@@ -1117,8 +1117,10 @@ struct Queue {
 }
 
 impl Queue {
-    // Adds `message`. A full queue drops its oldest message.
+    // Adds `message`, after it drops each message that `message` replaces. A full
+    // queue drops its oldest message.
     fn push(&mut self, message: raft::Message) {
+        self.messages.retain(|queued| !message.replaces(queued));
         if self.messages.len() == QUEUE_MAX {
             self.messages.pop_front();
         }
@@ -6967,6 +6969,46 @@ mod tests {
                 let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
                 let replies = replies(&mesh, &node.clock(), 1..=64).await;
                 assert_eq!(replies, (1..=64).map(Term).collect::<Vec<_>>());
+            });
+        }
+
+        // Node 2 answers each message of leader 1, and node 3 answers none.
+        #[test]
+        fn holds_one_heartbeat_for_a_member_that_does_not_answer() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                elect(&mesh).await;
+                let clock = node.clock();
+                for _ in 0..3 * ELECTION_TICKS {
+                    clock.sleep(TICK).await;
+                    while let Poll::Ready(sent) = now(pin!(mesh.outgoing(key(2)))).await
+                    {
+                        let sent = sent.unwrap();
+                        let body = match sent.body {
+                            Body::Heartbeat { .. } => Body::HeartbeatReply,
+                            Body::Append { prev, entries, .. } => {
+                                let last = entries
+                                    .last()
+                                    .map_or(prev.index, |entry| entry.at.index);
+                                Body::AppendReply { last }
+                            }
+                            _ => continue,
+                        };
+                        let reply = raft::Message {
+                            term: sent.term,
+                            ..message(2, 1, body)
+                        };
+                        assert_eq!(mesh.receive(public(2), reply), Ok(()));
+                    }
+                }
+                let group = mesh.group.borrow();
+                let queued = &group.queues[&key(3)].messages;
+                let heartbeats = queued
+                    .iter()
+                    .filter(|message| matches!(message.body, Body::Heartbeat { .. }))
+                    .count();
+                assert_eq!(heartbeats, 1);
+                assert_eq!(group.raft.role(), raft::Role::Leader);
             });
         }
 

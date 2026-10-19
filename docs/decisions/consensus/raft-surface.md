@@ -210,3 +210,11 @@
   2026-10-12T18:29:52Z
   (https://github.com/synnaxlabs/foundation/issues/1361#issuecomment-6130215772), with
   the deferral of #2471.
+  `Message::replaces(&self, older)` tells the caller that `older`, a message to the
+  same node that has not gone yet, can drop when this one goes after it: a heartbeat
+  replaces each heartbeat of the same sender at its term or a lower one. `raft` owns
+  the rule, and the caller's queue applies it, so the queue of a node that does not
+  answer holds one heartbeat, not one for each tick. Lost: the queue reads the body
+  itself, which puts a rule of `raft` in its caller. Decided by `laptop.architect`,
+  2026-10-19T19:31:21Z
+  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6275544916).

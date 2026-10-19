@@ -159,8 +159,13 @@
   (decided by the architect, 2026-10-07T08:15:18Z:
   https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025). The
   messages for one member wait in a queue of 64 that drops its oldest, because `raft`
-  sends again. A write that finds the pool full (`block::Error::Exhausted`), or that the
-  system refuses memory for (`Refused`), does not stop the group, because each may
+  sends again. Before it adds a message, the queue drops each message that the new one
+  replaces (`raft::Message::replaces`), so a member that does not answer holds one
+  heartbeat and the appends that its progress keeps in flight (`laptop.architect`,
+  2026-10-19T19:31:21Z:
+  https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6275544916). A
+  write that finds the pool full (`block::Error::Exhausted`), or that the system
+  refuses memory for (`Refused`), does not stop the group, because each may
   succeed later (MEMORY BOUNDS): the task writes the same `Ready` again at each tick,
   and until then no message leaves, nothing applies, and the group gets no tick. From
   the write that finds no block until the write ends, `propose` and `receive` give

@@ -167,6 +167,17 @@ impl Proof {
 }
 
 impl Message {
+    /// Whether `older`, a message to the same node that has not gone yet, can drop
+    /// when this one goes after it, with no loss to the receiver. A heartbeat replaces
+    /// each heartbeat of the same sender at its term or a lower one.
+    #[must_use]
+    pub fn replaces(&self, older: &Message) -> bool {
+        matches!(self.body, Body::Heartbeat { .. })
+            && matches!(older.body, Body::Heartbeat { .. })
+            && older.from == self.from
+            && older.term <= self.term
+    }
+
     // The claims of the proof in rising key order, then of each of `links`, then of
     // each change an append carries, then the sender's grant. `Raft::claims` picks
     // the links.
@@ -331,5 +342,58 @@ impl Body {
             | Self::AppendReply { .. }
             | Self::AppendReject { .. } => true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(from: u64, term: u64, body: Body) -> Message {
+        Message {
+            from: node::Key::from_u128(u128::from(from)),
+            to: node::Key::from_u128(9),
+            term: Term(term),
+            body,
+            proof: None,
+            chain: Vec::new(),
+        }
+    }
+
+    fn heartbeat(from: u64, term: u64) -> Message {
+        message(from, term, Body::Heartbeat { commit: 0 })
+    }
+
+    #[test]
+    fn a_heartbeat_replaces_a_heartbeat_of_its_term_and_sender() {
+        let older = Message {
+            body: Body::Heartbeat { commit: 3 },
+            ..heartbeat(1, 5)
+        };
+        assert!(heartbeat(1, 5).replaces(&older));
+    }
+
+    #[test]
+    fn a_heartbeat_replaces_a_heartbeat_of_a_lower_term() {
+        assert!(heartbeat(1, 5).replaces(&heartbeat(1, 4)));
+        assert!(!heartbeat(1, 4).replaces(&heartbeat(1, 5)));
+    }
+
+    #[test]
+    fn a_heartbeat_keeps_a_message_of_another_kind() {
+        let append = Body::Append {
+            prev: Position::default(),
+            entries: Vec::new(),
+            commit: 0,
+        };
+        assert!(!heartbeat(1, 5).replaces(&message(1, 5, append.clone())));
+        assert!(!message(1, 5, append).replaces(&heartbeat(1, 5)));
+        let reply = message(1, 5, Body::HeartbeatReply);
+        assert!(!reply.replaces(&message(1, 5, Body::HeartbeatReply)));
+    }
+
+    #[test]
+    fn a_heartbeat_keeps_a_heartbeat_of_another_sender() {
+        assert!(!heartbeat(1, 5).replaces(&heartbeat(2, 5)));
     }
 }
