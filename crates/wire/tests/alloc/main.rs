@@ -274,22 +274,15 @@ fn write_frames() {
         let (steps, allocations) = ALLOCATOR.count(|| {
             let head = frames.decode(&head);
             let ends = frames.decode(&run);
-            let counts = frames.decode(&counts);
             let due = matches!(frames.due(), Ok(write::Due::Draft { .. }));
-            (head, ends, counts, due)
+            (head, ends, due)
         });
-        let (
-            Ok(write::Step::Head(_)),
-            Ok(write::Step::More),
-            Ok(write::Step::More),
-            true,
-        ) = steps
-        else {
-            panic!("the head, ends, and counts did not decode: {steps:?}");
+        let (Ok(write::Step::Head(_)), Ok(write::Step::More), true) = steps else {
+            panic!("the head and ends did not decode: {steps:?}");
         };
         assert_eq!(
             allocations, 0,
-            "the head, ends, and counts of write frame {round} allocated"
+            "the head and ends of write frame {round} allocated"
         );
         let Ok(write::Due::Draft { layout, form }) = frames.due() else {
             panic!("a draft is due");
@@ -297,20 +290,30 @@ fn write_frames() {
         let draft = layout.draft(&pool, form).expect("a block");
         let (step, allocations) = ALLOCATOR.count(|| {
             let step = frames.draft(draft);
+            let counts = frames.decode(&counts);
             let Ok(write::Due::Body(rest)) = frames.due() else {
                 panic!("a body is due");
             };
             rest[..20].copy_from_slice(&body[..20]);
-            (step, frames.received(20), frames.decode(&body[20..]))
+            (
+                step,
+                counts,
+                frames.received(20),
+                frames.decode(&body[20..]),
+            )
         });
-        assert_eq!(allocations, 0, "the draft and body of a write allocated");
+        assert_eq!(
+            allocations, 0,
+            "the draft, counts, and body of a write allocated"
+        );
         let (
             write::Step::More,
+            Ok(write::Step::More),
             Ok(write::Step::More),
             Ok(write::Step::Frame { draft, .. }),
         ) = step
         else {
-            panic!("the body did not give a frame: {step:?}");
+            panic!("the counts and body did not give a frame: {step:?}");
         };
         let frame = draft.freeze(Path::Live);
         assert_eq!(frame.series(1), Some(&body[16..]), "the body round trips");
