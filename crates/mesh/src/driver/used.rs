@@ -5,7 +5,6 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::poll_fn;
-use std::mem;
 use std::path::{Path, PathBuf};
 use std::pin::{Pin, pin};
 use std::rc::{Rc, Weak};
@@ -42,6 +41,9 @@ pub(super) struct Used {
     // The chunks of the tree in use.
     pub(super) chunks: Chunks,
     pub(super) newest: Option<Newest>,
+    // The peer that gave the last chunk that a get got, of this pointer or an earlier
+    // one, where the next get starts.
+    gave: Option<node::Key>,
     // The task of `keep`, while it waits for a pointer to read.
     task: Option<Waker>,
 }
@@ -51,10 +53,8 @@ pub(super) struct Used {
 pub(super) struct Newest {
     pub(super) pointer: Pointer,
     // The chunks that its change listed, which the next read gets from the store. A
-    // read keeps only those that the store lacks.
+    // failed read keeps only those that the store lacks or that it did not reach.
     listed: BTreeSet<Digest>,
-    // The peer that gave the last chunk that a get got, where the next get starts.
-    gave: Option<node::Key>,
     // Each chunk of its tree that a read got from the store.
     pub(super) got: Vec<Vec<u8>>,
     step: Step,
@@ -86,9 +86,9 @@ enum Job {
 
 /// What the store part of a job gave.
 enum Gave {
-    Got(Result<Got, blob::Error>),
+    Got(Result<Option<node::Key>, blob::Error>),
     /// The result of the read, each chunk that it got from the store, and each listed
-    /// chunk that the store lacks.
+    /// chunk that the store lacks or that a failed call left unread.
     Read(
         Result<(BTreeMap<Name, Definition>, Chunks), Cause>,
         Vec<Vec<u8>>,
@@ -101,21 +101,15 @@ enum Done {
     /// The spec read, had no problem, and its file is durable: its definitions and
     /// the chunks of its tree.
     Taken(BTreeMap<Name, Definition>, Chunks),
-    /// The read failed, after it got `got` from the store and found that it lacks
-    /// the listed chunks of `lacked`.
+    /// The read failed, after it got `got` from the store. `lacked` holds each listed
+    /// chunk that the store lacks or that a failed call left unread.
     Failed {
         cause: Cause,
         got: Vec<Vec<u8>>,
         lacked: Vec<Digest>,
     },
-    /// What a get gave.
-    Got(Result<Got, blob::Error>),
-}
-
-/// The chunks that a get put in the store, and the last peer that gave one.
-struct Got {
-    chunks: Vec<Vec<u8>>,
-    gave: Option<node::Key>,
+    /// The last peer that gave a chunk to a get, or `None` when no peer gave one.
+    Got(Result<Option<node::Key>, blob::Error>),
 }
 
 impl Used {
@@ -129,7 +123,6 @@ impl Used {
         self.newest = Some(Newest {
             pointer,
             listed,
-            gave: None,
             got: Vec::new(),
             step: Step::Read,
         });
@@ -194,7 +187,7 @@ impl Used {
         self.task = None;
         let job = match &newest.step {
             Step::Get(digests) => {
-                let from = voters.partition_point(|(key, _)| Some(*key) < newest.gave);
+                let from = voters.partition_point(|(key, _)| Some(*key) < self.gave);
                 voters.rotate_left(from);
                 Job::Get(digests.clone(), voters)
             }
@@ -203,7 +196,7 @@ impl Used {
                 for chunk in &newest.got {
                     chunks.insert(chunk.clone());
                 }
-                let listed = mem::take(&mut newest.listed);
+                let listed = newest.listed.clone();
                 Job::Read { listed, chunks }
             }
         };
@@ -235,30 +228,27 @@ impl Used {
             (Done::Got(..), None) => return false,
             (Done::Failed { cause, got, lacked }, Some(newest)) => {
                 newest.got.extend(got);
+                newest.listed = lacked.into_iter().collect();
                 newest.step = match &cause {
                     Cause::Read(spec::region::Error::Tree(tree::Error::Missing(
                         digest,
                     ))) => {
-                        newest.listed = lacked.iter().copied().collect();
-                        let mut digests = lacked;
-                        if !digests.contains(digest) {
-                            digests.push(*digest);
-                        }
-                        Step::Get(digests)
+                        let mut digests = newest.listed.clone();
+                        digests.insert(*digest);
+                        Step::Get(digests.into_iter().collect())
                     }
                     Cause::Blob(_) | Cause::Files(_) => Step::Retry,
                     Cause::Read(_) | Cause::Problems(_) => Step::Stuck,
                 };
                 cause
             }
-            (Done::Got(Ok(got)), Some(newest)) if !got.chunks.is_empty() => {
-                newest.got.extend(got.chunks);
-                newest.gave = got.gave.or(newest.gave);
+            (Done::Got(Ok(Some(gave))), Some(newest)) => {
+                self.gave = Some(gave);
                 newest.step = Step::Read;
                 return false;
             }
             // A get that found no chunk keeps the cause of the read before it.
-            (Done::Got(Ok(_)), Some(newest)) => {
+            (Done::Got(Ok(None)), Some(newest)) => {
                 newest.step = Step::Retry;
                 return false;
             }
@@ -323,6 +313,7 @@ pub(super) async fn open(opening: Opening<'_>) -> Result<Used, Error> {
                 },
                 chunks,
                 newest: None,
+                gave: None,
                 task: None,
             });
         }
@@ -352,6 +343,7 @@ pub(super) async fn open(opening: Opening<'_>) -> Result<Used, Error> {
             },
             chunks,
             newest: None,
+            gave: None,
             task: None,
         }),
         Err(cause) => Ok(behind(pointer, Done::Failed { cause, got, lacked })),
@@ -388,7 +380,6 @@ fn behind(pointer: Pointer, failed: Done) -> Used {
     let newest = Newest {
         pointer,
         listed: BTreeSet::new(),
-        gave: None,
         got: Vec::new(),
         step: Step::Read,
     };
@@ -400,6 +391,7 @@ fn behind(pointer: Pointer, failed: Done) -> Used {
         },
         chunks: Chunks::default(),
         newest: Some(newest),
+        gave: None,
         task: None,
     };
     used.settle(pointer, failed);
@@ -417,7 +409,7 @@ async fn run(
 ) -> Gave {
     match job {
         Job::Get(digests, peers) => {
-            Gave::Got(get(store, transport, clock, &digests, &peers).await)
+            Gave::Got(peer::get(store, transport, clock, &digests, &peers).await)
         }
         Job::Read { listed, chunks } => {
             let (mut got, mut lacked) = (Vec::new(), Vec::new());
@@ -433,25 +425,6 @@ async fn run(
             Gave::Read(read.await, got, lacked)
         }
     }
-}
-
-// Gets the chunks of `digests` from `peers`, and reads each that they gave from
-// `store`.
-async fn get(
-    store: &blob::Store,
-    transport: &Transport,
-    clock: &Clock,
-    digests: &[Digest],
-    peers: &[(node::Key, Contact)],
-) -> Result<Got, blob::Error> {
-    let gave = peer::get(store, transport, clock, digests, peers).await?;
-    let mut chunks = Vec::new();
-    for &digest in digests {
-        if let Some(chunk) = store.get(digest).await? {
-            chunks.push(chunk.to_vec());
-        }
-    }
-    Ok(Got { chunks, gave })
 }
 
 /// Runs the job of each new committed pointer of `group`, and makes a spec that reads
@@ -526,7 +499,8 @@ pub(super) async fn keep(
 // The definitions of the spec of `pointer`, and the chunks of its tree, when it reads
 // and has no problem. `chunks` holds the tree in use. The read gets each chunk of
 // `listed` that `chunks` lacks and each chunk that the tree needs from `store`, adds
-// each to `got`, and adds each listed digest that `store` lacks to `lacked`.
+// each to `got`, and adds each listed digest that `store` lacks, or that a failed call
+// left unread, to `lacked`.
 async fn read(
     store: &blob::Store,
     prefix: &Prefix,
@@ -536,11 +510,19 @@ async fn read(
     got: &mut Vec<Vec<u8>>,
     lacked: &mut Vec<Digest>,
 ) -> Result<(BTreeMap<Name, Definition>, Chunks), Cause> {
-    for digest in listed {
+    let mut listed = listed.into_iter();
+    while let Some(digest) = listed.next() {
         if chunks.get(digest).is_some() {
             continue;
         }
-        let Some(chunk) = store.get(digest).await.map_err(Cause::Blob)? else {
+        let chunk = match store.get(digest).await {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                lacked.extend(listed);
+                return Err(Cause::Blob(error));
+            }
+        };
+        let Some(chunk) = chunk else {
             lacked.push(digest);
             continue;
         };

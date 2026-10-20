@@ -230,6 +230,52 @@ fn lacking(seed: u64) -> (Cluster, BTreeMap<Name, Definition>) {
     (cluster, definitions)
 }
 
+// Voter 3 is down at the change of 40 subjects, and at its start its store holds the
+// tree of 20 of them. The read of one of those fails once, so the first read ends
+// with `Cause::Blob`. The retry still gets each listed chunk that the store lacks in
+// one round.
+#[test]
+fn a_failed_store_read_keeps_the_listed_round() {
+    let (mut cluster, definitions) = lacking(0);
+    let half: BTreeMap<Name, Definition> = definitions
+        .iter()
+        .take(20)
+        .map(|(name, definition)| (name.clone(), definition.clone()))
+        .collect();
+    let mut chunks = Chunks::default();
+    let full = spec::region::tree(&mut chunks, &definitions);
+    let mut chunks = Chunks::default();
+    let part = spec::region::tree(&mut chunks, &half);
+    let shared: Vec<Digest> = part
+        .chunks
+        .iter()
+        .copied()
+        .filter(|digest| full.chunks.contains(digest))
+        .collect();
+    assert!(shared.len() > 3, "{}", shared.len());
+    let first = *shared.iter().min().unwrap();
+    cluster.board();
+    cluster.board.lock().unwrap().puts = [(3, half)].into();
+    let path = Path::new(BLOB).join(first.to_string());
+    cluster.node(3).fail_file(&path, Operation::ReadAt);
+    cluster.start_voter(3);
+    let mut seen = Vec::new();
+    for _ in 0..100 {
+        cluster.run(TICK);
+        let board = cluster.board.lock().unwrap();
+        seen.extend(board.specs.get(&3).and_then(|seen| seen.behind.clone()));
+    }
+    let board = cluster.board();
+    let blob = seen
+        .iter()
+        .any(|behind| matches!(behind.cause, Cause::Blob(_)));
+    assert!(blob, "{seen:?}");
+    assert_used(&board, &[3], pointer(1, &definitions), &definitions);
+    let lacked = full.chunks.len() - shared.len();
+    let calls = lacked.div_ceil(crate::driver::peer::CHUNKS);
+    assert_eq!(board.blobs, [(1, calls)].into());
+}
+
 // Cuts the power of voter 3, and starts it again after `down` runs on its node.
 fn restart<F: Future<Output = ()> + 'static>(
     cluster: &mut Cluster,
