@@ -107,8 +107,8 @@ pub enum Error {
     /// released only when its stream ends. A retry can succeed once enough of them
     /// are released.
     Bodies {
-        /// The bytes of the refused request, read, or write: a body, or the ends,
-        /// counts, or names of a write.
+        /// The bytes of the refused request, read, or write: a body, the ends,
+        /// counts, or names of a write, or the places of the home of a forward.
         length: u64,
         /// The body bytes that the open requests, reads, and writes of the hub held.
         held: u64,
@@ -122,8 +122,8 @@ pub enum Error {
     Share {
         /// The subject of the link's admitted hello.
         subject: Name,
-        /// The bytes of the refused request, read, or write: a body, or the ends,
-        /// counts, or names of a write.
+        /// The bytes of the refused request, read, or write: a body, the ends,
+        /// counts, or names of a write, or the places of the home of a forward.
         length: u64,
         /// The body bytes that the open requests, reads, and writes of `subject` held.
         held: u64,

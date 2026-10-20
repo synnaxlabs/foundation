@@ -423,6 +423,91 @@ fn sends_the_home_each_renewal_between_frames() {
     assert_eq!(served, [Ok(Got::Ended), Ok(Got::Ended)]);
 }
 
+/// A renewal that the member admits while it waits for the places of the home reaches
+/// the home then, so the hello that the home holds does not expire in that wait.
+#[test]
+fn sends_the_home_each_renewal_before_its_places() {
+    let renewed = Arc::new(Mutex::new(Vec::new()));
+    let kept = Arc::clone(&renewed);
+    let served = away(
+        22,
+        |mut home| async move {
+            let mut got = Vec::new();
+            for _ in 0..3 {
+                if let Some(message) = home.quiet().await {
+                    got.push(renewal(&message));
+                }
+            }
+            assert_eq!(got.len(), 1);
+            assert_eq!(*kept.lock().expect("not poisoned"), got);
+            home.start().await;
+            assert_eq!(home.stream.recv().await, Ok(None));
+            home.stream.sender.finish().expect("finishes");
+        },
+        |mut agent, challenge| async move {
+            let mut stream = agent.write(&["value"]).await;
+            agent.sleep(Span::from_nanos(QUIET.nanos() / 2)).await;
+            renew(&mut agent, challenge, &renewed).await;
+            assert_eq!(stream.started().await.places, places());
+            assert_eq!(end(&mut stream).await, []);
+            super::read::finish(&mut agent).await;
+        },
+    );
+    assert_eq!(served, [Ok(Got::Ended), Ok(Got::Ended)]);
+}
+
+/// The member holds the places of the home in the share of the subject until it sends
+/// them to the program: the size of a [`Place`] for each that the home counts, then
+/// each message of places. Here, with the 40 bytes of the ends and the 8 of the open,
+/// it holds `held` bytes of the share, of which `free` were free, when the hold of
+/// `length` fails.
+fn stops_a_forward_whose_places_pass_the_share(
+    seed: u64,
+    free: u64,
+    length: u64,
+    held: u64,
+) {
+    let served = away(
+        seed,
+        |mut home| async move {
+            home.start().await;
+            assert_eq!(home.stream.recv().await, reset_with(0));
+        },
+        move |mut agent, _| async move {
+            let held = agent.unfinished(BODY_BYTES_MAX - free, &[]).await;
+            agent.sleep(Span::MILLISECOND).await;
+            let mut busy = agent.write(&["value"]).await;
+            assert_eq!(busy.recv().await, reset_with(BUSY));
+            drop(held);
+            super::read::finish(&mut agent).await;
+        },
+    );
+    let share = serve::Error::Share {
+        subject: name(SUBJECT),
+        length,
+        held: BODY_BYTES_MAX - free + held,
+    };
+    let held = serve::Error::Stream(transport::Error::Reset { code: Code(0) });
+    assert_eq!(served, [Err(share), Err(held), Ok(Got::Ended)]);
+}
+
+/// The size of the 2 places of a write of `value`.
+fn fixed() -> u64 {
+    u64::try_from(2 * size_of::<Place>()).expect("a u64 holds a usize")
+}
+
+#[test]
+fn stops_a_forward_whose_places_pass_the_share_as_busy() {
+    stops_a_forward_whose_places_pass_the_share(23, 48 + fixed() - 1, fixed(), 48);
+}
+
+/// The 2 places of `value` come in one message of 65 bytes.
+#[test]
+fn stops_a_forward_whose_message_of_places_passes_the_share_as_busy() {
+    let free = 48 + fixed() + 65 - 1;
+    stops_a_forward_whose_places_pass_the_share(24, free, 65, 48 + fixed());
+}
+
 /// Renews the hello of `agent` with one that echoes `challenge`, keeps its nonce in
 /// `nonces`, and gives the next challenge once the member admitted it.
 async fn renew(
@@ -440,10 +525,9 @@ fn renewal(message: &[u8]) -> [u8; 16] {
     Signed::decode(message).expect("a hello").hello.nonce
 }
 
-/// When the home stops the forward with `code` after its places, the member ends
-/// group 0 with `end`, and each frame then in flight and each later frame of the
-/// program.
-fn ends_the_write(seed: u64, code: u32, end: End) {
+/// When the home stops the forward with `code` after its places, the member resets
+/// the program's write with the code of `refusal`.
+fn resets_the_write(seed: u64, code: u32, refusal: Refusal) {
     let served = away(
         seed,
         move |mut home| async move {
@@ -454,127 +538,150 @@ fn ends_the_write(seed: u64, code: u32, end: End) {
         move |mut agent, _| async move {
             let mut stream = write(&agent).await;
             send(&mut stream, &frame(10, 10)).await;
-            assert_eq!(stream.reply().await, Reply::Ended { group: 0, end });
-            assert_eq!(stream.reply().await, ended(1, end));
-            send(&mut stream, &frame(20, 20)).await;
-            assert_eq!(stream.reply().await, ended(2, end));
-            assert_eq!(super::away::end(&mut stream).await, []);
+            assert_eq!(stream.recv().await, reset_with(refusal.code()));
             super::read::finish(&mut agent).await;
         },
     );
-    assert_eq!(served, [Ok(Got::Ended), Ok(Got::Ended)]);
+    let forward = serve::Error::Forward {
+        home: OTHER,
+        refusal,
+    };
+    assert_eq!(served, [Err(forward), Ok(Got::Ended)]);
 }
 
 #[test]
-fn ends_the_write_as_refused_when_the_home_refuses_it() {
-    ends_the_write(3, REFUSED, End::Refused);
+fn resets_the_write_as_refused_when_the_home_refuses_it() {
+    resets_the_write(3, REFUSED, Refusal::Refused);
 }
 
 #[test]
-fn ends_the_write_as_refused_when_the_home_sees_another_subject() {
-    ends_the_write(4, CHANGED, End::Refused);
+fn resets_the_write_as_changed_when_the_home_sees_another_subject() {
+    resets_the_write(4, CHANGED, Refusal::Changed);
 }
 
 #[test]
-fn ends_the_write_as_refused_when_the_home_sees_another_carrier() {
-    ends_the_write(15, VIA, End::Refused);
+fn resets_the_write_as_via_when_the_home_sees_another_carrier() {
+    resets_the_write(15, VIA, Refusal::Via);
 }
 
 #[test]
-fn ends_the_write_as_removed_when_the_home_finds_a_channel_removed() {
-    ends_the_write(5, UNKNOWN, End::Removed);
+fn resets_the_write_as_unknown_when_the_home_finds_a_channel_removed() {
+    resets_the_write(5, UNKNOWN, Refusal::Unknown);
 }
 
 #[test]
-fn ends_the_write_as_failed_when_the_hello_expires_at_the_home() {
-    ends_the_write(6, EXPIRED, End::Failed);
+fn resets_the_write_as_expired_when_the_hello_expires_at_the_home() {
+    resets_the_write(6, EXPIRED, Refusal::Expired);
 }
 
-/// A group that the home ended keeps that end after the forward breaks.
+/// A `MALFORMED` of the home tells of a message of the member, not of the program.
 #[test]
-fn keeps_the_end_of_the_home_after_the_forward_breaks() {
-    let served = away(
-        7,
-        |mut home| async move {
-            home.start().await;
-            assert_eq!(home.messages(3).await, frame(10, 10));
-            home.reply(Reply::Ended {
-                group: 0,
-                end: End::Removed,
-            })
-            .await;
-            home.reply(ended(1, End::Removed)).await;
-            home.stream.sender.finish().expect("finishes");
-            assert_eq!(home.stream.recv().await, reset_with(MALFORMED));
-        },
-        |mut agent, _| async move {
-            let mut stream = write(&agent).await;
-            send(&mut stream, &frame(10, 10)).await;
-            let removed = Reply::Ended {
-                group: 0,
-                end: End::Removed,
-            };
-            assert_eq!(stream.reply().await, removed);
-            assert_eq!(stream.reply().await, ended(1, End::Removed));
-            send(&mut stream, &frame(20, 20)).await;
-            assert_eq!(stream.reply().await, ended(2, End::Removed));
-            assert_eq!(end(&mut stream).await, []);
-            super::read::finish(&mut agent).await;
-        },
-    );
-    assert_eq!(served, [Ok(Got::Ended), Ok(Got::Ended)]);
+fn resets_the_write_as_failed_when_the_home_stops_it_as_malformed() {
+    resets_the_write(18, MALFORMED, Refusal::Failed);
 }
 
-/// A reply out of order, or a finish of the home before the program's, breaks the
-/// wire: the member stops the forward as `MALFORMED` and ends the group as failed.
-fn ends_a_broken_forward(
+/// A reply out of order, a finish of the home before the program's, or a finish with
+/// an outcome due breaks HUB WIRE: the member stops the forward as `MALFORMED` and
+/// resets the program's write as `FAILED`.
+fn resets_a_broken_forward(
     seed: u64,
+    finished: bool,
     broken: impl AsyncFnOnce(&mut Home) + Send + 'static,
 ) {
     let served = away(
         seed,
-        |mut home| async move {
+        move |mut home| async move {
             home.start().await;
             assert_eq!(home.messages(3).await, frame(10, 10));
             broken(&mut home).await;
-            assert_eq!(home.stream.recv().await, reset_with(MALFORMED));
+            if !finished {
+                assert_eq!(home.stream.recv().await, reset_with(MALFORMED));
+            }
         },
-        |mut agent, _| async move {
+        move |mut agent, _| async move {
             let mut stream = write(&agent).await;
             send(&mut stream, &frame(10, 10)).await;
-            let failed = Reply::Ended {
-                group: 0,
-                end: End::Failed,
-            };
-            assert_eq!(stream.reply().await, failed);
-            assert_eq!(stream.reply().await, ended(1, End::Failed));
-            assert_eq!(end(&mut stream).await, []);
+            if finished {
+                stream.sender.finish().expect("finishes");
+            }
+            assert_eq!(stream.recv().await, reset_with(FAILED));
             super::read::finish(&mut agent).await;
         },
     );
-    assert_eq!(served, [Ok(Got::Ended), Ok(Got::Ended)]);
+    let forward = serve::Error::Forward {
+        home: OTHER,
+        refusal: Refusal::Failed,
+    };
+    assert_eq!(served, [Err(forward), Ok(Got::Ended)]);
 }
 
 #[test]
-fn ends_the_write_when_the_home_answers_a_frame_it_did_not_get() {
-    ends_a_broken_forward(8, async |home| home.reply(taken(2, 0, 1)).await);
+fn resets_the_write_when_the_home_answers_a_frame_it_did_not_get() {
+    resets_a_broken_forward(8, false, async |home| {
+        home.reply(taken(2, 0, 1)).await;
+    });
 }
 
 #[test]
-fn ends_the_write_when_the_home_finishes_before_the_program() {
-    ends_a_broken_forward(9, async |home| {
+fn resets_the_write_when_the_home_finishes_before_the_program() {
+    resets_a_broken_forward(9, false, async |home| {
         home.stream.sender.finish().expect("finishes");
     });
 }
 
-/// A stop of the home before its places stops the program's write with the same code.
+#[test]
+fn resets_the_write_when_the_home_finishes_with_an_outcome_due() {
+    resets_a_broken_forward(19, true, async |home| {
+        assert_eq!(home.stream.recv().await, Ok(None));
+        home.stream.sender.finish().expect("finishes");
+    });
+}
+
+/// Each reply of the home before the forward breaks reaches the program before the
+/// reset.
+#[test]
+fn sends_the_program_each_reply_of_the_home_before_the_forward_breaks() {
+    let removed = Reply::Ended {
+        group: 0,
+        end: End::Removed,
+    };
+    let served = away(
+        7,
+        move |mut home| async move {
+            home.start().await;
+            assert_eq!(home.messages(3).await, frame(10, 10));
+            home.reply(removed).await;
+            home.reply(ended(1, End::Removed)).await;
+            assert_eq!(home.messages(3).await, frame(20, 20));
+            home.stream.sender.finish().expect("finishes");
+            assert_eq!(home.stream.recv().await, reset_with(MALFORMED));
+        },
+        move |mut agent, _| async move {
+            let mut stream = write(&agent).await;
+            send(&mut stream, &frame(10, 10)).await;
+            assert_eq!(stream.reply().await, removed);
+            assert_eq!(stream.reply().await, ended(1, End::Removed));
+            send(&mut stream, &frame(20, 20)).await;
+            assert_eq!(stream.recv().await, reset_with(FAILED));
+            super::read::finish(&mut agent).await;
+        },
+    );
+    let forward = serve::Error::Forward {
+        home: OTHER,
+        refusal: Refusal::Failed,
+    };
+    assert_eq!(served, [Err(forward), Ok(Got::Ended)]);
+}
+
+/// A stop of the home before its places stops the program's write with the code of
+/// `refusal`.
 fn stops_the_write(seed: u64, code: u32, refusal: Refusal) {
     let served = away(
         seed,
         move |home| async move { home.stop(code) },
         move |mut agent, _| async move {
             let mut stream = agent.write(&["value"]).await;
-            assert_eq!(stream.recv().await, reset_with(code));
+            assert_eq!(stream.recv().await, reset_with(refusal.code()));
             super::read::finish(&mut agent).await;
         },
     );
@@ -593,6 +700,36 @@ fn stops_the_write_as_not_home_when_the_home_has_moved() {
 #[test]
 fn stops_the_write_with_the_code_of_the_home_before_its_places() {
     stops_the_write(11, EXPIRED, Refusal::Expired);
+}
+
+#[test]
+fn stops_the_write_as_failed_when_the_home_stops_it_as_malformed_before_its_places() {
+    stops_the_write(20, MALFORMED, Refusal::Failed);
+}
+
+/// A home that sends more places than the channels of the open and its index breaks
+/// HUB WIRE.
+#[test]
+fn stops_the_write_as_failed_when_the_home_sends_more_places_than_the_open() {
+    let served = away(
+        21,
+        |mut home| async move {
+            let mut out = [0; Places::LEN];
+            Places { count: 3 }.encode(&mut out);
+            home.stream.send(&out).await;
+            assert_eq!(home.stream.recv().await, reset_with(MALFORMED));
+        },
+        |mut agent, _| async move {
+            let mut stream = agent.write(&["value"]).await;
+            assert_eq!(stream.recv().await, reset_with(FAILED));
+            super::read::finish(&mut agent).await;
+        },
+    );
+    let forward = serve::Error::Forward {
+        home: OTHER,
+        refusal: Refusal::Failed,
+    };
+    assert_eq!(served, [Err(forward), Ok(Got::Ended)]);
 }
 
 /// The member sends each message of the program as it came, so a home that takes
@@ -675,8 +812,6 @@ fn forwards_the_write_again_when_the_home_closes_the_session_with_code_0() {
     assert_eq!(served, [Err(forward), Ok(Got::Ended)]);
 }
 
-/// With 64 frames that have no outcome, the member reads no more frames of the program
-/// until an outcome comes.
 /// The member holds 20 bytes for each channel of the open and for its index in the
 /// share of the subject until the forward ends. The open of `value` is 8 bytes and its
 /// names 21, so they fit where its ends do not.
@@ -713,6 +848,8 @@ fn stops_a_forward_whose_ends_pass_the_share_as_busy() {
     );
 }
 
+/// With 64 frames that have no outcome, the member reads no more frames of the program
+/// until an outcome comes.
 #[test]
 fn reads_no_more_of_the_program_while_64_frames_have_no_outcome() {
     let served = away(

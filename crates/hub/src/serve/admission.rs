@@ -1,12 +1,14 @@
 //! The hello that a session admitted, its renewals, and its end.
 
 use std::cell::{Cell, RefCell};
+use std::collections::hash_map::Entry;
 use std::future::poll_fn;
 use std::pin::pin;
-use std::task::{Poll, Waker};
+use std::task::{Context, Poll, Waker};
 
 use access::proof::{self, Admitted};
 use types::ed25519::PublicKey;
+use types::hash;
 use types::name::Name;
 use types::time::Stamp;
 use wire::hub::client::Signed;
@@ -23,8 +25,10 @@ pub(crate) struct Admission {
     admitted: RefCell<Option<(Admitted, [u8; 64])>>,
     /// The count of hellos admitted.
     count: Cell<u64>,
-    /// The waker of each task that waits for a hello after a count.
-    waiting: RefCell<Vec<Waker>>,
+    /// The waker of each [`Renewal`] that waits, by its key.
+    waiting: RefCell<hash::Map<u64, Waker>>,
+    /// The key of the next [`Renewal`].
+    key: Cell<u64>,
 }
 
 impl Admission {
@@ -36,6 +40,7 @@ impl Admission {
             admitted: RefCell::default(),
             count: Cell::default(),
             waiting: RefCell::default(),
+            key: Cell::default(),
         }
     }
 
@@ -52,17 +57,26 @@ impl Admission {
         signed: Signed,
     ) -> Result<(), Error> {
         let Signed { hello, signature } = signed;
-        let state = state.borrow();
-        let now = state.time.now().mesh;
-        let mut admitted = self.admitted.borrow_mut();
-        let next = match admitted.as_ref() {
-            None => state.rules.admit(now, self.peer, hello, &signature),
-            Some((first, _)) => state.rules.renew(first, now, hello, &signature),
+        {
+            let state = state.borrow();
+            let now = state.time.now().mesh;
+            let mut admitted = self.admitted.borrow_mut();
+            let next = match admitted.as_ref() {
+                None => state.rules.admit(now, self.peer, hello, &signature),
+                Some((first, _)) => state.rules.renew(first, now, hello, &signature),
+            }
+            .map_err(|error| Error::Access(Box::new(error)))?;
+            *admitted = Some((next, signature));
         }
-        .map_err(|error| Error::Access(Box::new(error)))?;
-        *admitted = Some((next, signature));
         self.count.set(self.count.get() + 1);
-        for waker in self.waiting.take() {
+        // A wake can drop a task whose renewal borrows the map.
+        let woken: Vec<Waker> = self
+            .waiting
+            .borrow_mut()
+            .drain()
+            .map(|(_, waker)| waker)
+            .collect();
+        for waker in woken {
             waker.wake();
         }
         Ok(())
@@ -74,7 +88,7 @@ impl Admission {
     /// # Panics
     ///
     /// When no hello is admitted.
-    pub(crate) fn signed(&self) -> (Signed, u64) {
+    fn signed(&self) -> (Signed, u64) {
         let admitted = self.admitted.borrow();
         let (admitted, signature) = admitted
             .as_ref()
@@ -86,19 +100,15 @@ impl Admission {
         (signed, self.count.get())
     }
 
-    /// Waits until the session admits a hello after the first `count`.
-    pub(crate) async fn renewed(&self, count: u64) {
-        poll_fn(|cx| {
-            if self.count.get() > count {
-                return Poll::Ready(());
-            }
-            let mut waiting = self.waiting.borrow_mut();
-            if !waiting.iter().any(|waker| waker.will_wake(cx.waker())) {
-                waiting.push(cx.waker().clone());
-            }
-            Poll::Pending
-        })
-        .await;
+    /// A wait for the renewals of the session, from now until its drop.
+    pub(crate) fn renewal(&self) -> Renewal<'_> {
+        let key = self.key.get();
+        self.key.set(key + 1);
+        Renewal {
+            admission: self,
+            key,
+            seen: Cell::new(self.count.get()),
+        }
     }
 
     /// The subject of the admitted hello, or `None` before one. A renewal never
@@ -186,5 +196,80 @@ impl Admission {
             .expect("invariant: a session waits only after its hello")
             .0
             .ends()
+    }
+}
+
+/// A wait for the renewals of a session. It keeps at most one waker, and its drop takes
+/// it out.
+#[derive(Debug)]
+pub(crate) struct Renewal<'a> {
+    admission: &'a Admission,
+    key: u64,
+    /// The count of hellos admitted through the last hello that it gave.
+    seen: Cell<u64>,
+}
+
+impl Renewal<'_> {
+    /// The admitted hello and its signature. A later [`Renewal::renewed`] gives only a
+    /// hello admitted after it.
+    ///
+    /// # Panics
+    ///
+    /// When no hello is admitted.
+    pub(crate) fn signed(&self) -> Signed {
+        let (signed, seen) = self.admission.signed();
+        self.seen.set(seen);
+        signed
+    }
+
+    /// The admitted hello when the session admitted it after the last hello that this
+    /// renewal gave, else `None`.
+    pub(crate) fn renewed(&self) -> Option<Signed> {
+        (self.admission.count.get() > self.seen.get()).then(|| self.signed())
+    }
+
+    /// Keeps the waker of `cx` until the session admits the next hello.
+    pub(crate) fn register(&self, cx: &Context<'_>) {
+        let replaced = match self.admission.waiting.borrow_mut().entry(self.key) {
+            Entry::Occupied(held) if held.get().will_wake(cx.waker()) => None,
+            Entry::Occupied(mut held) => Some(held.insert(cx.waker().clone())),
+            Entry::Vacant(vacant) => {
+                vacant.insert(cx.waker().clone());
+                None
+            }
+        };
+        // The last drop of a waker can drop a task that borrows the map.
+        drop(replaced);
+    }
+}
+
+impl Drop for Renewal<'_> {
+    fn drop(&mut self) {
+        let held = self.admission.waiting.borrow_mut().remove(&self.key);
+        // As in `register`.
+        drop(held);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use types::ed25519::PrivateKey;
+
+    use super::*;
+
+    #[test]
+    fn keeps_no_waker_of_a_dropped_renewal() {
+        let admission = Admission::new(PrivateKey([3; 32]).public());
+        let cx = Context::from_waker(Waker::noop());
+        let first = admission.renewal();
+        first.register(&cx);
+        first.register(&cx);
+        for _ in 0..3 {
+            admission.renewal().register(&cx);
+        }
+        assert_eq!(admission.waiting.borrow().len(), 1);
+        drop(first);
+        assert!(admission.waiting.borrow().is_empty());
     }
 }

@@ -5,21 +5,22 @@ use std::future::poll_fn;
 use std::ops::Range;
 use std::pin::pin;
 use std::rc::Rc;
-use std::task::{Context, Poll, Waker, ready};
+use std::task::{Context, Poll, Waker};
 
 use block::Block;
 use transport::stream::{Receiver, Sender};
 use transport::{Class, Code};
+use types::name::Name;
 use types::node;
 use wire::Protocol;
 use wire::header::MALFORMED;
 use wire::hub::client::write::{Open, Opening, Start, Write};
-use wire::hub::client::{Refusal, Signed};
+use wire::hub::client::{Place, Places, Refusal, Signed};
 use wire::hub::forward::{Forward, places};
-use wire::hub::write::{Due, End, Frames, Outcome, Replies, Reply, Step};
+use wire::hub::write::{Due, Frames, Replies, Reply, Step};
 
-use super::{Reserved, bytes, send};
-use crate::serve::admission::Admission;
+use super::{Reserved, bytes};
+use crate::serve::admission::{Admission, Renewal};
 use crate::serve::{Error, alloc, unless};
 use crate::{State, dial};
 
@@ -30,12 +31,13 @@ const IN_FLIGHT: u64 = 64;
 /// Serves the write of the subject of `admission` that `write` starts with `open`,
 /// whose home is `home`, another node: forwards it to `home`, sends the program the
 /// places of `home`, then sends `home` each message of the program unchanged, and each
-/// renewal of the hello of `admission` between frames, and sends the program each
-/// reply of `home` unchanged.
-/// When `home` ends the write after its places, ends group 0 with [`Reply::Ended`],
-/// and each frame that has no outcome then, or that comes later, with
-/// [`Outcome::Ended`]. Finishes the program's stream once the program and `home`
-/// finish.
+/// renewal of the hello of `admission`, and sends the program each reply of `home`
+/// unchanged. Finishes the program's stream once the program and `home` finish.
+///
+/// # Errors
+///
+/// [`Error::Forward`] when the forward ends before the program and `home` finish it,
+/// and the errors of the program's stream.
 pub(super) async fn serve(
     state: &Rc<RefCell<State>>,
     admission: &Admission,
@@ -51,7 +53,7 @@ pub(super) async fn serve(
     let channels = open.channels.len();
     let _ends =
         Reserved::new(state, subject.clone(), bytes(Frames::bytes(channels + 1)))?;
-    let reserved = Reserved::new(state, subject, write.length)?;
+    let reserved = Reserved::new(state, subject.clone(), write.length)?;
     // Each field of an open has one encoding, so these are the bytes the program
     // signed.
     let mut body = vec![0; open.encoded_len()];
@@ -59,9 +61,11 @@ pub(super) async fn serve(
     drop(open);
     let channels = u32::try_from(channels)
         .expect("invariant: an open names fewer than u32::MAX channels");
+    let renewal = admission.renewal();
+    let forward = Forward { places: channels };
     let started = {
         let program = pin!(trailing(receiver));
-        let start = start(state, admission, home, write, &body, channels);
+        let start = start(state, &renewal, &subject, home, write, &body, forward);
         unless(program, start).await?
     };
     drop((body, reserved));
@@ -69,23 +73,21 @@ pub(super) async fn serve(
         sender.finish()?;
         return Ok(());
     };
-    let (mut to, mut from, Start { places, set }, seen) = started?;
+    let Started {
+        mut to,
+        mut from,
+        start: Start { places, set },
+        held,
+    } = started?;
     super::super::places(state, sender, &places).await?;
+    drop((places, held));
     let mut frames = Frames::new(set);
     let flight = Flight::new();
-    let (cut, finished) = {
-        let mut up = pin!(up(
-            state,
-            admission,
-            seen,
-            &mut frames,
-            &flight,
-            receiver,
-            &mut to
-        ));
+    let cut = {
+        let mut up = pin!(up(state, &renewal, &mut frames, &flight, receiver, &mut to));
         let mut down = pin!(down(&flight, &mut from, sender));
         let mut finished = false;
-        let cut = poll_fn(|cx| {
+        poll_fn(|cx| {
             if !finished {
                 match up.as_mut().poll(cx) {
                     Poll::Ready(Ok(None)) => finished = true,
@@ -94,12 +96,11 @@ pub(super) async fn serve(
                 }
             }
             down.as_mut().poll(cx).map(|cut| match cut {
-                Ok(None) if !finished => Ok(Some(Cut::Broken)),
+                Ok(None) if !finished || flight.due() => Ok(Some(Cut::Broken)),
                 cut => cut,
             })
         })
-        .await?;
-        (cut, finished)
+        .await?
     };
     let Some(cut) = cut else {
         sender.finish()?;
@@ -107,8 +108,10 @@ pub(super) async fn serve(
     };
     to.reset(cut.code());
     from.stop(cut.code());
-    let program = if finished { None } else { Some(receiver) };
-    after(state, cut.end(), &mut frames, &flight, program, sender).await
+    Err(Error::Forward {
+        home,
+        refusal: cut.refusal(),
+    })
 }
 
 /// Waits for the program to finish while the write opens at its home. Each message of
@@ -120,34 +123,40 @@ async fn trailing(receiver: &mut Receiver) -> Result<(), Error> {
     }
 }
 
-/// Opens the forward at `home` of the write that `write` starts with `body`, an open of
-/// `channels` channels, with the hello of `admission`. Gives its halves, the places of
-/// `home`, and the count of hellos admitted through the hello it sent. A session that
-/// closes with `Code(0)` before the places gets another try, as [`dial::retry`] states.
+/// A forward that its home started.
+struct Started {
+    to: Sender,
+    from: Receiver,
+    start: Start,
+    /// The hold of the places of `start` in the share of the subject.
+    held: Reserved,
+}
+
+/// Opens `forward` at `home`, the forward of the write that `write` starts with
+/// `body`, with the hello of `renewal`, and holds the places of `home` in the share of
+/// `subject`. A session that closes with `Code(0)` before the places gets another
+/// try, as [`dial::retry`] states.
 async fn start(
     state: &Rc<RefCell<State>>,
-    admission: &Admission,
+    renewal: &Renewal<'_>,
+    subject: &Name,
     home: node::Key,
     write: Write,
     body: &[u8],
-    channels: u32,
-) -> Result<(Sender, Receiver, Start, u64), Error> {
+    forward: Forward,
+) -> Result<Started, Error> {
     let closed: fn(&Error) -> Option<&transport::Error> = |error| match error {
         Error::Stream(error) => Some(error),
         _ => None,
     };
-    let attempt = async || {
-        let (signed, seen) = admission.signed();
-        let (to, from, start) =
-            attempt(state, home, write, body, channels, &signed).await?;
-        Ok((to, from, start, seen))
-    };
+    let attempt =
+        async || attempt(state, renewal, subject, home, write, body, forward).await;
     dial::retry(attempt, closed)
         .await
         .map_err(|error| match error {
             Error::Stream(error) => Error::Forward {
                 home,
-                refusal: refusal(&error).unwrap_or(Refusal::Failed),
+                refusal: refusal(&error),
             },
             error => error,
         })
@@ -156,18 +165,14 @@ async fn start(
 /// One try of [`start`].
 async fn attempt(
     state: &Rc<RefCell<State>>,
+    renewal: &Renewal<'_>,
+    subject: &Name,
     home: node::Key,
     write: Write,
     body: &[u8],
-    channels: u32,
-    signed: &Signed,
-) -> Result<(Sender, Receiver, Start), Error> {
-    let (mut to, mut from) =
-        dial::dial(state, home).await?.open(Class::Complete).await?;
-    let failed = Error::Forward {
-        home,
-        refusal: Refusal::Failed,
-    };
+    forward: Forward,
+) -> Result<Started, Error> {
+    let (mut to, from) = dial::dial(state, home).await?.open(Class::Complete).await?;
     let (taken, largest) = {
         let state = state.borrow();
         let region = &state
@@ -196,12 +201,13 @@ async fn attempt(
         out.copy_from_slice(&header);
     })
     .await?;
-    let forward = Forward { places: channels };
     message(state, &mut to, Forward::LEN, |out| forward.encode(out)).await?;
+    let signed = renewal.signed();
     message(state, &mut to, signed.encoded_len(), |out| {
         signed.encode(out);
     })
     .await?;
+    drop(signed);
     message(state, &mut to, Write::LEN, |out| write.encode(out)).await?;
     let most = to.bytes_max().min(largest);
     for chunk in body.chunks(most) {
@@ -210,22 +216,76 @@ async fn attempt(
         })
         .await?;
     }
-    for run in runs(channels, most) {
+    for run in runs(forward.places, most) {
         let len = run.len() * places::LEN;
         message(state, &mut to, len, |out| places::encode(run, out)).await?;
     }
+    opened(state, renewal, subject, home, forward.places, to, from).await
+}
+
+/// Waits for the places and the start of `home` on `from` after an open, with each
+/// renewal of `renewal` sent on `to`, and holds the places in the share of `subject`.
+/// Each channel of the open, `places` in all, has one place, and its one index another.
+async fn opened(
+    state: &Rc<RefCell<State>>,
+    renewal: &Renewal<'_>,
+    subject: &Name,
+    home: node::Key,
+    places: u32,
+    mut to: Sender,
+    mut from: Receiver,
+) -> Result<Started, Error> {
     let mut opening = Opening::default();
+    let mut held: Option<Reserved> = None;
     loop {
-        let message = from.recv().await?;
-        match opening.decode(message.as_deref()) {
-            Ok(Some(start)) => return Ok((to, from, start)),
-            Ok(None) => {}
-            Err(_) => {
-                to.reset(Code(MALFORMED));
-                from.stop(Code(MALFORMED));
-                return Err(failed);
+        let message = match next(renewal, |_| Poll::Ready(()), &mut from).await? {
+            Next::Renewed(signed) => {
+                message(state, &mut to, signed.encoded_len(), |out| {
+                    signed.encode(out);
+                })
+                .await?;
+                continue;
+            }
+            Next::Message(message) => message,
+        };
+        if let Some(message) = message.as_deref() {
+            if let Some(held) = held.as_mut() {
+                // A place holds no more than its bytes, past its fixed size.
+                held.add(bytes(message.len()))?;
+            } else if let Ok(head) = Places::decode(message) {
+                if head.count > places + 1 {
+                    return Err(broken(home, to, from));
+                }
+                let count = usize::try_from(head.count)
+                    .expect("invariant: a usize holds a u32");
+                let fixed = bytes(count * size_of::<Place>());
+                held = Some(Reserved::new(state, subject.clone(), fixed)?);
             }
         }
+        match opening.decode(message.as_deref()) {
+            Ok(Some(start)) => {
+                let held = held.expect("invariant: a start follows its places");
+                return Ok(Started {
+                    to,
+                    from,
+                    start,
+                    held,
+                });
+            }
+            Ok(None) => {}
+            Err(_) => return Err(broken(home, to, from)),
+        }
+    }
+}
+
+/// Stops each half of the stream to `home`, which broke HUB WIRE, and gives the error
+/// of the program.
+fn broken(home: node::Key, to: Sender, from: Receiver) -> Error {
+    to.reset(Code(MALFORMED));
+    from.stop(Code(MALFORMED));
+    Error::Forward {
+        home,
+        refusal: Refusal::Failed,
     }
 }
 
@@ -253,36 +313,36 @@ async fn message(
     Ok(())
 }
 
-/// The refusal of the client wire that `error` carries, when the home stopped or reset
-/// the stream with one.
-fn refusal(error: &transport::Error) -> Option<Refusal> {
-    match error {
-        transport::Error::Reset { code } | transport::Error::Stopped { code } => {
-            Refusal::from_code(code.0)
-        }
-        _ => None,
+/// The refusal that the program gets when `error` ends the stream to the home: the
+/// code that the home stopped or reset the stream with, else `FAILED`. A `MALFORMED`
+/// of the home gives `FAILED` too: it tells of a message of this node, not of the
+/// program.
+fn refusal(error: &transport::Error) -> Refusal {
+    let (transport::Error::Reset { code } | transport::Error::Stopped { code }) = error
+    else {
+        return Refusal::Failed;
+    };
+    match Refusal::from_code(code.0) {
+        Some(Refusal::Malformed) | None => Refusal::Failed,
+        Some(refusal) => refusal,
     }
 }
 
-/// Why the forward ended before the program finished it.
+/// Why the forward ended before the program and the home finished it.
 enum Cut {
     /// The stream to the home failed with this error.
     Stream(transport::Error),
     /// The home broke HUB WIRE: a reply that [`Replies::decode`] refuses, or a finish
-    /// before the program's.
+    /// before the program's or with an outcome due.
     Broken,
 }
 
 impl Cut {
-    /// The end of the group.
-    fn end(&self) -> End {
-        let Self::Stream(error) = self else {
-            return End::Failed;
-        };
-        match refusal(error) {
-            Some(Refusal::Refused | Refusal::Via | Refusal::Changed) => End::Refused,
-            Some(Refusal::Unknown) => End::Removed,
-            _ => End::Failed,
+    /// The refusal that the program gets.
+    fn refusal(&self) -> Refusal {
+        match self {
+            Self::Stream(error) => refusal(error),
+            Self::Broken => Refusal::Failed,
         }
     }
 
@@ -301,8 +361,6 @@ struct Flight {
     replies: RefCell<Replies>,
     heads: Cell<u64>,
     answered: Cell<u64>,
-    /// The end of the [`Reply::Ended`] of the home.
-    ended: Cell<Option<End>>,
     /// The task that waits for an outcome while [`IN_FLIGHT`] frames are due.
     waiting: Cell<Option<Waker>>,
 }
@@ -313,7 +371,6 @@ impl Flight {
             replies: RefCell::new(Replies::new(1)),
             heads: Cell::default(),
             answered: Cell::default(),
-            ended: Cell::default(),
             waiting: Cell::default(),
         }
     }
@@ -327,17 +384,18 @@ impl Flight {
 
     /// Checks `message`, the next reply of the home, and counts an outcome.
     fn reply(&self, message: &[u8]) -> Result<(), wire::hub::Error> {
-        match self.replies.borrow_mut().decode(message)? {
-            Reply::Outcome { .. } => {
-                self.answered.set(self.answered.get() + 1);
-                if let Some(waker) = self.waiting.take() {
-                    waker.wake();
-                }
+        if let Reply::Outcome { .. } = self.replies.borrow_mut().decode(message)? {
+            self.answered.set(self.answered.get() + 1);
+            if let Some(waker) = self.waiting.take() {
+                waker.wake();
             }
-            Reply::Ended { end, .. } => self.ended.set(Some(end)),
-            Reply::Stored { .. } => {}
         }
         Ok(())
+    }
+
+    /// Whether a frame has an outcome due.
+    fn due(&self) -> bool {
+        self.heads.get() > self.answered.get()
     }
 
     /// Ready while fewer than [`IN_FLIGHT`] frames have an outcome due.
@@ -351,13 +409,11 @@ impl Flight {
 }
 
 /// Sends `to` each message of the program after `frames` checks it, and between
-/// frames the hello of `admission` at each renewal after the first `seen`. Gives
-/// `None` once the program finishes and it finishes `to`, or the cut when the stream
-/// to the home fails.
+/// frames each hello that `renewal` gives. Gives `None` once the program finishes and
+/// it finishes `to`, or the cut when the stream to the home fails.
 async fn up(
     state: &RefCell<State>,
-    admission: &Admission,
-    mut seen: u64,
+    renewal: &Renewal<'_>,
     frames: &mut Frames,
     flight: &Flight,
     receiver: &mut Receiver,
@@ -372,10 +428,8 @@ async fn up(
             }
             Due::Body(_) => unreachable!("invariant: a forward takes no draft"),
             Due::Message if between => {
-                match next(admission.renewed(seen), flight, receiver).await? {
-                    Next::Renewed => {
-                        let signed;
-                        (signed, seen) = admission.signed();
+                match next(renewal, |cx| flight.poll_room(cx), receiver).await? {
+                    Next::Renewed(signed) => {
                         let mut block = alloc(state, signed.encoded_len())?;
                         signed.encode(&mut block);
                         block.freeze()
@@ -410,31 +464,33 @@ async fn up(
     }
 }
 
-/// What comes between frames.
+/// What comes next on a stream that takes renewals.
 enum Next {
-    /// The session admitted a hello.
-    Renewed,
-    /// The next message of the program, or `None` when it finished.
+    /// The hello that the session admitted.
+    Renewed(Signed),
+    /// The next message, or `None` when the stream finished.
     Message(Option<Block>),
 }
 
-/// Waits for `renewed`, or for the next message of the program while `flight` has room.
+/// Waits for a hello that `renewal` gives, or, once `room` is ready, for the next
+/// message of `receiver`. A renewal goes first.
 async fn next(
-    renewed: impl Future<Output = ()>,
-    flight: &Flight,
+    renewal: &Renewal<'_>,
+    room: impl Fn(&Context<'_>) -> Poll<()>,
     receiver: &mut Receiver,
 ) -> Result<Next, Error> {
-    let mut renewed = pin!(renewed);
     let mut message = pin!(receiver.recv());
     poll_fn(|cx| {
-        if renewed.as_mut().poll(cx).is_ready() {
-            return Poll::Ready(Ok(Next::Renewed));
+        if let Some(signed) = renewal.renewed() {
+            return Poll::Ready(Ok(Next::Renewed(signed)));
         }
-        ready!(flight.poll_room(cx));
-        message
-            .as_mut()
-            .poll(cx)
-            .map(|message| Ok(Next::Message(message?)))
+        if room(cx).is_ready()
+            && let Poll::Ready(message) = message.as_mut().poll(cx)
+        {
+            return Poll::Ready(message.map(Next::Message).map_err(Error::from));
+        }
+        renewal.register(cx);
+        Poll::Pending
     })
     .await
 }
@@ -458,66 +514,6 @@ async fn down(
         }
         sender.send(message).await?;
     }
-}
-
-/// Ends group 0 with `end` once the home cut the forward, unless the home ended it
-/// first: sends the program [`Reply::Ended`], then [`Outcome::Ended`] for each frame of
-/// `flight` with no outcome, and for each later frame of `program` until it finishes,
-/// when it has not. Then finishes the program's stream.
-async fn after(
-    state: &RefCell<State>,
-    end: End,
-    frames: &mut Frames,
-    flight: &Flight,
-    mut program: Option<&mut Receiver>,
-    sender: &mut Sender,
-) -> Result<(), Error> {
-    let end = if let Some(ended) = flight.ended.get() {
-        ended
-    } else {
-        reply(state, sender, Reply::Ended { group: 0, end }).await?;
-        end
-    };
-    let (mut answered, mut heads) = (flight.answered.get(), flight.heads.get());
-    loop {
-        while answered < heads {
-            answered += 1;
-            let outcome = Reply::Outcome {
-                frame: answered,
-                group: 0,
-                outcome: Outcome::Ended(end),
-            };
-            reply(state, sender, outcome).await?;
-        }
-        let Some(receiver) = program.as_deref_mut() else {
-            break;
-        };
-        match frames.due().map_err(Error::Frame)? {
-            Due::Draft { .. } => frames.skip(),
-            Due::Body(_) => unreachable!("invariant: a forward takes no draft"),
-            Due::Message => {
-                let Some(message) = receiver.recv().await? else {
-                    frames.finish()?;
-                    break;
-                };
-                if let Step::Head(_) = frames.decode(&message)? {
-                    heads += 1;
-                }
-            }
-        }
-    }
-    sender.finish()?;
-    Ok(())
-}
-
-/// Sends `reply` to the program.
-async fn reply(
-    state: &RefCell<State>,
-    sender: &mut Sender,
-    reply: Reply,
-) -> Result<(), Error> {
-    let block = alloc(state, reply.encoded_len())?;
-    send(sender, block, reply).await
 }
 
 // A run of more places than a message holds needs over 12000 channels in one open, so
