@@ -1,5 +1,6 @@
 //! Join tickets: the Ed25519 key pairs that admit nodes to a region.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
@@ -15,10 +16,14 @@ use crate::bytes::{
     take_optional_span, take_prefix, take_public_key, take_stamp,
 };
 use crate::card;
+use crate::member::Member;
 
 const TAG: &[u8] = b"foundation/admission/1";
 
-const TEXT: &str = "foundation-ticket-1-";
+const START: &str = "foundation-ticket-1-";
+
+// The most voters of a ticket: each voter of both halves of a joint configuration.
+const VOTERS_MAX: usize = 2 * crate::message::VOTERS_MAX;
 
 /// What a join ticket admits. The region records it with the ticket's public key.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,6 +73,35 @@ pub struct Voter {
     pub addresses: card::addresses::Addresses,
 }
 
+impl Voter {
+    /// The voter that `member` is, with the addresses of its card.
+    pub(crate) fn of(member: &Member) -> Self {
+        Self {
+            key: member.card.key(),
+            public_key: member.public_key(),
+            addresses: member.card.card().addresses.clone(),
+        }
+    }
+
+    /// Adds the byte form of the voter to `out`: its node key, its public key, and
+    /// the byte form of its addresses.
+    pub(crate) fn encode(&self, out: &mut Vec<u8>) {
+        put_key(self.key, out);
+        put_public_key(self.public_key, out);
+        self.addresses.encode(out);
+    }
+
+    /// Takes what [`Voter::encode`] gives from the start of `bytes`. `None` when the
+    /// bytes do not start with that form; `bytes` is then at no known place.
+    pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Self> {
+        Some(Self {
+            key: take_key(bytes)?,
+            public_key: take_public_key(bytes)?,
+            addresses: card::addresses::Addresses::decode(bytes)?,
+        })
+    }
+}
+
 /// The secret part of a join ticket, which an operator carries to the joining node. It
 /// is never in region state, and Foundation never writes it to a file. Its `Debug`
 /// writes the region and the public key only, and it has no `Display`, no `Clone`, and
@@ -84,10 +118,14 @@ impl Ticket {
     ///
     /// # Panics
     ///
-    /// When `voters` is empty: a region always has a voter.
+    /// When `voters` is empty, has more than 254 voters, or has two voters with one
+    /// key: a region always has a voter, and has at most 254 in a joint configuration.
     #[must_use]
     pub fn new(private_key: PrivateKey, region: Prefix, voters: Vec<Voter>) -> Self {
-        assert!(!voters.is_empty(), "a ticket names at least one voter");
+        assert!(
+            valid(&voters),
+            "a ticket names 1 to {VOTERS_MAX} voters, each with its own key"
+        );
         Self {
             private_key,
             region,
@@ -131,11 +169,9 @@ impl Ticket {
         put_prefix(&self.region, &mut bytes);
         put_count(self.voters.len(), &mut bytes);
         for voter in &self.voters {
-            put_key(voter.key, &mut bytes);
-            put_public_key(voter.public_key, &mut bytes);
-            voter.addresses.encode(&mut bytes);
+            voter.encode(&mut bytes);
         }
-        format!("{TEXT}{}", Base64UrlUnpadded::encode_string(&bytes))
+        format!("{START}{}", Base64UrlUnpadded::encode_string(&bytes))
     }
 }
 
@@ -147,9 +183,10 @@ impl FromStr for Ticket {
     ///
     /// # Errors
     ///
-    /// [`Unreadable`] when `text` is not that form, also for a count of 0 voters.
+    /// [`Unreadable`] when `text` is not that form, also for voters that
+    /// [`Ticket::new`] refuses.
     fn from_str(text: &str) -> Result<Self, Unreadable> {
-        let text = text.trim_ascii().strip_prefix(TEXT).ok_or(Unreadable)?;
+        let text = text.trim_ascii().strip_prefix(START).ok_or(Unreadable)?;
         let bytes = Base64UrlUnpadded::decode_vec(text).ok().ok_or(Unreadable)?;
         let mut bytes = bytes.as_slice();
         let private_key = PrivateKey(take(&mut bytes).ok_or(Unreadable)?);
@@ -157,22 +194,20 @@ impl FromStr for Ticket {
         let count = take_count(&mut bytes).ok_or(Unreadable)?;
         let mut voters = Vec::new();
         for _ in 0..count {
-            voters.push(take_voter(&mut bytes).ok_or(Unreadable)?);
+            voters.push(Voter::decode(&mut bytes).ok_or(Unreadable)?);
         }
-        if voters.is_empty() || !bytes.is_empty() {
+        if !valid(&voters) || !bytes.is_empty() {
             return Err(Unreadable);
         }
         Ok(Self::new(private_key, region, voters))
     }
 }
 
-// Takes one voter of the byte form of [`Ticket::text`].
-fn take_voter(bytes: &mut &[u8]) -> Option<Voter> {
-    Some(Voter {
-        key: take_key(bytes)?,
-        public_key: take_public_key(bytes)?,
-        addresses: card::addresses::Addresses::decode(bytes)?,
-    })
+// Whether `voters` can be the voters of a ticket: 1 to `VOTERS_MAX`, each with its own
+// key.
+fn valid(voters: &[Voter]) -> bool {
+    let keys: BTreeSet<_> = voters.iter().map(|voter| voter.key).collect();
+    (1..=VOTERS_MAX).contains(&voters.len()) && keys.len() == voters.len()
 }
 
 /// A text that is no ticket. It names no part of the text: the text is a secret.
@@ -398,14 +433,27 @@ mod tests {
                 }
             },
         );
-        let voter = (any::<u8>(), prop::collection::vec(address, 0..4)).prop_map(
-            |(id, list)| Voter {
-                key: key(id),
-                public_key: public(id),
-                addresses: card::addresses::Addresses::new(list).unwrap(),
-            },
-        );
-        prop::collection::vec(voter, 1..5)
+        let addresses = prop::collection::vec(address, 0..4);
+        prop::collection::btree_map(any::<u8>(), addresses, 1..5)
+            .prop_map(|voters| {
+                let voters = voters.into_iter().map(|(id, list)| Voter {
+                    key: key(id),
+                    public_key: public(id),
+                    addresses: card::addresses::Addresses::new(list).unwrap(),
+                });
+                voters.collect::<Vec<_>>()
+            })
+            .prop_shuffle()
+    }
+
+    // The voters with the keys `ids`, with no addresses.
+    fn bare(ids: impl Iterator<Item = u8>) -> Vec<Voter> {
+        let voter = |id| Voter {
+            key: key(id),
+            public_key: public(id),
+            addresses: card::addresses::Addresses::new(Vec::new()).unwrap(),
+        };
+        ids.map(voter).collect()
     }
 
     fn regions() -> impl Strategy<Value = Prefix> {
@@ -459,10 +507,48 @@ mod tests {
     }
 
     #[test]
-    fn a_byte_past_the_end_is_unreadable() {
-        let mut bytes = bytes_of_ticket_7();
-        bytes.push(0);
+    fn a_character_past_the_end_is_unreadable() {
+        let text = ticket(7).text();
+        for past in ["A", "=", "-", "_", ".", "\u{a0}"] {
+            let text = format!("{text}{past}");
+            assert_eq!(Ticket::from_str(&text).err(), Some(Unreadable), "{past}");
+        }
+    }
+
+    #[test]
+    fn at_most_254_voters_are_readable() {
+        let most = Ticket::new(private(7), "plant".parse().unwrap(), bare(0..=253));
+        assert_eq!(Ticket::from_str(&most.text()).unwrap().voters().len(), 254);
+        let mut bytes = vec![7; 32];
+        bytes.extend(b"\x05plant");
+        put_count(255, &mut bytes);
+        for voter in bare(0..=254) {
+            voter.encode(&mut bytes);
+        }
         assert_eq!(Ticket::from_str(&text(&bytes)).err(), Some(Unreadable));
+    }
+
+    #[test]
+    fn two_voters_with_one_key_are_unreadable() {
+        let mut bytes = vec![7; 32];
+        bytes.extend(b"\x05plant");
+        put_count(2, &mut bytes);
+        for voter in bare([3, 3].into_iter()) {
+            voter.encode(&mut bytes);
+        }
+        assert_eq!(Ticket::from_str(&text(&bytes)).err(), Some(Unreadable));
+    }
+
+    #[test]
+    fn the_voters_keep_their_order() {
+        let ticket = Ticket::new(
+            private(7),
+            "plant".parse().unwrap(),
+            bare([6, 2, 4].into_iter()),
+        );
+        let read = Ticket::from_str(&ticket.text()).unwrap();
+        let keys: Vec<_> = read.voters().iter().map(|voter| voter.key).collect();
+        assert_eq!(keys, [6, 2, 4].map(key));
     }
 
     #[test]
@@ -537,12 +623,32 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "a ticket names at least one voter")]
+    #[should_panic(expected = "a ticket names 1 to 254 voters, each with its own key")]
     fn a_ticket_with_no_voter_panics() {
         drop(Ticket::new(
             private(7),
             "plant".parse().unwrap(),
             Vec::new(),
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "a ticket names 1 to 254 voters, each with its own key")]
+    fn a_ticket_with_255_voters_panics() {
+        drop(Ticket::new(
+            private(7),
+            "plant".parse().unwrap(),
+            bare(0..=254),
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "a ticket names 1 to 254 voters, each with its own key")]
+    fn a_ticket_with_two_voters_with_one_key_panics() {
+        drop(Ticket::new(
+            private(7),
+            "plant".parse().unwrap(),
+            bare([3, 3].into_iter()),
         ));
     }
 
@@ -766,6 +872,13 @@ mod tests {
             prop_assert_eq!(decoded.region(), ticket.region());
             prop_assert_eq!(decoded.voters(), ticket.voters());
             prop_assert_eq!(decoded.text(), text);
+        }
+
+        #[test]
+        fn a_byte_past_the_end_of_the_byte_form_is_unreadable(past in any::<u8>()) {
+            let mut bytes = bytes_of_ticket_7();
+            bytes.push(past);
+            prop_assert_eq!(Ticket::from_str(&text(&bytes)).err(), Some(Unreadable));
         }
 
         #[test]

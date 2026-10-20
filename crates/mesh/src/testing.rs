@@ -2115,8 +2115,34 @@ mod tests {
             "addresses_over_32",
             "trailing",
             "line_end",
+            "tcp",
+            "address_kind_unknown",
+            "address_family_unknown",
+            "relay_forged",
+            "prefix_not_utf8",
+            "address_cut",
+            "voters_over_254",
+            "voter_twice",
         );
         assert_eq!(count_files("mesh_ticket"), inputs.len());
+        for (name, want) in valid_tickets() {
+            let want = want.into_bytes();
+            assert_eq!(inputs[name], want, "{name}");
+            let round_trip = round_trip_ticket(&want);
+            assert_eq!(round_trip.as_deref(), Some(&want[..]), "{name}");
+        }
+        let line_end = format!("{}\n", ticket(7).text()).into_bytes();
+        assert_eq!(inputs["line_end"], line_end);
+        let read = round_trip_ticket(&line_end);
+        assert_eq!(read, Some(ticket(7).text().into_bytes()));
+        for (name, want) in refused_tickets() {
+            assert_eq!(inputs[name], want, "{name}");
+            assert_eq!(round_trip_ticket(&want), None, "{name}");
+        }
+    }
+
+    // The text of each input of `mesh_ticket` that is a ticket, by name.
+    fn valid_tickets() -> Vec<(&'static str, String)> {
         let root = Ticket::new(private(7), Prefix::ROOT, vec![voter()]).text();
         let relay = Address::Relay {
             node: public(3),
@@ -2135,25 +2161,21 @@ mod tests {
             },
         ];
         let voters = Ticket::new(private(7), "plant".parse().unwrap(), voters);
-        let valid = [
+        let tcp = Voter {
+            key: key(1),
+            public_key: public(1),
+            addresses: Addresses::new(vec![Address::Tcp(
+                "10.0.0.1:4000".parse().unwrap(),
+            )])
+            .unwrap(),
+        };
+        let tcp = Ticket::new(private(7), "plant".parse().unwrap(), vec![tcp]);
+        vec![
             ("ticket", ticket(7).text()),
             ("root", root),
             ("voters", voters.text()),
-        ];
-        for (name, want) in valid {
-            let want = want.into_bytes();
-            assert_eq!(inputs[name], want, "{name}");
-            let round_trip = round_trip_ticket(&want);
-            assert_eq!(round_trip.as_deref(), Some(&want[..]), "{name}");
-        }
-        let line_end = format!("{}\n", ticket(7).text()).into_bytes();
-        assert_eq!(inputs["line_end"], line_end);
-        let read = round_trip_ticket(&line_end);
-        assert_eq!(read, Some(ticket(7).text().into_bytes()));
-        for (name, want) in refused_tickets() {
-            assert_eq!(inputs[name], want, "{name}");
-            assert_eq!(round_trip_ticket(&want), None, "{name}");
-        }
+            ("tcp", tcp.text()),
+        ]
     }
 
     // The text of each input of `mesh_ticket` that is no ticket, by name.
@@ -2175,6 +2197,22 @@ mod tests {
         let standard = base64ct::Base64Unpadded::encode_string(&[0xfb; 33]);
         let mut over = 33u64.to_le_bytes().to_vec();
         over.extend((0..33).flat_map(|_| [0, 4, 10, 0, 0, 1, 0xa0, 0x0f]));
+        // The private key and the prefix, then voters with no address.
+        let bare = |ids: &[u8]| {
+            let mut bytes = bytes[..38].to_vec();
+            put_count(ids.len(), &mut bytes);
+            for &id in ids {
+                let addresses = Addresses::new(Vec::new()).unwrap();
+                let voter = Voter {
+                    key: key(id),
+                    public_key: public(id),
+                    addresses,
+                };
+                voter.encode(&mut bytes);
+            }
+            text(&bytes)
+        };
+        let ids: Vec<u8> = (0..=254).collect();
         vec![
             (
                 "first_part_wrong",
@@ -2195,6 +2233,16 @@ mod tests {
             ("voter_forged", with(62..94, &[0; 32])),
             ("addresses_over_32", with(94..110, &over)),
             ("trailing", text(&[&bytes[..], &[0]].concat())),
+            ("address_kind_unknown", with(102..103, &[3])),
+            ("address_family_unknown", with(103..104, &[5])),
+            (
+                "relay_forged",
+                with(102..103, &[&[2][..], &[0; 32]].concat()),
+            ),
+            ("prefix_not_utf8", with(33..38, &[0xff; 5])),
+            ("address_cut", text(&bytes[..105])),
+            ("voters_over_254", bare(&ids)),
+            ("voter_twice", bare(&[3, 3])),
         ]
     }
 }
