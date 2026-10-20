@@ -2157,6 +2157,29 @@ fn a_replaced_key_heals_the_run() {
     assert_eq!(values(&outcome.frames, 2), served(&outcome, A));
 }
 
+/// A trust that the client refuses, replaced by the certificate of the server, heals
+/// at a later run with no change of the spec.
+#[test]
+fn a_replaced_trust_heals_the_run() {
+    let mut secure = Secure::of(Policy::Basic256Sha256);
+    secure.credentials[2] = Some(b"no certificate");
+    let outcome = run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
+        scene.after(ms(1_050), |scene| async move {
+            let files = scene.node.files();
+            testing::create_secret(&files, &name(TRUST), SERVER.certificate).await;
+        });
+        scene.supervise(ms(5_050)).await
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    let text = "the trust holds no certificate in DER or PEM";
+    assert_eq!(
+        errors(&outcome.statuses),
+        [credentials(TRUST, text, TRUST_FIX)]
+    );
+    assert!(!outcome.frames.is_empty());
+    assert_eq!(values(&outcome.frames, 2), served(&outcome, A));
+}
+
 /// A certificate whose window opens 2 s after the start of the node reads once the
 /// window opens.
 #[test]
