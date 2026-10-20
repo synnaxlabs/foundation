@@ -174,15 +174,17 @@ take the next issue meanwhile.
   reaches no one. When no part of the issue is left to build, add `blocked` and take
   other work (Take an issue). A `blocked` issue names each wait in one line of its body,
   never wrapped, `Waits on #<n>, #<m>.`, for issues and PRs, with `the person` for a
-  question (`Waits on #12 and the person.`). When the answer comes, take `the person`
-  out of the line. Delete the line when nothing is left in it. A wait has ended when
+  question (`Waits on #12 and the person.`). When the answer comes, put in place of
+  `the person` each issue or PR that the answer says the issue waits on, or else take
+  `the person` out. Delete the line when nothing is left in it. A wait has ended when
   you delete the line, or when each issue that it names closed as completed, each PR
   merged, and it names no `the person`, as `ended` of the waits script says (step 2).
-  Then remove `blocked` if it is there. If the issue has your `owner:` label and no
-  open PR closes it or has its number in its branch, also give it back (step 3). With
-  no `owner:` label, send its link to `laptop.coordinator`, which admits it
-  (`/coordinate`, "Admit"; `docs/coordination.md`, "Messages", while it is paused). If
-  you build no other issue, take one (Take an issue).
+  Then remove `blocked` if it is there. If the issue has your `owner:` label and no open
+  PR closes it or has its number in its branch, also give it back at once, as step 3
+  says, so that step 2 does not resume it. With no `owner:` label, send its link to
+  `laptop.coordinator`, which admits it (`/coordinate`, "Admit"; `docs/coordination.md`,
+  "Messages", while it is paused). If you build no other issue, take one (Take an
+  issue).
 - A key choice (`CLAUDE.md`, "The person decides the design"): send it to
   `laptop.monitor` when you make it, before work builds on it, then go on. Never add
   `blocked` for it.
