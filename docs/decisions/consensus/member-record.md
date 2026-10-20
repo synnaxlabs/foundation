@@ -255,8 +255,9 @@
   Deferred: appends whose entries the queues of all peers share. Trigger: before
   `MEMBERS_MAX` grows past 128. A learner reads the log only from the leader. A learner
   that no leader can dial reaches a new leader within about two election timeouts for
-  each voter after the last message of the old one (MESH DRIVER; `laptop.architect`,
-  2026-10-19T19:46:05Z,
+  each voter after the last message of the old one, and up to a third of the idle
+  timeout of the transport more when the new leader restarted while the learner held a
+  session to it (MESH DRIVER; `laptop.architect`, 2026-10-19T19:46:05Z,
   https://github.com/synnaxlabs/foundation/pull/3415#issuecomment-6275819044, finding
   2). Fan-out from any voter is deferred to #3368, with its trigger: a region needs more
   than 128 members. A member that stops answering costs the leader its queue. For a
