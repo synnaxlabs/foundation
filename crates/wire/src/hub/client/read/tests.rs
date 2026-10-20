@@ -817,18 +817,6 @@ mod reader {
         drop(reader.decode(None));
     }
 
-    /// The messages of a fuzz input, as `fuzz::messages` cuts them: each a length byte
-    /// and then that many bytes.
-    fn input(mut bytes: &[u8]) -> Vec<&[u8]> {
-        let mut messages = Vec::new();
-        while let Some((&len, rest)) = bytes.split_first() {
-            let (message, rest) = rest.split_at(usize::from(len).min(rest.len()));
-            messages.push(message);
-            bytes = rest;
-        }
-        messages
-    }
-
     /// The bytes of the input `$file` of the fuzz target `wire_hub_client`.
     macro_rules! corpus {
         ($file:literal) => {
@@ -853,7 +841,7 @@ mod reader {
         let mut reader = Reader::new(Mode::Complete);
         let mut home = None;
         let mut steps = Vec::new();
-        for message in input(bytes) {
+        for message in crate::common::messages(bytes) {
             if let Some(home) = &mut home {
                 steps.push(Step::Reply(reply(home, message)));
                 continue;

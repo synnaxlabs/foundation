@@ -129,3 +129,16 @@ impl<'b> Fields<'b> {
         Length { len: self.len }
     }
 }
+
+/// The messages of a fuzz input, as `fuzz::messages` cuts them: each a length byte
+/// and then that many bytes, or the bytes that are left.
+#[cfg(test)]
+pub(crate) fn messages(mut bytes: &[u8]) -> Vec<&[u8]> {
+    let mut messages = Vec::new();
+    while let Some((&len, rest)) = bytes.split_first() {
+        let (message, rest) = rest.split_at(usize::from(len).min(rest.len()));
+        messages.push(message);
+        bytes = rest;
+    }
+    messages
+}

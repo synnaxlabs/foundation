@@ -6,8 +6,8 @@ use std::pin::pin;
 use std::task::Poll;
 
 use access::proof::{self, Admitted};
+use types::ed25519::PublicKey;
 use types::name::Name;
-use types::node;
 use types::time::Stamp;
 use wire::hub::client::Signed;
 
@@ -18,15 +18,15 @@ use crate::State;
 /// [`Admission::admit`] admits a hello, and each later one renews it.
 #[derive(Debug)]
 pub(crate) struct Admission {
-    /// The node that carried each hello of the session.
-    peer: node::Key,
+    /// The public key of the node that carried each hello of the session.
+    peer: PublicKey,
     admitted: RefCell<Option<(Admitted, [u8; 64])>>,
 }
 
 impl Admission {
     /// An admission of the hellos that `peer` carries: this node for a client
     /// session.
-    pub(crate) fn new(peer: node::Key) -> Self {
+    pub(crate) fn new(peer: PublicKey) -> Self {
         Self {
             peer,
             admitted: RefCell::default(),
@@ -53,7 +53,7 @@ impl Admission {
             None => state.rules.admit(now, self.peer, hello, &signature),
             Some((first, _)) => state.rules.renew(first, now, hello, &signature),
         }
-        .map_err(Error::Access)?;
+        .map_err(|error| Error::Access(Box::new(error)))?;
         *admitted = Some((next, signature));
         Ok(())
     }
@@ -92,7 +92,7 @@ impl Admission {
         state
             .rules
             .verify(admitted, state.time.now().mesh, kind, bytes, signature)
-            .map_err(Error::Access)?;
+            .map_err(|error| Error::Access(Box::new(error)))?;
         Ok(Signed {
             hello: admitted.hello().clone(),
             signature: *kept,
@@ -117,10 +117,10 @@ impl Admission {
                     .mesh
                     .expect("invariant: mesh time stays once the clock has synced");
                 if now.latest >= ends {
-                    return Error::Access(proof::Error::Expired {
+                    return Error::Access(Box::new(proof::Error::Expired {
                         expires: ends,
                         now: now.latest,
-                    });
+                    }));
                 }
                 (ends, state.time.reach(ends))
             };

@@ -11,7 +11,6 @@ use hub::serve;
 use transport::{Address, Code, Session};
 use types::connection;
 use types::ed25519::Pair;
-use types::node;
 use types::time::Span;
 use wire::Protocol;
 use wire::header::MALFORMED;
@@ -24,7 +23,7 @@ use super::{AREA, BODY_MAX, NODE, POOL, Test};
 use crate::agent::{
     AGENT, Agent, CONNECTION, SECOND, SUBJECT, THIRD, name, reset_with, signed,
 };
-use crate::net::{HOME, header, own_pool, public_key, transport};
+use crate::net::{HOME, PEER, header, own_pool, public_key, transport};
 use crate::sessions::{
     self, Got, HOLD, Home, OTHER, QUIET, accept_on, answer, closed_after, closed_with,
     rules, run_program, serve_each, shrink_wall_error,
@@ -259,7 +258,7 @@ fn refuses_a_hello_of_a_key_the_spec_does_not_list_and_closes_the_session() {
         subject: name(SUBJECT),
         key: public_key(&OTHER),
     };
-    assert_eq!(home.served, [Err(serve::Error::Access(refusal))]);
+    assert_eq!(home.served, [Err(serve::Error::Access(Box::new(refusal)))]);
     assert_eq!(
         home.closed,
         transport::Error::Closed {
@@ -267,7 +266,7 @@ fn refuses_a_hello_of_a_key_the_spec_does_not_list_and_closes_the_session() {
         }
     );
     assert_eq!(
-        serve::Error::Access(Refusal::Signature).to_string(),
+        serve::Error::Access(Box::new(Refusal::Signature)).to_string(),
         "access refused the program: the signature is not of the message by the key"
     );
 }
@@ -332,7 +331,7 @@ fn refuses_each_hello_before_the_first_rules() {
     let refusal = Refusal::Unknown {
         subject: name(SUBJECT),
     };
-    assert_eq!(home.served, [Err(serve::Error::Access(refusal))]);
+    assert_eq!(home.served, [Err(serve::Error::Access(Box::new(refusal)))]);
     assert_eq!(
         home.closed,
         transport::Error::Closed {
@@ -343,7 +342,7 @@ fn refuses_each_hello_before_the_first_rules() {
 
 #[test]
 fn refuses_a_hello_through_another_node() {
-    let other = node::Key::from_u128(2);
+    let other = public_key(&PEER);
     let home = session(85, true, move |mut agent| async move {
         let challenge = agent.hello.challenge().await;
         let mut hello = Agent::hello(challenge);
@@ -353,14 +352,14 @@ fn refuses_a_hello_through_another_node() {
     });
     let refusal = Refusal::Via {
         via: other,
-        peer: NODE,
+        peer: public_key(&HOME),
     };
-    assert_eq!(home.served, [Err(serve::Error::Access(refusal))]);
+    assert_eq!(home.served, [Err(serve::Error::Access(Box::new(refusal)))]);
 }
 
 #[test]
 fn a_hub_of_testing_open_refuses_a_hello_through_any_node_but_1() {
-    let other = node::Key::from_u128(2);
+    let other = public_key(&PEER);
     let open = async |node: &sim::node::Node, tasks: &env::tasks::Tasks| {
         let (hub, _) = hub::testing::open(crate::node::env(node, tasks.clone())).await;
         (hub, ())
@@ -376,9 +375,9 @@ fn a_hub_of_testing_open_refuses_a_hello_through_any_node_but_1() {
 
     let refusal = Refusal::Via {
         via: other,
-        peer: node::Key::from_u128(1),
+        peer: types::ed25519::PrivateKey([1; 32]).public(),
     };
-    assert_eq!(served, [Err(serve::Error::Access(refusal))]);
+    assert_eq!(served, [Err(serve::Error::Access(Box::new(refusal)))]);
 }
 
 /// A node with no mesh time sends no challenge, and closes the session.
@@ -387,7 +386,10 @@ fn closes_the_session_as_unsynced_when_the_node_has_no_mesh_time() {
     let home = session(86, false, |agent| async move {
         assert_eq!(agent.closed().await, closed_with(UNSYNCED));
     });
-    assert_eq!(home.served, [Err(serve::Error::Access(Refusal::Unsynced))]);
+    assert_eq!(
+        home.served,
+        [Err(serve::Error::Access(Box::new(Refusal::Unsynced)))]
+    );
 }
 
 #[test]
@@ -404,10 +406,11 @@ fn closes_the_session_when_the_hello_expires() {
         assert_eq!(agent.closed().await, closed_with(EXPIRED));
     });
     let expires = expires.lock().expect("not poisoned").expect("a hello");
-    let [Err(serve::Error::Access(Refusal::Expired { expires: at, now }))] =
-        home.served.as_slice()
-    else {
+    let [Err(serve::Error::Access(refusal))] = home.served.as_slice() else {
         panic!("one expiry, not {:?}", home.served);
+    };
+    let Refusal::Expired { expires: at, now } = &**refusal else {
+        panic!("an expiry, not {refusal:?}");
     };
     assert_eq!(*at, expires);
     assert!(
@@ -456,10 +459,11 @@ fn closes_the_session_at_the_expiry_of_a_renewal_that_moves_it_earlier() {
         assert_eq!(agent.closed().await, closed_with(EXPIRED));
     });
     let expires = expires.lock().expect("not poisoned").expect("a hello");
-    let [Err(serve::Error::Access(Refusal::Expired { expires: at, now }))] =
-        home.served.as_slice()
-    else {
+    let [Err(serve::Error::Access(refusal))] = home.served.as_slice() else {
         panic!("one expiry, not {:?}", home.served);
+    };
+    let Refusal::Expired { expires: at, now } = &**refusal else {
+        panic!("an expiry, not {refusal:?}");
     };
     assert_eq!(*at, expires);
     assert!(
@@ -480,7 +484,7 @@ fn refuses_a_renewal_on_another_connection() {
     let refusal = Refusal::Changed {
         field: Field::Connection,
     };
-    assert_eq!(home.served, [Err(serve::Error::Access(refusal))]);
+    assert_eq!(home.served, [Err(serve::Error::Access(Box::new(refusal)))]);
 }
 
 /// A request stream before the hello is admitted stops as `MALFORMED`, and the
@@ -595,7 +599,7 @@ fn stops_a_write_stream_that_the_subject_did_not_sign() {
     assert_eq!(
         home.served,
         [
-            Err(serve::Error::Access(Refusal::Signature)),
+            Err(serve::Error::Access(Box::new(Refusal::Signature))),
             Ok(Got::Request(name(SUBJECT), b"ab".to_vec())),
             Err(serve::Error::Stream(closed_with(0))),
         ]
@@ -683,7 +687,7 @@ fn refuses_a_request_whose_signature_does_not_verify() {
     });
     assert_eq!(
         home.served[0],
-        Err(serve::Error::Access(Refusal::Signature))
+        Err(serve::Error::Access(Box::new(Refusal::Signature)))
     );
 }
 
@@ -1120,10 +1124,11 @@ fn closes_the_session_at_the_cap_of_a_hello_past_it() {
         assert_eq!(agent.closed().await, closed_with(EXPIRED));
     });
     let cap = cap.lock().expect("not poisoned").expect("a hello");
-    let [Err(serve::Error::Access(Refusal::Expired { expires: at, now }))] =
-        home.served.as_slice()
-    else {
+    let [Err(serve::Error::Access(refusal))] = home.served.as_slice() else {
         panic!("one expiry, not {:?}", home.served);
+    };
+    let Refusal::Expired { expires: at, now } = &**refusal else {
+        panic!("an expiry, not {refusal:?}");
     };
     let soon = Span::from_nanos(10_000_000);
     assert!(
@@ -1190,10 +1195,11 @@ fn closes_the_session_at_the_cap_of_a_renewal_after_a_drop() {
         .expect("not poisoned")
         .expect("a third challenge");
     let served = std::mem::take(&mut *served.lock().expect("not poisoned"));
-    let [Err(serve::Error::Access(Refusal::Expired { expires: at, now }))] =
-        served.as_slice()
-    else {
+    let [Err(serve::Error::Access(refusal))] = served.as_slice() else {
         panic!("one expiry, not {served:?}");
+    };
+    let Refusal::Expired { expires: at, now } = &**refusal else {
+        panic!("an expiry, not {refusal:?}");
     };
     let cap = next.latest + access::proof::CAP;
     assert!(
@@ -1217,7 +1223,8 @@ fn refuses_a_hello_that_expired_before_it_came() {
     assert!(
         matches!(
             home.served.as_slice(),
-            [Err(serve::Error::Access(Refusal::Expired { .. }))]
+            [Err(serve::Error::Access(refusal))]
+                if matches!(**refusal, Refusal::Expired { .. })
         ),
         "{:?}",
         home.served

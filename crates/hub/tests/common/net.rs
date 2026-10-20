@@ -18,7 +18,8 @@ use wire::Protocol;
 pub(crate) const PORT: u16 = 7000;
 pub(crate) const HOME: PrivateKey = PrivateKey([1; 32]);
 pub(crate) const PEER: PrivateKey = PrivateKey([2; 32]);
-/// The node key of the hub under test, which each hello names as its `via`.
+/// The node key of the hub under test. Each hello names the public key of [`HOME`]
+/// as its `via`.
 pub(crate) const NODE: types::node::Key = types::node::Key::from_u128(1);
 
 pub(crate) fn public_key(key: &PrivateKey) -> PublicKey {
