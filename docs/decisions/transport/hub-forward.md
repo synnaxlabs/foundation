@@ -93,15 +93,14 @@
   program, so a home that sends more than the share holds gives `BUSY`. While it waits
   for the places, it sends the home each renewal of the hello. A code of the home before
   the places stops the program's stream with that code, `NOT_HOME` included, and with
-  `FAILED` in place of `MALFORMED`, as `serve::Error::Forward { home, refusal }`, and
-  an end of the stream with no code gives
-  `FAILED`. The member finds no new home (#3541). A write whose lease is zero gets
-  `MALFORMED` before the find of its home, not the `FAILED` of a forward that the home
-  refuses. After the places, the member splices: each message of the program goes to the
-  home as it came, each renewal of the hello goes between frames, and each reply goes to
-  the program as it came. It reads no more of the program while 64 frames have an
-  outcome due, so a forward moves at most 64 frames in each round trip to the home
-  (answer 4 of
+  `FAILED` in place of `MALFORMED`, as `serve::Error::Forward { home, refusal }`, and an
+  end of the stream with no code gives `FAILED`. The member finds no new home (#3541). A
+  write whose lease is zero gets `MALFORMED` before the find of its home, not the
+  `FAILED` of a forward that the home refuses. After the places, the member splices:
+  each message of the program goes to the home as it came, each renewal of the hello
+  goes between frames, and each reply goes to the program as it came. It reads no more
+  of the program while 64 frames have an outcome due, so a forward moves at most 64
+  frames in each round trip to the home (answer 4 of
   https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6269021946). When
   the forward is cut, the member resets the program's write with the code of the home,
   and with `FAILED` in place of `MALFORMED`. It also gives `FAILED` for a reply that
