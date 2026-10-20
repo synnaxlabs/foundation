@@ -278,6 +278,15 @@ mod tests {
     const UNNAMED: Body =
         holding("Unnamed.", &[attribute("u", Presence::Unless(&[]))], &[]);
 
+    const ITSELF: Body = holding(
+        "Itself.",
+        &[
+            attribute("b", Presence::Default("1")),
+            attribute("u", Presence::Unless(&["u"])),
+        ],
+        &[],
+    );
+
     const NOTHING: Body =
         holding("Nothing.", &[attribute("w", Presence::When(&[]))], &[]);
 
@@ -466,6 +475,13 @@ mod tests {
     fn fails_a_when_that_names_its_own_attribute() {
         let example = document(&["b", "w"], Vec::new());
         assert_examples([((), &SELF, example)], |(), _| Vec::new());
+    }
+
+    #[test]
+    #[should_panic(expected = "Itself.: u: u")]
+    fn fails_an_unless_that_names_its_own_attribute() {
+        let example = document(&["b", "u"], Vec::new());
+        assert_examples([((), &ITSELF, example)], |(), _| Vec::new());
     }
 
     #[test]
