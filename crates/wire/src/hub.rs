@@ -665,14 +665,37 @@ pub enum Error {
         /// The group that the next outcome answers.
         next: u32,
     },
-    /// A `Stored` of a write stream covers fewer frames than the last `Stored`, or
-    /// more than got an outcome.
+    /// A `Stored` of a write stream covers fewer frames than the last `Stored` of its
+    /// group, or more than got an outcome.
     Stored {
+        /// The group that it names.
+        group: u32,
         /// The frames that it covers.
         frames: u64,
-        /// The frames that the last `Stored` covers when `frames` is below them, else
-        /// the frames that got an outcome.
+        /// The frames that the last `Stored` of the group covers when `frames` is
+        /// below them, else the frames that got an outcome.
         bound: u64,
+    },
+    /// A reply of a write stream names a group after its `Ended`, other than an
+    /// outcome of the same end: a second `Ended`, a `Stored`, or another outcome.
+    Ended {
+        /// The group that it names.
+        group: u32,
+    },
+    /// An outcome of a write stream ends a group before the `Ended` of the group.
+    Unended {
+        /// The frame that it answers.
+        frame: u64,
+        /// The group that it answers.
+        group: u32,
+    },
+    /// A `Stored` or an `Ended` of a write stream names a group that the write does
+    /// not have.
+    Groups {
+        /// The group that it names.
+        group: u32,
+        /// The groups of the write.
+        count: usize,
     },
 }
 
@@ -802,15 +825,37 @@ impl fmt::Display for Error {
                 "the outcome answers group {group} of frame {frame}, not group {next}, \
                  which the next outcome answers"
             ),
-            Self::Stored { frames, bound } if frames < bound => write!(
+            Self::Stored {
+                group,
+                frames,
+                bound,
+            } if frames < bound => write!(
                 f,
-                "the stored reply covers {frames} frames, fewer than the {bound} of \
-                 the last stored reply"
+                "the stored reply of group {group} covers {frames} frames, fewer than \
+                 the {bound} of its last stored reply"
             ),
-            Self::Stored { frames, bound } => write!(
+            Self::Stored {
+                group,
+                frames,
+                bound,
+            } => write!(
                 f,
-                "the stored reply covers {frames} frames, more than the {bound} that \
-                 got an outcome"
+                "the stored reply of group {group} covers {frames} frames, more than \
+                 the {bound} that got an outcome"
+            ),
+            Self::Ended { group } => write!(
+                f,
+                "the reply names group {group} after the group ended, and is not an \
+                 outcome of its end"
+            ),
+            Self::Unended { frame, group } => write!(
+                f,
+                "the outcome of frame {frame} ends group {group}, which did not end"
+            ),
+            Self::Groups { group, count } => write!(
+                f,
+                "the reply names group {group}, not one of the {count} groups of the \
+                 write"
             ),
         }
     }

@@ -79,9 +79,9 @@ impl Writer {
             session,
             stream: Some((sender, receiver)),
             places,
+            replies: Replies::new(set.groups().len()),
             set,
             draft: None,
-            replies: Replies::new(),
             cut: false,
             ended: None,
         })
@@ -180,13 +180,17 @@ impl Writer {
         self.ending(written)
     }
 
-    /// Waits until each frame that the home took before the call is on disk. Gives
-    /// at once when the home took no frame. A call dropped before it gave loses
-    /// nothing: the next call takes the replies that it did not.
+    /// Waits until each frame that the home of a group took before the call is on
+    /// disk. Gives at once when the homes took no frame. It never waits on a group
+    /// whose write ended. A call dropped before it gave loses nothing: the next call
+    /// takes the replies that it did not.
     ///
     /// # Errors
     ///
-    /// The error that ended the writer, as [`Writer::write`] gives it.
+    /// The error that ended the writer, as [`Writer::write`] gives it, and
+    /// [`Error::Unstored`] for each group whose write ended with a taken frame whose
+    /// `Stored` did not come, so it may not be on disk; the writer goes on, and each
+    /// later call gives it again.
     pub async fn stored(&mut self) -> Result<(), Error> {
         self.check()?;
         let mut waited = Ok(());
@@ -196,23 +200,42 @@ impl Writer {
                 break;
             }
         }
-        self.ending(waited)
+        self.ending(waited)?;
+        self.unstored()
     }
 
     /// Drops a held draft, finishes the stream, and waits until each frame that the
-    /// home took is on disk and the node finished the stream. Control ends when the
-    /// stream finishes. Dropping the call drops the writer.
+    /// home took is on disk, or its group ended, and the node finished the stream.
+    /// Control ends when the stream finishes. Dropping the call drops the writer.
     ///
     /// # Errors
     ///
-    /// The error that ended the writer, as [`Writer::write`] gives it, and
+    /// The error that ended the writer, as [`Writer::write`] gives it,
     /// [`Error::Reply`] with [`wire::hub::Error::Finished`] when the node finishes the
-    /// stream before each outcome or the `Stored` of each taken frame.
+    /// stream before each group of each frame sent has its outcome, or before the
+    /// `Stored` of each taken frame of a group that did not end, and then
+    /// [`Error::Unstored`] as [`Writer::stored`] gives it.
     pub async fn finish(mut self) -> Result<(), Error> {
         self.draft = None;
         self.check()?;
         let finished = self.finished().await;
-        self.ending(finished)
+        self.ending(finished)?;
+        self.unstored()
+    }
+
+    /// [`Error::Unstored`] for each group whose write ended with a taken frame whose
+    /// `Stored` did not come.
+    fn unstored(&self) -> Result<(), Error> {
+        let groups: Vec<_> = self
+            .replies
+            .unstored()
+            .map(|(group, end)| (self.set.groups()[to_usize(group)], end))
+            .collect();
+        if groups.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Unstored(groups))
+        }
     }
 
     /// Finishes the sender and takes each reply until the node finishes.
@@ -367,4 +390,8 @@ async fn start(
             };
         }
     }
+}
+
+fn to_usize(value: u32) -> usize {
+    usize::try_from(value).expect("invariant: a u32 fits a usize")
 }
