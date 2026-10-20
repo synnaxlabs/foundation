@@ -11,6 +11,7 @@ use env::clock::Clock;
 use env::files::{Files, Mode};
 use transport::stream::Receiver;
 use transport::{Class, Code, Transport};
+use types::node;
 use types::time::{Monotonic, Span};
 
 use crate::card;
@@ -148,11 +149,9 @@ pub async fn ask(config: Config) -> Result<region::Founding, Error> {
     let header = header(&pool).map_err(Error::Pool)?;
     let mut join = encoded(&pool, request)?;
     let mut missed = Vec::new();
+    let mut refused = false;
     for round in 0..ROUNDS {
         if round > 0 {
-            let refused = missed
-                .iter()
-                .any(|(_, miss)| matches!(miss, Miss::Refused(_)));
             match later.take_if(|_| refused) {
                 Some(fresh) => {
                     file::write(&files, &dir, &blocks, &fresh).await?;
@@ -161,17 +160,52 @@ pub async fn ask(config: Config) -> Result<region::Founding, Error> {
                 None => clock.sleep(PAUSE).await,
             }
         }
-        missed.clear();
-        for voter in ticket.voters() {
-            let asked = ask_voter(&clock, &transport, voter, [&header, &join]).await;
-            let miss = match asked {
-                Ok(founding) => return Ok(founding),
-                Err(miss) => miss,
-            };
-            missed.push((voter.key, miss));
+        let messages = [&header, &join];
+        match ask_round(&clock, &transport, &ticket, messages, &mut missed).await {
+            Round::Founded(founding) => return Ok(founding),
+            Round::Missed { refused: now } => refused = now,
         }
     }
     Err(Error::Unjoined { missed })
+}
+
+// How a round of asks ends.
+enum Round {
+    Founded(region::Founding),
+    // `refused`: a voter refused the request, and no voter answered `Joined`.
+    Missed { refused: bool },
+}
+
+// Asks each voter of `ticket` once with `messages`, and gives the first founding that
+// comes. Else `missed` holds the miss of each voter.
+async fn ask_round(
+    clock: &Clock,
+    transport: &Transport,
+    ticket: &Ticket,
+    messages: [&Block; 2],
+    missed: &mut Vec<(node::Key, Miss)>,
+) -> Round {
+    missed.clear();
+    let mut joined = false;
+    for voter in ticket.voters() {
+        let miss = match ask_voter(clock, transport, voter, messages).await {
+            Ok((receiver, bytes)) => match founding(clock, receiver, bytes).await {
+                Ok(founding) => return Round::Founded(founding),
+                Err(miss) => {
+                    joined = true;
+                    miss
+                }
+            },
+            Err(miss) => miss,
+        };
+        missed.push((voter.key, miss));
+    }
+    let refused = missed
+        .iter()
+        .any(|(_, miss)| matches!(miss, Miss::Refused(_)));
+    Round::Missed {
+        refused: refused && !joined,
+    }
 }
 
 // The join message of `request`, in a block of `pool`.
@@ -182,13 +216,14 @@ fn encoded(pool: &Pool, request: Request) -> Result<Block, Error> {
     pool.copy(&join.encode()).map_err(Error::Pool)
 }
 
-// Sends the header and the join on a new stream to `voter`, and reads the answer.
+// Sends the header and the join on a new stream to `voter`, and reads the answer. Gives
+// the reply half and the bytes of the founding when the answer is `Joined`.
 async fn ask_voter(
     clock: &Clock,
     transport: &Transport,
     voter: &Voter,
     messages: [&Block; 2],
-) -> Result<region::Founding, Miss> {
+) -> Result<(Receiver, usize), Miss> {
     let end = after(clock, DEADLINE);
     let first = async {
         let addresses = voter.addresses.as_slice();
@@ -207,7 +242,7 @@ async fn ask_voter(
         return Err(Miss::Malformed);
     };
     match Message::decode(&first) {
-        Some(Message::Joined { bytes }) => founding(clock, receiver, bytes).await,
+        Some(Message::Joined { bytes }) => Ok((receiver, bytes)),
         Some(Message::Unjoined { refusal }) => {
             // The answer came, so only a message after it hides the refusal.
             if let Some(Ok(Some(_))) = before(clock, end, receiver.recv()).await {

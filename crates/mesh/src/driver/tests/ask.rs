@@ -832,6 +832,92 @@ fn an_ask_whose_first_voter_refuses_joins_by_the_stored_request_at_the_next() {
     }
 }
 
+/// Starts node `id` on a new node of `sim`, which answers each join stream with
+/// `message` and then ends its reply half. Gives its voter.
+fn answerer(sim: &mut Sim, id: u8, message: Vec<u8>) -> Voter {
+    let node = sim.node(sim::node::Config::default());
+    let at = SocketAddr::new(node.addresses()[0], PORT);
+    let own = node.clone();
+    let main = move |tasks: Tasks| async move {
+        let pool = create_pool();
+        let config = transport_config(&own, &tasks, id, Rc::clone(&pool));
+        let transport = bind(&own, PORT, config);
+        let message = Rc::new(message);
+        while let Ok(session) = transport.accept().await {
+            let (pool, message, streams) =
+                (Rc::clone(&pool), Rc::clone(&message), tasks.clone());
+            tasks.spawn(async move {
+                while let Ok(mut incoming) = session.accept().await {
+                    let (pool, message) = (Rc::clone(&pool), Rc::clone(&message));
+                    streams.spawn(async move {
+                        while let Ok(Some(_)) = incoming.receiver.recv().await {}
+                        let mut sender = incoming.sender.unwrap();
+                        let block = pool.copy(&message).unwrap();
+                        if sender.send(block).await.is_ok() {
+                            drop(sender.finish());
+                        }
+                    });
+                }
+            });
+        }
+    };
+    let config = env::shards::Config {
+        name: "answerer".into(),
+        core: None,
+    };
+    drop(node.shards().start(config, main).unwrap());
+    voter_at(id, at)
+}
+
+// The join of the stored request applied at each voter. The second ask gives another
+// card, by a ticket whose first voter refuses each request and whose second voter
+// admits the stored one (`Joined`), but its founding does not come, as when the
+// `send_founding` of a voter fails after its `Joined`. A voter admitted the stored
+// request in each round, so the ask must not write the new one over it, and a third
+// ask with the voters of the cluster joins by it.
+#[test]
+fn an_ask_whose_voter_admits_the_stored_request_and_sends_no_founding_keeps_it() {
+    for seed in 0..2 {
+        let mut cluster = recorded_cluster(seed, &IDS, &[]);
+        let unknown = region::Refused::Unknown {
+            public_key: public(TICKET),
+        };
+        let first = refuser(&mut cluster.sim, 6, Refusal::Refused(unknown));
+        let second = answerer(&mut cluster.sim, 7, joined(100));
+        let ticket = Ticket::new(
+            private(TICKET),
+            "plant".parse().unwrap(),
+            vec![first, second],
+        );
+        let card = common::member(JOINER).card;
+        let changed = member_signed(JOINER, JOINER, 2).card;
+        let asks = vec![
+            (ticket_to(TICKET, &IDS), card.clone()),
+            (ticket, changed.clone()),
+            (ticket_to(TICKET, &IDS), changed),
+        ];
+        let (node, asked) = asks_on(&mut cluster.sim, asks);
+        cluster.run(seconds(60));
+        let asked: Vec<_> = asked.lock().unwrap().drain(..).map(|(a, _)| a).collect();
+        let ticket = ticket_to(TICKET, &IDS);
+        let request = region::Request {
+            ticket: ticket.public_key(),
+            admission: ticket.admission(&card),
+            card: card.into(),
+            status: common::names([]),
+        };
+        let left = on(
+            &mut cluster,
+            &node,
+            |node| async move { stored(&node).await },
+        );
+        assert_eq!(left, Ok(Some(request)), "run {seed}: {asked:?}");
+        let founding = Ok(founding_of(&IDS, &IDS));
+        assert_eq!(asked[0], founding, "run {seed}");
+        assert_eq!(asked[2], founding, "run {seed}");
+    }
+}
+
 // No voter of the ticket runs. The file held the request of another public key, and
 // the ask writes its own over it before it asks.
 #[test]
