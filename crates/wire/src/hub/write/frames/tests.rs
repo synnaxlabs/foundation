@@ -148,9 +148,12 @@ fn builds_a_frame_from_a_whole_body_message() {
 fn finishes_between_frames() {
     let pool = create_pool();
     let mut frames = Frames::new(create_set());
+    assert!(frames.between());
     assert_eq!(frames.finish(), Ok(()));
     lead(&mut frames, &pool);
+    assert!(!frames.between());
     frames.decode(&body()).expect("the body");
+    assert!(frames.between());
     assert_eq!(frames.finish(), Ok(()));
 }
 
@@ -921,17 +924,22 @@ proptest! {
         let series = u32::try_from(case.present.len()).expect("at most 4");
         // Twice, so that the frames take a second frame after the first.
         for _ in 0..2 {
+            prop_assert!(frames.between());
             let step = frames.decode(&encode_head(LIVE, Form::Raw, series));
             prop_assert!(matches!(step, Ok(Step::Head(_))));
+            prop_assert!(!frames.between());
             let mut cuts = case.cuts.iter().copied().cycle();
             for run in crate::hub::tests::cut(&ends, &mut cuts) {
                 let step = frames.decode(&encode_ends(run));
                 prop_assert!(matches!(step, Ok(Step::More)));
+                prop_assert!(!frames.between());
             }
             prop_assert!(matches!(draft(&mut frames, &pool), Step::More));
+            prop_assert!(!frames.between());
             let mut step = frames
                 .decode(&encode_counts(&[case.count]))
                 .expect("the count");
+            prop_assert_eq!(frames.between(), body.is_empty());
             let fit = "the bytes of a frame fit a usize";
             let run = ends::LEN
                 .checked_mul(ends.len())
@@ -940,6 +948,7 @@ proptest! {
             let mut received = Head::LEN.checked_add(run).expect(fit);
             let len = NonZeroUsize::new(received.checked_add(body.len()).expect(fit));
             for part in crate::hub::tests::cut(&body, &mut cuts) {
+                prop_assert!(!frames.between());
                 prop_assert_eq!(frames.finish(), Err(Error::Cut { received, len }));
                 received = received.checked_add(part.len()).expect(fit);
                 step = if case.in_place {
@@ -952,6 +961,7 @@ proptest! {
                     frames.decode(part).expect("the part")
                 };
             }
+            prop_assert!(frames.between());
             prop_assert_eq!(frames.finish(), Ok(()));
             let (frame, _) = frame(step);
             prop_assert_eq!(frame.range(0), Some(Range { seq: 0, count: case.count }));

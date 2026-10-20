@@ -11,6 +11,7 @@ use types::frame::key_set::{Group, KeySet};
 use types::frame::{self, Draft, Form, Label};
 use types::hash;
 use types::name::Name;
+use types::node;
 use types::sample::Type;
 use types::time::{Span, Stamp};
 
@@ -182,26 +183,30 @@ impl Homed {
         state: &Rc<RefCell<State>>,
         config: Config,
     ) -> Result<Self, Error> {
-        let homed = Self::within(state, config, usize::MAX).await?;
+        let via = state.borrow().node;
+        let homed = Self::within(state, config, usize::MAX, via).await?;
         Ok(homed.expect("invariant: no writer has more than usize::MAX indexes"))
     }
 
-    /// As [`Homed::new`] for a writer on one index. Gives `None` when its channels
-    /// resolve to more than one index: before the wait for the home, or when a change
-    /// of a channel during that wait gives them a second.
+    /// As [`Homed::new`] for a writer on one index, which `via` opened: the node of its
+    /// program. Gives `None` when its channels resolve to more than one index: before
+    /// the wait for the home, or when a change of a channel during that wait gives them
+    /// a second.
     pub(crate) async fn one(
         state: &Rc<RefCell<State>>,
         config: Config,
+        via: node::Key,
     ) -> Result<Option<Self>, Error> {
-        Self::within(state, config, 1).await
+        Self::within(state, config, 1, via).await
     }
 
-    /// As [`Homed::new`], or `None` when the channels resolve to more than `indexes`
-    /// indexes after the wait for mesh time.
+    /// As [`Homed::new`] for a writer that `via` opened, or `None` when the channels
+    /// resolve to more than `indexes` indexes after the wait for mesh time.
     async fn within(
         state: &Rc<RefCell<State>>,
         config: Config,
         indexes: usize,
+        via: node::Key,
     ) -> Result<Option<Self>, Error> {
         let Config {
             subject,
@@ -232,7 +237,7 @@ impl Homed {
         let holder = control::Writer {
             subject,
             authority,
-            via: state.borrow().node,
+            via,
         };
         Ok(Some(Self {
             state: Rc::clone(state),

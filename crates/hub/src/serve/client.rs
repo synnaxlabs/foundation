@@ -19,10 +19,11 @@ use wire::hub::client::{
 };
 
 use super::admission::Admission;
-use super::{BODIES_BYTES_MAX, Error, alloc, halves, stop};
+use super::{BODIES_BYTES_MAX, Error, alloc, boxed, halves, stop};
 use crate::State;
 use crate::link::{Served, Session};
 
+pub(super) mod forward;
 pub(super) mod read;
 pub(super) mod write;
 
@@ -353,9 +354,18 @@ pub(crate) async fn later(
                 .map(|()| Served::Ended)
         }
         Ok(Some((subject, First::Write(open)))) => {
-            write::serve(session, subject, open, &mut receiver, &mut sender)
-                .await
-                .map(|()| Served::Ended)
+            let (state, admission) = (&session.state, &session.client.admission);
+            let write = || {
+                write::serve(
+                    state,
+                    admission,
+                    subject,
+                    open,
+                    &mut receiver,
+                    &mut sender,
+                )
+            };
+            boxed(write).await.map(|()| Served::Ended)
         }
         Err(error) => Err(error),
     };
