@@ -50,10 +50,13 @@
   only with its `ecdsa` feature), an encrypted key, a public key that is not the key of
   the private key (`Mismatch`), a comment that is not UTF-8 (`Comment`), and a text that
   is not a key file. It reads each such file that `ssh-key` 0.6.7 reads, also one with a
-  body of any width or with white space, any text after the end mark, CRLF line ends, or
-  no line end after the end mark. It refuses some files that OpenSSH reads: a comment
-  that is not UTF-8 (`Comment`), padding of a block or more, options of the `none` KDF,
-  and a NUL in the body (`laptop.director`, 2026-10-20T02:19:48Z,
+  body of any width or with white space, any bytes after the end mark, CRLF line ends,
+  or no line end after the end mark (the bytes, `laptop.architect-2`,
+  2026-10-20T02:30:05Z,
+  https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6281938918). It
+  refuses some files that OpenSSH reads: a comment that is not UTF-8 (`Comment`),
+  padding of a block or more, options of the `none` KDF, and a NUL in the body
+  (`laptop.director`, 2026-10-20T02:19:48Z,
   https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6281813278;
   `laptop.architect-2`, 2026-10-20T02:36:54Z, item 2 of
   https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6282027387; the line

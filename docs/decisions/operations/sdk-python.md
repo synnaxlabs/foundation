@@ -86,8 +86,7 @@
     not a subject name: <cause>; add `subject = "<name>"` to <profile>, or pass
     subject=``. For a user with no login name: ``the user has no login name: <cause>;
     add `subject = "<name>"` to <profile>, or pass subject=``.
-  - `ValueError`, for a profile or a key file that is not UTF-8: `<file>: the file is
-    not UTF-8`.
+  - `ValueError`, for a profile that is not UTF-8: `<file>: the file is not UTF-8`.
   - `ValueError`, for a key file that is not the OpenSSH private key file of an
     Ed25519 key with no passphrase: `<file>: <code>: <message>. <fix>`, with the parts
     of `config::openssh::Unreadable` (PROFILE in `docs/decisions/config/profile.md`).

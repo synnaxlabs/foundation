@@ -187,23 +187,39 @@ fn made(subject: &Name, path: &Path, fix: &str) -> PyResult<PrivateKey> {
 }
 
 /// The private key in the OpenSSH file `path`, or `None` when there is no file.
-/// Raises as [`text`] does, and `ValueError` when it is not the key file of an Ed25519
-/// key with no passphrase, with `fix` for a key with a passphrase.
+/// Raises as [`bytes`] does, and `ValueError` when it is not the key file of an
+/// Ed25519 key with no passphrase, with `fix` for a key with a passphrase.
 fn key(path: &Path, fix: &str) -> PyResult<Option<PrivateKey>> {
-    text(path)?
-        .map(|text| openssh::private_key(&text).map_err(|e| unreadable(path, e, fix)))
+    bytes(path)?
+        .map(|file| openssh::private_key(&file).map_err(|e| unreadable(path, e, fix)))
         .transpose()
 }
 
-/// The text of the file `path`, or `None` when there is no file. Raises `ValueError`
-/// when it is not UTF-8, and `OSError` when it cannot be read.
+/// The text of the file `path`, or `None` when there is no file. Raises as [`bytes`]
+/// does, and `ValueError` when it is not UTF-8.
 fn text(path: &Path) -> PyResult<Option<String>> {
-    match fs::read_to_string(path) {
-        Ok(text) => Ok(Some(text)),
+    let Some(bytes) = bytes(path)? else {
+        return Ok(None);
+    };
+    let Ok(text) = String::from_utf8(bytes) else {
+        return Err(PyValueError::new_err(format!(
+            "{}: the file is not UTF-8",
+            path.display()
+        )));
+    };
+    Ok(Some(text))
+}
+
+/// The bytes of the file `path`, or `None` when there is no file. Raises `OSError`
+/// when it cannot be read.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the files of the program's own host"
+)]
+fn bytes(path: &Path) -> PyResult<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) if e.kind() == io::ErrorKind::InvalidData => Err(PyValueError::new_err(
-            format!("{}: the file is not UTF-8", path.display()),
-        )),
         Err(e) => Err(PyOSError::new_err(format!("{}: {e}", path.display()))),
     }
 }

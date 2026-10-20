@@ -1058,15 +1058,37 @@ class ProfileTest(unittest.TestCase):
         with unittest.mock.patch.dict(os.environ, {"FOUNDATION_PROFILE": ""}):
             self.trusted("alice", os.path.join(self.dir, "alice.key"))
 
-    def test_a_file_that_is_not_utf8_is_refused(self) -> None:
+    def test_a_profile_that_is_not_utf8_is_refused(self) -> None:
+        os.makedirs(self.dir)
+        with open(self.profile, "wb") as file:
+            file.write(b"\xff\n")
+        with self.assertRaises(ValueError) as raised:
+            foundation.connect(self.node.address, public_key=self.node.public_key())
+        self.assertEqual(
+            str(raised.exception), f"{self.profile}: the file is not UTF-8"
+        )
+
+    def test_a_key_file_takes_bytes_that_are_not_utf8_only_after_its_end_mark(
+        self,
+    ) -> None:
         os.makedirs(self.dir)
         key = os.path.join(self.dir, "alice.key")
-        for path in [key, self.profile]:
-            with open(path, "wb") as file:
-                file.write(b"\xff\n")
-            with self.assertRaises(ValueError) as raised:
-                foundation.connect(self.node.address, public_key=self.node.public_key())
-            self.assertEqual(str(raised.exception), f"{path}: the file is not UTF-8")
+        keygen("-q", "-t", "ed25519", "-N", "", "-f", key)
+        with open(key, "ab") as file:
+            file.write(b"caf\xe9 notes\n")
+        self.trusted("alice", key)
+        with open(key, "rb") as file:
+            text = file.read()
+        with open(key, "wb") as file:
+            file.write(b"\xe9" + text)
+        with self.assertRaises(ValueError) as raised:
+            foundation.connect(self.node.address)
+        self.assertEqual(
+            str(raised.exception),
+            f"{key}: config.key-format: the file is not an OpenSSH private key. Use "
+            'the private key file that `ssh-keygen -t ed25519 -N ""` writes, not its '
+            "`.pub` file",
+        )
 
     def test_a_home_that_is_a_file_is_refused(self) -> None:
         with open(self.dir, "w") as file:
