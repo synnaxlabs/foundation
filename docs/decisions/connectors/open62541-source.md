@@ -1129,8 +1129,11 @@
   by `\n`, since the check runs before aws-lc counts certificates (`laptop.architect-2`,
   items 1 and 2 of
   https://github.com/synnaxlabs/foundation/issues/3428#issuecomment-6279597410; the
-  name `Credential` in place of `Part`, which `client.rs` holds, sent to
-  `laptop.architect-2` in message 8qdvt0fu). A site that the client does not reach
+  name `Credential` in place of `Part`, which `client.rs` holds: `laptop.architect-2`,
+  2026-10-19 23:38 UTC,
+  https://github.com/synnaxlabs/foundation/issues/3428#issuecomment-6279750751, which
+  also approves one entry BIO for each PEM read of `openSSLLoadPublicKey` in place of
+  `BIO_reset`). A site that the client does not reach
   keeps its own failure for a refused line: a CRL fails as a damaged one,
   `UA_CertificateUtils_comparePublicKeys` skips the PEM read, and
   `UA_CertificateUtils_decryptPrivateKey` gives `BadSecurityChecksFailed`. A
