@@ -22,10 +22,15 @@
   2026-10-13T02:18:10Z, item 5:
   https://github.com/synnaxlabs/foundation/pull/2518#issuecomment-6136764966).
   `after` panics for a stamp under the last stamp, since a refusal of the frame of the
-  last stamp never gives one. `connector::poll::Writer` (POLL WRITER) is the one
-  writer that writes a refused frame again inside for each kind that polls. The status
-  writer still writes a refused frame again itself; one writer for it is deferred to
-  #2527. The status writer of the supervisor stamps its frames with `Stamps::next`
+  last stamp never gives one. `stamp::Writer`, crate-private, owns the hub's writer
+  and the `Stamps` of its frames. Its `write` takes the series of a frame and a fill of
+  each data sample. It puts the stamp in each index, gives each group of the frame and
+  whether the home applied it, and writes again only the series of the groups that the
+  home refused as `Backwards`. `connector::poll::Writer` (POLL WRITER) and the status
+  writer each write through it, and neither matches the outcomes itself (the plan,
+  2026-10-20T08:54:50Z:
+  https://github.com/synnaxlabs/foundation/issues/2527#issuecomment-6287263795). The
+  status writer of the supervisor stamps its frames with `Stamps::next`
   of its one read of mesh time, so one module holds the stamp rule
   (`laptop.architect-2`, 2026-10-13T01:38:13Z, item 2:
   https://github.com/synnaxlabs/foundation/pull/2518#issuecomment-6136191164, approved

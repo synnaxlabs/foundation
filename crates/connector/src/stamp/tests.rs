@@ -1,12 +1,19 @@
+use std::convert::Infallible;
 use std::future;
 
-use hub::writer::{Config, Writer};
+use hub::home::{Outcome, Refusal, order};
+use hub::writer::{Config, Failure, Writer};
 use proptest::prelude::*;
+use spec::definition::Definition;
 use types::authority::Authority;
+use types::channel;
+use types::frame::{self, Draft, Form, Label, Path};
+use types::name::Name;
 use types::time::{Interval, Span, Stamp};
 
-use super::Stamps;
+use super::{Stamps, twice};
 use crate::common::{create_status, env, run_with};
+use crate::{stamp, testing};
 
 /// Runs `main` on a node of `config`, with a writer on the status index of
 /// `plant.stamp` and the clock of the node.
@@ -279,4 +286,308 @@ proptest! {
             last = Some(stamp);
         }
     }
+}
+
+/// Runs `main` with the hub of a node that defines the status channels of `plant.a`
+/// and of `plant.b`.
+fn with_hub<T: Send + 'static>(
+    main: impl AsyncFnOnce(hub::Hub) -> T + Send + 'static,
+) -> T {
+    run_with(0, sim::node::Config::default(), |node, tasks| async move {
+        let (hub, _) = hub::testing::open(env(&node, tasks)).await;
+        hub.set_definitions(status(&["a", "b"]).iter().map(|(name, def)| (name, def)));
+        main(hub).await
+    })
+}
+
+/// The status channels of each of `plants`, such as `a` for `plant.a`, with the keys
+/// 100 on for `a` and 200 on for `b`.
+fn status(plants: &[&str]) -> Vec<(Name, Definition)> {
+    (plants.iter())
+        .flat_map(|&plant| {
+            let first = if plant == "a" { 100 } else { 200 };
+            let name = format!("plant.{plant}").parse().expect("a valid name");
+            testing::create_status(&name, &[], channel::Key::from_u128(first))
+        })
+        .collect()
+}
+
+/// Opens a writer at `authority` of `channels`, each a plant and the last part of a
+/// status channel, such as `a.state` for `plant.a.status.state`.
+async fn open(hub: &hub::Hub, authority: u8, channels: &[&str]) -> Writer {
+    let channels = (channels.iter())
+        .map(|channel| {
+            let (plant, last) = channel.split_once('.').expect("a plant and a channel");
+            let name = format!("plant.{plant}.status.{last}");
+            name.parse().expect("a valid name")
+        })
+        .collect();
+    let config = Config {
+        subject: "plant".parse().expect("a valid name"),
+        authority: Authority(authority),
+        lease: None,
+        channels,
+    };
+    hub.writer(config).await.expect("the writer opens")
+}
+
+/// Writes a frame of `channel` 1 ms ahead of the mesh time with a writer that it then
+/// closes, and gives the stamp of that frame.
+async fn write_ahead(hub: &hub::Hub, channel: &str) -> Stamp {
+    let mut rival = open(hub, 1, &[channel]).await;
+    let ahead = rival.now() + Span::MILLISECOND;
+    assert_eq!(put(&mut rival, ahead), None, "the frame ahead applies");
+    ahead
+}
+
+/// Writes one frame at `stamp` on `writer`, with 7 in its data channel, and gives the
+/// stamp that the home gives when it refuses the frame as `Backwards`.
+fn put(writer: &mut Writer, stamp: Stamp) -> Option<Stamp> {
+    let set = writer.set();
+    let series: Vec<_> = (set.entries().iter().enumerate())
+        .map(|(i, entry)| (i, entry.data_type.width().expect("a fixed width")))
+        .collect();
+    let group = set.entries()[0].group;
+    let index: Vec<_> = (0..series.len()).map(|i| set.index(i) == i).collect();
+    let mut draft = writer.draft(Form::Raw, &series).expect("a block");
+    for (i, bytes) in draft.iter_mut() {
+        let value = if index[i] {
+            stamp.nanos().cast_unsigned()
+        } else {
+            7
+        };
+        let len = bytes.len();
+        bytes.copy_from_slice(&value.to_le_bytes()[..len]);
+    }
+    draft.set_count(group, 1);
+    match writer.write(Label::Path(Path::Live), draft) {
+        Ok([Outcome::Applied { .. }]) => None,
+        Ok(
+            [
+                Outcome::Refused {
+                    refusal: Refusal::Order(order::Error::Backwards { before, .. }),
+                    ..
+                },
+            ],
+        ) => Some(*before),
+        other => panic!("the frame is applied or backwards: {other:?}"),
+    }
+}
+
+/// Each entry of a frame of `writer`, with the width of its type.
+fn series(writer: &stamp::Writer) -> Vec<(usize, usize)> {
+    (writer.hub().set().entries().iter().enumerate())
+        .map(|(entry, e)| (entry, e.data_type.width().expect("a fixed width")))
+        .collect()
+}
+
+/// The stamp and the entry of each call of the fill of [`stamp::Writer::write`].
+type Fills = Vec<(Stamp, usize)>;
+
+/// What [`stamp::Writer::write`] gives, owned.
+type Wrote = Result<Vec<(u32, bool)>, stamp::Error>;
+
+/// Writes a frame of each entry at the next stamp with `writer`, with 7 in each data
+/// entry, and gives the result, the stamp, and each fill.
+fn write(writer: &mut stamp::Writer) -> (Wrote, Stamp, Fills) {
+    write_series(writer, &series(writer))
+}
+
+/// As [`write`], with the entries and lengths of `series`.
+fn write_series(
+    writer: &mut stamp::Writer,
+    series: &[(usize, usize)],
+) -> (Wrote, Stamp, Fills) {
+    let stamp = writer.next(writer.hub().now());
+    let mut fills = Fills::new();
+    let wrote = writer.write(stamp, series, |stamp, entry, bytes| {
+        fills.push((stamp, entry));
+        let len = bytes.len();
+        bytes.copy_from_slice(&7_u64.to_le_bytes()[..len]);
+    });
+    (wrote.map(<[_]>::to_vec), stamp, fills)
+}
+
+/// The group of each entry of the frames of `writer`.
+fn groups(writer: &stamp::Writer) -> Vec<u32> {
+    writer
+        .hub()
+        .set()
+        .entries()
+        .iter()
+        .map(|entry| entry.group)
+        .collect()
+}
+
+#[test]
+fn write_writes_a_frame_refused_as_backwards_again_1_ns_after_the_refusal() {
+    let (ahead, (wrote, stamp, fills), groups, next) = with_hub(async |hub| {
+        let ahead = write_ahead(&hub, "a.restarts").await;
+        let mut writer = stamp::Writer::new(open(&hub, 1, &["a.state"]).await);
+        let wrote = write(&mut writer);
+        (
+            ahead,
+            wrote,
+            groups(&writer),
+            writer.next(Stamp::from_nanos(0)),
+        )
+    });
+    assert!(stamp < ahead, "{stamp} < {ahead}");
+    assert_eq!(wrote, Ok(vec![(groups[0], true)]));
+    let after = |n| ahead + Span::from_nanos(n);
+    assert_eq!(fills, [(stamp, 1), (after(1), 1)]);
+    assert_eq!(next, after(2));
+}
+
+#[test]
+fn write_writes_a_frame_once_when_the_home_applies_it() {
+    let ((wrote, stamp, fills), groups) = with_hub(async |hub| {
+        let mut writer = stamp::Writer::new(open(&hub, 1, &["a.state"]).await);
+        (write(&mut writer), groups(&writer))
+    });
+    assert_eq!(wrote, Ok(vec![(groups[0], true)]));
+    assert_eq!(fills, [(stamp, 1)]);
+}
+
+#[test]
+fn write_writes_again_only_the_series_of_the_group_refused_as_backwards() {
+    let (ahead, (wrote, stamp, fills), groups, keys) = with_hub(async |hub| {
+        let ahead = write_ahead(&hub, "a.restarts").await;
+        let channels = ["a.state", "b.state"];
+        let mut writer = stamp::Writer::new(open(&hub, 1, &channels).await);
+        let keys: Vec<_> = (writer.hub().set().entries().iter())
+            .map(|entry| entry.key.as_u128())
+            .collect();
+        (ahead, write(&mut writer), groups(&writer), keys)
+    });
+    let at = |key| {
+        keys.iter()
+            .position(|&k| k == key)
+            .expect("the key is in the set")
+    };
+    let (a, b) = (at(101), at(201));
+    let mut applied = vec![(groups[a], true), (groups[b], true)];
+    applied.sort_unstable();
+    assert_eq!(wrote, Ok(applied));
+    let mut first = vec![(stamp, a), (stamp, b)];
+    first.sort_unstable_by_key(|&(_, entry)| entry);
+    first.push((ahead + Span::from_nanos(1), a));
+    assert_eq!(fills, first);
+}
+
+#[test]
+fn write_loses_a_frame_when_the_pool_has_no_block_now() {
+    let ((wrote, _, fills), groups) = with_hub(async |hub| {
+        let mut writer = stamp::Writer::new(open(&hub, 1, &["a.state"]).await);
+        let held = hold(writer.hub());
+        let wrote = write(&mut writer);
+        drop(held);
+        (wrote, groups(&writer))
+    });
+    assert_eq!(wrote, Ok(vec![(groups[0], false)]));
+    assert_eq!(fills, []);
+}
+
+/// Drafts frames of `writer` until the pool has no block, and gives them.
+fn hold(writer: &Writer) -> Vec<Draft> {
+    let mut held = Vec::new();
+    for len in [1 << 16, 1 << 12, 1 << 8, 8] {
+        let series: Vec<_> = (0..writer.set().entries().len())
+            .map(|entry| (entry, len))
+            .collect();
+        while let Ok(draft) = writer.draft(Form::Raw, &series) {
+            held.push(draft);
+        }
+    }
+    held
+}
+
+#[test]
+fn write_gives_the_error_of_a_frame_larger_than_the_largest_block() {
+    let ((wrote, _, fills), large) = with_hub(async |hub| {
+        let mut writer = stamp::Writer::new(open(&hub, 1, &["a.state"]).await);
+        let series = [(0, 8), (1, 1 << 40)];
+        let large = writer.hub().draft(Form::Raw, &series).err();
+        (write_series(&mut writer, &series), large)
+    });
+    let large = large.expect("no block holds the frame");
+    assert!(
+        matches!(large, frame::Error::Pool(block::Error::TooLarge { .. })),
+        "{large:?}"
+    );
+    assert_eq!(wrote, Err(stamp::Error::Draft(large)));
+    assert_eq!(fills, []);
+}
+
+#[test]
+fn write_loses_a_frame_of_a_channel_that_a_higher_authority_controls() {
+    let ((wrote, stamp, fills), groups) = with_hub(async |hub| {
+        let rival = open(&hub, 2, &["a.state"]).await;
+        let mut writer = stamp::Writer::new(open(&hub, 1, &["a.state"]).await);
+        let wrote = write(&mut writer);
+        drop(rival);
+        (wrote, groups(&writer))
+    });
+    assert_eq!(wrote, Ok(vec![(groups[0], false)]));
+    assert_eq!(fills, [(stamp, 1)]);
+}
+
+#[test]
+fn write_gives_the_failure_of_the_hub_when_a_channel_is_removed() {
+    let ((wrote, stamp, fills), key) = with_hub(async |hub| {
+        let mut writer = stamp::Writer::new(open(&hub, 1, &["a.state"]).await);
+        hub.set_definitions(status(&["b"]).iter().map(|(name, def)| (name, def)));
+        let key = writer.hub().set().entries()[1].key;
+        (write(&mut writer), key)
+    });
+    assert_eq!(wrote, Err(stamp::Error::Write(Failure::Removed(key))));
+    assert_eq!(fills, [(stamp, 1)]);
+}
+
+#[test]
+fn twice_gives_the_error_of_the_first_send_with_no_second() {
+    let mut calls = Vec::new();
+    let sent = twice(
+        &mut Stamps::default(),
+        Stamp::from_nanos(5),
+        |stamp, again| {
+            calls.push((stamp, again));
+            Err::<Option<Stamp>, _>("down")
+        },
+    );
+    assert_eq!(sent, Err("down"));
+    assert_eq!(calls, [(Stamp::from_nanos(5), false)]);
+}
+
+#[test]
+fn twice_gives_the_error_of_the_send_again() {
+    let mut calls = Vec::new();
+    let sent = twice(
+        &mut Stamps::default(),
+        Stamp::from_nanos(5),
+        |stamp, again| {
+            calls.push((stamp, again));
+            if again {
+                Err("down")
+            } else {
+                Ok(Some(Stamp::from_nanos(9)))
+            }
+        },
+    );
+    assert_eq!(sent, Err("down"));
+    let (five, ten) = (Stamp::from_nanos(5), Stamp::from_nanos(10));
+    assert_eq!(calls, [(five, false), (ten, true)]);
+}
+
+#[test]
+#[should_panic(expected = "invariant: a frame stamped after \
+                           1970-01-01T00:00:00.000000009Z, the last stamp of its \
+                           index, is not backwards, but the home gives \
+                           1970-01-01T00:00:00.000000012Z as last")]
+fn twice_panics_when_the_frame_written_again_is_backwards() {
+    let sent = twice(&mut Stamps::default(), Stamp::from_nanos(5), |_, again| {
+        let before = if again { 12 } else { 9 };
+        Ok::<_, Infallible>(Some(Stamp::from_nanos(before)))
+    });
+    assert_eq!(sent, Ok(()), "the second refusal panics");
 }

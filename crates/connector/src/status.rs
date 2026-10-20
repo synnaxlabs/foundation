@@ -20,19 +20,19 @@ use env::clock::Clock;
 use spec::channel::{Channel, Kind};
 use spec::definition::Definition;
 use types::authority::Authority;
-use types::frame::{self, Draft, Form, Label, Path};
+use types::frame;
 use types::name::Name;
 use types::sample::{Scalar, Type};
 use types::time::{Monotonic, Span, Stamp};
 
-use hub::home::{self, Outcome, Refusal, order};
+use hub::home;
 use hub::writer::Failure;
 #[cfg(loom)]
 use loom::sync::Mutex;
 #[cfg(loom)]
 use loom::sync::atomic::{AtomicBool, Ordering};
 
-use crate::stamp::Stamps;
+use crate::stamp;
 use crate::{cancel, deadline, kind};
 
 mod reading;
@@ -510,20 +510,23 @@ impl Writer {
             form,
         };
         let (error, note) = (text(error), text(note));
-        let group = set.entries()[entries[0]].group;
+        let mut positions = vec![0; set.entries().len()].into_boxed_slice();
+        for (at, &entry) in entries.iter().enumerate() {
+            positions[entry] = at;
+        }
         let status = Status::new(counts, span.clone());
         let session = Session {
-            hub: session,
-            entries,
-            series,
-            group,
-            stamps: Stamps::default(),
+            stamped: stamp::Writer::new(session),
+            frame: Frame {
+                positions,
+                series,
+                phase: Phase::Running,
+                class: None,
+                restarts: 0,
+                error,
+                note,
+            },
             wrote: Monotonic::default(),
-            phase: Phase::Running,
-            class: None,
-            restarts: 0,
-            error,
-            note,
             started: false,
             unapplied: None,
             closed: false,
@@ -546,12 +549,13 @@ impl Writer {
             return false;
         }
         self.change(|session| {
+            let frame = &mut session.frame;
             if session.started {
-                session.restarts = session.restarts.strict_add(1);
+                frame.restarts = frame.restarts.strict_add(1);
             }
             session.started = true;
-            session.phase = Phase::Running;
-            let restarts = session.restarts;
+            frame.phase = Phase::Running;
+            let restarts = frame.restarts;
             tracing::info!(parent: &self.span, restarts, "running");
         });
         self.values.run.replace(Some(Run::default()));
@@ -580,10 +584,11 @@ impl Writer {
             }
         }
         self.set(move |session| {
-            session.class = class;
-            session.error.set(&mut session.series, error);
-            session.note.set(&mut session.series, String::new());
-            session.phase = Phase::Ending;
+            let frame = &mut session.frame;
+            frame.class = class;
+            frame.error.set(&mut frame.series, error);
+            frame.note.set(&mut frame.series, String::new());
+            frame.phase = Phase::Ending;
         })
     }
 
@@ -592,14 +597,15 @@ impl Writer {
     pub(crate) async fn wait(&self, span: Span) -> Monotonic {
         self.applied().await;
         let next = self.clock.now() + span;
-        self.change(|session| session.phase = Phase::Waiting(next));
+        self.change(|session| session.frame.phase = Phase::Waiting(next));
         tracing::info!(parent: &self.span, backoff = %span, "restarting");
         next
     }
 
     /// Writes `state` 2.
     pub(crate) async fn stop(&self) {
-        self.set(|session| session.phase = Phase::Stopped).await;
+        self.set(|session| session.frame.phase = Phase::Stopped)
+            .await;
         tracing::info!(parent: &self.span, "stopped");
     }
 
@@ -706,23 +712,12 @@ impl Writer {
     }
 }
 
-/// The hub's writer session of the status channels, and the supervisor's part of the
-/// status.
+/// The hub's writer session of the status channels, and the frame that it writes.
 struct Session {
-    hub: hub::writer::Writer,
-    /// The entries of the index and the supervisor's channels, then the counts.
-    entries: Box<[usize]>,
-    /// Each series of a frame, by entry, with its length.
-    series: Box<[(usize, usize)]>,
-    group: u32,
-    stamps: Stamps,
+    stamped: stamp::Writer,
+    frame: Frame,
     /// When the last write was, by the node's clock.
     wrote: Monotonic,
-    phase: Phase,
-    class: Option<Class>,
-    restarts: u64,
-    error: Text,
-    note: Text,
     /// Set at the first start, after which each start is a restart.
     started: bool,
     /// The time of the first change of state that the home did not apply, while no
@@ -734,11 +729,25 @@ struct Session {
     closed: bool,
 }
 
+/// The series of the status frame, and the supervisor's values that it holds.
+struct Frame {
+    /// The position of each entry of the key set in the status channels: the index,
+    /// then the supervisor's channels, then the counts.
+    positions: Box<[usize]>,
+    /// Each series of a frame, by entry, with its length.
+    series: Box<[(usize, usize)]>,
+    phase: Phase,
+    class: Option<Class>,
+    restarts: u64,
+    error: Text,
+    note: Text,
+}
+
 /// The text of `error` or of `note`, and where and how a frame holds it.
 struct Text {
     /// At most [`TEXT_MAX`] bytes.
     value: String,
-    /// The index in `Session::series` of its series, one of the two whose length
+    /// The index in `Frame::series` of its series, one of the two whose length
     /// changes.
     at: usize,
     form: Variable,
@@ -771,166 +780,99 @@ impl Session {
             self.unapplied = None;
             return;
         }
+        let frame = &mut self.frame;
         if let Some(run) = &*values.run.borrow() {
             match &run.error {
                 Shown::Nothing => {}
                 Shown::Cleared => {
-                    if self.class.is_some() || !self.error.value.is_empty() {
+                    if frame.class.is_some() || !frame.error.value.is_empty() {
                         tracing::info!(parent: span, "cleared");
                     }
-                    self.class = None;
-                    if !self.error.value.is_empty() {
-                        self.error.set(&mut self.series, String::new());
+                    frame.class = None;
+                    if !frame.error.value.is_empty() {
+                        frame.error.set(&mut frame.series, String::new());
                     }
                 }
                 Shown::Error(text) => {
-                    if self.class != Some(Class::Retry) || self.error.value != *text {
+                    if frame.class != Some(Class::Retry) || frame.error.value != *text {
                         tracing::warn!(parent: span, error = text.as_str(), "error");
                     }
-                    self.class = Some(Class::Retry);
-                    if self.error.value != *text {
-                        self.error.set(&mut self.series, text.clone());
+                    frame.class = Some(Class::Retry);
+                    if frame.error.value != *text {
+                        frame.error.set(&mut frame.series, text.clone());
                     }
                 }
             }
-            if self.note.value != run.note {
+            if frame.note.value != run.note {
                 tracing::info!(parent: span, note = run.note.as_str(), "note");
-                self.note.set(&mut self.series, run.note.clone());
+                frame.note.set(&mut frame.series, run.note.clone());
             }
         }
         self.wrote = now;
-        let mesh = self.hub.now();
-        let stamp = self.stamps.next(mesh);
+        let mesh = self.stamped.hub().now();
+        let stamp = self.stamped.next(mesh);
         // The hub's clock can step while the node's clock does not.
-        let next = match self.phase {
+        let next = match frame.phase {
             Phase::Waiting(next) => Some(mesh + (next - now)),
             Phase::Running | Phase::Stopped | Phase::Ending => None,
         };
-        if let Err(before) = self.send(values, stamp, next) {
-            let stamp = self.stamps.after(before);
-            if let Err(again) = self.send(values, stamp, next) {
-                panic!(
-                    "invariant: a status frame stamped after {before}, the last stamp \
-                     of its index, is not backwards, but the home gives {again} as last"
-                )
+        let frame = &self.frame;
+        let fill = |stamp, entry, bytes: &mut [u8]| {
+            frame.fill(values, stamp, next, entry, bytes);
+        };
+        match self.stamped.write(stamp, &frame.series, fill) {
+            Ok(groups) => {
+                if groups.iter().any(|&(_, applied)| !applied) {
+                    values.stage();
+                }
+            }
+            Err(error) => {
+                check_failure(&error);
+                self.closed = true;
+                values.waker.take();
             }
         }
         if !values.staged.get() {
             self.unapplied = None;
         }
     }
+}
 
-    /// Writes one frame of the last value of each status channel at `stamp`, with
-    /// `next` the time of the next try by the hub's clock, while one waits.
-    ///
-    /// # Errors
-    ///
-    /// The stamp that the home gives when it refuses the frame as `Backwards`.
-    ///
-    /// # Panics
-    ///
-    /// When the draft or the home refuses the frame for a cause that only a defect
-    /// gives, which includes a frame larger than the largest block of the pool.
-    fn send(
-        &mut self,
-        values: &Values,
-        stamp: Stamp,
-        next: Option<Stamp>,
-    ) -> Result<(), Stamp> {
-        let mut draft = match self.hub.draft(Form::Raw, &self.series) {
-            Ok(draft) => draft,
-            Err(frame::Error::Pool(error)) => {
-                check_pool(&error);
-                values.stage();
-                return Ok(());
-            }
-            Err(error) => panic!("invariant: the series follow the key set: {error}"),
-        };
-        self.fill(&mut draft, values, stamp, next);
-        match self.hub.write(Label::Path(Path::Live), draft) {
-            Ok([Outcome::Applied { .. }]) => {}
-            Err(Failure::Removed(_) | Failure::Home(home::Error::Disk(_))) => {
-                self.closed = true;
-                values.waker.take();
-            }
-            Ok(
-                [
-                    Outcome::Refused {
-                        refusal: Refusal::Order(order::Error::Backwards { before, .. }),
-                        ..
-                    },
-                ],
-            ) => return Err(*before),
-            Ok(
-                [
-                    Outcome::Lost { .. }
-                    | Outcome::Refused {
-                        refusal:
-                            Refusal::Waiting | Refusal::Reserved | Refusal::Order(_),
-                        ..
-                    },
-                ],
-            ) => values.stage(),
-            Ok(
-                [
-                    Outcome::Refused {
-                        refusal: refusal @ (Refusal::Expired | Refusal::Codec { .. }),
-                        ..
-                    },
-                ],
-            ) => panic!("the home refuses a status frame: {refusal}"),
-            Ok(outcomes) => {
-                panic!("invariant: a frame of one group has one outcome: {outcomes:?}")
-            }
-            Err(Failure::Home(
-                error @ (home::Error::Resend | home::Error::Full | home::Error::Large),
-            )) => panic!("the home refuses a status frame: {error}"),
-        }
-        Ok(())
-    }
-
-    /// Fills `draft` with the last value of each status channel at `stamp`, with
-    /// `next` the time of the next try by the hub's clock, while one waits.
+impl Frame {
+    /// Fills `bytes`, the sample of `entry` in a frame at `stamp`, with the last value
+    /// of its status channel, with `next` the time of the next try by the hub's clock,
+    /// while one waits.
     fn fill(
         &self,
-        draft: &mut Draft,
         values: &Values,
         stamp: Stamp,
         next: Option<Stamp>,
+        entry: usize,
+        bytes: &mut [u8],
     ) {
-        let backoff = next.map_or(Span::ZERO, |next| (next - stamp).max(Span::ZERO));
-        let supervisor = [
-            u64::from(self.phase.state().code()).to_le_bytes(),
-            u64::from(Class::code(self.class)).to_le_bytes(),
-            self.restarts.to_le_bytes(),
-            backoff.nanos().to_le_bytes(),
-        ];
-        let counts = values
-            .counts
-            .iter()
-            .map(|(_, count)| count.get().to_le_bytes());
-        let mut samples = supervisor.into_iter().chain(counts);
-        for (i, &entry) in self.entries.iter().enumerate() {
-            let bytes = draft
-                .series_mut(entry)
-                .expect("invariant: each entry has a series");
-            if i == 0 {
-                bytes.copy_from_slice(&stamp.nanos().to_le_bytes());
-                continue;
+        let text = match self.positions[entry] {
+            ERROR => &self.error,
+            NOTE => &self.note,
+            at if at < ERROR => {
+                let backoff =
+                    next.map_or(Span::ZERO, |next| (next - stamp).max(Span::ZERO));
+                let supervisor = [
+                    u64::from(self.phase.state().code()).to_le_bytes(),
+                    u64::from(Class::code(self.class)).to_le_bytes(),
+                    self.restarts.to_le_bytes(),
+                    backoff.nanos().to_le_bytes(),
+                ];
+                let len = bytes.len();
+                bytes.copy_from_slice(&supervisor[at - 1][..len]);
+                return;
             }
-            if let Some(text) = match i {
-                ERROR => Some(&self.error),
-                NOTE => Some(&self.note),
-                _ => None,
-            } {
-                text.form.write(&[&text.value], bytes);
-                continue;
+            at => {
+                let count = values.counts[at - NOTE - 1].1.get();
+                bytes.copy_from_slice(&count.to_le_bytes());
+                return;
             }
-            let sample = samples.next().expect("invariant: a sample per channel");
-            let len = bytes.len();
-            bytes.copy_from_slice(&sample[..len]);
-        }
-        draft.set_count(self.group, 1);
+        };
+        text.form.write(&[&text.value], bytes);
     }
 }
 
@@ -1004,19 +946,29 @@ impl Wake for Woke {
     }
 }
 
-/// Checks that the pool can give a status frame later.
+/// Checks that `error`, which ended a write of the status, closes the session: the
+/// hub removed it, or the home failed on disk.
 ///
 /// # Panics
 ///
-/// When no block of the pool holds a status frame.
-fn check_pool(error: &block::Error) {
+/// For each other error, which only a defect gives. This includes a frame larger than
+/// the largest block of the pool.
+fn check_failure(error: &stamp::Error) {
     match error {
-        block::Error::Exhausted { .. } | block::Error::Refused { .. } => {}
-        block::Error::TooLarge { .. } => {
+        stamp::Error::Write(
+            Failure::Removed(_) | Failure::Home(home::Error::Disk(_)),
+        ) => {}
+        stamp::Error::Draft(frame::Error::Pool(error)) => {
             panic!(
                 "invariant: a status frame fits the largest block of the pool: {error}"
             )
         }
+        stamp::Error::Draft(error) => {
+            panic!("invariant: the series follow the key set: {error}")
+        }
+        stamp::Error::Write(Failure::Home(
+            error @ (home::Error::Resend | home::Error::Full | home::Error::Large),
+        )) => panic!("the home refuses a status frame: {error}"),
     }
 }
 
@@ -1231,12 +1183,9 @@ mod tests {
     /// No test of a caller makes the system refuse memory to the pool, so only this
     /// test sees `Refused` moved to the arm that panics.
     #[test]
-    fn check_pool_accepts_a_pool_with_no_block_now() {
-        check_pool(&block::Error::Exhausted {
-            requested: 128,
-            available: 64,
-        });
-        check_pool(&block::Error::Refused { requested: 128 });
+    fn check_failure_accepts_a_removed_channel() {
+        let key = types::channel::Key::from_u128(2);
+        check_failure(&stamp::Error::Write(Failure::Removed(key)));
     }
 
     #[test]
@@ -1245,10 +1194,26 @@ mod tests {
                     block of 128 bytes is above the largest block of 64 bytes"
     )]
     fn panics_when_no_block_of_the_pool_holds_a_status_frame() {
-        check_pool(&block::Error::TooLarge {
+        let error = block::Error::TooLarge {
             requested: 128,
             largest: 64,
-        });
+        };
+        check_failure(&stamp::Error::Draft(frame::Error::Pool(error)));
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: the series follow the key set: entry 3 \
+                               follows entry 4: entries must increase")]
+    fn panics_when_the_series_do_not_follow_the_key_set() {
+        let error = frame::Error::Unordered { entry: 3, last: 4 };
+        check_failure(&stamp::Error::Draft(error));
+    }
+
+    #[test]
+    #[should_panic(expected = "the home refuses a status frame: the home does not \
+                               take a resend frame yet")]
+    fn panics_when_the_home_refuses_a_status_frame() {
+        check_failure(&stamp::Error::Write(Failure::Home(home::Error::Resend)));
     }
 }
 

@@ -43,13 +43,21 @@
   https://github.com/synnaxlabs/foundation/pull/2817#issuecomment-6208721580, and
   2026-10-16T06:44:07Z, condition 1:
   https://github.com/synnaxlabs/foundation/issues/2830#issuecomment-6209753061).
-  `status::Writer` keeps its own write again: it writes string series, stages its values
-  again when the pool has no block, and closes on `Removed`, where `poll::Writer` writes
-  fixed-width samples, loses the frame, and gives the error to the run. One writer for
-  both is deferred to #2527. Lost: a copy of the writer in each kind, which the rule of
-  `Backwards` and of pool loss would drift between; a `write` that takes a closure per
-  channel, which reads each value up to three times and makes the kind count `bad` and
-  `uncertain` in another pass (`laptop.architect-2`, 2026-10-16T04:07:48Z:
+  `poll::Writer` and `status::Writer` each write through `stamp::Writer::write`
+  (STAMP), which owns the draft, the stamp of each index, the class of each outcome,
+  and the write again. Each gives the bytes of its data samples through a fill and acts
+  on the groups that it gives: `poll::Writer` counts their samples applied or lost, and
+  `status::Writer` stages its values again for a group that is not applied, and closes
+  on `Removed` or a failed disk (the plan, 2026-10-20T08:54:50Z:
+  https://github.com/synnaxlabs/foundation/issues/2527#issuecomment-6287263795). Lost:
+  `status::Writer` writes through `poll::Writer`, which then takes text values and a
+  second rule for a pool with no block in its hot path; a `stamp::Writer::write` that
+  takes a closure that sends the frame, so that each writer keeps its own draft and its
+  own match of outcomes (the same plan); a copy of the writer in each kind, which the
+  rule of `Backwards` and of pool loss would drift between; a `write` that takes a
+  closure per channel, which reads each value up to three times and makes the kind
+  count `bad` and `uncertain` in another pass
+  (`laptop.architect-2`, 2026-10-16T04:07:48Z:
   https://github.com/synnaxlabs/foundation/pull/2817#issuecomment-6207854657); a bit set
   of the kept channels beside the values, which each caller keeps in step; an error at
   the open for a channel named again, which the parse refuses first; slots that the kind
