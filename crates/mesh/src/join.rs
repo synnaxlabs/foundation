@@ -229,8 +229,7 @@ async fn before<F: Future>(
 pub enum Miss {
     /// The dial or the stream failed.
     Stream(transport::Error),
-    /// The dial, the answer, or the end of the reply half of a refusal did not come
-    /// within 10 s.
+    /// The dial or the answer did not come within 10 s.
     Deadline,
     /// After `Joined`, the founding or the end of the reply half did not come within
     /// 10 s + its bytes / (100 KiB/s), or a message did not come within 10 s of the one
@@ -272,7 +271,7 @@ impl fmt::Display for Miss {
         match self {
             Self::Stream(error) => write!(f, "the stream failed: {error}"),
             Self::Deadline => f.write_str("no answer came within 10 s"),
-            Self::Slow => f.write_str("the founding came slower than 100 KiB/s"),
+            Self::Slow => f.write_str("the founding came under 100 KiB/s or with a gap over 10 s"),
             Self::Malformed => f.write_str("the answer is not one of a join stream"),
             Self::Uncommitted => f.write_str("no leader committed the join"),
             Self::Unsynced => f.write_str("the voter has no mesh time to stamp a join"),

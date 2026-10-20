@@ -145,18 +145,20 @@
   https://github.com/synnaxlabs/foundation/pull/3335#issuecomment-6267301786).
   Amended (2026-10-20, PR 5d of #336): `join::ask` asks the voters of the ticket in
   the ticket's order, in at most 8 rounds with a pause of 1 s between them, and gives
-  the founding of the first voter that admits the node. The dial of a voter, its
-  answer, and the end of a refusal come within 10 s, or the miss is `Deadline`; a
-  refusal whose reply half does not end in time gives its miss. So voters that do not
-  answer give `Error::Unjoined`, with the miss of each voter in the last round, within
-  `join::bound`: 8 x (10 s for each voter + 1 s), 248 s for 3 voters. After `Joined`,
-  the whole founding and the end of the half come within 10 s + its bytes /
-  (100 KiB/s), and each message within 10 s of the one before it, or the miss is
-  `Slow`. So each transfer of a founding that fails adds at most 665.36 s, for the
-  largest (`laptop.architect`, 2026-10-20T08:38:03Z, items A to C of
-  https://github.com/synnaxlabs/foundation/pull/3551#issuecomment-6286959971; 665.36 s
-  in place of its 665 s: 2026-10-20T08:58:14Z,
-  https://github.com/synnaxlabs/foundation/pull/3551#issuecomment-6287323078). `Unled`
+  the founding of the first voter that admits the node. The dial of a voter and its
+  answer come within 10 s, or the miss is `Deadline`. A refusal gives its own miss,
+  also when its reply half does not end within that 10 s, and the node then drops the
+  half. So voters that do not answer give `Error::Unjoined`, with the miss of each
+  voter in the last round, within `join::bound`: 8 x (10 s for each voter + 1 s),
+  248 s for 3 voters. After `Joined`, the whole founding and the end of the half come
+  within 10 s + its bytes / (100 KiB/s), and each message within 10 s of the one
+  before it, or the miss is `Slow`. So each transfer of a founding that fails adds at
+  most 665.36 s, for the largest (`laptop.architect`, 2026-10-20T08:38:03Z, items A to
+  C of https://github.com/synnaxlabs/foundation/pull/3551#issuecomment-6286959971;
+  665.36 s in place of its 665 s: 2026-10-20T08:58:14Z,
+  https://github.com/synnaxlabs/foundation/pull/3551#issuecomment-6287323078; `Slow`
+  and the drop of the half: 2026-10-20T09:24:55Z,
+  https://github.com/synnaxlabs/foundation/pull/3551#issuecomment-6287794097). `Unled`
   is the miss `Uncommitted`, whose text is "no leader committed the join". The node
   stops a reply half that carries a message that a join stream does not carry with
   code 2. The opaque `join::Refused` keeps `region::Refused` and `ticket::Refused`

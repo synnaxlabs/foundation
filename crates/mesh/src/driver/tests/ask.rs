@@ -518,7 +518,10 @@ fn the_text_of_each_miss_names_its_cause() {
             format!("the stream failed: {}", transport::Error::TimedOut),
         ),
         (Miss::Deadline, "no answer came within 10 s".into()),
-        (Miss::Slow, "the founding came slower than 100 KiB/s".into()),
+        (
+            Miss::Slow,
+            "the founding came under 100 KiB/s or with a gap over 10 s".into(),
+        ),
         (
             Miss::Malformed,
             "the answer is not one of a join stream".into(),
