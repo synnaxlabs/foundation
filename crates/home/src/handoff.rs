@@ -31,19 +31,20 @@ const _: () = assert!(
 /// Appends the entry that records `handoff`, alone, with `head`, and returns what
 /// [`state::append`] does.
 pub(crate) fn append(buffer: &Buffer, handoff: Handoff<'_>, head: state::Head) -> bool {
-    state::append(buffer, TAG, body(handoff).as_deref(), head)
+    state::append(buffer, TAG, body(handoff, &mut [0; MAX_BYTES]), head)
 }
 
-/// The body of the entry that records `handoff`, or `None` when no writer holds
-/// control.
-fn body(handoff: Handoff<'_>) -> Option<Vec<u8>> {
+/// The body of the entry that records `handoff`, written at the start of `out`, or
+/// `None` when no writer holds control.
+fn body<'a>(handoff: Handoff<'_>, out: &'a mut [u8; MAX_BYTES]) -> Option<&'a [u8]> {
     let holder = handoff.to?;
     let subject = holder.subject.as_str().as_bytes();
-    let mut body = Vec::with_capacity(1 + VIA + subject.len());
-    body.push(holder.authority.0);
-    body.extend_from_slice(&holder.via.as_u128().to_le_bytes());
-    body.extend_from_slice(subject);
-    Some(body)
+    let (authority, rest) = out.split_at_mut(1);
+    let (via, rest) = rest.split_at_mut(VIA);
+    authority[0] = holder.authority.0;
+    via.copy_from_slice(&holder.via.as_u128().to_le_bytes());
+    rest[..subject.len()].copy_from_slice(subject);
+    Some(&out[..1 + VIA + subject.len()])
 }
 
 /// The holder that the newest durable handoff of each index in `buffer` names, with
@@ -115,8 +116,9 @@ mod tests {
         #[test]
         fn writes_the_authority_the_node_then_the_subject() {
             let holder = writer("plant.pump-1", 7);
+            let mut out = [0; MAX_BYTES];
 
-            let body = body(Handoff { to: Some(&holder) }).expect("a holder");
+            let body = body(Handoff { to: Some(&holder) }, &mut out).expect("a holder");
 
             assert_eq!(body, bytes("plant.pump-1"));
         }
@@ -124,15 +126,16 @@ mod tests {
         #[test]
         fn writes_the_largest_body_for_the_longest_subject() {
             let holder = writer(&"b".repeat(Name::MAX_BYTES), 7);
+            let mut out = [0; MAX_BYTES];
 
-            let body = body(Handoff { to: Some(&holder) }).expect("a holder");
+            let body = body(Handoff { to: Some(&holder) }, &mut out).expect("a holder");
 
             assert_eq!(body.len(), MAX_BYTES);
         }
 
         #[test]
         fn has_no_body_when_no_writer_holds_control() {
-            assert_eq!(body(Handoff { to: None }), None);
+            assert_eq!(body(Handoff { to: None }, &mut [0; MAX_BYTES]), None);
         }
     }
 
@@ -197,8 +200,8 @@ mod tests {
                 authority: Authority(authority),
                 via: node::Key::from_u128(via),
             });
-            let body = body(Handoff { to: holder.as_ref() });
-            let bytes = body.as_deref().unwrap_or_default();
+            let mut out = [0; MAX_BYTES];
+            let bytes = body(Handoff { to: holder.as_ref() }, &mut out).unwrap_or_default();
 
             prop_assert!(bytes.len() <= MAX_BYTES);
             prop_assert_eq!(read(bytes), holder);
