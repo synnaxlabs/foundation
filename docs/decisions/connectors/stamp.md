@@ -1,12 +1,14 @@
 - **STAMP (#435)** `connector::stamp::Writer`, crate-private, stamps the frames of one
   writer: the `poll::Writer` of a kind and the status writer of the supervisor each
   hold one, and no other code gives a stamp. A kind writes each frame at the last
-  stamp that `request` or `sample` of its `poll::Writer` gave, and writes one frame at
-  each stamp. `write` takes the stamp as an argument, so the doc holds this rule, not
-  the type (#3596; `laptop.architect-2`, 2026-10-20T13:33:43Z, item 1:
-  https://github.com/synnaxlabs/foundation/pull/3595#issuecomment-6292093472). A
-  second frame at one stamp, after a group of the first was written again, can get a
-  refusal under the stamp of that write again, and `write` then panics.
+  stamp that `request` or `sample` of its `poll::Writer` gave (`laptop.architect-2`,
+  2026-10-20T13:33:43Z, item 1:
+  https://github.com/synnaxlabs/foundation/pull/3595#issuecomment-6292093472), and
+  writes one frame at each stamp (`laptop.architect-2`, 2026-10-20T14:10:32Z:
+  https://github.com/synnaxlabs/foundation/issues/3596#issuecomment-6292853314).
+  `write` takes the stamp as an argument, so the doc holds this rule, not the type
+  (#3596). A second frame at one stamp, after a group of the first was written again,
+  can get a refusal under the stamp of that write again, and `write` then panics.
   `stamp::Writer` keeps the stamp rule in a private value with no hub, so the tests of
   the rule need no node (`laptop.architect-2`, 2026-10-20T13:14:36Z:
   https://github.com/synnaxlabs/foundation/issues/2527#issuecomment-6291709126). Lost:

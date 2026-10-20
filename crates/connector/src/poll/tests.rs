@@ -822,8 +822,9 @@ fn panics_at_a_refusal_under_the_last_stamp_given() {
 }
 
 /// The home refuses `plant.a` of the first frame of [`Late::Again`] as `Backwards`, so
-/// the writer writes it again 1 ns after the frame of the rival. The home then refuses
-/// the second frame, at the stamp of the request, with a stamp under that one.
+/// the writer writes it again 1 ns after the frame of the rival, which the home
+/// refuses as `Ahead`. The home then refuses the second frame, at the stamp of the
+/// request, with a stamp under the last stamp of the writer.
 #[test]
 #[should_panic(expected = "refusal under the last stamp")]
 fn panics_at_a_second_frame_at_one_stamp_after_a_write_again() {
