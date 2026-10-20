@@ -46,19 +46,17 @@ pyo3::create_exception!(
     Stopped,
     PyException,
     "The node stopped a write, with a code. At the open, no writer opened, and the \
-     session goes on. Later, it has one of two scopes, which its text names. When the \
-     node stopped the stream, the writer has ended, and each later call raises it \
-     again. When the write of the group of an index ended, only that group ended: \
-     each later frame that holds the group raises it again, and the frames of the \
-     other groups go on, so a writer of one index has ended. `code` is its name in \
-     lower case. At the open: `unknown` for a name of no channel, `not_home` when the \
-     node is not the home of an index, `malformed` for a reader of channels of more \
-     than one index, `failed` when the home cannot open the write, `refused` when the \
-     access check of the node refuses the write, and `busy` when the node has no room \
-     for the open. Later: `unknown` when a channel was removed, `failed` when the home \
-     failed, `refused` when the home refuses the program's proof, such as a renewal of \
-     its hello, `busy` when the home has no room for the outcome of a frame, and \
-     `malformed` for a frame that breaks a rule of the wire."
+     session goes on. From a call, the node stopped the stream: the writer has ended, \
+     and each later call raises it again. Its subclass `GroupEnded` is the end of the \
+     write of one or more groups only. `code` is its name in lower case. At the open: \
+     `unknown` for a name of no channel, `not_home` when the node is not the home of \
+     an index, `malformed` for a reader of channels of more than one index, `failed` \
+     when the home cannot open the write, `refused` when the access check of the node \
+     refuses the write, and `busy` when the node has no room for the open. Later: \
+     `unknown` when a channel was removed, `failed` when the home failed, `refused` \
+     when the home refuses the program's proof, such as a renewal of its hello, `busy` \
+     when the home has no room for the outcome of a frame, and `malformed` for a frame \
+     that breaks a rule of the wire."
 );
 pyo3::create_exception!(
     foundation,
@@ -74,15 +72,17 @@ pyo3::create_exception!(
 );
 pyo3::create_exception!(
     foundation,
-    PartialWrite,
+    GroupEnded,
     Stopped,
-    "The write of the group of one or more indexes ended, and the node took the \
-     samples of at least one other group of the frame. `written` and `unwritten` are \
-     the names of the channels of the frame in the groups that the node took and did \
-     not take, in place order. `code` is the end of the first group that ended, as \
-     `Stopped` gives it. Its text names the cause of each group that the node did not \
-     take. The writer goes on: each later frame that holds an ended group raises it \
-     again."
+    "The write of the group of one or more indexes ended. `code` is the end of the \
+     first group that ended, as `Stopped` gives it. `ended` is the names of the \
+     channels of the writer in each group that ended, the index included, and \
+     `written` and `unwritten` those of the channels of the frame in the groups that \
+     the node took and did not take, each in place order. Its text names the cause \
+     of each group that the node did not take. The writer goes on: each later frame \
+     that holds a channel of `ended` raises it again, so a writer of one index \
+     writes nothing more. To write the frame again, write only the channels of \
+     `unwritten` that are not in `ended`."
 );
 pyo3::create_exception!(
     foundation,
@@ -111,7 +111,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("Refused", py.get_type::<Refused>())?;
     module.add("Stopped", py.get_type::<Stopped>())?;
     module.add("Rejected", py.get_type::<Rejected>())?;
-    module.add("PartialWrite", py.get_type::<PartialWrite>())?;
+    module.add("GroupEnded", py.get_type::<GroupEnded>())?;
     module.add("DataLost", py.get_type::<DataLost>())?;
     #[cfg(feature = "sim")]
     sim::add(module)?;

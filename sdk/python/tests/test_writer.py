@@ -306,6 +306,8 @@ class WriterTest(unittest.TestCase):
     ) -> None:
         writer = self.client.open_writer(["plant.a", "other.a"])
         self.addCleanup(writer.close)
+        alone = self.client.open_writer("other.a")
+        self.addCleanup(alone.close)
         removed = (
             'channel "other.a" {\n  data_type = "f64"\n  index = "other.time"\n}\n'
         )
@@ -321,13 +323,14 @@ class WriterTest(unittest.TestCase):
             self.assertLess(time.monotonic(), deadline)
             time.sleep(0.01)
         for _ in range(2):
-            with self.assertRaises(foundation.PartialWrite) as raised:
+            with self.assertRaises(foundation.GroupEnded) as raised:
                 writer.write({"plant.a": 1.5, "other.a": 2.5})
             assert_stated(self, raised.exception)
             self.assertIsInstance(raised.exception, foundation.Stopped)
             self.assertEqual(raised.exception.code, "unknown")
             self.assertEqual(raised.exception.written, ("plant.a", "plant.time"))
             self.assertEqual(raised.exception.unwritten, ("other.a", "other.time"))
+            self.assertEqual(raised.exception.ended, ("other.a", "other.time"))
             self.assertEqual(
                 str(raised.exception),
                 "the write of other.time ended (unknown: a channel of its group was "
@@ -335,8 +338,22 @@ class WriterTest(unittest.TestCase):
                 "plant.a, plant.time were; each later frame of an ended group raises "
                 "again, and the other groups go on",
             )
+            with self.assertRaises(foundation.GroupEnded) as raised:
+                alone.write(2.5)
+            self.assertEqual(raised.exception.code, "unknown")
+            self.assertEqual(raised.exception.written, ())
+            self.assertEqual(raised.exception.unwritten, ("other.a", "other.time"))
+            self.assertEqual(raised.exception.ended, ("other.a", "other.time"))
+            self.assertEqual(
+                str(raised.exception),
+                "the write of other.time ended (unknown: a channel of its group was "
+                "removed); channels other.a, other.time were not written; no channel "
+                "was; each later frame of an ended group raises again, and the other "
+                "groups go on",
+            )
         self.assertIsNone(writer.write({"plant.a": 3.5}))
         self.assertIsNone(writer.close())
+        self.assertIsNone(alone.close())
 
     def test_write_takes_a_value_with_no_key_for_one_place(self) -> None:
         with self.client.open_writer("plant.a") as writer:

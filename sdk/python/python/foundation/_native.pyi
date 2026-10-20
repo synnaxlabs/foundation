@@ -89,11 +89,9 @@ class Refused(ConnectionError):
 
 class Stopped(Exception):
     """The node stopped a write, with a code. At the open, no writer opened, and the
-    session goes on. Later, it has one of two scopes, which its text names. When the
-    node stopped the stream, the writer has ended, and each later call raises it again.
-    When the write of the group of an index ended, only that group ended: each later
-    frame that holds the group raises it again, and the frames of the other groups go
-    on, so a writer of one index has ended. `code` is its name in lower case. At the
+    session goes on. From a call, the node stopped the stream: the writer has ended,
+    and each later call raises it again. Its subclass `GroupEnded` is the end of the
+    write of one or more groups only. `code` is its name in lower case. At the
     open: `unknown` for a name of no channel, `not_home` when the node is not the home
     of an index, `malformed` for a reader of channels of more than one index, `failed`
     when the home cannot open the write, `refused` when the access check of the node
@@ -120,15 +118,18 @@ class Rejected(Exception):
     written: tuple[str, ...]
     unwritten: tuple[str, ...]
 
-class PartialWrite(Stopped):
-    """The write of the group of one or more indexes ended, and the node took the
-    samples of at least one other group of the frame. `written` and `unwritten` are the
-    names of the channels of the frame in the groups that the node took and did not
-    take, in place order. `code` is the end of the first group that ended, as `Stopped`
-    gives it. Its text names the cause of each group that the node did not take. The
-    writer goes on: each later frame that holds an ended group raises it again.
+class GroupEnded(Stopped):
+    """The write of the group of one or more indexes ended. `code` is the end of the
+    first group that ended, as `Stopped` gives it. `ended` is the names of the channels
+    of the writer in each group that ended, the index included, and `written` and
+    `unwritten` those of the channels of the frame in the groups that the node took and
+    did not take, each in place order. Its text names the cause of each group that the
+    node did not take. The writer goes on: each later frame that holds a channel of
+    `ended` raises it again, so a writer of one index writes nothing more. To write the
+    frame again, write only the channels of `unwritten` that are not in `ended`.
     """
 
+    ended: tuple[str, ...]
     written: tuple[str, ...]
     unwritten: tuple[str, ...]
 
@@ -280,14 +281,13 @@ class Writer:
         of a value is the `__cause__` of the `TypeError` that names its place. With each
         of these, nothing was sent and the writer goes on. When the node did not take
         each group of the frame, raises for the first that holds: a group whose write
-        ended raises `PartialWrite` when the node took another group, else `Stopped`; a
-        refused group raises `Rejected`; and a lost group raises `DataLost` with
-        `on_loss="raise"`, with the channels of the lost groups only. The text of each
-        names the cause of each group that the node did not take, and the text of
-        `Stopped` its scope. Raises `Stopped` when the node stopped the stream, and
-        `ConnectionError` when the session failed, after which each call raises it
-        again; `RuntimeError` after a close or in a forked process; and `PanicException`
-        when the client's thread panicked.
+        ended raises `GroupEnded`, also in a writer of one index; a refused group raises
+        `Rejected`; and a lost group raises `DataLost` with `on_loss="raise"`, with the
+        channels of the lost groups only. The text of each names the cause of each group
+        that the node did not take. Raises `Stopped` when the node stopped the stream,
+        so the writer has ended, and `ConnectionError` when the session failed, after
+        each of which each call raises it again; `RuntimeError` after a close or in a
+        forked process; and `PanicException` when the client's thread panicked.
         """
 
     def write_series(self, series: dict[Any, NDArray[Any]]) -> None:

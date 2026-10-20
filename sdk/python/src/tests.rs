@@ -384,13 +384,14 @@ fn range(seq: u64, count: u32) -> frame::Range {
     frame::Range { seq, count }
 }
 
-/// The class, the text, and the `code`, `written`, and `unwritten` of an exception,
-/// when it has them.
+/// The class, the text, and the `code`, `written` and `unwritten`, and `ended` of an
+/// exception, when it has them.
 type Raised = (
     String,
     String,
     Option<String>,
     Option<(Vec<String>, Vec<String>)>,
+    Option<Vec<String>>,
 );
 
 /// What `answer` raises for a frame of the items at `frame` of a writer of `places`,
@@ -417,7 +418,7 @@ fn untaken(
         };
         let written = names("written").zip(names("unwritten"));
         let class = error.get_type(py).name().unwrap().to_string();
-        (class, value.to_string(), code, written)
+        (class, value.to_string(), code, written, names("ended"))
     })
 }
 
@@ -426,9 +427,8 @@ fn names(names: &[&str]) -> Vec<String> {
     names.iter().map(|&name| name.to_owned()).collect()
 }
 
-/// A frame with an end, a refusal, and a loss raises `PartialWrite` for the end when
-/// the node took another group, and its text names the cause of each group that the
-/// node did not take.
+/// A frame with an end, a refusal, and a loss raises `GroupEnded` for the end, and its
+/// text names the cause of each group that the node did not take.
 #[test]
 fn answer_names_the_cause_of_each_group_that_the_node_did_not_take() {
     let outcomes = [
@@ -446,7 +446,7 @@ fn answer_names_the_cause_of_each_group_that_the_node_did_not_take() {
     assert_eq!(
         raised,
         (
-            "PartialWrite".to_owned(),
+            "GroupEnded".to_owned(),
             "the write of plant.time ended (unknown: a channel of its group was \
              removed); the node refused the frame of cell.time (full: a backfill frame \
              found no room in the log, or the frame found no block of the node's pool: \
@@ -467,16 +467,19 @@ fn answer_names_the_cause_of_each_group_that_the_node_did_not_take() {
                     "line.time"
                 ])
             )),
+            Some(names(&["plant.a", "plant.time"])),
         )
     );
     Python::attach(|py| {
-        let class = py.get_type::<crate::PartialWrite>();
+        let class = py.get_type::<crate::GroupEnded>();
         assert!(class.is_subclass_of::<crate::Stopped>().unwrap());
     });
 }
 
 /// With no end, a refusal raises `Rejected` with the code of the first refused group,
-/// and an end with no group taken raises `Stopped` with the code of the first end.
+/// and an end with no group taken raises `GroupEnded` with the code of the first end.
+/// Its `ended` holds each channel of the writer in an ended group, also one that is
+/// not in the frame, and not those of a refused group of `unwritten`.
 #[test]
 fn answer_raises_for_an_end_then_a_refusal() {
     let refused = [
@@ -511,6 +514,7 @@ fn answer_raises_for_an_end_then_a_refusal() {
                     "other.time"
                 ])
             )),
+            None,
         )
     );
     let ended = [
@@ -519,27 +523,31 @@ fn answer_raises_for_an_end_then_a_refusal() {
         (6, Outcome::Ended(End::Refused)),
     ];
     assert_eq!(
-        untaken(&grouped(), crate::Loss::Raise, &ended, &[0, 1, 2]),
+        untaken(&grouped(), crate::Loss::Raise, &ended, &[0, 2]),
         (
-            "Stopped".to_owned(),
+            "GroupEnded".to_owned(),
             "the node refused the frame of plant.time (order: a stamp is not after the \
              stamp before it); the write of cell.time ended (failed: the home of its \
              group failed); the write of line.time ended (refused: the home of its \
-             group refused the proof of the program); channels plant.a, cell.a, \
-             line.a, plant.time, cell.time, line.time were not written; no channel \
-             was; each later frame of an ended group raises again, and the other \
-             groups go on"
+             group refused the proof of the program); channels plant.a, line.a, \
+             plant.time, cell.time, line.time were not written; no channel was; each \
+             later frame of an ended group raises again, and the other groups go on"
                 .to_owned(),
             Some("failed".to_owned()),
-            None,
+            Some((
+                Vec::new(),
+                names(&["plant.a", "line.a", "plant.time", "cell.time", "line.time"])
+            )),
+            Some(names(&["cell.a", "line.a", "cell.time", "line.time"])),
         )
     );
 }
 
-/// The end of the group of a writer of one index raises `Stopped` with the code of a
-/// stream that the node stopped for the same cause, and says that the writer ended.
+/// The end of the group of a writer of one index raises `GroupEnded` with the code of
+/// a stream that the node stopped for the same cause, and each channel of the writer
+/// in `ended`.
 #[test]
-fn answer_ends_a_writer_of_one_index_at_the_end_of_its_group() {
+fn answer_raises_group_ended_for_the_end_of_the_group_of_a_writer_of_one_index() {
     let grouped = grouped();
     let places = [0, 4].map(|place| sdk::Place {
         index: 1,
@@ -563,13 +571,15 @@ fn answer_ends_a_writer_of_one_index_at_the_end_of_its_group() {
         assert_eq!(
             untaken(&places, crate::Loss::Raise, &outcomes, &[0]),
             (
-                "Stopped".to_owned(),
+                "GroupEnded".to_owned(),
                 format!(
                     "the write of plant.time ended ({code}: {why}); channels plant.a, \
-                     plant.time were not written; no channel was; the writer has ended"
+                     plant.time were not written; no channel was; each later frame of \
+                     an ended group raises again, and the other groups go on"
                 ),
                 Some(code.to_owned()),
-                None,
+                Some((Vec::new(), names(&["plant.a", "plant.time"]))),
+                Some(names(&["plant.a", "plant.time"])),
             )
         );
     }
@@ -631,7 +641,7 @@ fn answer_gives_the_seqs_of_the_lost_groups_only() {
 }
 
 /// A writer of `plant.time`, `plant.a`, and `plant.time` whose frame gives the stamp at
-/// place 2, the repeat of the index, names the index once.
+/// place 2, the repeat of the index, names the index once, also in `ended`.
 #[test]
 fn answer_names_a_repeat_of_the_index_once() {
     let grouped = grouped();
@@ -650,6 +660,7 @@ fn answer_names_a_repeat_of_the_index_once() {
                 .to_owned(),
             Some("order".to_owned()),
             Some((Vec::new(), names(&["plant.time", "plant.a"]))),
+            None,
         )
     );
     let lost = [(
@@ -662,6 +673,9 @@ fn answer_names_a_repeat_of_the_index_once() {
         untaken(&places, crate::Loss::Raise, &lost, &[1, 2]).1,
         "samples were lost: plant.time (1), plant.a (1)"
     );
+    let ended = [(0, Outcome::Ended(End::Removed))];
+    let ended = untaken(&places, crate::Loss::Raise, &ended, &[1]);
+    assert_eq!(ended.4, Some(names(&["plant.time", "plant.a"])));
 }
 
 /// The writer's map of an error names the channels at its places: a close that gives

@@ -25,7 +25,7 @@ use types::hash;
 use types::sample::{Scalar, Type, Value};
 use types::time::{Span, Stamp};
 
-use crate::{Loss, PartialWrite, Rejected, Stopped, owned, stop};
+use crate::{GroupEnded, Loss, Rejected, Stopped, owned, stop};
 
 /// A writer of channels of any index at their homes, which `Client.open_writer` opens.
 /// A `with` block closes it at its end. Its calls take turns to send: a call waits,
@@ -127,8 +127,8 @@ impl Writer {
     /// Calls `send` on the `sdk` writer with `buffers` and the GIL released, keeps
     /// `buffers` for the next call, and then returns `None` when the node took each
     /// group, answers as [`answer`] says for the outcomes of a frame that it did not
-    /// take whole, or raises the exception of the error as [`raised`] maps it. `places` gives the places of
-    /// the items of the frame. Raises `RuntimeError` after a close.
+    /// take whole, or raises the exception of the error as [`raised`] maps it. `places`
+    /// gives the places of the items of the frame. Raises `RuntimeError` after a close.
     fn send<F>(
         &self,
         py: Python<'_>,
@@ -257,14 +257,13 @@ impl Writer {
     /// of a value is the `__cause__` of the `TypeError` that names its place. With each
     /// of these, nothing was sent and the writer goes on. When the node did not take
     /// each group of the frame, raises for the first that holds: a group whose write
-    /// ended raises `PartialWrite` when the node took another group, else `Stopped`; a
-    /// refused group raises `Rejected`; and a lost group raises `DataLost` with
-    /// `on_loss="raise"`, with the channels of the lost groups only. The text of each
-    /// names the cause of each group that the node did not take, and the text of
-    /// `Stopped` its scope. Raises `Stopped` when the node stopped the stream, and
-    /// `ConnectionError` when the session failed, after which each call raises it
-    /// again; `RuntimeError` after a close or in a forked process; and `PanicException`
-    /// when the client's thread panicked.
+    /// ended raises `GroupEnded`, also in a writer of one index; a refused group raises
+    /// `Rejected`; and a lost group raises `DataLost` with `on_loss="raise"`, with the
+    /// channels of the lost groups only. The text of each names the cause of each group
+    /// that the node did not take. Raises `Stopped` when the node stopped the stream,
+    /// so the writer has ended, and `ConnectionError` when the session failed, after
+    /// each of which each call raises it again; `RuntimeError` after a close or in a
+    /// forked process; and `PanicException` when the client's thread panicked.
     fn write(&self, py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<()> {
         #[cfg(feature = "sim")]
         let began = crate::sim::Part::start();
@@ -460,13 +459,12 @@ fn untaken(written: Result<&[(usize, Outcome)], sdk::Error>) -> Untaken {
 }
 
 /// Answers a frame whose groups did not all get `Taken`, by the first rule that holds:
-/// a group whose write ended raises `PartialWrite` when the node took another group,
-/// else `Stopped`; a refused group raises `Rejected`; and a lost group does what `loss`
-/// says, with the channels of the lost groups, so it gives `Ok` for `warn` and
-/// `ignore`. `outcomes` is the place of the index and the outcome of each group, in
-/// the order of their index places, and `frame` the places of the items of the call,
-/// of the writer of `places`. The channels of the frame are those of `frame` and the
-/// index of each group, each named once.
+/// a group whose write ended raises `GroupEnded`; a refused group raises `Rejected`;
+/// and a lost group does what `loss` says, with the channels of the lost groups, so it
+/// gives `Ok` for `warn` and `ignore`. `outcomes` is the place of the index and the
+/// outcome of each group, in the order of their index places, and `frame` the places of
+/// the items of the call, of the writer of `places`. The channels of the frame are
+/// those of `frame` and the index of each group, each named once.
 pub(crate) fn answer(
     py: Python<'_>,
     places: &[Place],
@@ -482,7 +480,7 @@ pub(crate) fn answer(
         outcomes[at].1
     };
     let frame = channels(places, outcomes, frame);
-    let ended = outcomes.iter().find_map(|&(_, outcome)| match outcome {
+    let end = outcomes.iter().find_map(|&(_, outcome)| match outcome {
         Outcome::Ended(end) => Some(end),
         _ => None,
     });
@@ -508,20 +506,16 @@ pub(crate) fn answer(
         value.setattr("unwritten", PyTuple::new(py, unwritten)?)?;
         Err(raised)
     };
-    match (ended, refused) {
+    match (end, refused) {
         (Some(end), _) => {
             let (written, unwritten, text) = split();
-            let scope = if places.iter().all(|place| place.index == places[0].index) {
-                "the writer has ended"
-            } else {
-                "each later frame of an ended group raises again, and the other groups \
-                 go on"
-            };
-            let text = format!("{text}; {scope}");
-            if written.is_empty() {
-                return Err(crate::coded(py, Stopped::new_err(text), stop(end)));
-            }
-            let raised = crate::coded(py, PartialWrite::new_err(text), stop(end));
+            let text = format!(
+                "{text}; each later frame of an ended group raises again, and the \
+                 other groups go on"
+            );
+            let raised = crate::coded(py, GroupEnded::new_err(text), stop(end));
+            let ended = PyTuple::new(py, ended(places, outcomes))?;
+            raised.value(py).setattr("ended", ended)?;
             listed(raised, written, unwritten)
         }
         (None, Some(refusal)) => {
@@ -542,6 +536,25 @@ pub(crate) fn answer(
             loss.act(py, "samples were lost", gone, py.None().bind(py))
         }
     }
+}
+
+/// The name of each channel of the writer of `places` in a group whose write ended,
+/// by `outcomes`, once each, in place order.
+fn ended<'a>(places: &'a [Place], outcomes: &[(usize, Outcome)]) -> Vec<&'a str> {
+    let ended = |index: usize| {
+        outcomes
+            .binary_search_by_key(&index, |&(index, _)| index)
+            .is_ok_and(|at| matches!(outcomes[at].1, Outcome::Ended(_)))
+    };
+    places
+        .iter()
+        .enumerate()
+        .filter(|&(at, place)| {
+            ended(place.index)
+                && places.iter().position(|other| other.key == place.key) == Some(at)
+        })
+        .map(|(_, place)| place.name.as_str())
+        .collect()
 }
 
 /// The first place of each channel of a frame of the items at `frame` of a writer of
@@ -631,7 +644,8 @@ pub(crate) fn raised(py: Python<'_>, places: &[Place], error: &sdk::Error) -> Py
                 .collect();
             let writes = if named.len() == 1 { "write" } else { "writes" };
             let text = format!(
-                "the {writes} of {} ended: a frame that the node took may not be on disk",
+                "the {writes} of {} ended: a frame that the node took may not be on \
+                 disk",
                 named.join(", ")
             );
             let (_, end) = groups.first().expect("invariant: Unstored names a group");
