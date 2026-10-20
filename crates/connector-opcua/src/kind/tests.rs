@@ -2908,25 +2908,43 @@ const KEY_FIX: &str =
 const TRUST_FIX: &str =
     "Give the DER or PEM certificate of the server, or of the CA that issued it";
 
+/// Each policy in each security mode reads each change: a frame at each tick when the
+/// kind polls, and at each change when it subscribes.
 #[test]
 fn reads_over_a_secure_channel_of_each_policy_in_each_mode() {
-    for policy in Policy::ALL {
-        for unencrypted in [false, true] {
-            let offered = if unencrypted {
-                client::Mode::Sign
-            } else {
-                client::Mode::SignAndEncrypt
-            };
-            let outcome = secured(Secure {
-                offered,
-                unencrypted,
-                ..Secure::of(policy)
-            });
-            let at = format!("{policy:?}, unencrypted {unencrypted}");
-            assert!(outcome.result.is_ok(), "{at}: {:?}", outcome.result);
-            assert_eq!(errors(&outcome.statuses), [], "{at}");
-            assert_eq!(outcome.frames.len(), 11, "{at}");
-            assert_eq!(values(&outcome.frames, 2), served(&outcome, A), "{at}");
+    for stage in [Stage::POLL, Stage::WATCH] {
+        for policy in Policy::ALL {
+            for unencrypted in [false, true] {
+                let offered = if unencrypted {
+                    client::Mode::Sign
+                } else {
+                    client::Mode::SignAndEncrypt
+                };
+                let secure = stage.over(Secure {
+                    offered,
+                    unencrypted,
+                    ..Secure::of(policy)
+                });
+                let outcome = scene(Setup::three(), secure, |scene| async move {
+                    scene.after(ms(430), |scene| async move {
+                        scene.variables.change(Quality::GOOD);
+                    });
+                    scene.supervise(ms(1_050)).await
+                });
+                let at = format!(
+                    "{policy:?}, unencrypted {unencrypted}, subscribed {}",
+                    stage.subscribed
+                );
+                assert!(outcome.result.is_ok(), "{at}: {:?}", outcome.result);
+                assert_eq!(errors(&outcome.statuses), [], "{at}");
+                let mut served = served(&outcome, A);
+                if stage.subscribed {
+                    served.dedup();
+                } else {
+                    assert_eq!(outcome.frames.len(), 11, "{at}");
+                }
+                assert_eq!(values(&outcome.frames, 2), served, "{at}");
+            }
         }
     }
 }
