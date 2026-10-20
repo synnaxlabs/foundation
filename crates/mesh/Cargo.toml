@@ -9,6 +9,7 @@ publish.workspace = true
 sim = []
 
 [dependencies]
+base64ct = { workspace = true, features = ["alloc"] }
 blob = { path = "../blob" }
 block = { path = "../block" }
 clock = { path = "../clock" }

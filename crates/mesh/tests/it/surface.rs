@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use env::tasks::Tasks;
@@ -14,6 +15,7 @@ use mesh::card::addresses::Addresses;
 use mesh::card::{self, Card};
 use mesh::region::Founding;
 use mesh::status::Status;
+use mesh::ticket::{self, Ticket};
 use mesh::{
     Config, Error, Member, Mesh, Stopped, Watch, change, claim, join, log, region, used,
 };
@@ -66,6 +68,11 @@ fn assert_applies<'a, F: Future<Output = Result<Pointer, Error>>>(
 
 fn assert_gives_the_spec<'a, F: Future<Output = Result<used::Spec, Stopped>>>(
     _: fn(&'a Mesh) -> F,
+) {
+}
+
+fn assert_makes_a_ticket<'a, F: Future<Output = Result<Ticket, Error>>>(
+    _: fn(&'a Mesh, ticket::Options) -> F,
 ) {
 }
 
@@ -479,6 +486,19 @@ fn each_call_of_a_mesh_has_the_signature_that_a_caller_holds() {
     assert_readdresses(Mesh::set_addresses);
     assert_applies(Mesh::apply);
     assert_gives_the_spec(Mesh::spec);
+    assert_makes_a_ticket(Mesh::ticket);
+}
+
+// The text that an operator carries goes out of the binary and comes back in it.
+#[test]
+fn a_ticket_has_one_text_form() {
+    let _: fn(&Ticket) -> String = Ticket::text;
+    let _: fn(&str) -> Result<Ticket, ticket::Unreadable> = Ticket::from_str;
+    assert_error(&ticket::Unreadable);
+    assert_eq!(
+        "foundation-ticket-1-".parse::<Ticket>().err(),
+        Some(ticket::Unreadable)
+    );
 }
 
 // The match has no wildcard arm, so a new case of `Error` does not compile here.
@@ -493,6 +513,7 @@ fn error_has_one_case_for_each_cause_that_a_public_call_gives() {
         | Error::PeerNotVoter { .. }
         | Error::Claim(_)
         | Error::NotMember(_)
+        | Error::Outside { .. }
         | Error::NoVote
         | Error::Contested { .. }
         | Error::Member(_)
@@ -558,7 +579,7 @@ fn ask_takes_the_parts_of_a_join_and_names_each_miss() {
         | join::Miss::Refused(_) => {}
     };
     let _: fn(&join::Miss) = cases;
-    let _: fn(&mesh::ticket::Ticket) -> Span = join::bound;
+    let _: fn(&Ticket) -> Span = join::bound;
 }
 
 #[test]

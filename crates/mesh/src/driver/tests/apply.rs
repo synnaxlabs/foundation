@@ -827,12 +827,12 @@ fn an_apply_over_links_of_300_ms_commits_as_each_chunk_ends_within_the_deadline(
 }
 
 // Voter 3 is down. Voter 2 stores chunks for 15 s over links of 300 ms, about one a
-// second, and then its links are cut. With seed 0, its last `Stored` was sent before
+// second, and then its links are cut. With seed 1, its last `Stored` was sent before
 // the cut and comes within 300 ms of it, so its put misses between 10 s and 10.5 s
 // after the cut. A deadline of the whole call would miss at 10 s after its start.
 #[test]
 fn a_voter_that_goes_silent_in_its_put_misses_the_deadline_after_its_last_stored() {
-    let mut cluster = Cluster::new(0);
+    let mut cluster = Cluster::new(1);
     cluster.delay(Span::from_nanos(300 * Span::MILLISECOND.nanos()));
     cluster.start_voter(1);
     cluster.start_voter(2);

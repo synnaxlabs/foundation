@@ -664,6 +664,20 @@ impl Leader {
         sender.finish().unwrap();
     }
 
+    /// Sends node 1 `entries` after the start of the log, with commit `commit`, in one
+    /// message.
+    pub(super) async fn append_entries(&self, entries: Vec<Entry>, commit: u64) {
+        let append = Body::Append {
+            prev: Position::default(),
+            entries,
+            commit,
+        };
+        let append = Message::Raft(proven(2, 1, append)).encode();
+        let mut sender = Self::open(&self.peer, &self.session).await;
+        sender.send(self.peer.block(&append)).await.unwrap();
+        sender.finish().unwrap();
+    }
+
     /// Answers a proposal with the position `at`.
     pub(super) async fn answer(
         &self,

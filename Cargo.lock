@@ -1199,6 +1199,7 @@ dependencies = [
 name = "mesh"
 version = "0.0.0"
 dependencies = [
+ "base64ct",
  "blob",
  "block",
  "clock",

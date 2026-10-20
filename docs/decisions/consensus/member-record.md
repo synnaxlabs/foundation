@@ -409,3 +409,26 @@
   and a late older proposal are no-ops, and the name and the keys of a member never
   change. Approved by `laptop.architect` (2026-10-18T03:29:11Z:
   https://github.com/synnaxlabs/foundation/issues/3115#issuecomment-6245196820).
+  Amended (2026-10-20, PR A of #1157): the text form of a `Ticket`, which an operator
+  carries, is `foundation-ticket-1-` and the URL-safe Base64 (`base64ct`, constant
+  time) of the byte form, with no padding. The byte form is the private key (32
+  bytes), the region prefix behind a length byte, and the voters behind a count of 8
+  little-endian bytes, each as its node key (16 bytes), its public key (32 bytes), and
+  the byte form of its `Addresses`. `Ticket::text` gives the text, and `FromStr` reads
+  it, with any ASCII whitespace at its ends, such as a line end. A read gives
+  `ticket::Unreadable`, which names no part of the text, for another first part,
+  padded or standard Base64, a cut or a byte past the end, no voter, more than 254
+  voters (each voter of both halves of a joint configuration), two voters with one
+  key, and a voter key that is not a valid public key. A read keeps the order of the
+  voters, because a joining node asks them in that order. `Ticket::new` panics on
+  the voters that a read refuses. The text is a secret: it is never in region state,
+  and Foundation never writes it to a file. Lost: a byte form in `mesh` and the text
+  in `ops`, so that two crates know the version of one format; and a `Display` of
+  `Ticket`, so that no format of a struct prints the secret. Plan:
+  https://github.com/synnaxlabs/foundation/issues/1157#issuecomment-6293270267.
+  Approved by `laptop.architect` (2026-10-20T14:33:01Z:
+  https://github.com/synnaxlabs/foundation/issues/1157#issuecomment-6293328111;
+  2026-10-20T15:36:02Z:
+  https://github.com/synnaxlabs/foundation/pull/3611#issuecomment-6294701855;
+  2026-10-20T16:06:59Z:
+  https://github.com/synnaxlabs/foundation/pull/3611#issuecomment-6295368878).
