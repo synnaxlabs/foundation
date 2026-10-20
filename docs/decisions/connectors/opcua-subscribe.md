@@ -73,6 +73,13 @@
   `BadNotImplemented`, which makes the kind poll, as below (`laptop.architect-2`,
   2026-10-20T06:08:01Z,
   https://github.com/synnaxlabs/foundation/pull/3507#issuecomment-6284605117).
+  `subscribe` reads `MaxMonitoredItemsPerCall` in a Read of its own, not with
+  `MaxNodesPerRead` at the connect: before that read, only a Read of one node surely
+  fits the server. Lost: one Read of both limits at the connect, one round trip less
+  at each connect of the default mode (`laptop.architect-2`, 2026-10-20T09:03:12Z,
+  https://github.com/synnaxlabs/foundation/issues/3539#issuecomment-6287411634).
+  Supersedes the one Read of item 1 of
+  https://github.com/synnaxlabs/foundation/pull/2674#issuecomment-6160861895.
   When CreateSubscription or CreateMonitoredItems answers `BadServiceUnsupported` or
   `BadNotImplemented`, as a server of the Nano Embedded Device profile can (OPC UA
   Part 7), the kind closes that session and polls on a new session for the rest of
@@ -91,9 +98,12 @@
   and crate tests run the polled path (`laptop.architect-2`, item 4 of 6279727836,
   approved without its "only" in item 2 of
   https://github.com/synnaxlabs/foundation/pull/3507#issuecomment-6285209512). A ONE
-  NODE test runs the polled path only when it needs a sample at each tick, as a trace
-  of EXIT TIME CHECK or a count that grows does, or when its sink opens after the first
-  value of a node (#3537). It asks for `polled = true` at its call site. Each other
-  ONE NODE test that runs the `opcua` kind runs the subscribed path end to end
+  NODE test runs the polled path only when it needs a sample at each tick (a trace of
+  EXIT TIME CHECK, or a count that grows while its nodes do not change), or, until
+  #3537, when its sink opens after a node that does not change writes its first value.
+  It asks for `polled = true` at its call site (`laptop.architect-2`,
+  2026-10-20T09:01:30Z,
+  https://github.com/synnaxlabs/foundation/issues/3539#issuecomment-6287381254). The
+  other ONE NODE tests that run the `opcua` kind run the subscribed path end to end
   (`laptop.monitor`, kinds d and g of #3507, quoted at 2026-10-20T06:49:37Z in
   https://github.com/synnaxlabs/foundation/pull/3507#issuecomment-6285161214).
