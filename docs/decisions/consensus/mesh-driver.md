@@ -549,12 +549,15 @@
   2026-10-18T08:28:03Z:
   https://github.com/synnaxlabs/foundation/pull/3155#issuecomment-6247634446).
   Amended (2026-10-20, PR 5e of #336): the mesh directory also holds the file `join`,
-  which `join::ask` writes before its first ask (MEMBER RECORD). Its check, version,
-  and frame are those of `founding`, and a body over `change::BYTES_MAX` bytes gives
-  `Error::JoinFile` with no read, as a body of `founding` over `FOUNDING_BYTES_MAX`
-  bytes gives `Error::Unfounded`. A founding never holds a node that joined, so the file
-  stays for the life of the directory: each open of a founding that lacks this node
-  reads it. An `ask` in a directory that holds `founding` gives `Error::Founded`, so a
-  node that opened a region never writes over its join file (`laptop.architect`,
-  2026-10-20T11:14:16Z, item B of
+  which `join::ask` writes before its first ask (MEMBER RECORD). Its check, version, and
+  frame are those of `founding`, and a body over `change::BYTES_MAX` bytes gives
+  `Error::JoinFile` with no read (`laptop.architect`, 2026-10-20T11:50:35Z, item 5 of
+  https://github.com/synnaxlabs/foundation/pull/3571#issuecomment-6290189272), as a body
+  of `founding` over `FOUNDING_BYTES_MAX` bytes gives `Error::Unfounded`
+  (`laptop.architect`, 2026-10-20T12:03:22Z,
+  https://github.com/synnaxlabs/foundation/pull/3571#issuecomment-6290402091). A
+  founding never holds a node that joined, so the file stays for the life of the
+  directory: each open of a founding that lacks this node reads it. An `ask` in a
+  directory that holds `founding` gives `Error::Founded`, so a node that opened a region
+  never writes over its join file (`laptop.architect`, 2026-10-20T11:14:16Z, item B of
   https://github.com/synnaxlabs/foundation/pull/3571#issuecomment-6289593633).

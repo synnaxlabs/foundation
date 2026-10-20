@@ -206,11 +206,12 @@
   admits the stored request and with one that refuses it for its card, its ticket, or
   its status, `ask` writes the request of its card and status over it, at most once in a
   call and durable before the first send, and asks the next round with it, at once. That
-  round is one of the 8, so `bound` holds. This replaces item 3 for that case, because a
-  node that can never join by its ticket is the worse failure. A voter that applied the
-  join admits only the stored request, so the case left is a round in which each voter
-  that applied the join does not admit it, after the card or the status changed
-  (`laptop.architect`, 2026-10-20T12:00:29Z,
+  round is one of the 8, so `bound` holds. This supersedes item 3 of
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6286140973 for that
+  case, because a node that can never join by its ticket is the worse failure. A voter
+  that applied the join admits only the stored request, so the case left is a round in
+  which each voter that applied the join does not admit it, after the card or the status
+  changed (`laptop.architect`, 2026-10-20T12:00:29Z,
   https://github.com/synnaxlabs/foundation/pull/3571#issuecomment-6290352039). An `ask`
   in a mesh directory that holds a founding file gives `Error::Founded`, before it makes
   the directory or reads `join`: the file stays for the life of the directory, and each
