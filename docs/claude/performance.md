@@ -86,3 +86,12 @@ Before you write a hot path, make a back-of-envelope sketch of its network, disk
 memory, and CPU cost, in bandwidth and in latency. Put the sketch in the PR beside the
 six answers (r16 rule 41). A slowdown at or over the cost limit adds the P1 judgment
 beside them.
+
+A plan whose change can reach the cost limit states its trigger, and the architect OKs
+it with the plan: each bench line, the statistic that decides (the p99 for a latency
+target), the commits that the run compares, and the slowdown that adds the judgment,
+which is the cost limit in the unit of the line. The commits are the merge-base and, for
+work that spans PRs, the commit before its first PR, so a speedup that merges between
+them does not hide the cost. The run then decides with no new ruling: under the
+trigger, the PR gives its numbers; at or over it, the PR adds the P1 judgment (#3283,
+#3581).
