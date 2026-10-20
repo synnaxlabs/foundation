@@ -161,6 +161,11 @@ state on `main`.
   after its deadline or replayed after an outage, and any read or write path that does
   not reach `access`, and a subject key of small order (the check must take
   `PublicKey`).
+- A program that connects with no pinned public key trusts the key that the node
+  proves (`sdk::Node::answering`, #3212). At that first connect, a host in the middle
+  can act as the node to the program, but it cannot act on the node as the program: the
+  hello names the public key that the session of the program proved, and the node
+  refuses a hello that names another with `VIA` (SUBJECT PROOF, #3212).
 
 ### Agent host and CLI to `ops`
 

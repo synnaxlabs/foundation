@@ -632,6 +632,7 @@ pub(super) async fn reopen(
         interner,
         tasks,
         node: super::NODE,
+        public_key: crate::net::public_key(&crate::net::HOME),
         time: mesh.clone(),
         entropy: node.entropy(),
         region: None,
