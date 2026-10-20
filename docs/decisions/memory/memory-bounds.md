@@ -104,10 +104,10 @@
   https://github.com/synnaxlabs/foundation/pull/3480#issuecomment-6281613899). The
   member that forwards a write holds the ends and counts of each channel of its open and
   one index, from the find of its home until the stream ends, and its open, encoded, in
-  place of its names until the home gives its places, since a new try of the dial sends
-  it again. It also holds the places of the home, the size of a `Place` for each place
-  that the home counts and the bytes of each message of places after the first, until it
-  sends them to the program (#3104 PR 4a, HUB FORWARD). A write
+  place of its names until the home gives its places, because a new try of the dial
+  sends it again. It also holds the places of the home, the size of a `Place` for each
+  place that the home counts and the bytes of each message of places after the first,
+  until it sends them to the program (#3104 PR 4a, HUB FORWARD). A write
   open is at most `OPEN_BYTES_MAX` (64 KiB), with at least 2 bytes for each channel, and
   each channel adds at most two places, itself and its index, so its ends and counts
   are at most 1,280 KiB, and the budget bounds the places of all write streams of a
