@@ -219,9 +219,11 @@
   decoder, so at most about 67 MB at the receive limit, and past it fails with
   `BadOutOfMemory`, which closes the connection. The arena keeps at most that memory,
   and while an answer decodes, its blocks hold less than 3 times it, about 200 MB. The
-  worst case that the decoder knows, an array of empty `DataValue` values, takes 80 B
-  for each byte, so an answer of it takes about 42 MB and decodes. Lost: a fixed limit
-  of the arena, which lets a small answer take the memory of the largest.
+  worst case that the decoder knows, an array of `Variant` values that each hold an
+  empty `DataValue`, takes 104 B for each byte, so an answer of it takes about 55 MB and
+  decodes. Lost: a fixed limit of the arena, which lets a small answer take the memory
+  of the largest (`laptop.architect-2`, 2026-10-20 02:27 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3462#issuecomment-6281907328).
   `subscribe(nodes, sampling)` asks for a publishing interval of the longer of
   `sampling` and 100 ms, at most 1 min, a keep-alive count of max(1, floor(1 min /
   interval)), and a queue of each item that holds the samples of two revised publishing
