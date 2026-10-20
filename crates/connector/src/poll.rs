@@ -193,9 +193,9 @@ impl Writer {
     }
 
     /// Gives the stamp of a frame of samples whose true mesh time is within `time`, and
-    /// whose values hold until at least `held`, with its error, as [`Stamps::sample`]
-    /// gives them. Each stamp is after the stamp of each frame that this writer wrote
-    /// or stamped before.
+    /// whose values hold until at least `held`, with its error, as
+    /// [`stamp::Stamps::sample`] gives them. Each stamp is after the stamp of each frame
+    /// that this writer wrote or stamped before.
     ///
     /// # Panics
     ///
@@ -267,11 +267,7 @@ impl Writer {
             let channel = channel.unwrap_or_else(|| stamped_index(entry));
             value(values, channel, scalar).write(bytes);
         };
-        let groups = match stamped.write(stamp, &shape.series, fill) {
-            Ok(groups) => groups,
-            Err(stamp::Error::Draft(error)) => return Err(error.into()),
-            Err(stamp::Error::Write(failure)) => return Err(failure.into()),
-        };
+        let groups = stamped.write(stamp, &shape.series, fill)?;
         let (mut wrote, mut gone) = (0, 0);
         for &(group, applied) in groups {
             let n = shape.samples[to_usize(group)];

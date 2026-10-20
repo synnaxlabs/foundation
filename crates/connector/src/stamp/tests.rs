@@ -1,4 +1,3 @@
-use std::convert::Infallible;
 use std::future;
 
 use hub::home::{Outcome, Refusal, order};
@@ -11,7 +10,7 @@ use types::frame::{self, Draft, Form, Label, Path};
 use types::name::Name;
 use types::time::{Interval, Span, Stamp};
 
-use super::{Stamps, twice};
+use super::{Stamps, backwards_again};
 use crate::common::{create_status, env, run_with};
 use crate::{stamp, testing};
 
@@ -331,11 +330,11 @@ async fn open(hub: &hub::Hub, authority: u8, channels: &[&str]) -> Writer {
     hub.writer(config).await.expect("the writer opens")
 }
 
-/// Writes a frame of `channel` 1 ms ahead of the mesh time with a writer that it then
-/// closes, and gives the stamp of that frame.
-async fn write_ahead(hub: &hub::Hub, channel: &str) -> Stamp {
-    let mut rival = open(hub, 1, &[channel]).await;
-    let ahead = rival.now() + Span::MILLISECOND;
+/// Writes a frame of `channel` `ahead` of the mesh time with a writer at authority 2,
+/// over the writers of a test, that it then closes, and gives the stamp of that frame.
+async fn write_ahead(hub: &hub::Hub, channel: &str, ahead: Span) -> Stamp {
+    let mut rival = open(hub, 2, &[channel]).await;
+    let ahead = rival.now() + ahead;
     assert_eq!(put(&mut rival, ahead), None, "the frame ahead applies");
     ahead
 }
@@ -422,7 +421,7 @@ fn groups(writer: &stamp::Writer) -> Vec<u32> {
 #[test]
 fn write_writes_a_frame_refused_as_backwards_again_1_ns_after_the_refusal() {
     let (ahead, (wrote, stamp, fills), groups, next) = with_hub(async |hub| {
-        let ahead = write_ahead(&hub, "a.restarts").await;
+        let ahead = write_ahead(&hub, "a.restarts", Span::MILLISECOND).await;
         let mut writer = stamp::Writer::new(open(&hub, 1, &["a.state"]).await);
         let wrote = write(&mut writer);
         (
@@ -452,7 +451,7 @@ fn write_writes_a_frame_once_when_the_home_applies_it() {
 #[test]
 fn write_writes_again_only_the_series_of_the_group_refused_as_backwards() {
     let (ahead, (wrote, stamp, fills), groups, keys) = with_hub(async |hub| {
-        let ahead = write_ahead(&hub, "a.restarts").await;
+        let ahead = write_ahead(&hub, "a.restarts", Span::MILLISECOND).await;
         let channels = ["a.state", "b.state"];
         let mut writer = stamp::Writer::new(open(&hub, 1, &channels).await);
         let keys: Vec<_> = (writer.hub().set().entries().iter())
@@ -473,6 +472,77 @@ fn write_writes_again_only_the_series_of_the_group_refused_as_backwards() {
     first.sort_unstable_by_key(|&(_, entry)| entry);
     first.push((ahead + Span::from_nanos(1), a));
     assert_eq!(fills, first);
+}
+
+#[test]
+fn write_writes_again_only_the_group_refused_in_this_write() {
+    let (ahead, (wrote, stamp, fills), groups, keys) = with_hub(async |hub| {
+        write_ahead(&hub, "a.restarts", Span::MILLISECOND).await;
+        let channels = ["a.state", "b.state"];
+        let mut writer = stamp::Writer::new(open(&hub, 1, &channels).await);
+        let keys: Vec<_> = (writer.hub().set().entries().iter())
+            .map(|entry| entry.key.as_u128())
+            .collect();
+        let (first, ..) = write(&mut writer);
+        assert!(first.is_ok(), "{first:?}");
+        // After the stamp of the write again of group a.
+        let ahead = write_ahead(&hub, "b.restarts", Span::from_nanos(2_000_000)).await;
+        (ahead, write(&mut writer), groups(&writer), keys)
+    });
+    let at = |key| {
+        keys.iter()
+            .position(|&k| k == key)
+            .expect("the key is in the set")
+    };
+    let (a, b) = (at(101), at(201));
+    let mut applied = vec![(groups[a], true), (groups[b], true)];
+    applied.sort_unstable();
+    assert_eq!(wrote, Ok(applied));
+    let mut second = vec![(stamp, a), (stamp, b)];
+    second.sort_unstable_by_key(|&(_, entry)| entry);
+    second.push((ahead + Span::from_nanos(1), b));
+    assert_eq!(fills, second);
+}
+
+/// The address and the capacity of each buffer of `writer`. A write that grows a
+/// buffer changes them.
+fn buffers(writer: &stamp::Writer) -> [(usize, usize); 4] {
+    [
+        (writer.groups.as_ptr().addr(), writer.groups.capacity()),
+        (
+            writer.backwards.as_ptr().addr(),
+            writer.backwards.capacity(),
+        ),
+        (writer.again.as_ptr().addr(), writer.again.capacity()),
+        (writer.retried.as_ptr().addr(), writer.retried.capacity()),
+    ]
+}
+
+#[test]
+fn write_grows_no_buffer_when_it_writes_again() {
+    let (one, two) = with_hub(async |hub| {
+        write_ahead(&hub, "a.restarts", Span::MILLISECOND).await;
+        let mut writer = stamp::Writer::new(open(&hub, 1, &["a.state"]).await);
+        let before = buffers(&writer);
+        let (wrote, _, fills) = write(&mut writer);
+        assert_eq!(fills.len(), 2, "the frame goes again: {wrote:?}");
+        let one = (before, buffers(&writer));
+        drop(writer);
+        write_ahead(&hub, "a.restarts", Span::from_nanos(2_000_000)).await;
+        let channels = ["a.state", "b.state"];
+        let mut writer = stamp::Writer::new(open(&hub, 1, &channels).await);
+        let before = buffers(&writer);
+        let mut after = Vec::new();
+        for (ahead, channel) in [(4, "b.restarts"), (6, "a.restarts")] {
+            let (wrote, _, fills) = write(&mut writer);
+            assert_eq!(fills.len(), 3, "one group goes again: {wrote:?}");
+            after.push(buffers(&writer));
+            write_ahead(&hub, channel, Span::from_nanos(ahead * 1_000_000)).await;
+        }
+        (one, (before, after))
+    });
+    assert_eq!(one.1, one.0, "one group");
+    assert_eq!(two.1, [two.0; 2], "two groups, refused one at a time");
 }
 
 #[test]
@@ -544,50 +614,13 @@ fn write_gives_the_failure_of_the_hub_when_a_channel_is_removed() {
     assert_eq!(fills, [(stamp, 1)]);
 }
 
-#[test]
-fn twice_gives_the_error_of_the_first_send_with_no_second() {
-    let mut calls = Vec::new();
-    let sent = twice(
-        &mut Stamps::default(),
-        Stamp::from_nanos(5),
-        |stamp, again| {
-            calls.push((stamp, again));
-            Err::<Option<Stamp>, _>("down")
-        },
-    );
-    assert_eq!(sent, Err("down"));
-    assert_eq!(calls, [(Stamp::from_nanos(5), false)]);
-}
-
-#[test]
-fn twice_gives_the_error_of_the_send_again() {
-    let mut calls = Vec::new();
-    let sent = twice(
-        &mut Stamps::default(),
-        Stamp::from_nanos(5),
-        |stamp, again| {
-            calls.push((stamp, again));
-            if again {
-                Err("down")
-            } else {
-                Ok(Some(Stamp::from_nanos(9)))
-            }
-        },
-    );
-    assert_eq!(sent, Err("down"));
-    let (five, ten) = (Stamp::from_nanos(5), Stamp::from_nanos(10));
-    assert_eq!(calls, [(five, false), (ten, true)]);
-}
-
+/// No caller reaches this panic: the two sends of `stamp::Writer::write` run with no
+/// await between them, so no rival writes ahead of the stamp of the write again.
 #[test]
 #[should_panic(expected = "invariant: a frame stamped after \
                            1970-01-01T00:00:00.000000009Z, the last stamp of its \
                            index, is not backwards, but the home gives \
                            1970-01-01T00:00:00.000000012Z as last")]
-fn twice_panics_when_the_frame_written_again_is_backwards() {
-    let sent = twice(&mut Stamps::default(), Stamp::from_nanos(5), |_, again| {
-        let before = if again { 12 } else { 9 };
-        Ok::<_, Infallible>(Some(Stamp::from_nanos(before)))
-    });
-    assert_eq!(sent, Ok(()), "the second refusal panics");
+fn backwards_again_names_both_stamps() {
+    backwards_again(Stamp::from_nanos(9), Stamp::from_nanos(12));
 }

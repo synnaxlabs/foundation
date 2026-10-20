@@ -1180,8 +1180,7 @@ mod tests {
         );
     }
 
-    /// No test of a caller makes the system refuse memory to the pool, so only this
-    /// test sees `Refused` moved to the arm that panics.
+    /// `check_failure` accepts `Removed`, which closes the session.
     #[test]
     fn check_failure_accepts_a_removed_channel() {
         let key = types::channel::Key::from_u128(2);
