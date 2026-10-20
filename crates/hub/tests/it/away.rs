@@ -10,7 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
-use hub::serve;
+use access::proof::Kind;
+use hub::{serve, writer};
 use transport::{Address, Code, Session, Transport};
 use types::authority::Authority;
 use types::frame::{Form, Path};
@@ -730,6 +731,39 @@ fn stops_the_write_as_failed_when_the_home_sends_more_places_than_the_open() {
         refusal: Refusal::Failed,
     };
     assert_eq!(served, [Err(forward), Ok(Got::Ended)]);
+}
+
+/// The member refuses a lease that is not longer than zero before it finds the home,
+/// so the first forward that the home gets is of the next write.
+#[test]
+fn stops_a_write_whose_lease_is_zero_as_malformed_before_the_forward() {
+    let served = away(
+        25,
+        |home| async move {
+            assert_eq!(home.open.lease, None);
+            home.stop(REFUSED);
+        },
+        |mut agent, _| async move {
+            let open = Open {
+                authority: Authority(1),
+                lease: Some(Span::ZERO),
+                channels: vec![name("value")],
+            };
+            let mut stream = agent.open().await;
+            stream.write(&open, Kind::Write, &AGENT).await;
+            assert_eq!(stream.recv().await, reset_with(MALFORMED));
+            let mut stream = agent.write(&["value"]).await;
+            assert_eq!(stream.recv().await, reset_with(REFUSED));
+            super::read::finish(&mut agent).await;
+        },
+    );
+    let lease = home::writer::Error::Lease { span: Span::ZERO };
+    let lease = serve::Error::Writer(Box::new(writer::Error::Home(lease)));
+    let forward = serve::Error::Forward {
+        home: OTHER,
+        refusal: Refusal::Refused,
+    };
+    assert_eq!(served, [Err(lease), Err(forward), Ok(Got::Ended)]);
 }
 
 /// The member sends each message of the program as it came, so a home that takes
