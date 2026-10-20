@@ -823,13 +823,14 @@ MonitoredItems_create_async_handler(UA_Client *client, void *data,
         if(!mon)
             continue;
 
-        /* Delete MonitoredItem if the creation failed */
-        UA_MonitoredItemCreateResult *item = &response->results[i];
+        /* Delete MonitoredItem if the creation failed. A failed service has no
+         * results, so the index waits for the check. */
         if(response->responseHeader.serviceResult != UA_STATUSCODE_GOOD ||
-           item->statusCode != UA_STATUSCODE_GOOD) {
+           response->results[i].statusCode != UA_STATUSCODE_GOOD) {
             MonitoredItem_delete(client, sub, mon);
             continue;
         }
+        UA_MonitoredItemCreateResult *item = &response->results[i];
 
         /* Update the MonitoredItem with the server's response  */
         MonitoredItem_createFinish(client, sub, mon, item);
