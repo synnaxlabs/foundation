@@ -23,7 +23,7 @@ use crate::message::FOUNDING_BYTES_MAX;
 use crate::region::Founding;
 
 /// The name of the founding file in a mesh directory.
-pub(super) const FILE: &str = "founding";
+pub(crate) const FILE: &str = "founding";
 const VERSION: u16 = 1;
 
 /// The founding that the mesh directory `dir` of `files` holds, or `None` when `dir`

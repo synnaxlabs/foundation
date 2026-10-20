@@ -195,6 +195,12 @@ pub enum Error {
         /// The path of the join file.
         path: PathBuf,
     },
+    /// `config.dir` holds a founding file: this node opened a region from it, and asks
+    /// no more.
+    Founded {
+        /// The path of the founding file.
+        path: PathBuf,
+    },
     /// No voter of the ticket admitted this node in the last round of asks.
     Unjoined {
         /// Each voter of the ticket, in its order, with the miss of its last ask.
@@ -335,6 +341,11 @@ impl fmt::Display for Error {
                     path.display()
                 )
             }
+            Self::Founded { path } => write!(
+                f,
+                "{} is there: this node opened a region from it, and asks no more",
+                path.display()
+            ),
             Self::Unjoined { missed } => {
                 f.write_str("no voter of the ticket admitted this node")?;
                 let mut each = missed.iter();

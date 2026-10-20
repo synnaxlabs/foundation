@@ -690,6 +690,53 @@ fn an_ask_by_another_ticket_writes_a_new_request_and_joins() {
     assert_eq!(asked, [refused_by_each(9), Ok(founding_of(&IDS, &IDS))]);
 }
 
+// Each voter refuses the first card, which takes the name of node 1. The second ask
+// has a free name and the same ticket: a voter refuses the stored request, so the ask
+// writes its own over it and joins with that.
+#[test]
+fn an_ask_with_a_free_name_after_a_refused_name_writes_its_request_and_joins() {
+    for seed in 0..2 {
+        let mut cluster = recorded_cluster(seed, &IDS, &[]);
+        let taken = common::signed(JOINER, "plant.node1");
+        let free = common::member(JOINER).card;
+        let asks = vec![
+            (ticket_to(TICKET, &IDS), taken),
+            (ticket_to(TICKET, &IDS), free.clone()),
+        ];
+        let (node, asked) = asks_on(&mut cluster.sim, asks);
+        cluster.run(seconds(60));
+        let asked: Vec<_> = asked.lock().unwrap().drain(..).map(|(a, _)| a).collect();
+        let [first, second] = &asked[..] else {
+            panic!("run {seed}: {asked:?}");
+        };
+        assert!(
+            matches!(first, Err(Error::Unjoined { .. })),
+            "run {seed}: {first:?}"
+        );
+        assert_eq!(*second, Ok(founding_of(&IDS, &IDS)), "run {seed}");
+        let ticket = ticket_to(TICKET, &IDS);
+        let request = region::Request {
+            ticket: ticket.public_key(),
+            admission: ticket.admission(&free),
+            card: free.clone().into(),
+            status: common::names([]),
+        };
+        let left = on(
+            &mut cluster,
+            &node,
+            |node| async move { stored(&node).await },
+        );
+        assert_eq!(left, Ok(Some(request)), "run {seed}");
+        cluster.script(|_| home_to(9));
+        cluster.run(seconds(5));
+        let records = cluster.board().records;
+        for id in IDS {
+            let card = records[&id].get(&JOINER).map(|member| member.card.clone());
+            assert_eq!(card, Some(free.clone()), "run {seed}: node {id}");
+        }
+    }
+}
+
 // No voter of the ticket runs. The file held the request of another public key, and
 // the ask writes its own over it before it asks.
 #[test]
@@ -989,6 +1036,34 @@ fn an_open_of_a_founding_without_this_node_gives_the_error_of_its_join_file() {
     });
     let path = PathBuf::from("join");
     assert_eq!(torn, Err(Error::JoinFile { path }));
+}
+
+// A joined node opened from its directory, which then holds a founding file. An ask
+// there gives the error and leaves the join file.
+#[test]
+fn an_ask_in_a_directory_that_a_joined_node_opened_gives_the_error() {
+    let mut sim = Sim::new(common::simulation(0));
+    let node = sim.node(sim::node::Config::default());
+    let ran = sim.run_on(&node, |node, tasks| async move {
+        write_join(&node, common::member(JOINER).card).await;
+        let request = stored(&node).await;
+        let config = config(&node, &tasks, JOINER, &IDS, &IDS).await;
+        let transport = Rc::clone(&config.transport);
+        drop(Mesh::start(config).await.unwrap());
+        let asking = config_of(&node, transport, ticket_to(TICKET, &IDS));
+        let asked = join::ask(asking).await;
+        (asked, stored(&node).await, request)
+    });
+    let (asked, left, request) = ran.unwrap();
+    let path = PathBuf::from("founding");
+    let text = "founding is there: this node opened a region from it, and asks no more";
+    assert_eq!(
+        asked.as_ref().map_err(ToString::to_string),
+        Err(text.into())
+    );
+    assert_eq!(asked, Err(Error::Founded { path }));
+    assert!(matches!(request, Ok(Some(_))), "{request:?}");
+    assert_eq!(left, request);
 }
 
 /// Starts [`JOINER`] on `node` of `cluster`. With no founding file it asks by ticket

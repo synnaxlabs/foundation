@@ -519,6 +519,7 @@ fn error_has_one_case_for_each_cause_that_a_public_call_gives() {
         | Error::Unjoined { .. }
         | Error::CardFile { .. }
         | Error::JoinFile { .. }
+        | Error::Founded { .. }
         | Error::Soon => {}
     };
     let _: fn(&Error) = cases;

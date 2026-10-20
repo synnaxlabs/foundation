@@ -38,6 +38,7 @@ use crate::message::{self, Message};
 use crate::refusal::Refusal;
 use crate::region::{self, Refused, Request};
 use bound::Bound;
+pub(crate) use founding::FILE as FOUNDING;
 pub use founding::founding;
 use send::Senders;
 use turn::Turn;

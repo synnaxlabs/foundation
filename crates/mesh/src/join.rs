@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use block::{Block, Pool};
 use env::clock::Clock;
-use env::files::{Files, Mode};
+use env::files::{self, Files, Mode};
 use transport::stream::Receiver;
 use transport::{Class, Code, Transport};
 use types::time::{Monotonic, Span};
@@ -84,10 +84,14 @@ pub fn bound(ticket: &Ticket) -> Span {
 /// `config.transport` proves, `ask` sends that request, and does not send
 /// `config.card`. Else it writes the new request over it. So a node that stops after
 /// a voter applied its join, and before the answer came, is admitted at the next
-/// call.
+/// call. When a voter refuses the stored request for its card, its ticket, or its
+/// status, `ask` writes the request of `config.card` and `config.status` over it and
+/// asks with that. The file stays for the life of `config.dir`: each
+/// [`Mesh::open`](crate::Mesh::open) of a founding that lacks this node reads it.
 ///
 /// # Errors
 ///
+/// - [`Error::Founded`] when `config.dir` holds a founding file.
 /// - [`Error::Unjoined`] when no voter admitted the node in the last round.
 /// - [`Error::JoinFile`] when `config.dir` holds a join file that does not read back
 ///   whole.
@@ -115,32 +119,39 @@ pub async fn ask(config: Config) -> Result<region::Founding, Error> {
         card.card().public_key,
         "invariant: the transport proves the public key of the card"
     );
+    let founded = dir.join(crate::driver::FOUNDING);
+    match files.open(&founded, Mode::Read).await {
+        Ok(opened) => {
+            opened.close().await;
+            return Err(Error::Founded { path: founded });
+        }
+        Err(files::Error::NotFound { .. }) => {}
+        Err(error) => return Err(Error::Files(error)),
+    }
     let blocks = Blocks::new(Rc::clone(&pool)).map_err(Error::Pool)?;
     file::durable(&files, &dir).await?;
+    let fresh = Request {
+        ticket: ticket.public_key(),
+        admission: ticket.admission(&card),
+        card: card.into(),
+        status,
+    };
+    // The request that a refusal of the stored one writes over it.
+    let mut later = None;
     let request = match file::read(&files, &dir, &blocks, Mode::Write).await? {
         Some(stored)
-            if stored.ticket == ticket.public_key()
-                && stored.card.card.public_key == own =>
+            if stored.ticket == fresh.ticket && stored.card.card.public_key == own =>
         {
+            later = Some(fresh).filter(|fresh| *fresh != stored);
             stored
         }
         _ => {
-            let request = Request {
-                ticket: ticket.public_key(),
-                admission: ticket.admission(&card),
-                card: card.into(),
-                status,
-            };
-            file::write(&files, &dir, &blocks, &request).await?;
-            request
+            file::write(&files, &dir, &blocks, &fresh).await?;
+            fresh
         }
     };
-    let join = Message::Join {
-        request: Box::new(request),
-    };
-    let blocks = [header(&pool), pool.copy(&join.encode())];
-    let [header, join] = blocks.map(|block| block.map_err(Error::Pool));
-    let (header, join) = (header?, join?);
+    let header = header(&pool).map_err(Error::Pool)?;
+    let mut join = encoded(&pool, request)?;
     let mut missed = Vec::new();
     for round in 0..ROUNDS {
         if round > 0 {
@@ -149,13 +160,26 @@ pub async fn ask(config: Config) -> Result<region::Founding, Error> {
         missed.clear();
         for voter in ticket.voters() {
             let asked = ask_voter(&clock, &transport, voter, [&header, &join]).await;
-            match asked {
+            let miss = match asked {
                 Ok(founding) => return Ok(founding),
-                Err(miss) => missed.push((voter.key, miss)),
+                Err(miss) => miss,
+            };
+            if let (Miss::Refused(_), Some(fresh)) = (&miss, later.take()) {
+                file::write(&files, &dir, &blocks, &fresh).await?;
+                join = encoded(&pool, fresh)?;
             }
+            missed.push((voter.key, miss));
         }
     }
     Err(Error::Unjoined { missed })
+}
+
+// The join message of `request`, in a block of `pool`.
+fn encoded(pool: &Pool, request: Request) -> Result<Block, Error> {
+    let join = Message::Join {
+        request: Box::new(request),
+    };
+    pool.copy(&join.encode()).map_err(Error::Pool)
 }
 
 // Sends the header and the join on a new stream to `voter`, and reads the answer.
