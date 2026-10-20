@@ -1,7 +1,7 @@
 //! Tests of `join::ask` by node 5, against the voters of a cluster or a voter that
 //! sends scripted answers.
 
-use env::files::Mode;
+use env::files::{self, Mode};
 
 use super::serve::MALFORMED;
 use super::*;
@@ -792,6 +792,126 @@ fn ask_gives_the_error_of_a_join_file_that_does_not_read_back_whole() {
     }
 }
 
+/// Writes `body` in the frame of `format` as the join file of `node`.
+async fn write_framed(node: &sim::node::Node, format: u16, body: &[u8]) {
+    let blocks = crate::file::Blocks::new(create_pool()).unwrap();
+    let files = node.files();
+    let written =
+        crate::file::replace(&files, Path::new(""), "join", &blocks, format, body);
+    written.await.unwrap();
+}
+
+// No voter of the ticket runs, so a request that reads back is unjoined.
+#[test]
+fn ask_gives_the_error_of_a_join_file_of_another_format_or_with_extra_bytes() {
+    for (format, extra) in [(1, 0), (2, 0), (1, 1)] {
+        solo(move |node, tasks| async move {
+            let transport = transport_of(&node, &tasks, JOINER);
+            let config = config_of(&node, transport, ticket_to(TICKET, &[1]));
+            let mut body = Vec::new();
+            request_of(&config).encode(&mut body);
+            body.extend(std::iter::repeat_n(0, extra));
+            write_framed(&node, format, &body).await;
+            let asked = join::ask(config).await;
+            if (format, extra) == (1, 0) {
+                assert!(matches!(asked, Err(Error::Unjoined { .. })), "{asked:?}");
+            } else {
+                let path = PathBuf::from("join");
+                assert_eq!(asked, Err(Error::JoinFile { path }), "{format}, {extra}");
+            }
+        });
+    }
+}
+
+// A join file whose body is over the most bytes of a change is not read, so a pool
+// with no block does not fail it. One at the most is read.
+#[test]
+fn ask_reads_no_join_file_whose_body_is_over_the_most_bytes_of_a_change() {
+    for len in [crate::change::BYTES_MAX + 1, crate::change::BYTES_MAX] {
+        solo(move |node, tasks| async move {
+            write_framed(&node, 1, &vec![0; len]).await;
+            let transport = transport_of(&node, &tasks, JOINER);
+            let config = config_of(&node, transport, ticket_to(TICKET, &[1]));
+            let held = fill(&config.pool);
+            let asked = join::ask(config).await;
+            drop(held);
+            let expected = if len > crate::change::BYTES_MAX {
+                let path = PathBuf::from("join");
+                Error::JoinFile { path }
+            } else {
+                exhausted(crate::file::frame(1, &vec![0; len]).len())
+            };
+            assert_eq!(asked, Err(expected), "{len}");
+        });
+    }
+}
+
+// An ask in a new directory, then a power cut: the directory and its join file stay.
+#[test]
+fn an_ask_in_a_new_directory_leaves_it_after_a_power_cut() {
+    for seed in 0..16 {
+        let mut sim = Sim::new(common::simulation(seed));
+        let node = sim.node(sim::node::Config::default());
+        let ran = sim.run_on(&node, |node, tasks| async move {
+            let transport = transport_of(&node, &tasks, JOINER);
+            let config = join::Config {
+                dir: PathBuf::from("mesh"),
+                ..config_of(&node, transport, ticket_to(TICKET, &[1]))
+            };
+            let request = request_of(&config);
+            let asked = join::ask(config).await;
+            assert!(matches!(asked, Err(Error::Unjoined { .. })), "{asked:?}");
+            request
+        });
+        let request = ran.unwrap();
+        sim.crash(&node, Crash::Power);
+        let left = sim.run_on(&node, |node, _| async move {
+            let blocks = crate::file::Blocks::new(create_pool()).unwrap();
+            let files = node.files();
+            join::file::read(&files, Path::new("mesh"), &blocks, Mode::Read).await
+        });
+        assert_eq!(left.unwrap(), Ok(Some(request)), "run {seed}");
+    }
+}
+
+// The file holds the request of ticket 8. An ask by ticket 9 drops at one of 40 times
+// in its first 200 us, then an ask by ticket 8 leaves a request of ticket 8 there.
+#[test]
+fn an_ask_after_a_dropped_ask_by_another_ticket_keeps_its_request() {
+    let mut dropped = 0_usize;
+    for step in 0..40_i64 {
+        let mut sim = Sim::new(common::simulation(0));
+        let node = sim.node(sim::node::Config::default());
+        let ran = sim.run_on(&node, move |node, tasks| async move {
+            let transport = transport_of(&node, &tasks, JOINER);
+            let config =
+                || config_of(&node, Rc::clone(&transport), ticket_to(TICKET, &[1]));
+            let request = request_of(&config());
+            write_framed(&node, 1, &{
+                let mut body = Vec::new();
+                request.encode(&mut body);
+                body
+            })
+            .await;
+            let other = config_of(&node, Rc::clone(&transport), ticket_to(9, &[1]));
+            let span = Span::from_nanos(step.saturating_mul(5_000));
+            let ended = within(&node.clock(), span, join::ask(other))
+                .await
+                .is_some();
+            let asked = join::ask(config()).await;
+            (ended, asked, stored(&node).await, request)
+        });
+        let (ended, asked, left, request) = ran.unwrap();
+        dropped = dropped.saturating_add(usize::from(!ended));
+        assert!(
+            matches!(asked, Err(Error::Unjoined { .. })),
+            "{step}: {asked:?}"
+        );
+        assert_eq!(left, Ok(Some(request)), "step {step}");
+    }
+    assert_ne!(dropped, 0, "no ask dropped");
+}
+
 /// What `body` gives on a new shard of `node`, which runs for 1 s of `cluster`.
 fn on<T: Send + 'static, F: Future<Output = T> + 'static>(
     cluster: &mut Cluster,
@@ -967,8 +1087,8 @@ fn an_ask_that_joins_leaves_its_request_after_a_power_cut() {
     }
 }
 
-/// What [`Mesh::start`] of [`JOINER`] with the founding of [`IDS`] gives, after
-/// `before` ran on its node.
+/// What [`Mesh::open`] of [`JOINER`] with the founding of [`IDS`] gives, after `before`
+/// ran on its node.
 #[expect(clippy::unwrap_in_result, reason = "a test may panic")]
 fn open_joiner<F: Future<Output = ()> + 'static>(
     before: impl FnOnce(sim::node::Node) -> F + Send + 'static,
@@ -978,7 +1098,7 @@ fn open_joiner<F: Future<Output = ()> + 'static>(
     sim.run_on(&node, |node, tasks| async move {
         before(node.clone()).await;
         let config = config(&node, &tasks, JOINER, &IDS, &IDS).await;
-        let mesh = Mesh::start(config).await?;
+        let mesh = Mesh::open(config).await?;
         Ok(mesh.member(key(JOINER)))
     })
     .unwrap()
@@ -1066,6 +1186,38 @@ fn an_ask_in_a_directory_that_a_joined_node_opened_gives_the_error() {
     assert_eq!(left, request);
 }
 
+#[test]
+fn an_open_of_a_founding_without_this_node_gives_the_error_of_a_failed_join_file_call()
+{
+    for operation in [Operation::Open, Operation::ReadAt] {
+        let failed = open_joiner(move |node| async move {
+            write_join(&node, common::member(JOINER).card).await;
+            node.fail_file(Path::new("join"), operation);
+        });
+        let path = PathBuf::from("join");
+        let cause = files::Error::Io {
+            path,
+            operation,
+            code: 5,
+        };
+        assert_eq!(failed, Err(Error::Files(cause)), "{operation}");
+    }
+}
+
+#[test]
+fn an_open_of_a_founding_without_this_node_gives_the_pool_error_of_its_join_file() {
+    solo(|node, tasks| async move {
+        write_join(&node, common::member(JOINER).card).await;
+        let mut body = Vec::new();
+        stored(&node).await.unwrap().unwrap().encode(&mut body);
+        let config = config(&node, &tasks, JOINER, &IDS, &IDS).await;
+        let held = fill(&config.pool);
+        let opened = Mesh::open(config).await.err();
+        drop(held);
+        assert_eq!(opened, Some(exhausted(crate::file::frame(1, &body).len())));
+    });
+}
+
 /// Starts [`JOINER`] on `node` of `cluster`. With no founding file it asks by ticket
 /// 8 first. It opens with the founding, and puts what it applies on the board.
 fn start_joiner(cluster: &Cluster, node: &sim::node::Node) {
@@ -1114,10 +1266,9 @@ fn joined_cluster(seed: u64) -> (Cluster, sim::node::Node, u8) {
     (cluster, joiner, leader)
 }
 
-// The node becomes a voter when it appends the voters entry, before it applies its
-// own join. The node calls each millisecond while it is not a voter, so a call comes
-// in that gap: it waits until the join applies, then proposes the card of the join
-// with the new addresses.
+// The node calls each millisecond while it is not a voter. Its join applies before the
+// voters entry comes, so its first call as a voter proposes the card of the join with
+// the new addresses.
 #[test]
 fn a_node_that_joins_and_becomes_a_voter_sets_its_addresses() {
     for seed in 0..4 {
@@ -1174,6 +1325,67 @@ fn a_node_that_joins_and_becomes_a_voter_sets_its_addresses() {
         };
         let moved = moved.lock().unwrap().take();
         assert_eq!(moved, Some((Ok(()), card)), "run {seed}");
+    }
+}
+
+// The node joins and becomes a voter, then restarts. Its log makes it a voter at the
+// open, before it applies its own join, so a call right after the open waits for the
+// join and then proposes the card with the new addresses.
+#[test]
+fn a_joined_voter_that_restarts_sets_its_addresses() {
+    for seed in 0..4 {
+        let mut cluster = recorded_cluster(seed, &IDS, &[]);
+        let joiner = cluster.sim.node(sim::node::Config::default());
+        start_joiner(&cluster, &joiner);
+        cluster.run(seconds(10));
+        let leader = *cluster.board.lock().unwrap().led.last().unwrap();
+        let voters = [1, 2, 3, JOINER].into();
+        cluster
+            .board
+            .lock()
+            .unwrap()
+            .configurations
+            .insert(leader, voters);
+        cluster.run(seconds(10));
+        cluster.sim.crash(&joiner, Crash::Process);
+        let at = SocketAddr::new(Ipv4Addr::new(10, 0, 9, JOINER).into(), PORT);
+        let addresses = card::addresses::Addresses::new(vec![Address::Udp(at)]);
+        let addresses = addresses.unwrap();
+        let (node, moving) = (joiner.clone(), addresses.clone());
+        let moved = Arc::new(Mutex::new(None));
+        let slot = Arc::clone(&moved);
+        let board = Arc::clone(&cluster.board);
+        let main = move |tasks: Tasks| async move {
+            let base =
+                config_at(&node, &tasks, JOINER, PORT, BYTES_MAX, &[], &[]).await;
+            let transport = Rc::clone(&base.transport);
+            let pool = Rc::clone(&base.pool);
+            let stored = founding(&base.files, &base.dir, pool).await.unwrap();
+            let founding = stored.unwrap();
+            let mesh = Mesh::open(Config { founding, ..base }).await.unwrap();
+            let member = mesh.member(key(JOINER)).is_some();
+            let (serving, streams) = (mesh.clone(), tasks.clone());
+            tasks.spawn(async move {
+                accept(serving, transport, streams, JOINER, board).await;
+            });
+            let result = mesh.set_addresses(moving.clone()).await;
+            let card = mesh.member(key(JOINER)).map(|own| own.card.card().clone());
+            *slot.lock().unwrap() = Some((member, result, card));
+            std::future::pending::<()>().await;
+        };
+        let config = env::shards::Config {
+            name: "joiner".into(),
+            core: None,
+        };
+        drop(joiner.shards().start(config, main).unwrap());
+        cluster.run(seconds(20));
+        let card = card::Card {
+            addresses,
+            version: 2,
+            ..common::member(JOINER).card.card().clone()
+        };
+        let moved = moved.lock().unwrap().take();
+        assert_eq!(moved, Some((false, Ok(()), Some(card))), "run {seed}");
     }
 }
 
