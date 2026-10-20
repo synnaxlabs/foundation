@@ -190,8 +190,8 @@
   A crash before the rename can lose an old request, but `ask` writes over a request
   only when its ticket or key is not that of the call, or a voter refuses it.
   `config.founding.members` can lack this node when `config.dir` holds the join file of
-  this node: the node opens with no member record of its own, and its log alone makes it
-  a voter. Its member record comes when it applies its join (`laptop.architect`,
+  this node: the node opens with no member record of its own, and only its log can make
+  it a voter. Its member record comes when it applies its join (`laptop.architect`,
   2026-10-20T07:51:19Z, items 3 to 5 of
   https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6286140973; the
   surface and its condition 1: 2026-10-20T09:51:13Z,
