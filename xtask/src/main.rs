@@ -894,7 +894,10 @@ mod tests {
                 "        run: >-",
                 "          cargo xtask test nextest ${{ join(matrix.crates, ' ') }}",
                 "          ${{ join(matrix.untested, ' ') }} --all-features",
-                "          -- ${{ join(matrix.tests, ' ') }}",
+                concat!(
+                    "          --config-file .github/nextest.toml",
+                    " -- ${{ join(matrix.tests, ' ') }}",
+                ),
             ]
         );
         assert_eq!(
@@ -924,6 +927,27 @@ mod tests {
                 "          cargo xtask test nextest || failed=1",
                 "          cargo xtask test serial || failed=1",
                 "          exit \"$failed\"",
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_runs_the_tests_of_program_one_at_a_time() {
+        let config =
+            std::fs::read_to_string(fixture().join("../../.github/nextest.toml"))
+                .unwrap();
+        let config: Vec<&str> = (config.lines())
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect();
+        assert_eq!(
+            config,
+            [
+                "[test-groups]",
+                "program = { max-threads = 1 }",
+                "[[profile.default.overrides]]",
+                "platform = \"cfg(windows)\"",
+                "filter = \"package(program) & kind(test)\"",
+                "test-group = \"program\"",
             ]
         );
     }
