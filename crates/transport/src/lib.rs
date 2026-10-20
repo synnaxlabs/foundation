@@ -242,8 +242,10 @@ impl Transport {
     }
 
     /// Waits for the next new session: one that a dial on this transport made, or
-    /// one that a peer opened and the node routed to this shard. Each comes once.
-    /// The peer has completed the handshake. The caller decides whether to admit it,
+    /// one that a peer opened and the node routed to this shard. Each comes once. A
+    /// session that a peer opened and that loses to a dial of this node, as
+    /// [`Transport::dial`] states, closes with `Code(0)` and never comes. The peer
+    /// has completed the handshake. The caller decides whether to admit it,
     /// closes it if not, and takes the streams that the peer opens on it. Handshakes
     /// that fail never reach the caller.
     ///

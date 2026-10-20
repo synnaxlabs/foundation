@@ -1304,13 +1304,10 @@ fn a_reader_whose_home_closes_three_sessions_with_code_0_gets_transport() {
     );
 }
 
-#[test]
-fn a_reader_whose_session_loses_the_tie_break_to_the_home_gets_each_frame() {
-    let link = sim::link::Config {
-        delay: Span::from_nanos(20 * Span::MILLISECOND.nanos()),
-        ..sim::link::Config::default()
-    };
-    for seed in [1, 9] {
+/// For each of `seeds`, the home dials the reader once the reader opens, so each node
+/// dials the other on `link`, and the reader still gets each frame.
+fn tie_break(link: sim::link::Config, seeds: &[u64]) {
+    for &seed in seeds {
         remote(
             seed,
             link,
@@ -1335,6 +1332,15 @@ fn a_reader_whose_session_loses_the_tie_break_to_the_home_gets_each_frame() {
     }
 }
 
+#[test]
+fn a_reader_whose_session_loses_the_tie_break_to_the_home_gets_each_frame() {
+    let link = sim::link::Config {
+        delay: Span::from_nanos(20 * Span::MILLISECOND.nanos()),
+        ..sim::link::Config::default()
+    };
+    tie_break(link, &[1, 9]);
+}
+
 // The home's dial wins at the home and closes the reader's first session. The
 // reader's node does not have the home's session yet (a lost datagram), so the second
 // try dials a third session, which the home's session then also beats.
@@ -1345,26 +1351,21 @@ fn a_reader_whose_session_loses_the_tie_break_on_a_lossy_link_gets_each_frame() 
         loss: 0.2,
         ..sim::link::Config::default()
     };
-    remote(
-        3,
-        link,
-        |node, tasks, transport, steps| async move {
-            until(&node.clock(), &steps.opening).await;
-            let at = [steps.reader.expect("the reader's address")];
-            let session = transport.dial(public_key(&HOME), &at);
-            let session = session.await.expect("dials");
-            let kept = Arc::clone(&steps);
-            hub_home(node, tasks, transport, steps, |test| {
-                write_three(test, kept)
-            })
-            .await;
-            drop(session);
-        },
-        |test, steps| async move {
-            steps.opening.store(true, Ordering::Relaxed);
-            read_three(test, steps).await;
-        },
-    );
+    tie_break(link, &[3]);
+}
+
+// The home's dial completes first, as the client of its handshake, while it holds
+// the reader's session. The home closes the held session only once the reader
+// answers a ping on the home's session, so a loss of each close leaves no reset.
+#[test]
+fn a_reader_whose_held_session_closes_on_a_link_of_loss_0_4_gets_no_reset() {
+    let link = sim::link::Config {
+        delay: Span::from_nanos(20 * Span::MILLISECOND.nanos()),
+        loss: 0.4,
+        ..sim::link::Config::default()
+    };
+    // Each seed failed with a reset when the home closed the held session at once.
+    tie_break(link, &[95, 148, 161, 162, 287, 369, 374, 376]);
 }
 
 /// `Ok` with the output of `a` when it is done first, else `Err` with that of `b`.
