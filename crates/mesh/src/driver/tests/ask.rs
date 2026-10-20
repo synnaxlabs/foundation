@@ -228,6 +228,7 @@ fn near(took: Span, at: Span) -> bool {
 
 /// What a scripted voter sends on each join stream, after it read the request.
 struct Script {
+    /// The messages of the reply half. An empty one resets the half with code 7.
     messages: Vec<Vec<u8>>,
     /// The time before each message.
     gap: Span,
@@ -277,6 +278,10 @@ fn scripted(script: Script) -> Scripted {
                 let mut sender = incoming.sender.unwrap();
                 for message in &script.messages {
                     node.clock().sleep(script.gap).await;
+                    if message.is_empty() {
+                        sender.reset(transport::Code(7));
+                        return;
+                    }
                     if sender.send(pool.copy(message).unwrap()).await.is_err() {
                         break;
                     }
@@ -409,14 +414,18 @@ fn ask_gives_the_miss_of_each_refusal() {
 }
 
 #[test]
-fn ask_misses_a_voter_that_holds_its_answer_past_the_deadline() {
-    for messages in [vec![], vec![joined(4)], vec![joined(8), part(&[1; 4])]] {
+fn ask_misses_a_voter_that_holds_its_answer_or_founding_past_the_deadline() {
+    for (messages, miss) in [
+        (vec![], Miss::Deadline),
+        (vec![joined(4)], Miss::Slow),
+        (vec![joined(8), part(&[1; 4])], Miss::Slow),
+    ] {
         let (asked, took, finished) = scripted(Script {
             messages,
             gap: Span::ZERO,
             hold: seconds(1000),
         });
-        assert_eq!(asked, unjoined_by(Miss::Deadline));
+        assert_eq!(asked, unjoined_by(miss));
         assert!(near(took, seconds(87)), "{took}");
         assert_eq!(finished, []);
     }
@@ -432,27 +441,47 @@ fn ask_misses_a_founding_that_comes_slower_than_100_kib_each_second() {
         gap: seconds(9),
         hold: seconds(1000),
     });
-    assert_eq!(asked, unjoined_by(Miss::Deadline));
+    assert_eq!(asked, unjoined_by(Miss::Slow));
     let at = Span::from_nanos((8 * 29_240 + 7_000) * Span::MILLISECOND.nanos());
+    assert!(near(took, at), "{took}");
+}
+
+// 614,400 bytes have 16 s from their `Joined` at 1.5 s, and the last part comes at
+// 16.5 s, so the end of the half has 1 s.
+#[test]
+fn ask_misses_a_founding_whose_half_does_not_end_within_its_transfer() {
+    let mut messages = vec![joined(614_400)];
+    messages.extend((0..10).map(|_| part(&vec![1; 61_440])));
+    let (asked, took, _) = scripted(Script {
+        messages,
+        gap: Span::from_nanos(1_500 * Span::MILLISECOND.nanos()),
+        hold: seconds(1000),
+    });
+    assert_eq!(asked, unjoined_by(Miss::Slow));
+    let at = Span::from_nanos((8 * 17_500 + 7_000) * Span::MILLISECOND.nanos());
     assert!(near(took, at), "{took}");
 }
 
 // The founding of 1 MiB has 20.24 s, but each message only 10 s after the one before.
 #[test]
 fn ask_misses_a_founding_whose_voter_stops_sending_after_10_s() {
-    let (asked, took, _) = scripted(Script {
-        messages: vec![joined(1 << 20), part(&[1])],
-        gap: Span::ZERO,
-        hold: seconds(1000),
-    });
-    assert_eq!(asked, unjoined_by(Miss::Deadline));
-    assert!(near(took, seconds(87)), "{took}");
+    for messages in [vec![joined(1 << 20)], vec![joined(1 << 20), part(&[1])]] {
+        let (asked, took, _) = scripted(Script {
+            messages,
+            gap: Span::ZERO,
+            hold: seconds(1000),
+        });
+        assert_eq!(asked, unjoined_by(Miss::Slow));
+        assert!(near(took, seconds(87)), "{took}");
+    }
 }
 
 // The refusal comes at 9 s, and its half has not ended at 10 s.
 #[test]
 fn a_refusal_whose_half_does_not_end_in_time_gives_its_miss_and_stops_the_half() {
-    let stopped = Err(transport::Error::Stopped { code: MALFORMED });
+    let stopped = Err(transport::Error::Stopped {
+        code: transport::Code(0),
+    });
     for (refusal, miss) in [
         (Refusal::Contested, Miss::Contested),
         (Refusal::Unsynced, Miss::Unsynced),
@@ -469,6 +498,16 @@ fn a_refusal_whose_half_does_not_end_in_time_gives_its_miss_and_stops_the_half()
 }
 
 #[test]
+fn a_refusal_whose_half_resets_gives_its_miss() {
+    let (asked, _, _) = scripted(Script {
+        messages: vec![unjoined(Refusal::Contested), vec![]],
+        gap: seconds(1),
+        hold: Span::ZERO,
+    });
+    assert_eq!(asked, unjoined_by(Miss::Contested));
+}
+
+#[test]
 fn the_text_of_each_miss_names_its_cause() {
     let unknown = region::Refused::Unknown {
         public_key: public(9),
@@ -478,7 +517,8 @@ fn the_text_of_each_miss_names_its_cause() {
             Miss::Stream(transport::Error::TimedOut),
             format!("the stream failed: {}", transport::Error::TimedOut),
         ),
-        (Miss::Deadline, "no answer came within its deadline".into()),
+        (Miss::Deadline, "no answer came within 10 s".into()),
+        (Miss::Slow, "the founding came slower than 100 KiB/s".into()),
         (
             Miss::Malformed,
             "the answer is not one of a join stream".into(),

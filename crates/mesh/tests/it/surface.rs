@@ -543,6 +543,7 @@ fn ask_takes_the_parts_of_a_join_and_names_each_miss() {
     let cases = |miss: &join::Miss| match miss {
         join::Miss::Stream(_)
         | join::Miss::Deadline
+        | join::Miss::Slow
         | join::Miss::Malformed
         | join::Miss::Uncommitted
         | join::Miss::Unsynced

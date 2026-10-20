@@ -25,9 +25,8 @@ const PAUSE: Span = Span::SECOND;
 /// The most time that the dial of a voter and its answer take, and that each message
 /// of a founding takes after the one before it.
 const DEADLINE: Span = Span::from_nanos(10 * Span::SECOND.nanos());
-/// The least rate, in bytes each second, at which a founding comes: the rate that the
-/// chunk puts of a peer assume.
-const RATE: i64 = 100 << 10;
+/// The least rate at which a founding must come.
+const RATE_BYTES_PER_S: i64 = 100 << 10;
 /// The code of a reply half that carried a message that a join stream does not carry.
 const MALFORMED: Code = Code(wire::header::MALFORMED);
 
@@ -148,13 +147,9 @@ async fn ask_voter(
         Some(Message::Joined { bytes }) => founding(clock, receiver, bytes).await,
         Some(Message::Unjoined { refusal }) => {
             // The answer came, so only a message after it hides the refusal.
-            match before(clock, end, receiver.recv()).await {
-                Some(Ok(Some(_))) => {
-                    receiver.stop(MALFORMED);
-                    return Err(Miss::Malformed);
-                }
-                None => receiver.stop(MALFORMED),
-                Some(Ok(None) | Err(_)) => {}
+            if let Some(Ok(Some(_))) = before(clock, end, receiver.recv()).await {
+                receiver.stop(MALFORMED);
+                return Err(Miss::Malformed);
             }
             Err(Miss::from(refusal))
         }
@@ -166,21 +161,23 @@ async fn ask_voter(
 }
 
 // Reads the founding of `bytes` bytes in parts, each a `Founding` that is not empty,
-// then the end of the reply half, all within 10 s + `bytes` / `RATE`.
+// then the end of the reply half, all within `transfer(bytes)`, and each within 10 s
+// of the one before it.
 async fn founding(
     clock: &Clock,
     mut receiver: Receiver,
     bytes: usize,
 ) -> Result<region::Founding, Miss> {
     let end = after(clock, transfer(bytes));
+    let next = || end.min(after(clock, DEADLINE));
     let mut body = Vec::new();
     while body.len() < bytes {
-        let next = before(clock, end, receiver.recv()).await;
-        let next = next.ok_or(Miss::Deadline)?.map_err(Miss::Stream)?;
-        let Some(next) = next else {
+        let part = before(clock, next(), receiver.recv()).await;
+        let part = part.ok_or(Miss::Slow)?.map_err(Miss::Stream)?;
+        let Some(part) = part else {
             return Err(Miss::Malformed);
         };
-        match Message::decode(&next) {
+        match Message::decode(&part) {
             Some(Message::Founding { part })
                 if !part.is_empty()
                     && (body.len().checked_add(part.len()))
@@ -194,8 +191,8 @@ async fn founding(
             }
         }
     }
-    let next = before(clock, end, receiver.recv()).await;
-    if next.ok_or(Miss::Deadline)?.map_err(Miss::Stream)?.is_some() {
+    let last = before(clock, next(), receiver.recv()).await;
+    if last.ok_or(Miss::Slow)?.map_err(Miss::Stream)?.is_some() {
         receiver.stop(MALFORMED);
         return Err(Miss::Malformed);
     }
@@ -203,29 +200,28 @@ async fn founding(
 }
 
 // The most time that a founding of `bytes` and the end of its half take: 10 s, and the
-// time of `bytes` at `RATE`.
+// time of `bytes` at `RATE_BYTES_PER_S`.
 fn transfer(bytes: usize) -> Span {
-    let bytes = i64::try_from(bytes).unwrap_or(i64::MAX);
-    let nanos = bytes
-        .saturating_mul(Span::SECOND.nanos())
-        .saturating_div(RATE);
-    Span::from_nanos(nanos.saturating_add(DEADLINE.nanos()))
+    let bytes = i64::try_from(bytes).expect("invariant: a founding is at most 64 MiB");
+    let nanos = bytes.saturating_mul(Span::SECOND.nanos()) / RATE_BYTES_PER_S;
+    Span::from_nanos(DEADLINE.nanos().saturating_add(nanos))
 }
 
 // The time `span` after now.
 fn after(clock: &Clock, span: Span) -> Monotonic {
-    Monotonic(clock.now().0.saturating_add(span.nanos().unsigned_abs()))
+    let end = clock.now().checked_add(span);
+    end.expect("invariant: a deadline is far from the end of the clock")
 }
 
-// The output of `future`, or `None` when `end` or 10 s from now passes first.
+// The output of `future`, or `None` when `end` passes first.
 async fn before<F: Future>(
     clock: &Clock,
     end: Monotonic,
     future: F,
 ) -> Option<F::Output> {
-    let left = i64::try_from(end.0.saturating_sub(clock.now().0));
-    let left = left.map_or(DEADLINE, Span::from_nanos).min(DEADLINE);
-    within(clock, left, future).await
+    let left = end.0.saturating_sub(clock.now().0);
+    let left = i64::try_from(left).expect("invariant: an end is at most 665.36 s away");
+    within(clock, Span::from_nanos(left), future).await
 }
 
 /// Why one ask of a voter gave no founding.
@@ -233,9 +229,13 @@ async fn before<F: Future>(
 pub enum Miss {
     /// The dial or the stream failed.
     Stream(transport::Error),
-    /// The dial, an answer, or the end of the reply half did not come within its
-    /// deadline.
+    /// The dial, the answer, or the end of the reply half of a refusal did not come
+    /// within 10 s.
     Deadline,
+    /// After `Joined`, the founding or the end of the reply half did not come within
+    /// 10 s + its bytes / (100 KiB/s), or a message did not come within 10 s of the one
+    /// before it.
+    Slow,
     /// The answer is not one that a join stream carries. The reply half stopped
     /// with code 2, or had ended.
     Malformed,
@@ -271,7 +271,8 @@ impl fmt::Display for Miss {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Stream(error) => write!(f, "the stream failed: {error}"),
-            Self::Deadline => f.write_str("no answer came within its deadline"),
+            Self::Deadline => f.write_str("no answer came within 10 s"),
+            Self::Slow => f.write_str("the founding came slower than 100 KiB/s"),
             Self::Malformed => f.write_str("the answer is not one of a join stream"),
             Self::Uncommitted => f.write_str("no leader committed the join"),
             Self::Unsynced => f.write_str("the voter has no mesh time to stamp a join"),
