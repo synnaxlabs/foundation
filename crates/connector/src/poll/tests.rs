@@ -729,3 +729,56 @@ fn panics_at_fewer_values_after_a_frame_that_keeps_each() {
     short.pop();
     run_of(CHANNELS, vec![all, short], (0, 0), |_, _, _| async {});
 }
+
+/// A kind that stamps a request, then stamps a sample 2 s later, then writes a frame
+/// at the stamp of the request.
+struct Late;
+
+impl Kind for Late {
+    type Config = ();
+    const SCHEMA: document::schema::Body = crate::testing::READS;
+
+    fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
+
+    fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
+        Ok(Channels {
+            writes: CHANNELS.map(name).to_vec(),
+            counts: vec![name("in"), name("lost")],
+            ..Channels::default()
+        })
+    }
+
+    async fn run(&self, ctx: Context<()>) -> Result<(), Error> {
+        let writer = Writer::open(&ctx, CHANNELS.map(name).to_vec()).await?;
+        let mut writer = writer.expect("a live token");
+        let ((), first) = writer.request(std::future::ready(())).await;
+        let later = first + Span::from_nanos(2 * Span::SECOND.nanos());
+        let time = Interval {
+            earliest: later,
+            latest: later,
+        };
+        writer.sample(time, later);
+        writer.write(values(1.5, 7, -3, [true; 3]), first)?;
+        Ok(())
+    }
+}
+
+/// A rival writes `plant.a` 1 s ahead, so the home refuses the frame of [`Late`] as
+/// `Backwards` with a stamp under the stamp of its sample.
+#[test]
+#[should_panic(expected = "refusal under the last stamp")]
+fn panics_at_a_refusal_under_the_last_stamp_given() {
+    run_on(move |node, tasks| async move {
+        let kinds = Table::new().with("late", Late);
+        let rig = Rig::open(env(&node, tasks), node.net(), kinds).await;
+        rig.define(definitions());
+        write_ahead(rig.hub(), "plant.a", F64(0.0), Span::SECOND).await;
+        let config = Document::default();
+        let token = crate::cancel::Token::new();
+        let opened = rig.open_connector("late", name("plant.late"), &config, &token);
+        let result = opened.await.run().await;
+        panic!("the run ends with {result:?}");
+    });
+}
