@@ -61,8 +61,8 @@ mod validity;
 #[cfg(feature = "open62541")]
 mod value;
 
-// The copy calls the libcrypto of `aws-lc-sys`, and no Rust here names the crate, which
-// rustc links only when it is named.
+// The copy calls the libcrypto of `aws-lc-sys`, and no product code names the crate,
+// which rustc links only when it is named.
 #[cfg(feature = "open62541")]
 use aws_lc_sys as _;
 #[cfg(feature = "open62541")]
@@ -320,13 +320,10 @@ mod tests {
         assert_eq!(configure(&[(SANITIZE, "thread")]), Err(refusal("thread")));
         let server = |vars| {
             let shim = configure_with(vars).unwrap().0.shim;
-            let file = shim.get_files().any(|file| file.ends_with("src/server.c"));
-            let internal = Path::new("/copy/src").display().to_string();
-            let args = args(&tool(shim, "/missing/gcc"));
-            (file, includes(&args).contains(&internal.as_str()))
+            shim.get_files().any(|file| file.ends_with("src/server.c"))
         };
-        assert_eq!(server(&[FUZZING]), (false, false));
-        assert_eq!(server(&[FUZZING, ("CARGO_FEATURE_SIM", "1")]), (true, true));
+        assert!(!server(&[FUZZING]));
+        assert!(server(&[FUZZING, ("CARGO_FEATURE_SIM", "1")]));
         let (builds, libcrypto) = configure_with(&[FUZZING]).unwrap();
         let expected = compiler::Libcrypto {
             include: include.into(),
@@ -449,9 +446,10 @@ mod tests {
         for path in ["/missing/gcc", "/missing/clang"] {
             let shim = args(&tool(shim.clone(), path));
             let common = copy.join("arch/common").display().to_string();
+            let internal = copy.join("src").display().to_string();
             assert_eq!(
                 includes(&shim),
-                [dirs[0].as_str(), &dirs[1], &common, src],
+                [dirs[0].as_str(), &dirs[1], &common, &internal, src],
                 "{path}: {shim:?}"
             );
             for arg in ["-Wall", "-Wextra", "-Werror", "-std=c99", &header] {
