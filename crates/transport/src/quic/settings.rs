@@ -260,8 +260,8 @@ fn transport(setup: &Setup) -> TransportConfig {
             VarInt::from_u64(idle_ms).expect("invariant: i64 nanoseconds fit"),
         )))
         .keep_alive_interval(Some(idle / 3))
-        // With no round-trip sample, the first two PTOs, at 3 and 9 initial RTTs, come
-        // within 9/10 of the idle.
+        // From an idle of 5 ms, with no round-trip sample, the first PTO comes at 3
+        // initial RTTs and the second by 9, both within 9/10 of the idle.
         .initial_rtt(Duration::from_millis(333).min(idle / 10))
         .packet_threshold(3)
         .time_threshold(9.0 / 8.0)
@@ -337,8 +337,8 @@ mod tests {
     use std::num::NonZeroUsize;
     use std::task::Poll;
 
-    use noq_proto::Dir;
     use noq_proto::crypto::HmacKey;
+    use noq_proto::{Dir, PathId};
     use types::time::Monotonic;
 
     use super::*;
@@ -838,13 +838,25 @@ mod tests {
                 // Initials, so the client has no round-trip sample. The client loses
                 // its ACK of the server's Initials, then its Finished.
                 let (client, server) = ([3, 4], [0, 1]);
+                let mut rtt = None;
                 for _ in 0..3000 {
                     let sent = pair.client.sent.len();
                     pair.client.drops = usize::from(client.contains(&sent));
                     let sent = pair.server.sent.len();
                     pair.server.drops = usize::from(server.contains(&sent));
                     pair.run(Duration::from_millis(1));
+                    if rtt.is_none() && pair.client.sent.len() > 4 {
+                        rtt = pair.client.connection().rtt(PathId::ZERO);
+                    }
                 }
+                // The initial RTT, so no sample when the Finished is lost.
+                assert_eq!(rtt, Some(Duration::from_millis(100)));
+                // A long header of the Handshake space; noq-proto greases the fixed
+                // bit.
+                let handshake =
+                    |(_, _, datagram): &(_, _, Vec<u8>)| datagram[0] & 0xb0 == 0xa0;
+                assert!(handshake(&pair.client.sent[4]));
+                assert!(pair.client.sent[5..].iter().any(handshake), "no resend");
                 let client = lost(&pair.client).map(|(_, error)| error.clone());
                 (client, connected(&pair.server))
             });

@@ -378,7 +378,9 @@ pub struct Config {
     /// keep-alive. One whose peer has sent no hello twice that long after the handshake
     /// ends with [`Error::Broken`], or with [`Error::TimedOut`] when the idle timeout
     /// was due by the check. Sessions send keep-alives, so a live peer is never silent
-    /// this long. A dial waits this long for the peer's first answer. Must be positive.
+    /// this long. A dial waits this long for the peer's first answer, or 3 ms more than
+    /// 3/10 of it at 4 ms or less, as each PTO is at least 1 ms more than the RTT. QUIC
+    /// counts this span in whole milliseconds, rounded up. Must be positive.
     pub idle: Span,
     /// The monotonic clock for timeouts, pacing, and keep-alives.
     pub clock: env::clock::Clock,
