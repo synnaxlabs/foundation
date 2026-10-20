@@ -180,6 +180,8 @@ pub enum Unreadable {
     Passphrase,
     /// The public key of the file is not the key of its private key.
     Mismatch,
+    /// A text of the file, such as its comment, is not UTF-8.
+    Comment,
 }
 
 impl fmt::Display for Unreadable {
@@ -195,15 +197,20 @@ impl fmt::Display for Unreadable {
             Self::Mismatch => f.write_str(
                 "the public key of the file is not the key of its private key",
             ),
+            Self::Comment => f.write_str(
+                "the key file holds a text that is not UTF-8, such as its comment",
+            ),
         }
     }
 }
 
 /// Reads the OpenSSH private key file of an Ed25519 key with no passphrase, as
 /// `ssh-keygen -t ed25519 -N ""` and [`key_file`] write it. It reads each such file
-/// that OpenSSH reads, with a body of any width or with white space, and any text after
-/// the end mark, and also one with CRLF line ends or no line end after the end mark.
-/// The comment is not kept.
+/// that `ssh-key` 0.6.7 reads, also one with a body of any width or with white space,
+/// any text after the end mark, CRLF line ends, or no line end after the end mark. It
+/// refuses some files that OpenSSH reads: a comment that is not UTF-8
+/// ([`Unreadable::Comment`]), padding of a block or more, options of the `none` KDF,
+/// and a NUL in the body. The comment is not kept.
 ///
 /// # Errors
 ///
@@ -215,6 +222,12 @@ pub fn private_key(text: &str) -> Result<PrivateKey, Unreadable> {
         // with options, which a corrupt file can hold, also gives this error.
         Err(ssh_key::Error::AlgorithmUnknown) => {
             return Err(Unreadable::Algorithm("ECDSA"));
+        }
+        // `ssh-key` does not export the type of this error, so its text names it.
+        Err(ssh_key::Error::Encoding(error))
+            if error.to_string() == "character encoding invalid" =>
+        {
+            return Err(Unreadable::Comment);
         }
         Err(_) => return Err(Unreadable::Format),
     };

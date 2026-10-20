@@ -174,6 +174,32 @@ fn reads_a_key_file_whose_body_has_any_width() {
     }
 }
 
+/// `ssh-keygen -C` in a Latin-1 locale writes a comment that is not UTF-8, which OpenSSH
+/// reads and `ssh-key` 0.6.7 refuses. The error says so, not that the file is no key.
+#[test]
+fn refuses_a_key_file_whose_comment_is_not_utf8() {
+    use base64ct::{Base64, Encoding};
+    let body: String = KEYGEN
+        .lines()
+        .filter(|line| !line.starts_with("-----"))
+        .collect();
+    let mut binary = Base64::decode_vec(&body).unwrap();
+    let at = binary
+        .windows(12)
+        .position(|bytes| bytes == b"alice@laptop")
+        .unwrap();
+    binary[at + 2] = 0xe9;
+    let text = format!(
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\n",
+        Base64::encode_string(&binary)
+    );
+    let expected = (
+        Unreadable::Comment,
+        "the key file holds a text that is not UTF-8, such as its comment".into(),
+    );
+    assert_eq!(unreadable(&text), expected);
+}
+
 /// OpenSSH skips white space in the body: space and tab around each line, and a
 /// vertical tab or a form feed in a line.
 #[test]
