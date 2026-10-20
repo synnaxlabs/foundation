@@ -425,13 +425,14 @@ fn restart<F: Future<Output = ()> + 'static>(
     let node = cluster.node(3).clone();
     cluster.sim.crash(&node, Crash::Power);
     let (own, board) = (node.clone(), Arc::clone(&cluster.board));
+    let ids = cluster.ids.clone();
     let config = env::shards::Config {
         name: "voter-3".into(),
         core: None,
     };
     let main = move |tasks| async move {
         down(own.clone()).await;
-        voter(own, tasks, 3, board).await;
+        voter(own, tasks, 3, &ids, board).await;
     };
     drop(node.shards().start(config, main).unwrap());
 }
