@@ -849,8 +849,8 @@ pub(crate) fn heals_after_random_faults(suite: &'static Suite) {
     });
 }
 
-/// The seeds that `value`, the value of [`REPLAY`], gives, or 0 to [`RUNS`] when it
-/// is not set.
+/// The seeds that `value`, the value of [`REPLAY`], gives, or the [`RUNS`] seeds
+/// from 0 when it is not set.
 ///
 /// # Panics
 ///
