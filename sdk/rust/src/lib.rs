@@ -407,8 +407,8 @@ impl Client {
     /// for a name of no channel, `Refused(Refusal::NotHome)` when their channels are on
     /// more than one index and the client's node is not the home of one, or the home of
     /// their one index is not the home when the write reaches it, and
-    /// `Refused(Refusal::Malformed)` for channels of more than one index whose homes
-    /// are all the client's node, each a `program::Refusal`.
+    /// `Refused(Refusal::Malformed)` for a lease that is not longer than zero, each a
+    /// `program::Refusal`.
     pub fn open_writer(&self, config: write::Config) -> Result<write::Writer, Error> {
         write::Writer::open(&self.requests, &self.closed, config)
     }

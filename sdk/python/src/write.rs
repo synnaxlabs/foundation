@@ -67,15 +67,40 @@ struct Buffers {
 
 impl Writer {
     /// The Python writer of `writer`, opened in `process`.
-    pub(crate) fn new(writer: sdk::write::Writer, process: u32, loss: Loss) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// `Stopped`, code `malformed`, when the channels of `writer` are of more than one
+    /// index, which drops `writer`.
+    pub(crate) fn new(
+        py: Python<'_>,
+        writer: sdk::write::Writer,
+        process: u32,
+        loss: Loss,
+    ) -> PyResult<Self> {
+        let places = writer.places();
+        let mut indexes: Vec<&str> = Vec::new();
+        for place in places {
+            let index = places[place.index].name.as_str();
+            if !indexes.contains(&index) {
+                indexes.push(index);
+            }
+        }
+        if indexes.len() > 1 {
+            let text = format!(
+                "channels of more than one index ({}): open one writer for each index",
+                indexes.join(", ")
+            );
+            let stopped = crate::Stopped::new_err(text);
+            return Err(crate::coded(py, stopped, program::Refusal::Malformed));
+        }
         let mut named = hash::Map::default();
         for (place, Place { name, .. }) in writer.places().iter().enumerate() {
             named.entry(name.as_str().to_owned()).or_insert(place);
         }
-        Self {
+        Ok(Self {
             places: writer.places().to_vec(),
             named,
-            // `Client.open_writer` refuses channels of more than one index.
             index: writer.places()[0].index,
             bytes_max: writer.bytes_max(),
             state: Mutex::new(Some(State {
@@ -86,7 +111,7 @@ impl Writer {
             loss,
             #[cfg(feature = "sim")]
             part: crate::sim::Part::default(),
-        }
+        })
     }
 
     /// The state, which it waits for with other Python threads running. No Python code
