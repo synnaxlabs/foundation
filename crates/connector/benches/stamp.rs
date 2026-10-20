@@ -1,9 +1,9 @@
 //! The cost of a stamp, on a sim node. Run with `cargo bench -p connector --bench
 //! stamp`.
 //!
-//! - `now`: one read of mesh time by `Writer::now`.
-//! - `request`: `Stamps::request` of a request that is ready at once, so the line is
-//!   its two reads of mesh time and the rule of the stamp.
+//! - `now`: one read of mesh time by `hub::writer::Writer::now`.
+//! - `request`: `poll::Writer::request` of a request that is ready at once, so the
+//!   line is its two reads of mesh time and the rule of the stamp.
 //! - `before`: `Fit::before` of a fit that bounds the clock, one value later in device
 //!   time each call.
 //! - `between`: `Fit::between` of that fit, one read 1 us later in device time each
@@ -11,25 +11,26 @@
 //! - `old`: `Fit::before` of a fit whose newest reading is 1 s later in device time,
 //!   one value later in device time each call, up to that reading.
 //! - `mesh`: `Fit::mesh` of that fit.
-//! - `sample`: `Stamps::sample` of an interval 1 us later each call.
+//! - `sample`: `poll::Writer::sample` of an interval 1 us later each call.
 //!
 //! Each figure is ps per call, so a change under 1 ns shows, with the count of the
 //! allocations of the calls.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
+use std::future;
 use std::hint::black_box;
 use std::pin::pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
-use connector::kind::Table;
-use connector::stamp::{Fit, Fitted, Stamps};
-use connector::testing::{self, Rig};
-use hub::writer::Writer;
-use types::channel;
-use types::name::Name;
+use connector::poll::Writer;
+use connector::stamp::{Fit, Fitted};
 use types::time::{Interval, Monotonic, Span, Stamp};
+
+#[path = "../tests/common/stamped.rs"]
+mod stamped;
 
 #[global_allocator]
 static ALLOCATOR: counting::Allocator = counting::Allocator::new();
@@ -49,33 +50,33 @@ fn main() {
             entropy: node.entropy(),
             tasks,
         };
-        let rig = Rig::open(env, node.net(), Table::new()).await;
-        let connector: Name = "plant.stamp".parse().expect("a valid name");
-        let first = channel::Key::from_u128(100);
-        rig.define(testing::create_status(&connector, &[], first));
-        let state = "plant.stamp.status.state".parse().expect("a valid name");
-        let writer = rig.writer(connector, vec![state]).await;
-        [
-            time("now", || {
-                black_box(writer.now());
-            }),
-            request(&writer),
-            before(),
-            between(),
-            old(),
-            mesh(),
-            sample(),
-        ]
+        let stamped = Arc::new(Mutex::new(None));
+        let into = Arc::clone(&stamped);
+        let rig = stamped::rig(env, node.net(), move |writer| {
+            let lines = [request(writer), sample(writer)];
+            *into.lock().expect("no panic") = Some(lines);
+        })
+        .await;
+        let writer = rig
+            .writer(stamped::connector(), vec![stamped::value()])
+            .await;
+        let now = time("now", || {
+            black_box(writer.now());
+        });
+        drop(writer);
+        stamped::run(&rig).await;
+        let lines = stamped.lock().expect("no panic").take();
+        let [request, sample] = lines.expect("the run times its lines");
+        [now, request, before(), between(), old(), mesh(), sample]
     });
     print(&lines.expect("the run ends"));
 }
 
 /// The line `request`.
-fn request(writer: &Writer) -> Line {
-    let mut stamps = Stamps::default();
+fn request(writer: &mut Writer) -> Line {
     let mut cx = Context::from_waker(Waker::noop());
     time("request", || {
-        let request = pin!(stamps.request(writer, async { black_box(7_u8) }));
+        let request = pin!(writer.request(future::ready(black_box(7_u8))));
         let Poll::Ready(stamped) = request.poll(&mut cx) else {
             panic!("the request is ready")
         };
@@ -148,16 +149,15 @@ fn mesh() -> Line {
 }
 
 /// The line `sample`.
-fn sample() -> Line {
-    let mut stamps = Stamps::default();
-    let mut earliest = Stamp::from_nanos(0);
+fn sample(writer: &mut Writer) -> Line {
+    let mut earliest = writer.time().now();
     time("sample", || {
         earliest = earliest + Span::MICROSECOND;
         let interval = Interval {
             earliest,
             latest: earliest + Span::from_nanos(200),
         };
-        black_box(stamps.sample(black_box(interval), earliest));
+        black_box(writer.sample(black_box(interval), earliest));
     })
 }
 

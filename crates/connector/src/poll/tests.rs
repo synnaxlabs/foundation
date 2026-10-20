@@ -66,7 +66,7 @@ fn definitions() -> Vec<(Name, Definition)> {
 }
 
 /// The ends of the time and the `held` of a frame of samples, each in ns after the
-/// stamp of the last request.
+/// stamp of the last request, and stopped at the ends of time.
 type Sample = [i64; 3];
 
 /// A kind that opens a [`Writer`] of `channels`, keeps its types, and writes each of
@@ -112,7 +112,7 @@ impl Kind for Polls {
             last = Some((values, stamp));
         }
         if let Some((values, at)) = last {
-            let after = |nanos| at + Span::from_nanos(nanos);
+            let after = |nanos| Stamp::from_nanos(at.nanos().saturating_add(nanos));
             for &[earliest, latest, held] in &self.samples {
                 let time = Interval {
                     earliest: after(earliest),
@@ -354,6 +354,24 @@ fn stamps_each_sample_at_its_midpoint_or_after_the_last_stamp_with_its_error() {
     );
     assert_eq!(record.time, time);
     assert_eq!(record.counts, (15, 0));
+}
+
+/// The first sample is 3 ns wide, so its error rounds up to 2 ns. The second is from
+/// `i64::MIN` ns after the stamp of the request to the last instant, so its error,
+/// with how far its stamp is past its midpoint, is past the range of a `Span` and
+/// stops at its end.
+#[test]
+fn rounds_up_the_error_of_a_sample_and_stops_it_at_the_end_of_a_span() {
+    let writes = [values(1.5, 7, -3, [true; 3])];
+    let samples = vec![[0, 3, 0], [i64::MIN, i64::MAX, i64::MIN]];
+    let all = writes.iter().copied().map(Vec::from).collect();
+    let record = run_sampled(CHANNELS, all, samples, (9, 0), |_, _, _| async {});
+    assert_eq!(record.result.as_ref().map_err(ToString::to_string), Ok(&()));
+    let first = stamp(&record.time[0], 1);
+    let want = [(first + 1, 2), (first + 2, i64::MAX)]
+        .map(|(stamp, error)| (Stamp::from_nanos(stamp), Span::from_nanos(error)));
+    assert_eq!(record.stamped, want);
+    assert_eq!(record.counts, (9, 0));
 }
 
 #[test]
@@ -728,4 +746,87 @@ fn panics_at_fewer_values_after_a_frame_that_keeps_each() {
     let mut short = Vec::from(values(2.5, 8, -4, [true; 3]));
     short.pop();
     run_of(CHANNELS, vec![all, short], (0, 0), |_, _, _| async {});
+}
+
+/// A kind that stamps a request, then writes a frame under the last stamp that its
+/// writer gave.
+#[derive(Clone, Copy)]
+enum Late {
+    /// Stamps a sample 2 s later, then writes at the stamp of the request.
+    Sampled,
+    /// Writes at the stamp of the request, then writes only `plant.c` at it again.
+    Again,
+}
+
+impl Kind for Late {
+    type Config = ();
+    const SCHEMA: document::schema::Body = crate::testing::READS;
+
+    fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
+
+    fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
+        Ok(Channels {
+            writes: CHANNELS.map(name).to_vec(),
+            counts: vec![name("in"), name("lost")],
+            ..Channels::default()
+        })
+    }
+
+    async fn run(&self, ctx: Context<()>) -> Result<(), Error> {
+        let writer = Writer::open(&ctx, CHANNELS.map(name).to_vec()).await?;
+        let mut writer = writer.expect("a live token");
+        let ((), first) = writer.request(std::future::ready(())).await;
+        match self {
+            Self::Sampled => {
+                let later = first + Span::from_nanos(2 * Span::SECOND.nanos());
+                let time = Interval {
+                    earliest: later,
+                    latest: later,
+                };
+                writer.sample(time, later);
+                writer.write(values(1.5, 7, -3, [true; 3]), first)?;
+            }
+            Self::Again => {
+                writer.write(values(1.5, 7, -3, [true; 3]), first)?;
+                writer.write(values(1.5, 8, -3, [false, true, false]), first)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Runs `late` after a rival writes `plant.a` 1 s ahead, and panics with the end of
+/// its run.
+fn run_late(late: Late) {
+    run_on(move |node, tasks| async move {
+        let kinds = Table::new().with("late", late);
+        let rig = Rig::open(env(&node, tasks), node.net(), kinds).await;
+        rig.define(definitions());
+        write_ahead(rig.hub(), "plant.a", F64(0.0), Span::SECOND).await;
+        let config = Document::default();
+        let token = crate::cancel::Token::new();
+        let opened = rig.open_connector("late", name("plant.late"), &config, &token);
+        let result = opened.await.run().await;
+        panic!("the run ends with {result:?}");
+    });
+}
+
+/// The home refuses the frame of [`Late::Sampled`] as `Backwards` with a stamp under
+/// the stamp of its sample.
+#[test]
+#[should_panic(expected = "refusal under the last stamp")]
+fn panics_at_a_refusal_under_the_last_stamp_given() {
+    run_late(Late::Sampled);
+}
+
+/// The home refuses `plant.a` of the first frame of [`Late::Again`] as `Backwards`, so
+/// the writer writes it again 1 ns after the frame of the rival, which the home
+/// refuses as `Ahead`. The home then refuses the second frame, at the stamp of the
+/// request, with a stamp under the last stamp of the writer.
+#[test]
+#[should_panic(expected = "refusal under the last stamp")]
+fn panics_at_a_second_frame_at_one_stamp_after_a_write_again() {
+    run_late(Late::Again);
 }
