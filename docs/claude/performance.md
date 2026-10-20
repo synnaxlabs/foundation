@@ -90,8 +90,9 @@ beside them.
 A plan whose change can reach the cost limit states its trigger, and the architect OKs
 it with the plan: each bench line, the statistic that decides (the p99 for a latency
 target), the commits that the run compares, and the slowdown that adds the judgment,
-which is the cost limit in the unit of the line. The commits are the merge-base and, for
-work that spans PRs, the commit before its first PR, so a speedup that merges between
-them does not hide the cost. The run then decides with no new ruling: under the
+which is the cost limit in the unit of the line. The run compares the head with the
+merge-base and, for work that spans PRs, also with the commit before its first PR. A
+slowdown at the trigger in either span adds the judgment, so a speedup that merges
+between them does not hide the cost. The run then decides with no new ruling: under the
 trigger, the PR gives its numbers; at or over it, the PR adds the P1 judgment (#3283,
 #3581).
