@@ -2015,7 +2015,7 @@ const CERTIFICATE_FIX: &str = "Give a DER or PEM certificate with an RSA key, th
                                of the node in its subject alternative name, and a \
                                validity window that holds the mesh time";
 const KEY_FIX: &str =
-    "Give the DER or PEM private key of `certificate`, with no password";
+    "Give the DER or PEM private key of `certificate` in clear, with no password";
 const TRUST_FIX: &str =
     "Give the DER or PEM certificate of the server, or of the CA that issued it";
 
@@ -2074,6 +2074,16 @@ fn refuses_a_key_with_a_byte_past_0x7f_in_a_pem_line_with_its_secret() {
     secure.credentials[1] = Some(HIGH_PEM.key);
     let text = "line 2 of the key, in a PEM block, holds a byte of 0x80 to 0xFF, which \
                 PEM does not allow";
+    assert_eq!(refusals(secure), [credentials(KEY, text, KEY_FIX)]);
+}
+
+/// A node never asks for a password, so an encrypted key does not parse, and the fix
+/// asks for the key in clear.
+#[test]
+fn refuses_an_encrypted_key_with_the_secret_of_the_key() {
+    let mut secure = Secure::of(Policy::Basic256Sha256);
+    secure.credentials[1] = Some(include_bytes!("../pem/encrypted-key.pem"));
+    let text = "the key does not parse";
     assert_eq!(refusals(secure), [credentials(KEY, text, KEY_FIX)]);
 }
 

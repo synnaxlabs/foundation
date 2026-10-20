@@ -310,7 +310,8 @@ impl<'a> Secured<'a> {
             ),
             Credential::Key => (
                 &self.security.key,
-                "Give the DER or PEM private key of `certificate`, with no password",
+                "Give the DER or PEM private key of `certificate` in clear, with no \
+                 password",
             ),
             Credential::Trust => (
                 &self.security.trust,
