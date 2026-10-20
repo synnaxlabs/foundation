@@ -164,8 +164,8 @@ fn main() {
                         .collect(),
                 };
                 let mut writer = session.writer(config).await.expect("opens");
-                let layout: Vec<(usize, usize)> = (0..shape.series)
-                    .map(|entry| (entry, shape.len()))
+                let layout: Vec<(usize, u32, usize)> = (0..shape.series)
+                    .map(|entry| (entry, shape.samples, shape.len()))
                     .collect();
                 let [draft, sends, outcome, stored] = shape.names;
                 let mut parts =
@@ -176,7 +176,7 @@ fn main() {
                     for _ in 0..FRAMES {
                         timer.add(table::timed(&ALLOCATOR, || ()).1);
                         let [drafted, sent, taken, kept] =
-                            frame(&mut writer, &node, shape, &layout).await;
+                            frame(&mut writer, &node, &layout).await;
                         if round >= WARMUP {
                             out.push(drafted.0 + sent.0);
                             whole.push(drafted.0 + sent.0 + taken.0);
@@ -207,12 +207,11 @@ fn main() {
 async fn frame(
     writer: &mut Writer,
     node: &sim::node::Node,
-    shape: &Shape,
-    layout: &[(usize, usize)],
+    layout: &[(usize, u32, usize)],
 ) -> [(u64, u64); 4] {
     let mut context = Context::from_waker(Waker::noop());
     let (ready, drafted) = table::timed(&ALLOCATOR, || {
-        let draft = pin!(writer.draft(Form::Raw, shape.samples, layout));
+        let draft = pin!(writer.draft(Form::Raw, layout));
         matches!(draft.poll(&mut context), Poll::Ready(Ok(_)))
     });
     assert!(ready, "the pool has a block");

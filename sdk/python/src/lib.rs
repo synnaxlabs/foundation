@@ -746,6 +746,7 @@ fn exception(py: Python<'_>, error: &sdk::Error, text: String) -> PyErr {
         sdk::Error::Stream(
             program::Error::Layout(_)
             | program::Error::Unsent { .. }
+            | program::Error::Count { .. }
             | program::Error::Pool(_)
             | program::Error::Body { .. }
             | program::Error::Open { .. }

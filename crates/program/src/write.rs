@@ -1,4 +1,4 @@
-//! The writes of a session: one write stream each, on the channels of one index.
+//! The writes of a session: one write stream each, on channels of any index.
 
 use std::iter;
 use std::rc::Rc;
@@ -23,17 +23,17 @@ use crate::{Error, Handle, end};
 pub struct Config {
     /// The writer's authority over its channels.
     pub authority: Authority,
-    /// How long the writer may go without a write and keep control, or `None` for no
-    /// limit.
+    /// How long the writer may go with no write of an index and keep control of the
+    /// channels of that index, or `None` for no limit.
     pub lease: Option<Span>,
-    /// The channels that the writer writes, at least one, all on one index.
+    /// The channels that the writer writes, at least one, of any index.
     pub channels: Vec<Name>,
 }
 
-/// A writer of a [`Session`](crate::Session): one write stream on the channels of one
-/// index, at its home. The home applies its frames in the order of the calls. It
-/// holds a clone of its session. [`Writer::finish`] ends it once its frames are on
-/// disk. Dropping it stops the stream, and the home ends the writer.
+/// A writer of a [`Session`](crate::Session): one write stream on channels of any
+/// index. The home of each index applies the frames of its group in the order of the
+/// calls. It holds a clone of its session. [`Writer::finish`] ends it once its frames
+/// are on disk. Dropping it stops the stream, and each home ends the writer.
 #[derive(Debug)]
 pub struct Writer {
     session: Rc<Handle>,
@@ -44,6 +44,15 @@ pub struct Writer {
     /// The frame that the next write sends.
     draft: Option<Draft>,
     replies: Replies,
+    /// The entry and byte length of each series of the last draft.
+    lens: Vec<(usize, usize)>,
+    /// The lowest entry and count of each group of the last draft, by group.
+    counts: Vec<Option<(usize, u32)>>,
+    /// The place of the index and outcome of each present group of the last frame
+    /// written.
+    outcomes: Vec<(usize, Outcome)>,
+    /// The frames sent.
+    sent: u64,
     /// A call dropped while it sent a frame, so the stream holds part of it.
     cut: bool,
     /// The error that ended the writer.
@@ -75,11 +84,16 @@ impl Writer {
                 largest,
             }));
         }
+        let groups = set.groups().len();
         Ok(Self {
             session,
             stream: Some((sender, receiver)),
+            lens: Vec::with_capacity(places.len()),
             places,
-            replies: Replies::new(set.groups().len()),
+            replies: Replies::new(groups),
+            counts: vec![None; groups],
+            outcomes: Vec::with_capacity(groups),
+            sent: 0,
             set,
             draft: None,
             cut: false,
@@ -87,32 +101,27 @@ impl Writer {
         })
     }
 
-    /// The channels of the writer: the key, sample type, and name of each place.
-    /// Place `n` is entry `n` of each draft.
+    /// The channels of the writer: the key, sample type, name, and place of the index
+    /// of each place. Place `n` is entry `n` of each draft.
     #[must_use]
     pub fn places(&self) -> &[Place] {
         &self.places
     }
 
-    /// The place of the index of the writer's channels, whose samples are the stamps
-    /// of each frame. A frame of at least one sample holds its series.
-    #[must_use]
-    pub fn index(&self) -> usize {
-        self.set.groups()[0]
-    }
-
     /// The draft that the next [`Writer::write`] sends, to fill: a new frame of the
-    /// writer's key set from [`Config::frames`](crate::Config::frames), with `count`
-    /// samples in each series, as [`Draft::new`] takes `series`. The entry of place `n`
-    /// is `n`. A frame of at least one sample holds the index series. It drops a held
-    /// draft that no write sent. While the pool is full, it waits as each block of the
-    /// session waits: the blocks of a frame come back as the node acknowledges it. The
-    /// writer holds the draft, so a draft of another writer reaches its write only
-    /// through a swap of two `&mut Draft`.
+    /// writer's key set from [`Config::frames`](crate::Config::frames). `series` gives
+    /// each present entry, the count of its series, and its byte length, in increasing
+    /// entry order, as [`Draft::new`] takes them. Each series of one group holds one
+    /// count. The entry of place `n` is `n`. A frame holds the index series of each
+    /// group that it holds. It drops a held draft that no write sent. While the pool is
+    /// full, it waits as each block of the session waits: the blocks of a frame come
+    /// back as the node acknowledges it. The writer holds the draft, so a draft of
+    /// another writer reaches its write only through a swap of two `&mut Draft`.
     ///
     /// # Errors
     ///
-    /// [`Error::Layout`] when `series` breaks a rule of [`Layout::new`], with no block
+    /// [`Error::Layout`] when `series` breaks a rule of [`Layout::new`], and
+    /// [`Error::Count`] when two series of one group hold two counts, each with no block
     /// taken; the writer goes on. [`Error::Pool`] when no block of the pool can hold
     /// the frame, the error of the close when the session closes first, and the error
     /// that ended the writer, as [`Writer::write`] gives it. The writer then holds no
@@ -120,27 +129,55 @@ impl Writer {
     pub async fn draft(
         &mut self,
         form: Form,
-        count: u32,
-        series: &[(usize, usize)],
+        series: &[(usize, u32, usize)],
     ) -> Result<&mut Draft, Error> {
         self.draft = None;
         self.check()?;
-        let shared = &self.session.0;
-        let layout = Layout::new(&self.set, series).map_err(Error::Layout)?;
+        let Self {
+            session,
+            set,
+            lens,
+            counts,
+            ..
+        } = self;
+        lens.clear();
+        lens.extend(series.iter().map(|&(entry, _, len)| (entry, len)));
+        let layout = Layout::new(set, lens).map_err(Error::Layout)?;
+        counts.fill(None);
+        for &(place, count, _) in series {
+            let group = &mut counts[to_usize(set.entries()[place].group)];
+            match *group {
+                None => *group = Some((place, count)),
+                Some((first, first_count)) if first_count != count => {
+                    return Err(Error::Count {
+                        place: first,
+                        count: first_count,
+                        other: place,
+                        other_count: count,
+                    });
+                }
+                Some(_) => {}
+            }
+        }
+        let shared = &session.0;
         let mut draft = shared.retry(|| layout.draft(&shared.frames, form)).await?;
-        draft.set_counts(0, iter::repeat(count));
+        // A group holds a count when it holds a series, so in group order.
+        draft.set_counts(0, counts.iter().flatten().map(|&(_, count)| count));
         Ok(self.draft.insert(draft))
     }
 
     /// Sends the writer's draft with its stamps from `time`, and waits for what the
-    /// home did with it. A frame of [`Time::Node`] holds one sample of each series,
-    /// in the raw form, and the home writes a stamp over its index sample: mesh time
-    /// now, or 1 ns after the last stamp of this writer when now is not after it.
-    /// Behind a later stamp of another writer, the home refuses it with
-    /// [`Refusal::Order`]. A refused or lost frame leaves the writer open. A removed
-    /// channel or a failed commit of a group gives [`Outcome::Ended`], also for each
-    /// later frame of the group. A call dropped after it sent its frame loses only its
-    /// outcome; a call dropped while it sends ends the writer. A call takes the draft
+    /// home of each group did with it. Gives the place of the index and the outcome of
+    /// each present group of the frame, in group order; the slice lives until the next
+    /// call. A frame of [`Time::Node`] holds one sample of each series, in the raw
+    /// form, and the home of each group writes a stamp over its index sample: mesh time
+    /// now, or 1 ns after the last stamp of this writer in that group when now is not
+    /// after it. So two groups of one frame can get two stamps. Behind a later stamp of
+    /// another writer, the home refuses the group with [`Refusal::Order`]. A refused or
+    /// lost group leaves the writer open. A removed channel or a failed commit of a
+    /// group gives [`Outcome::Ended`], also for each later frame of the group. A call
+    /// dropped after it sent its frame loses only its outcomes; a call dropped while it
+    /// sends ends the writer. A call takes the draft
     /// at its first poll, so after each result the writer holds no draft: the next
     /// write needs a new call of [`Writer::draft`].
     ///
@@ -159,7 +196,7 @@ impl Writer {
     /// # Panics
     ///
     /// When the writer holds no draft.
-    pub async fn write(&mut self, time: Time) -> Result<Outcome, Error> {
+    pub async fn write(&mut self, time: Time) -> Result<&[(usize, Outcome)], Error> {
         let frame = self
             .draft
             .take()
@@ -177,7 +214,8 @@ impl Writer {
             return Err(Error::Unsent { count, form });
         }
         let written = self.written(time, frame).await;
-        self.ending(written)
+        self.ending(written)?;
+        Ok(&self.outcomes)
     }
 
     /// Waits until each frame that the home of a group took before the call is on
@@ -315,24 +353,33 @@ impl Writer {
         }
         *cut = false;
         self.replies.sent(frame.ranges().map(|(group, _)| group));
+        self.sent = self.sent.strict_add(1);
         Ok(())
     }
 
-    /// Sends `frame` and takes its outcome.
-    async fn written(&mut self, time: Time, frame: Draft) -> Result<Outcome, Error> {
+    /// Sends `frame` and takes its outcomes.
+    async fn written(&mut self, time: Time, frame: Draft) -> Result<(), Error> {
+        self.outcomes.clear();
         self.send(time, frame).await?;
         self.outcome().await
     }
 
-    /// Takes replies until the outcome of the last frame sent.
-    async fn outcome(&mut self) -> Result<Outcome, Error> {
-        loop {
-            if let Reply::Outcome { outcome, .. } = self.reply().await?
-                && self.replies.answered()
+    /// Takes replies until the outcome of each group of the last frame sent, and keeps
+    /// those outcomes.
+    async fn outcome(&mut self) -> Result<(), Error> {
+        while !self.replies.answered() {
+            if let Reply::Outcome {
+                frame,
+                group,
+                outcome,
+            } = self.reply().await?
+                && frame == self.sent
             {
-                return Ok(outcome);
+                let index = self.set.groups()[to_usize(group)];
+                self.outcomes.push((index, outcome));
             }
         }
+        Ok(())
     }
 
     /// Takes the next reply, and counts it.
