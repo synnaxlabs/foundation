@@ -6,10 +6,12 @@ use std::ops::Range;
 use connector_influx::sim::{Field, Fields, Store};
 use types::time::Stamp;
 
-use super::{Gap, Received, Written};
+use super::{Gap, Received};
 
-/// What `store` holds for the channel of `written`, as `connector` writes it to the
-/// data measurement `measurement`, folded by the rule of INFLUX SEQ AND GAPS:
+/// What `store` holds for the samples with the seqs `seqs` of a channel on the index
+/// `index`, as `connector` writes them to the data measurement `measurement`. Sample
+/// `k` has the seq `seqs.start + k` and the value `k as f64`. The fold follows the
+/// rule of INFLUX SEQ AND GAPS:
 /// - `samples` and `seqs`: the stored points, each mapped to its seq by its value.
 /// - `gaps`: the union of the seq ranges of the gap lines of the connector and index,
 ///   minus the stored seqs, as maximal runs. A gap line ends its range at the seq of
@@ -32,16 +34,18 @@ pub(crate) fn stored(
     store: &Store,
     connector: &str,
     measurement: &str,
-    written: &Written,
+    seqs: &Range<u64>,
+    index: &str,
 ) -> Received {
     let reader = Reader {
         store,
         connector,
         measurement,
-        written,
+        seqs,
+        index,
     };
     let mut fold = Fold {
-        next: written.seqs.start,
+        next: seqs.start,
         ranges: reader.ranges(),
         at: 0,
         first: None,
@@ -62,7 +66,8 @@ struct Reader<'a> {
     store: &'a Store,
     connector: &'a str,
     measurement: &'a str,
-    written: &'a Written,
+    seqs: &'a Range<u64>,
+    index: &'a str,
 }
 
 impl Reader<'_> {
@@ -88,7 +93,7 @@ impl Reader<'_> {
 
     /// The seq of the point at `stamp` with `fields`.
     fn seq(&self, stamp: Stamp, fields: Fields<'_>) -> u64 {
-        let seqs = &self.written.seqs;
+        let seqs = self.seqs;
         let count = seqs.end - seqs.start;
         let mut values = fields.iter().map(|(_, value)| value);
         let k = match (values.next(), values.next()) {
@@ -120,7 +125,7 @@ impl Reader<'_> {
     /// The seq ranges of the gap lines of the connector and index, sorted, with each
     /// overlapping or touching pair merged.
     fn ranges(&self) -> Vec<Range<u64>> {
-        let index = self.written.index.as_str();
+        let index = self.index;
         let lines: Vec<(Stamp, u64)> = self
             .store
             .points(
@@ -156,7 +161,7 @@ impl Reader<'_> {
             .collect();
         let mut ranges: Vec<Range<u64>> = Vec::with_capacity(lines.len());
         let mut lines = lines.into_iter().peekable();
-        let first = self.written.seqs.start;
+        let first = self.seqs.start;
         for (stamp, end) in self.points() {
             while let Some((time, count)) = lines.next_if(|&(time, _)| time <= stamp) {
                 if time != stamp {

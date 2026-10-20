@@ -4,12 +4,8 @@ use super::*;
 
 const FIRST: u64 = 100;
 
-fn written() -> Written {
-    Written {
-        seqs: FIRST..FIRST + 100,
-        index: "edge.time".into(),
-    }
-}
+/// The seqs of the samples that the lab wrote.
+const SEQS: Range<u64> = FIRST..FIRST + 100;
 
 /// The stamp of the sample with seq `seq`.
 fn stamp(seq: u64) -> i64 {
@@ -37,7 +33,7 @@ fn gap_line(seq: u64, count: i64) -> String {
 fn check(body: &str) -> Received {
     let mut store = Store::default();
     store.write(body.as_bytes()).unwrap();
-    stored(&store, "influx", "edge.value", &written())
+    stored(&store, "influx", "edge.value", &SEQS, "edge.time")
 }
 
 mod stored {
@@ -572,7 +568,7 @@ mod connector {
         ) {
             let (store, held) = run(&ops);
             prop_assert_eq!(
-                stored(&store, "influx", "edge.value", &written()),
+                stored(&store, "influx", "edge.value", &SEQS, "edge.time"),
                 truth(&held)
             );
         }
