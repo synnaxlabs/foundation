@@ -14,11 +14,11 @@
   timeout, so a node whose idle timeout is shorter than that gap forgets the dial when a
   probe in the gap is lost too (42 of the 4096 masks of the first 6 datagrams of each
   side, for a program of 30 s and a node of 1 s, on the virtual time pair of the `quic`
-  tests). Each of the 42 ends with `TimedOut` at the program's idle timeout, and the
-  node never connects. Lost: a node that keeps a dial for the client's idle timeout
-  until its handshake ends (it keeps the state of an address that it has not validated
-  for longer than its own setting); a lower initial RTT on each client (as below).
-  Decided by `laptop.architect-2` (2026-10-20T05:39:16Z:
+  tests). Of the 42, none connects at a later probe, and each ends with `TimedOut` at
+  the program's idle timeout, 24 at 31.04 s and 18 at 33.05 s. Lost: a node that keeps a
+  dial for the client's idle timeout until its handshake ends (it keeps the state of an
+  address that it has not validated for longer than its own setting); a lower initial
+  RTT on each client (as below). Decided by `laptop.architect-2` (2026-10-20T05:39:16Z:
   https://github.com/synnaxlabs/foundation/pull/3498#issuecomment-6284239465). Lost: a
   cap of PROBE GAP below the PTO base with no sample (it changes a ruled decision, and
   leaves a dialer of 1 s to a node of 30 s); this record narrowed to equal idle timeouts
