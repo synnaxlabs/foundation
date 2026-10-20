@@ -36,6 +36,18 @@ fn exact() -> Fit {
     fit
 }
 
+/// The diagnostic of a value of the read `b` with no timestamp that maps to mesh time.
+fn refused() -> Diagnostic {
+    Diagnostic::new(
+        NO_TIMESTAMP,
+        None,
+        "the server gives a value of the node `ns=1;s=b` of the channel `b` with no \
+         timestamp that maps to mesh time, so the subscription cannot place it"
+            .into(),
+        "Set `polled = true` to read each node at the rate".into(),
+    )
+}
+
 #[test]
 fn the_map_keeps_each_stamp_from_minus_2_to_the_62_on() {
     let ends = [
@@ -83,15 +95,37 @@ fn a_change_with_no_timestamp_is_refused() {
     let Err(Error::Config(diagnostics)) = taken else {
         panic!("not refused: {taken:?}");
     };
-    let diagnostic = Diagnostic::new(
-        NO_TIMESTAMP,
-        None,
-        "the server gives a value of the node `ns=1;s=b` of the channel `b` with no \
-         timestamp, so the subscription cannot place it in time"
-            .into(),
-        "Set `polled = true` to read each node at the rate".into(),
-    );
-    assert_eq!(diagnostics, [diagnostic]);
+    assert_eq!(diagnostics, [refused()]);
+}
+
+#[test]
+fn a_value_takes_the_fitted_time_of_a_timestamp_or_is_refused() {
+    let fit = exact();
+    let placed = device(stamp(1_000 * S)).expect("in the map");
+    let entry = |at, server| Entry {
+        index: 1,
+        value: Ok(Value::I32(1)),
+        at,
+        server,
+        order: 0,
+        held: Stamp::EPOCH,
+    };
+    let past = Monotonic(u64::MAX);
+    let at = fit.mesh(placed).expect("placed");
+    let time = |entry: Entry| entry.time(&fit, &reads()).expect("placed");
+    assert_eq!(time(entry(placed, Some(past))), at);
+    assert_eq!(time(entry(past, Some(placed))), at);
+    let refusals = [
+        entry(past, Some(past)).time(&fit, &reads()),
+        entry(past, None).time(&fit, &reads()),
+        entry(placed, Some(placed)).time(&Fit::default(), &reads()),
+    ];
+    for refusal in refusals {
+        let Err(Error::Config(diagnostics)) = refusal else {
+            panic!("not refused: {refusal:?}");
+        };
+        assert_eq!(diagnostics, [refused()]);
+    }
 }
 
 #[test]

@@ -33,8 +33,8 @@ const OFFSET: i64 = 1 << 62;
 ///
 /// [`Error::Device`] when a read of the current time or the subscribe fails, when
 /// the server does not watch a node, and when the subscription ends.
-/// [`Error::Config`] with `opcua.no-timestamp` for a change with no timestamp. The
-/// errors of [`Frames::write`].
+/// [`Error::Config`] with `opcua.no-timestamp` for a change with no timestamp that maps
+/// to mesh time. The errors of [`Frames::write`].
 pub(super) async fn run(
     ctx: &Context<Config>,
     client: &mut Client,
@@ -82,7 +82,7 @@ pub(super) async fn run(
             clock.read(client).await?;
             due = ctx.clock().now() + READ;
         }
-        drive.write(frames, &clock.fit)?;
+        drive.write(frames, &clock.fit, reads)?;
     }
     Ok(())
 }
@@ -138,7 +138,7 @@ pub async fn drives(
         measures.push(measure(&mut || {
             written = drive
                 .take(&changes, &mut fit, arrived, reads)
-                .and_then(|_| drive.write(&mut frames, &fit));
+                .and_then(|_| drive.write(&mut frames, &fit, reads));
         }));
         written?;
     }
@@ -185,8 +185,6 @@ struct Drive {
     slots: Vec<Option<usize>>,
     /// The device time of the next value of each read, in the order of `entries`.
     next: Vec<Option<Monotonic>>,
-    /// The mesh time after the drive.
-    arrived: Stamp,
     /// The count of changes with an overflow.
     overflows: u64,
 }
@@ -213,7 +211,6 @@ impl Drive {
             entries: Vec::new(),
             slots: vec![None; reads],
             next: vec![None; reads],
-            arrived: Stamp::EPOCH,
             overflows: 0,
         }
     }
@@ -233,7 +230,6 @@ impl Drive {
         reads: &[Read],
     ) -> Result<Fitted, Error> {
         self.entries.clear();
-        self.arrived = arrived;
         self.overflows = 0;
         let mut fitted = Fitted::Kept;
         for (order, change) in changes.iter().enumerate() {
@@ -287,20 +283,20 @@ impl Drive {
     /// Writes the entries in the order of [`Drive::order`], with one frame for each
     /// device time, at the mesh time that `fit` gives it. A second value of a read at
     /// one device time starts a new frame. When `fit` cannot place a device time, the
-    /// frame takes the mesh time of the server timestamp of its first value, or the
-    /// mesh time after the drive.
+    /// frame takes the mesh time of the server timestamp of its first value.
     ///
     /// # Errors
     ///
-    /// As [`Frames::write`].
-    fn write(&mut self, frames: &mut Frames<'_>, fit: &Fit) -> Result<(), Error> {
+    /// [`Error::Config`] with `opcua.no-timestamp` when `fit` can place neither. As
+    /// [`Frames::write`].
+    fn write(
+        &mut self,
+        frames: &mut Frames<'_>,
+        fit: &Fit,
+        reads: &[Read],
+    ) -> Result<(), Error> {
         self.order(fit);
-        let Self {
-            entries,
-            slots,
-            arrived,
-            ..
-        } = self;
+        let Self { entries, slots, .. } = self;
         let mut start = 0;
         while let Some(first) = entries.get(start) {
             let mut held = Stamp::from_nanos(i64::MAX);
@@ -313,12 +309,7 @@ impl Drive {
                 held = held.min(entry.held);
                 end += 1;
             }
-            let time = (fit.mesh(first.at))
-                .or_else(|| first.server.and_then(|server| fit.mesh(server)))
-                .unwrap_or(Interval {
-                    earliest: *arrived,
-                    latest: *arrived,
-                });
+            let time = first.time(fit, reads)?;
             // The error of the stamp is not written yet (#2627).
             let (stamp, _) = frames.writer.sample(time, held);
             let values = slots
@@ -331,13 +322,28 @@ impl Drive {
     }
 }
 
+impl Entry {
+    /// Gives the mesh time that `fit` gives the device time of the entry, or else its
+    /// server timestamp.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] with `opcua.no-timestamp` when `fit` places neither.
+    fn time(&self, fit: &Fit, reads: &[Read]) -> Result<Interval, Error> {
+        (fit.mesh(self.at))
+            .or_else(|| self.server.and_then(|server| fit.mesh(server)))
+            .ok_or_else(|| no_timestamp(&reads[self.index]))
+    }
+}
+
 /// Gives the device time of the timestamp `time`, or `None` when it is absent, 0, or
 /// before the map of [`device`].
 fn timestamp(time: Option<Stamp>) -> Option<Monotonic> {
     time.filter(|&time| time != Stamp::EPOCH).and_then(device)
 }
 
-/// The error of a change of the node of `read` with no timestamp.
+/// The error of a change of the node of `read` with no timestamp that maps to mesh
+/// time.
 #[cold]
 fn no_timestamp(read: &Read) -> Error {
     Error::Config(vec![Diagnostic::new(
@@ -345,7 +351,7 @@ fn no_timestamp(read: &Read) -> Error {
         None,
         format!(
             "the server gives a value of the node `{}` of the channel `{}` with no \
-             timestamp, so the subscription cannot place it in time",
+             timestamp that maps to mesh time, so the subscription cannot place it",
             read.node, read.channel,
         ),
         "Set `polled = true` to read each node at the rate".into(),
