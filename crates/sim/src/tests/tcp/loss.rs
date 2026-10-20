@@ -935,3 +935,33 @@ fn a_reset_end_keeps_its_reset_after_its_lost_bytes_would_time_out() {
     let (_tcp, written) = take(&client);
     assert_eq!(written, Err(Net::Reset { remote }));
 }
+
+#[test]
+fn a_power_cut_drops_the_lost_ack_of_a_closed_end_of_its_node() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    let server = start(&b, "server", move |node| async move {
+        let mut tcp = accept(&mut listener).await;
+        let read = read_all(&mut tcp).await;
+        node.clock().sleep(millis(10)).await;
+        (read, close(&mut tcp).await, tcp)
+    });
+    let remote = at(&b, 4433);
+    let client = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        node.clock().sleep(millis(10)).await;
+        (close(&mut tcp).await, read_all(&mut tcp).await)
+    });
+    sim.run_for(millis(15)).unwrap();
+    sim.link(&a, &b, cut());
+    sim.run_for(millis(15)).unwrap();
+    assert_eq!(take(&client), (Ok(()), (vec![], Ok(()))));
+    sim.crash(&a, Crash::Power);
+    sim.link(&a, &b, link::Config::default());
+    let digest = sim.digest();
+    sim.run_for(secs(1_000)).unwrap();
+    // The last ACK of the client, lost at leg 4 plus 20 ms, never goes again.
+    assert_eq!(sim.digest(), digest);
+    let (read, closed, _tcp) = take(&server);
+    assert_eq!((read, closed), ((vec![], Ok(())), Ok(())));
+}
