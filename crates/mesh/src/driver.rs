@@ -3454,6 +3454,18 @@ mod tests {
             });
         }
 
+        // As above, and the learners leave node 3 out, as the leave of #3355 will.
+        #[test]
+        fn answers_removed_to_an_applied_member_that_the_learners_leave_out() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let sets = [(&[1, 2][..], &[1, 2, 3][..]), (&[1, 2], &[])];
+                take(&node, &mesh, changes(2, &sets), 2).await;
+                mesh.group.borrow_mut().raft.set_learners([key(1), key(2)]);
+                assert_eq!(answered(&mesh, 3), Err(Error::Removed { from: key(3) }));
+            });
+        }
+
         // Only the outgoing set of the committed joint entry held node 3, as for a
         // wiped voter whose first entry is a joint entry.
         #[test]
