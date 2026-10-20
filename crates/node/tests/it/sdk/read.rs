@@ -329,7 +329,7 @@ fn a_reader_reads_a_frame_larger_than_a_draft_of_the_sdk() {
         let layout: Vec<_> = (encoded.iter().enumerate())
             .map(|(place, bytes)| (place, count, bytes.len()))
             .collect();
-        let draft = writer.draft(Form::Encoded, &layout).await.unwrap();
+        let mut draft = writer.draft(Form::Encoded, &layout).await.unwrap();
         for ((_, to), bytes) in draft.iter_mut().zip(&encoded) {
             to.copy_from_slice(bytes);
         }

@@ -518,18 +518,17 @@
   and approved on #3558 at 2026-10-20T09:20:44Z
   (https://github.com/synnaxlabs/foundation/pull/3558#issuecomment-6287720622).
   Supersedes the `Writer::index` of
-  https://github.com/synnaxlabs/foundation/issues/3266#issuecomment-6255066811. The
-  writer keeps the address of the block of the draft that it gave, and a write panics,
-  before it sends, on a draft in another block. A swap of two `&mut Draft` is a misuse:
-  the next write panics, or, when the pool gave the block of the draft again, sends the
-  draft of the other writer as its own. `wire::hub::write::Replies::frames` gives the
-  frame of the last send, so the writer keeps only the outcomes of that frame. Ruled by
-  `laptop.architect` at 2026-10-20T09:26:59Z
-  (https://github.com/synnaxlabs/foundation/pull/3558#issuecomment-6287830271) and, for
-  the block that comes back, at 2026-10-20T09:39:52Z
-  (https://github.com/synnaxlabs/foundation/pull/3558#issuecomment-6288048203). Lost: a
-  check of the key set, which cannot tell two writers apart, and a count of the allocs
-  of each pool in `block`. A draft that no caller can swap waits on #3561. Plan:
+  https://github.com/synnaxlabs/foundation/issues/3266#issuecomment-6255066811.
+  `draft` gives a `Fill`, which holds a borrow of the writer's draft and fills only its
+  series, so no caller can swap two drafts or change a head. Ruled by
+  `laptop.architect` at 2026-10-20T09:54:23Z
+  (https://github.com/synnaxlabs/foundation/pull/3558#issuecomment-6288292277). Lost:
+  the address check, which a block that comes back passes, and `Pin<&mut Draft>`
+  (#3561), which keeps the setters of the head and needs `!Unpin` in `types`.
+  `wire::hub::write::Replies::frames` gives the frame of the last send, so the writer
+  keeps only the outcomes of that frame. Ruled by `laptop.architect` at
+  2026-10-20T09:26:59Z
+  (https://github.com/synnaxlabs/foundation/pull/3558#issuecomment-6287830271). Plan:
   https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6286854444. Lost: a
   draft that takes one count for each group, which makes the caller find the group of
   each place.

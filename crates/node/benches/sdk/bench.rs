@@ -260,7 +260,7 @@ fn program(
 /// for each place of `writer`, with the node's stamp.
 async fn write(writer: &mut program::Writer, layout: &[(usize, u32, usize)]) {
     let index = writer.places()[0].index;
-    let draft = writer
+    let mut draft = writer
         .draft(Form::Raw, layout)
         .await
         .expect("the frame fits the pool");

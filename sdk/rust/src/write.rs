@@ -433,7 +433,7 @@ async fn sent(
     frame: &Frame,
     time: Time,
 ) -> Result<Outcome, program::Error> {
-    let draft = writer.draft(Form::Raw, &frame.series).await?;
+    let mut draft = writer.draft(Form::Raw, &frame.series).await?;
     // The draft holds the series of the frame, both in place order.
     for ((_, to), (_, bytes)) in draft.iter_mut().zip(frame.each()) {
         to.copy_from_slice(bytes);

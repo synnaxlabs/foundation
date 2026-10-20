@@ -30,6 +30,24 @@ pub struct Config {
     pub channels: Vec<Name>,
 }
 
+/// The series of the writer's draft, to fill. The writer keeps the draft and its
+/// head, so a swap of two `Fill` swaps only the borrows.
+#[derive(Debug)]
+pub struct Fill<'a>(&'a mut Draft);
+
+impl Fill<'_> {
+    /// The bytes of `entry`'s series, to fill, or `None` when it is absent. Time is
+    /// logarithmic in the number of present series.
+    pub fn series_mut(&mut self, entry: usize) -> Option<&mut [u8]> {
+        self.0.series_mut(entry)
+    }
+
+    /// Each present entry and its series bytes, to fill, in entry order.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (usize, &mut [u8])> {
+        self.0.iter_mut()
+    }
+}
+
 /// A writer of a [`Session`](crate::Session): one write stream on channels of any
 /// index. The home of each index applies the frames of its group in the order of the
 /// calls. It holds a clone of its session. [`Writer::finish`] ends it once its frames
@@ -43,9 +61,6 @@ pub struct Writer {
     set: Arc<KeySet>,
     /// The frame that the next write sends.
     draft: Option<Draft>,
-    /// The address of the body of the last draft given, which a swap of two
-    /// `&mut Draft` does not move.
-    drafted: usize,
     replies: Replies,
     /// The entry and byte length of each series of the last draft.
     lens: Vec<(usize, usize)>,
@@ -96,7 +111,6 @@ impl Writer {
             outcomes: Vec::with_capacity(groups),
             set,
             draft: None,
-            drafted: 0,
             cut: false,
             ended: None,
         })
@@ -116,10 +130,7 @@ impl Writer {
     /// series of one group holds one count. The entry of place `n` is `n`. A frame
     /// holds the index series of each group that it holds. It drops a held draft that
     /// no write sent. While the pool is full, it waits as each block of the session
-    /// waits: the blocks of a frame come back as the node acknowledges it. The writer
-    /// holds the draft. A swap of two `&mut Draft` is a misuse: the next
-    /// [`Writer::write`] panics, or, when the pool gave the block of the draft again,
-    /// sends the draft of the other writer as its own.
+    /// waits: the blocks of a frame come back as the node acknowledges it.
     ///
     /// # Errors
     ///
@@ -133,7 +144,7 @@ impl Writer {
         &mut self,
         form: Form,
         series: &[(usize, u32, usize)],
-    ) -> Result<&mut Draft, Error> {
+    ) -> Result<Fill<'_>, Error> {
         self.draft = None;
         self.check()?;
         let Self {
@@ -159,8 +170,7 @@ impl Writer {
             // A group holds a count when it holds a series, so in group order.
             draft.set_counts(0, counts.iter().flatten().map(|&(_, count)| count));
         }
-        self.drafted = draft.body_mut().as_ptr().addr();
-        Ok(self.draft.insert(draft))
+        Ok(Fill(self.draft.insert(draft)))
     }
 
     /// Sends the writer's draft with its stamps from `time`, and waits for what the
@@ -192,17 +202,12 @@ impl Writer {
     ///
     /// # Panics
     ///
-    /// When the writer holds no draft, or holds a draft in a block other than that of
-    /// the last draft that [`Writer::draft`] of this writer gave.
+    /// When the writer holds no draft.
     pub async fn write(&mut self, time: Time) -> Result<&[(usize, Outcome)], Error> {
-        let mut frame = self
+        let frame = self
             .draft
             .take()
             .expect("a write sends the draft of a call of `Writer::draft`");
-        assert!(
-            frame.body_mut().as_ptr().addr() == self.drafted,
-            "a write sends the draft that `Writer::draft` of its writer gave"
-        );
         self.check()?;
         let form = frame.form();
         let unsent = |count| {

@@ -2,14 +2,13 @@
 
 use std::collections::BTreeMap;
 use std::future::poll_fn;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::pin;
 use std::rc::Rc;
 use std::task::Poll;
 
 use env::clock::Clock;
 use env::tasks::Tasks;
-use program::write::{Config, End, Outcome, Refusal as Refused, Time};
+use program::write::{Config, End, Fill, Outcome, Refusal as Refused, Time};
 use program::{Error, Reader, Session, Writer};
 use spec::channel::{Channel, Data, Kind};
 use spec::data_type::DataType;
@@ -18,7 +17,7 @@ use transport::Code;
 use transport::stream::Incoming;
 use types::authority::Authority;
 use types::channel;
-use types::frame::{Draft, Form, Frame, Path, Range};
+use types::frame::{Form, Frame, Path, Range};
 use types::name::Selector;
 use types::sample::{Scalar, Type};
 use types::time::Span;
@@ -144,7 +143,7 @@ async fn frame<'a>(
     count: usize,
     stamp: i64,
     values: &[(u128, i64)],
-) -> &'a mut Draft {
+) -> Fill<'a> {
     let mut series: Vec<(usize, i64)> = [(1, stamp)]
         .iter()
         .chain(values)
@@ -156,7 +155,7 @@ async fn frame<'a>(
         .iter()
         .map(|&(at, _)| (at, samples, 8 * count))
         .collect();
-    let draft = writer.draft(Form::Raw, &lens).await.expect("a frame");
+    let mut draft = writer.draft(Form::Raw, &lens).await.expect("a frame");
     for (at, first) in series {
         let bytes = draft.series_mut(at).expect("present");
         let (samples, _) = bytes.as_chunks_mut::<8>();
@@ -444,7 +443,7 @@ fn gives_stored_once_the_commit_covers_the_last_taken_frame() {
 fn gives_unsent_for_a_frame_of_no_sample_or_a_bad_frame_to_stamp() {
     on_hub(706, |session, _| async move {
         let mut writer = session.writer(config(&["value"], 1)).await.expect("opens");
-        frame(&mut writer, 1, 0, &[(2, 1)]).await.set_count(0, 0);
+        frame(&mut writer, 0, 0, &[(2, 1)]).await;
         let got = writer
             .write(Time::Frame(Path::Live))
             .await
@@ -783,9 +782,8 @@ fn gives_unsent_for_a_group_1_of_no_sample() {
             Box::pin(async move {
                 let mut writer =
                     session.writer(config(&["a", "b"], 1)).await.expect("opens");
-                let series = [(0, 1, 8), (1, 1, 8), (2, 1, 8), (3, 1, 8)];
-                let draft = writer.draft(Form::Raw, &series).await.expect("a frame");
-                draft.set_count(1, 0);
+                let series = [(0, 1, 8), (1, 1, 8), (2, 0, 0), (3, 0, 0)];
+                writer.draft(Form::Raw, &series).await.expect("a frame");
                 let got = writer
                     .write(Time::Frame(Path::Live))
                     .await
@@ -815,9 +813,8 @@ fn gives_unsent_for_a_node_frame_of_2_samples_in_group_1() {
             Box::pin(async move {
                 let mut writer =
                     session.writer(config(&["a", "b"], 1)).await.expect("opens");
-                let series = [(0, 1, 8), (1, 1, 8), (2, 1, 16), (3, 1, 16)];
-                let draft = writer.draft(Form::Raw, &series).await.expect("a frame");
-                draft.set_count(1, 2);
+                let series = [(0, 1, 8), (1, 1, 8), (2, 2, 16), (3, 2, 16)];
+                writer.draft(Form::Raw, &series).await.expect("a frame");
                 let got = writer.write(Time::Node).await.map(<[_]>::to_vec);
                 let unsent = Error::Unsent {
                     count: 2,
@@ -1112,7 +1109,7 @@ fn panics_at_a_write_with_no_draft() {
 fn panics_at_a_write_after_an_unsent_with_no_new_draft() {
     on_hub(720, |session, _| async move {
         let mut writer = session.writer(config(&["value"], 1)).await.expect("opens");
-        frame(&mut writer, 1, 0, &[(2, 1)]).await.set_count(0, 0);
+        frame(&mut writer, 0, 0, &[(2, 1)]).await;
         let unsent = Err(Error::Unsent {
             count: 0,
             form: Form::Raw,
@@ -1122,65 +1119,30 @@ fn panics_at_a_write_after_an_unsent_with_no_new_draft() {
     });
 }
 
-/// After a swap of the drafts of two writers of one shape, the write of each panics
-/// before it sends, and each writer goes on with its own drafts.
+/// A swap of the fills of two writers swaps only the borrows: each writer sends its
+/// own draft, with the bytes put through the fill of the other.
 #[test]
-fn panics_at_each_write_of_a_draft_that_its_writer_did_not_give() {
+fn sends_its_own_draft_after_a_swap_of_two_fills() {
     on_hub(797, |session, _| async move {
+        let mut reader = reader(&session, &["value"]).await;
         let mut first = session.writer(config(&["value"], 1)).await.expect("opens");
         let mut second = session.writer(config(&["b"], 1)).await.expect("opens");
         let series = [(0, 1, 8), (1, 1, 8)];
-        let mine = first.draft(Form::Raw, &series).await.expect("a frame");
-        let other = second.draft(Form::Raw, &series).await.expect("a frame");
-        std::mem::swap(mine, other);
-        for writer in [&mut first, &mut second] {
-            let panic = poll_fn(|cx| {
-                Poll::Ready(catch_unwind(AssertUnwindSafe(|| {
-                    drop(pin!(writer.write(Time::Node)).poll(cx));
-                })))
-            })
-            .await
-            .expect_err("panics");
-            assert_eq!(
-                panic.downcast_ref::<&str>(),
-                Some(
-                    &"a write sends the draft that `Writer::draft` of its writer gave"
-                ),
-            );
+        let mut mine = first.draft(Form::Raw, &series).await.expect("a frame");
+        let mut other = second.draft(Form::Raw, &series).await.expect("a frame");
+        std::mem::swap(&mut mine, &mut other);
+        for (fill, value) in [(&mut mine, 7_i64), (&mut other, 5)] {
+            let bytes = fill.series_mut(1).expect("present");
+            bytes.copy_from_slice(&value.to_le_bytes());
         }
         for writer in [&mut first, &mut second] {
-            writer.draft(Form::Raw, &series).await.expect("a frame");
             assert_eq!(
                 writer.write(Time::Node).await.map(<[_]>::to_vec),
                 Ok(one(taken(0, 1)))
             );
         }
-    });
-}
-
-/// A swap misses the check when the pool gives the block of the draft again: after a
-/// swap, a new draft of the other writer in the block of the first, and a swap back,
-/// the first writer sends the draft of the other as its own frame.
-#[test]
-fn sends_a_swapped_draft_in_a_block_that_the_pool_gave_again() {
-    on_hub(798, |session, _| async move {
-        let mut reader = reader(&session, &["value"]).await;
-        let mut first = session.writer(config(&["value"], 1)).await.expect("opens");
-        let mut second = session.writer(config(&["b"], 1)).await.expect("opens");
-        let series = [(0, 1, 8), (1, 1, 8)];
-        let mine = first.draft(Form::Raw, &series).await.expect("a frame");
-        let other = second.draft(Form::Raw, &series).await.expect("a frame");
-        std::mem::swap(mine, other);
-        let other = second.draft(Form::Raw, &series).await.expect("a frame");
-        let b = other.series_mut(1).expect("present");
-        b.copy_from_slice(&7_i64.to_le_bytes());
-        std::mem::swap(mine, other);
-        assert_eq!(
-            first.write(Time::Node).await.map(<[_]>::to_vec),
-            Ok(one(taken(0, 1)))
-        );
         let got = reader.next().await.expect("a frame");
-        assert_eq!(samples(&reader, &got)[0], (key(2), vec![7]));
+        assert_eq!(samples(&reader, &got)[0], (key(2), vec![5]));
     });
 }
 
@@ -1907,9 +1869,7 @@ fn gives_unstored_with_the_index_place_of_a_second_group_after_the_first_is_stor
                     let mut writer =
                         session.writer(config(&["a", "b"], 1)).await.expect("opens");
                     let series = [(0, 1, 8), (1, 1, 8), (2, 1, 8), (3, 1, 8)];
-                    let draft =
-                        writer.draft(Form::Raw, &series).await.expect("a frame");
-                    draft.set_count(1, 1);
+                    writer.draft(Form::Raw, &series).await.expect("a frame");
                     let outcome = writer
                         .write(Time::Frame(Path::Live))
                         .await
