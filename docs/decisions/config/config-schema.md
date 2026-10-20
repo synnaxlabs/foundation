@@ -49,10 +49,10 @@
   those of each kind in `node`, over `kinds()`. Both run
   `document::testing::assert_examples`, behind `sim`, which checks each example, the
   example without each attribute that it does not need, the example without each
-  attribute with a default, each name of each `Unless` and `When`, and an example
-  without each attribute with a `When`. The check that
-  each attribute and block of a body is in an example, and the check of an example
-  without an attribute that it needs, stay in each crate until #3349. `foundation docs`
+  attribute with a default, each name of each `Unless` and `When`, and, for each
+  attribute with a `When`, an example without it. The check that each attribute and
+  block of a body is in an example, and the check of an example without an attribute
+  that it needs, stay in each crate until #3349. `foundation docs`
   gives each kind example inside a whole `connector` block, labeled with the name of the
   kind, with `kind` and `node = "edge"`, so a copy is a block that a config takes. An
   example that holds `<<` keeps its lines with no indent, so a heredoc keeps its value.
@@ -124,4 +124,7 @@
   its `placement` example only in this record, at 2026-10-20T04:57:48Z
   (https://github.com/synnaxlabs/foundation/pull/3505#issuecomment-6283734442). Each
   name is another attribute, by `laptop.architect-2` at 2026-10-20T04:54:13Z
-  (https://github.com/synnaxlabs/foundation/pull/3505#issuecomment-6283692312).
+  (https://github.com/synnaxlabs/foundation/pull/3505#issuecomment-6283692312). Each
+  attribute with a `When` is absent in at least one example, by `laptop.architect-2` at
+  2026-10-20T05:01:36Z
+  (https://github.com/synnaxlabs/foundation/pull/3505#issuecomment-6283779355).
