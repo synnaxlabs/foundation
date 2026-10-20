@@ -1280,6 +1280,7 @@ impl Serve {
                     interner,
                     tasks: tasks.clone(),
                     node: key,
+                    public_key: transport.public_key(),
                     time: time.clone(),
                     entropy: entropy.clone(),
                     region,

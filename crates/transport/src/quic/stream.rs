@@ -2559,6 +2559,43 @@ mod tests {
         });
     }
 
+    #[test]
+    fn a_late_copy_of_a_reset_keeps_the_connection() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let mut reset = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            write(&mut pair.client, now, &mut reset, &[shard.block(b"a")]);
+            pair.run(RUN);
+            // Not accepted, so noq-proto keeps the stream after the reset.
+            fill(&mut pair, shard, &mut reset);
+            pair.client.endpoint.reset(now, &mut reset, Code(9));
+            let dropped = pair.client.sent.len();
+            pair.client.drops = 1;
+            pair.run(RUN);
+            let mut other = open_sender(&mut pair, Class::Complete);
+            let message = vec![1; MESSAGE_MAX];
+            let now = pair.now();
+            write(&mut pair.client, now, &mut other, &[shard.block(&message)]);
+            pair.run(RUN);
+            let (_, _, late) = pair.client.sent[dropped].clone();
+            let meta = pair::meta(pair::CLIENT, &late);
+            pair.server.endpoint.receive(pair.now(), &meta, &late);
+            pair.run(RUN);
+            let closed = events(&pair.server)
+                .into_iter()
+                .find(|event| matches!(event, Event::Closed { .. }));
+            assert_eq!(closed, None);
+            let now = pair.now();
+            let mut incoming = accept(&mut pair.server);
+            let read = next(&mut pair.server, now, &mut incoming.receiver);
+            assert_eq!(read, Err(Error::Reset { code: Code(9) }));
+            let mut incoming = accept(&mut pair.server);
+            let read = drain(&mut pair.server, now, &mut incoming.receiver);
+            assert_eq!(read, (vec![message], false));
+        });
+    }
+
     /// A window of two of the largest messages, so the receive budget holds three.
     const NARROW: usize = 2 * MESSAGE_MAX;
 
@@ -2905,6 +2942,131 @@ mod tests {
             let read = drain(&mut pair.server, now, &mut fourth.receiver);
             assert_eq!(read, (vec![message.to_vec()], true));
         });
+    }
+
+    /// The bytes the client sends on raw streams that the server never reads, until
+    /// the server's connection window takes no more.
+    fn unread(pair: &mut Pair) -> usize {
+        let ids: Vec<StreamId> = (0..4)
+            .map(|_| {
+                raw(
+                    pair.client.connection(),
+                    Dir::Uni,
+                    &[byte(Class::Complete)],
+                    false,
+                )
+            })
+            .collect();
+        let chunk = vec![0; 1 << 14];
+        let mut total = ids.len();
+        loop {
+            let mut written = 0;
+            for &id in &ids {
+                let mut send = pair.client.connection().send_stream(id);
+                while let Ok(bytes) = send.write(&chunk) {
+                    written += bytes;
+                    if bytes < chunk.len() {
+                        break;
+                    }
+                }
+            }
+            pair.run(RUN);
+            if written == 0 {
+                return total;
+            }
+            total += written;
+        }
+    }
+
+    /// How the server ends a stream that the client reset with an unread message.
+    #[derive(Clone, Copy, Debug)]
+    enum Ending {
+        /// A read gives the reset.
+        Read,
+        /// A stop after the reset arrives.
+        StopAfter,
+        /// A stop before the client resets, in answer to it.
+        StopBefore,
+    }
+
+    /// The window the client has on the server after 8 streams, each with one unread
+    /// message, end by `ending`.
+    fn window_after(ending: Ending) -> usize {
+        testing::run(1, move |shard| {
+            let mut pair = connected(shard);
+            for _ in 0..8 {
+                let mut sender = open_sender(&mut pair, Class::Complete);
+                let now = pair.now();
+                let message = shard.block(&vec![1; MESSAGE_MAX]);
+                write(&mut pair.client, now, &mut sender, &[message]);
+                pair.run(RUN);
+                let mut incoming = accept(&mut pair.server);
+                if let Ending::StopBefore = ending {
+                    let now = pair.now();
+                    pair.server.endpoint.stop(now, incoming.receiver, Code(9));
+                    pair.run(RUN);
+                    let now = pair.now();
+                    pair.client.endpoint.reset(now, &mut sender, Code(9));
+                    pair.run(RUN);
+                    continue;
+                }
+                let now = pair.now();
+                pair.client.endpoint.reset(now, &mut sender, Code(9));
+                pair.run(RUN);
+                let now = pair.now();
+                if let Ending::StopAfter = ending {
+                    pair.server.endpoint.stop(now, incoming.receiver, Code(9));
+                } else {
+                    let read = next(&mut pair.server, now, &mut incoming.receiver);
+                    assert_eq!(read, Err(Error::Reset { code: Code(9) }));
+                }
+                pair.run(RUN);
+            }
+            unread(&mut pair)
+        })
+    }
+
+    #[test]
+    fn a_stop_after_the_peer_reset_gives_the_peer_no_more_window() {
+        assert_eq!(window_after(Ending::StopAfter), window_after(Ending::Read));
+    }
+
+    #[test]
+    fn a_stop_before_the_peer_reset_gives_the_peer_no_more_window() {
+        assert_eq!(window_after(Ending::StopBefore), window_after(Ending::Read));
+    }
+
+    /// The stop goes out while a message is lost, so the reset's final size is past
+    /// the bytes that arrived.
+    #[test]
+    fn a_stop_before_a_reset_past_the_bytes_that_arrived_gives_the_peer_its_window() {
+        let window = testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            for _ in 0..8 {
+                let mut sender = open_sender(&mut pair, Class::Complete);
+                let now = pair.now();
+                write(
+                    &mut pair.client,
+                    now,
+                    &mut sender,
+                    &[shard.block(&[1; 100])],
+                );
+                pair.run(RUN);
+                let incoming = accept(&mut pair.server);
+                pair.client.drops = usize::MAX;
+                let now = pair.now();
+                let message = shard.block(&vec![2; MESSAGE_MAX]);
+                write(&mut pair.client, now, &mut sender, &[message]);
+                pair.server.endpoint.stop(now, incoming.receiver, Code(9));
+                pair.run(DELAY + STEP);
+                pair.client.drops = 0;
+                let now = pair.now();
+                pair.client.endpoint.reset(now, &mut sender, Code(9));
+                pair.run(RUN);
+            }
+            unread(&mut pair)
+        });
+        assert_eq!(window, window_after(Ending::Read));
     }
 
     #[test]
@@ -8969,7 +9131,7 @@ mod tests {
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
             pair.foreign = Some(foreign);
             let (now, peer) = (pair.now(), pair::FOREIGN_KEY.public());
-            let key = pair.client.endpoint.connect(now, peer, pair::FOREIGN);
+            let key = pair.client.endpoint.connect(now, Some(peer), pair::FOREIGN);
             pair.client.key = Some(key);
             pair.run(RUN);
             pair

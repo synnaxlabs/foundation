@@ -478,6 +478,35 @@ fn a_message_with_a_proof_drops_its_entries_and_keeps_its_chain() {
     assert_eq!(chain, [at(2), at(3)]);
 }
 
+#[test]
+fn a_message_with_a_proof_drops_its_entries_before_its_oldest_link() {
+    let short = |message: &Message| message.chain.len() <= 1;
+    let (mut nodes, mut ran) = led(short);
+    let leader = nodes.get_mut(&key(1)).unwrap();
+    leader.propose_voters(keyed(&[1, 2, 3])).unwrap();
+    run_among(&mut nodes, &[1, 2, 3], &mut ran);
+    let ran = &mut Ran::default();
+    let elected = elect(&mut nodes, &[2, 3], ran);
+    let leader = nodes.get_mut(&key(elected)).unwrap();
+    leader.propose(vec![7]).unwrap();
+    run_among(&mut nodes, &[elected], ran);
+    let append = ran
+        .sent
+        .iter()
+        .find(|message| {
+            matches!(message.body, Body::Append { .. }) && message.to == key(1)
+        })
+        .unwrap();
+    assert!(append.proof.is_some(), "{append:?}");
+    assert_eq!(entries(append), []);
+    let chain: Vec<Position> = append.chain.iter().map(|link| link.at).collect();
+    let at = Position {
+        term: Term(1),
+        index: 3,
+    };
+    assert_eq!(chain, [at]);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(CASES))]
 

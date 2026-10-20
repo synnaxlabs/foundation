@@ -1,5 +1,6 @@
 //! The writes of a session: one write stream each, on the channels of one index.
 
+use std::iter;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -12,9 +13,8 @@ use types::name::Name;
 use types::time::Span;
 use wire::hub::client::Place;
 use wire::hub::client::write::{Open, Opening, Start, Write};
-use wire::hub::ends;
-use wire::hub::write::{Head, Replies, Reply};
-pub use wire::hub::write::{Outcome, Refusal, Time};
+pub use wire::hub::write::{End, Outcome, Refusal, Time};
+use wire::hub::write::{Lead, Replies, Reply};
 
 use crate::{Error, Handle, end};
 
@@ -67,7 +67,7 @@ impl Writer {
                     return Err(error);
                 }
             };
-        let lead = Head::LEN + places.len() * ends::LEN;
+        let lead = Lead::most(&set);
         let largest = session.0.pool.largest();
         if lead > largest {
             return Err(Error::Pool(block::Error::TooLarge {
@@ -79,9 +79,9 @@ impl Writer {
             session,
             stream: Some((sender, receiver)),
             places,
+            replies: Replies::new(set.groups().len()),
             set,
             draft: None,
-            replies: Replies::new(),
             cut: false,
             ended: None,
         })
@@ -128,10 +128,7 @@ impl Writer {
         let shared = &self.session.0;
         let layout = Layout::new(&self.set, series).map_err(Error::Layout)?;
         let mut draft = shared.retry(|| layout.draft(&shared.frames, form)).await?;
-        // A frame of no series has no group, and its write gives `Unsent`.
-        if !series.is_empty() {
-            draft.set_count(0, count);
-        }
+        draft.set_counts(0, iter::repeat(count));
         Ok(self.draft.insert(draft))
     }
 
@@ -148,16 +145,16 @@ impl Writer {
     ///
     /// # Errors
     ///
-    /// [`Error::Unsent`] for a frame of no sample or no series, or a frame of
-    /// [`Time::Node`] that is encoded or holds more than one sample, with nothing sent
-    /// and the draft dropped; the writer goes on. Else the error that ended the writer,
-    /// given again at each later call: the error that ended the renewal, or
-    /// [`Error::Refused`] when the node stopped the stream (`UNKNOWN` when a channel
-    /// was removed, `FAILED` when the home failed, `BUSY` when the home has no block
-    /// for the outcome of a frame, `MALFORMED` for a frame that breaks a rule of the
-    /// wire), [`Error::Transport`] (a reset of `Code(0)` after a call dropped while it
-    /// sent), and [`Error::Reply`] for a reply that `wire` refuses, a reply out of
-    /// order, or a stream that ends early.
+    /// [`Error::Unsent`] for a frame of no series or with a group of no sample, or a
+    /// frame of [`Time::Node`] that is encoded or holds more than one sample in a
+    /// group, with nothing sent and the draft dropped; the writer goes on. Else the
+    /// error that ended the writer, given again at each later call: the error that
+    /// ended the renewal, or [`Error::Refused`] when the node stopped the stream
+    /// (`UNKNOWN` when a channel was removed, `FAILED` when the home failed, `BUSY`
+    /// when the home has no block for the outcome of a frame, `MALFORMED` for a frame
+    /// that breaks a rule of the wire), [`Error::Transport`] (a reset of `Code(0)`
+    /// after a call dropped while it sent), and [`Error::Reply`] for a reply that
+    /// `wire` refuses, a reply out of order, or a stream that ends early.
     ///
     /// # Panics
     ///
@@ -168,22 +165,32 @@ impl Writer {
             .take()
             .expect("a write sends the draft of a call of `Writer::draft`");
         self.check()?;
-        let count = frame.range(0).map_or(0, |range| range.count);
         let form = frame.form();
-        if count == 0 || time == Time::Node && (form != Form::Raw || count != 1) {
+        let unsent = |count| {
+            count == 0 || time == Time::Node && (form != Form::Raw || count != 1)
+        };
+        let mut counts = frame.ranges().map(|(_, range)| range.count);
+        let first = counts.next().unwrap_or(0);
+        if let Some(count) =
+            iter::once(first).chain(counts).find(|&count| unsent(count))
+        {
             return Err(Error::Unsent { count, form });
         }
-        let written = self.written(time, frame, count).await;
+        let written = self.written(time, frame).await;
         self.ending(written)
     }
 
-    /// Waits until each frame that the home took before the call is on disk. Gives
-    /// at once when the home took no frame. A call dropped before it gave loses
-    /// nothing: the next call takes the replies that it did not.
+    /// Waits until each frame that the home of a group took before the call is on
+    /// disk. Gives at once when the homes took no frame. It never waits on a group
+    /// whose write ended. A call dropped before it gave loses nothing: the next call
+    /// takes the replies that it did not.
     ///
     /// # Errors
     ///
-    /// The error that ended the writer, as [`Writer::write`] gives it.
+    /// The error that ended the writer, as [`Writer::write`] gives it, and
+    /// [`Error::Unstored`] for each group whose write ended with a taken frame whose
+    /// `Stored` did not come, so it may not be on disk; the writer goes on, and each
+    /// later call gives it again.
     pub async fn stored(&mut self) -> Result<(), Error> {
         self.check()?;
         let mut waited = Ok(());
@@ -193,23 +200,42 @@ impl Writer {
                 break;
             }
         }
-        self.ending(waited)
+        self.ending(waited)?;
+        self.unstored()
     }
 
     /// Drops a held draft, finishes the stream, and waits until each frame that the
-    /// home took is on disk and the node finished the stream. Control ends when the
-    /// stream finishes. Dropping the call drops the writer.
+    /// home took is on disk, or its group ended, and the node finished the stream.
+    /// Control ends when the stream finishes. Dropping the call drops the writer.
     ///
     /// # Errors
     ///
-    /// The error that ended the writer, as [`Writer::write`] gives it, and
+    /// The error that ended the writer, as [`Writer::write`] gives it,
     /// [`Error::Reply`] with [`wire::hub::Error::Finished`] when the node finishes the
-    /// stream before each outcome or the `Stored` of each taken frame.
+    /// stream before each group of each frame sent has its outcome, or before the
+    /// `Stored` of each taken frame of a group that did not end, and then
+    /// [`Error::Unstored`] as [`Writer::stored`] gives it.
     pub async fn finish(mut self) -> Result<(), Error> {
         self.draft = None;
         self.check()?;
         let finished = self.finished().await;
-        self.ending(finished)
+        self.ending(finished)?;
+        self.unstored()
+    }
+
+    /// [`Error::Unstored`] for each group whose write ended with a taken frame whose
+    /// `Stored` did not come.
+    fn unstored(&self) -> Result<(), Error> {
+        let groups: Vec<_> = self
+            .replies
+            .unstored()
+            .map(|(group, end)| (self.set.groups()[to_usize(group)], end))
+            .collect();
+        if groups.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Unstored(groups))
+        }
     }
 
     /// Finishes the sender and takes each reply until the node finishes.
@@ -256,14 +282,9 @@ impl Writer {
         Err(ended)
     }
 
-    /// Sends the head, the ends, and the body of `frame`, whose group 0 holds `count`
-    /// samples. The body goes from the frame's own block.
-    async fn send(
-        &mut self,
-        time: Time,
-        frame: Draft,
-        count: u32,
-    ) -> Result<(), Error> {
+    /// Sends the head, the ends, the counts, and the body of `frame`. The body goes
+    /// from the frame's own block.
+    async fn send(&mut self, time: Time, frame: Draft) -> Result<(), Error> {
         let Self {
             session,
             stream,
@@ -274,52 +295,32 @@ impl Writer {
         let (sender, _) = stream
             .as_mut()
             .expect("invariant: a writer holds its stream until it ends");
-        let head = Head {
-            time,
-            form: frame.form(),
-            count,
-            series: to_u32(frame.iter().count()),
-        };
         let frame = frame.freeze(match time {
             Time::Frame(path) => path,
             Time::Node => Path::Live,
         });
-        let run = to_usize(head.series) * ends::LEN;
+        let lead = Lead::new(time, &frame);
         // The open checked that a block of the pool holds the lead.
-        let mut lead = shared.alloc(Head::LEN + run).await?;
-        let (bytes, rest) = lead.split_at_mut(Head::LEN);
-        head.encode(bytes);
-        ends::encode(
-            frame
-                .ends()
-                .map(|(entry, end)| (to_u32(entry), to_u32(end))),
-            rest,
-        );
-        let lead = lead.freeze();
+        let mut bytes = shared.alloc(lead.bytes()).await?;
+        lead.encode(&mut bytes);
+        let bytes = bytes.freeze();
         let most = sender.bytes_max();
-        let run_most = most / ends::LEN * ends::LEN;
         *cut = true;
-        send_range(sender, &lead, 0..Head::LEN).await?;
-        for at in (Head::LEN..lead.len()).step_by(run_most) {
-            send_range(sender, &lead, at..lead.len().min(at + run_most)).await?;
+        for range in lead.messages(most) {
+            send_range(sender, &bytes, range).await?;
         }
         let body = frame.body();
         for at in (0..body.len()).step_by(most) {
             send_range(sender, &body, at..body.len().min(at + most)).await?;
         }
         *cut = false;
-        self.replies.sent();
+        self.replies.sent(frame.ranges().map(|(group, _)| group));
         Ok(())
     }
 
     /// Sends `frame` and takes its outcome.
-    async fn written(
-        &mut self,
-        time: Time,
-        frame: Draft,
-        count: u32,
-    ) -> Result<Outcome, Error> {
-        self.send(time, frame, count).await?;
+    async fn written(&mut self, time: Time, frame: Draft) -> Result<Outcome, Error> {
+        self.send(time, frame).await?;
         self.outcome().await
     }
 
@@ -389,10 +390,6 @@ async fn start(
             };
         }
     }
-}
-
-fn to_u32(value: usize) -> u32 {
-    u32::try_from(value).expect("invariant: a frame of a writer fits the wire")
 }
 
 fn to_usize(value: u32) -> usize {

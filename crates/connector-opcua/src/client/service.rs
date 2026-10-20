@@ -1,5 +1,5 @@
 //! The requests and answers of each service, and the sizes of their messages, for
-//! [`Client::read`] and the browse.
+//! [`Client::read`], the browse, and the subscription.
 
 use std::cell::Cell;
 use std::ffi::c_void;
@@ -8,7 +8,7 @@ use std::ptr::{self, NonNull};
 use std::task::Poll;
 
 use super::browse::{Cause, Foreign};
-use super::{Calls, Client, READS, id_bytes};
+use super::{Calls, Client, id_bytes};
 use crate::alloc;
 use crate::ffi::{self, Service, Status};
 use crate::node::{Key, Node};
@@ -117,6 +117,49 @@ impl Request {
         // SAFETY: `nodes` holds its count, and C copies each name.
         let raw = unsafe { ffi::shim_read_new(nodes.as_ptr(), nodes.len()) };
         Self::new(raw.cast(), Service::READ)
+    }
+
+    /// A `CreateSubscription` request at the publishing interval `interval` ms and the
+    /// keep-alive count `keep_alive`, with at most `most` notifications in a Publish
+    /// answer.
+    ///
+    /// # Aborts
+    ///
+    /// As [`Request::browse`].
+    pub(super) fn subscribe(interval: f64, keep_alive: u32, most: u32) -> Self {
+        // SAFETY: it reads nothing.
+        let raw = unsafe { ffi::shim_subscribe_new(interval, keep_alive, most) };
+        Self::new(raw, Service::SUBSCRIBE)
+    }
+
+    /// A `CreateMonitoredItems` request on the subscription `subscription` of an item
+    /// for the Value of each of `nodes`, with the client handle `first + i` for
+    /// `nodes[i]`, that reports each change of the status or the value with both
+    /// timestamps, samples at `sampling` ms, and queues `queue` values, the oldest
+    /// dropped first.
+    ///
+    /// # Aborts
+    ///
+    /// As [`Request::browse`].
+    pub(super) fn monitor(
+        subscription: u32,
+        nodes: &[ffi::Node<'_>],
+        first: u32,
+        sampling: f64,
+        queue: u32,
+    ) -> Self {
+        // SAFETY: `nodes` holds its count, and C copies each name.
+        let raw = unsafe {
+            ffi::shim_monitor_new(
+                subscription,
+                nodes.as_ptr(),
+                nodes.len(),
+                first,
+                sampling,
+                queue,
+            )
+        };
+        Self::new(raw, Service::MONITOR)
     }
 
     /// Takes `raw`, a request of `service` from C, or NULL when C could not allocate
@@ -252,6 +295,10 @@ pub(super) enum Item {
     Result,
     /// One reference of a Browse result.
     Reference,
+    /// A `CreateMonitoredItems` result with no filter result.
+    Created,
+    /// A data change of a Double in a Publish answer.
+    Change,
 }
 
 impl Item {
@@ -266,6 +313,8 @@ impl Item {
             Self::Path => ffi::shim_item_path(),
             Self::Result => ffi::shim_item_result(),
             Self::Reference => ffi::shim_item_reference(),
+            Self::Created => ffi::shim_item_created(),
+            Self::Change => ffi::shim_item_change(),
         }
     }
 }
@@ -293,6 +342,24 @@ impl Answer {
     fn count(&self) -> usize {
         // SAFETY: the answer lives.
         unsafe { ffi::shim_answer_count(self.raw.as_ptr()) }
+    }
+
+    /// Gives its service result.
+    ///
+    /// # Errors
+    ///
+    /// The service result when it is Bad, or, of a `CreateSubscription` or a
+    /// `CreateMonitoredItems`, when it is not Good, as open62541 then makes no
+    /// subscription or item.
+    pub(super) fn result(&self) -> Result<(), Status> {
+        // SAFETY: the answer lives, and is an answer of its service.
+        let status =
+            Status(unsafe { ffi::shim_answer_result(self.raw.as_ptr(), self.service) });
+        if status == Status::GOOD {
+            Ok(())
+        } else {
+            Err(status)
+        }
     }
 
     /// Checks that the answer has `count` results.
@@ -349,6 +416,61 @@ impl Answer {
         self.check(&[Service::READ], index);
         // SAFETY: the answer lives, and has more results than `index`.
         unsafe { ffi::shim_read_result(self.raw.as_ptr().cast(), index) }
+    }
+
+    /// Gives the id of the subscription of a Good `CreateSubscription` answer, its
+    /// publishing interval in ms, and its keep-alive count.
+    ///
+    /// # Panics
+    ///
+    /// If the answer is not of a `CreateSubscription`.
+    pub(super) fn subscription(&self) -> (u32, f64, u32) {
+        assert_eq!(
+            self.service,
+            Service::SUBSCRIBE,
+            "invariant: a reader of a subscription reads no other answer"
+        );
+        let (mut interval, mut keep_alive) = (0.0, 0);
+        // SAFETY: the answer lives, and `interval` and `keep_alive` are places to
+        // write.
+        let id = unsafe {
+            ffi::shim_subscription(
+                self.raw.as_ptr(),
+                &raw mut interval,
+                &raw mut keep_alive,
+            )
+        };
+        (id, interval, keep_alive)
+    }
+
+    /// Gives the sampling interval in ms and the queue size of result `index` of a
+    /// `CreateMonitoredItems` answer.
+    ///
+    /// # Errors
+    ///
+    /// The status of the result when it is not Good.
+    ///
+    /// # Panics
+    ///
+    /// If the answer is not of a `CreateMonitoredItems`, or has no result `index`.
+    pub(super) fn created(&self, index: usize) -> Result<(f64, u32), Status> {
+        self.check(&[Service::MONITOR], index);
+        let (mut sampling, mut queue) = (0.0, 0);
+        // SAFETY: the answer lives and has more results than `index`, and `sampling`
+        // and `queue` are places to write.
+        let status = Status(unsafe {
+            ffi::shim_monitor_result(
+                self.raw.as_ptr(),
+                index,
+                &raw mut sampling,
+                &raw mut queue,
+            )
+        });
+        if status == Status::GOOD {
+            Ok((sampling, queue))
+        } else {
+            Err(status)
+        }
     }
 
     /// Gives each reference of result `index` of a Browse or `BrowseNext` answer to
@@ -463,34 +585,41 @@ impl Client {
     /// [`Client::read`] gives them, else the status of open62541 when it refuses the
     /// request, or the service result of an answer when it is Bad.
     pub(super) async fn serve(&mut self, request: &Request) -> Result<Answer, Status> {
+        let answer = self.exchange(request).await?;
+        answer.result()?;
+        Ok(answer)
+    }
+
+    /// As [`Client::serve`], but gives an answer whose service result is Bad.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::serve`], other than the service result.
+    pub(super) async fn exchange(
+        &mut self,
+        request: &Request,
+    ) -> Result<Answer, Status> {
         if request.bytes(self.token) > self.sends {
             return Err(Status::BAD_REQUEST_TOO_LARGE);
         }
         let slot = &self.calls.service;
         slot.awaited.set(None);
         drop(slot.answer.take());
-        let answer = self
-            .call(|client, sent| {
-                if let Err(status) = client.ask(request, sent) {
-                    return Poll::Ready(Err(status));
-                }
-                let answer = client.calls.service.answer.take();
-                answer.map_or(Poll::Pending, |answer| Poll::Ready(Ok(answer)))
-            })
-            .await?;
-        // SAFETY: the answer lives.
-        let status = Status(unsafe { ffi::shim_response_result(answer.raw.as_ptr()) });
-        if status != Status::GOOD {
-            return Err(status);
-        }
-        Ok(answer)
+        self.call(|client, sent| {
+            if let Err(status) = client.ask(request, sent) {
+                return Poll::Ready(Err(status));
+            }
+            let answer = client.calls.service.answer.take();
+            answer.map_or(Poll::Pending, |answer| Poll::Ready(Ok(answer)))
+        })
+        .await
     }
 
-    /// Sends `request` unless `sent`, or [`READS`] are in flight, and then sets
-    /// `sent`.
+    /// Sends `request` unless `sent`, or [`Client::budget`] requests are in flight,
+    /// and then sets `sent`.
     fn ask(&self, request: &Request, sent: &mut bool) -> Result<(), Status> {
-        let calls = &self.calls;
-        if *sent || calls.pending.get() == READS {
+        let calls = &*self.calls;
+        if *sent || calls.pending.get() >= self.budget {
             return Ok(());
         }
         let mut key = 0;

@@ -2641,6 +2641,7 @@ mod hub {
                     interner,
                     tasks: spawn,
                     node: types::node::Key::from_u128(1),
+                    public_key: types::ed25519::PrivateKey([1; 32]).public(),
                     time,
                     entropy,
                     region: None,
@@ -3480,8 +3481,9 @@ pub(crate) mod port {
         assert_eq!(sim.run(), Ok(()));
         let seen = seen.lock().unwrap().take().expect("the peer ran");
         let unreachable = transport::Error::Unreachable {
-            peer: KEY.public(),
-            attempts: vec![(Address::Udp(listen(&host)), transport::Error::TimedOut)],
+            peer: Some(KEY.public()),
+            attempts: vec![(Address::Udp(listen(&host)), transport::Error::TimedOut)]
+                .into_boxed_slice(),
         };
         assert_eq!(seen, Err(unreachable));
         let error = ::buffer::Error::Files(env::files::Error::Io {
@@ -4594,6 +4596,7 @@ pub(crate) mod port {
                 interner,
                 tasks: tasks.clone(),
                 node: key,
+                public_key: transport.public_key(),
                 time: time.clone(),
                 entropy: entropy.clone(),
                 region: Some(::hub::Region {
@@ -4763,11 +4766,12 @@ pub(crate) mod port {
             assert_eq!(node.join(), Ok(()));
             let peer = OTHER.1.public();
             let unreachable = transport::Error::Unreachable {
-                peer,
+                peer: Some(peer),
                 attempts: vec![(
                     Address::Udp(listen(&host)),
                     transport::Error::Authentication { expected: peer },
-                )],
+                )]
+                .into_boxed_slice(),
             };
             let error = ::hub::reader::Error::Transport(unreachable);
             assert_eq!(opened.lock().unwrap().take(), Some(Some(error)));
