@@ -20,20 +20,20 @@ use crate::agent::{Agent, SUBJECT, Stream};
 use crate::{ALLOCATOR, COUNTED, WARM, common, net, serving, sessions};
 
 /// The longest wait for the program to take an outcome.
-const TAKE: Span = Span::SECOND;
+pub(crate) const TAKE: Span = Span::SECOND;
 /// The time from a send of the program to the poll of the home. Longer than the 25 ms
 /// for which a QUIC peer may hold an ack.
-const SPACING: Span = Span::from_nanos(30_000_000);
+pub(crate) const SPACING: Span = Span::from_nanos(30_000_000);
 
 /// What the program tells the home.
 #[derive(Default)]
-struct Progress {
+pub(crate) struct Progress {
     /// The program has the places of its write.
-    started: AtomicBool,
+    pub(crate) started: AtomicBool,
     /// The frames that the program sent.
-    sent: AtomicUsize,
+    pub(crate) sent: AtomicUsize,
     /// The outcomes that the program took.
-    taken: AtomicUsize,
+    pub(crate) taken: AtomicUsize,
 }
 
 /// A program writes frames that the node stamps, one at a time: of `value` for one
@@ -111,7 +111,7 @@ async fn serve(node: sim::node::Node, tasks: Tasks, progress: Arc<Progress>) {
 /// # Panics
 ///
 /// When it does not hold within [`TAKE`].
-async fn wait(node: &sim::node::Node, n: i64, done: impl Fn() -> bool) {
+pub(crate) async fn wait(node: &sim::node::Node, n: i64, done: impl Fn() -> bool) {
     let end = node.clock().now() + TAKE;
     while !done() {
         assert!(node.clock().now() < end, "frame {n} did not go through");
@@ -122,7 +122,7 @@ async fn wait(node: &sim::node::Node, n: i64, done: impl Fn() -> bool) {
 /// The program: admits a hello, opens a write of `groups`, and sends each frame of
 /// the run once the outcomes of the frame before it came. The places of two groups are
 /// `time`, `time-b`, `value`, and `value-b`.
-async fn write(
+pub(crate) async fn write(
     node: sim::node::Node,
     tasks: Tasks,
     at: Address,
