@@ -1,47 +1,47 @@
-//! Changes the voters of the region through the leader of the group.
+//! Changes the voters of the region.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use raft::{Position, Voters};
+use raft::{Position, Role, Voters};
 use spec::tree::{self, Chunks};
 use types::digest::Digest;
 use types::ed25519::PublicKey;
 use types::node;
 
 use super::used::RETRY;
-use super::{Group, Mesh, check_voters};
+use super::{Group, Mesh, check_voters, fetched};
 use crate::error::Error;
 
 impl Mesh {
     /// Proposes `voters` as the next set of voters, and returns once this node applied
     /// the joint entry and a majority of the set holds each chunk of the tree of the
     /// spec in force. `raft` moves to the set through a joint configuration (RAFT
-    /// VOTERS), whose entry binds the card key of each voter that it adds. Before the
-    /// proposal, it puts each chunk of the tree of the pointer in force on each other
-    /// voter of the set, all at once, in the calls of [`Mesh::apply`], and proposes
-    /// once the holders are a majority of the set. After the joint entry applies, it
-    /// puts the tree of the pointer then in force on the set again when that pointer
-    /// moved, and tries again each second until a majority holds it. No failed put
-    /// after the joint entry fails the call, other than one that cannot run again:
-    /// the change of voters is in force.
+    /// VOTERS), whose entry binds the card key of each voter that it adds. The call
+    /// puts the tree on the set before the proposal, and again after the joint entry
+    /// applies when the pointer moved in between, for as long as it takes a majority
+    /// of the set to hold it.
     ///
     /// # Errors
     ///
-    /// None of these propose anything, other than `Stopped`, `Blob`, `Tree`, and
-    /// `NotLeader` after the write: the set is in force after the joint entry.
+    /// Nothing is proposed, and the voters stay as they were:
     ///
     /// - [`Error::Voters`] when the set holds more voters than one set can hold.
     /// - [`Error::NotMember`] when a node of the set is not a member in the applied
     ///   state of this node.
     /// - [`Error::NoVote`] when this node is not a voter.
-    /// - [`Error::Stopped`] when the group stopped, or stops before the call ends.
-    /// - [`Error::Tree`] when this node cannot list the tree in force from its store.
-    /// - [`Error::Blob`] when a call of the store fails.
+    /// - [`Error::Raft`] with [`raft::Error::NotLeader`] when this node does not lead,
+    ///   or when a new leader replaces the entry before a write holds it or before it
+    ///   applies, or when `raft` refuses the set ([`Raft::propose_voters`]).
     /// - [`Error::Quorum`] when the holders are not a majority of the set once each
     ///   put ended, with each voter whose put failed and why.
-    /// - [`Error::Raft`] when `raft` refuses the set ([`Raft::propose_voters`]), or
-    ///   with [`raft::Error::NotLeader`] when a new leader replaces the entry before
-    ///   a write holds it or before it applies.
+    /// - [`Error::Stopped`], [`Error::Tree`], and [`Error::Blob`] before the proposal.
+    ///
+    /// The set is in force, and a majority of it may not hold the tree in force:
+    ///
+    /// - [`Error::Stopped`] when the group stops after the joint entry applied.
+    /// - [`Error::Tree`] with [`tree::Error::Corrupt`] when a chunk of the tree in
+    ///   force does not fit in a tree.
+    /// - [`Error::Blob`] when a call of the store fails after the joint entry.
     ///
     /// # Panics
     ///
@@ -55,19 +55,20 @@ impl Mesh {
         voters: BTreeSet<node::Key>,
     ) -> Result<Position, Error> {
         check_voters(voters.len())?;
-        keyed(&self.group.borrow(), &voters)?;
-        self.check_proposer()?;
+        public_keys(&self.group.borrow(), &voters)?;
+        self.check_leader()?;
         let set = Voters {
             incoming: voters,
             outgoing: BTreeSet::new(),
         };
         let pointer = self.pointer();
-        self.put(&set, pointer.root).await?;
+        self.spread_tree(&set, pointer.root).await?;
         let at = {
             let attempt = self.attempt()?;
             let at = self
                 .proposed(|group| {
-                    Ok(group.raft.propose_voters(keyed(group, &set.incoming)?)?)
+                    let keys = public_keys(group, &set.incoming)?;
+                    Ok(group.raft.propose_voters(keys)?)
                 })
                 .await?;
             match attempt.applied(at).await? {
@@ -81,44 +82,56 @@ impl Mesh {
                 }
             }
         };
+        if self.pointer().root != pointer.root {
+            self.spread_in_force(&set).await?;
+        }
+        Ok(at)
+    }
+
+    // `Stopped` when the group stopped, `NoVote` when this node is not a voter, and
+    // `NotLeader` when it does not lead.
+    fn check_leader(&self) -> Result<(), Error> {
+        self.check_proposer()?;
+        let group = self.group.borrow();
+        if group.raft.role() != Role::Leader {
+            let leader = group.raft.leader();
+            return Err(raft::Error::NotLeader { leader }.into());
+        }
+        Ok(())
+    }
+
+    // Puts the tree of the pointer in force on each other voter of `set`, each
+    // `RETRY`, until a majority of each half holds it. Ends on `Stopped`, `Blob`, or
+    // `Tree(Corrupt)`.
+    pub(super) async fn spread_in_force(&self, set: &Voters) -> Result<(), Error> {
         loop {
-            let moved = self.pointer();
-            if moved == pointer {
-                return Ok(at);
-            }
-            match self.put(&set, moved.root).await {
-                Ok(()) => return Ok(at),
+            match self.spread_tree(set, self.pointer().root).await {
+                Ok(()) => return Ok(()),
                 Err(Error::Quorum { .. } | Error::Tree(tree::Error::Missing(_))) => {}
                 Err(error) => return Err(error),
             }
             self.clock.sleep(RETRY).await;
+            self.group.borrow().running()?;
         }
     }
 
     // Puts each chunk of the tree at `root`, from this node's store, on each other
-    // voter of `set`, in the order of a walk from the root.
-    async fn put(&self, set: &Voters, root: Digest) -> Result<(), Error> {
+    // voter of `set`.
+    async fn spread_tree(&self, set: &Voters, root: Digest) -> Result<(), Error> {
         let mut chunks = Chunks::default();
-        let mut digests = Vec::new();
-        loop {
-            let digest = match tree::diff(&chunks, tree::empty(), root) {
-                Ok(_) => break,
-                Err(tree::Error::Missing(digest)) => digest,
-                Err(error) => return Err(Error::Tree(error)),
-            };
-            match self.store.get(digest).await.map_err(Error::Blob)? {
-                Some(chunk) => chunks.insert(chunk.to_vec()),
-                None => return Err(Error::Tree(tree::Error::Missing(digest))),
-            };
-            digests.push(digest);
-        }
-        self.spread(set, &digests).await.map(|_| ())
+        let read = |chunks: &Chunks| {
+            tree::diff(chunks, tree::empty(), root).map(|diff| diff.chunks)
+        };
+        let listed = fetched(&self.store, &mut chunks, read)
+            .await?
+            .map_err(Error::Tree)?;
+        self.spread(set, &listed).await.map(|_| ())
     }
 }
 
 // The public key of each of `voters` in the applied state of `group`, or `NotMember`
 // of the first that is not a member.
-fn keyed(
+fn public_keys(
     group: &Group,
     voters: &BTreeSet<node::Key>,
 ) -> Result<BTreeMap<node::Key, PublicKey>, Error> {

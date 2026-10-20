@@ -118,31 +118,42 @@ fn a_pointer_that_moves_before_the_joint_entry_is_put_until_a_majority_holds_it(
     assert_used(&board, &IDS, moved, &next);
 }
 
-// Voter 3 is down at the apply, and comes back while voters 1 and 2 answer no blob
-// stream, so its store lacks the tree, from its root.
+// A `Spec` entry with the lone voter as holder moves the pointer to a tree that the
+// store of the lone voter lacks: the state machine never reads chunks.
 #[test]
 fn a_proposer_whose_store_lacks_the_tree_in_force_gives_tree_missing() {
-    let mut cluster = Cluster::new(0);
-    cluster.start_voter(1);
-    cluster.start_voter(2);
-    cluster.run(seconds(5));
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1, 2], &[1]).await.unwrap();
+        lead(&mesh, &node.clock(), home_to(1)).await;
+        let root = settle_unheld(&mesh).await.root;
+        let proposed = now(pin!(mesh.propose_voters([key(1), key(2)].into()))).await;
+        let missing = Error::Tree(tree::Error::Missing(root));
+        assert_eq!(proposed, Poll::Ready(Err(missing.clone())));
+        assert_eq!(
+            missing.to_string(),
+            format!(
+                "this node cannot list the spec tree in force: chunk {root} is not here"
+            )
+        );
+        assert_eq!(mesh.group.borrow().raft.voters().outgoing, BTreeSet::new());
+    });
+}
+
+/// Applies a change on `mesh`, the lone voter and the one holder, with no put of its
+/// chunks in the store of `mesh`, and gives the pointer that it moved to.
+async fn settle_unheld(mesh: &Mesh) -> Pointer {
     let definitions = create_subjects(&["plant.a"], 1);
-    cluster.change(1, base(), &definitions);
-    cluster.run(seconds(5));
-    cluster.board.lock().unwrap().silent = [1, 2].into();
-    cluster.start_voter(3);
-    cluster.run(seconds(5));
-    cluster.configure(3, IDS.into());
-    cluster.run(seconds(5));
-    let root = pointer(1, &definitions).root;
-    let missing = Error::Tree(tree::Error::Missing(root));
-    assert_eq!(outcomes(&cluster.board()), [(3, Err(missing.clone()))]);
-    assert_eq!(
-        missing.to_string(),
-        format!(
-            "this node cannot list the spec tree in force: chunk {root} is not here"
-        )
-    );
+    let mut chunks = Chunks::default();
+    let update = spec::region::tree(&mut chunks, &definitions);
+    let listed = update.chunks.iter().copied().collect();
+    let holders = [key(1)].into();
+    let start = mesh.pointer();
+    let moved = mesh
+        .settle_spec(start, update.root, listed, holders, BTreeMap::new())
+        .await
+        .unwrap();
+    assert_eq!(mesh.pointer(), moved);
+    moved
 }
 
 #[test]
@@ -155,4 +166,37 @@ fn a_proposal_by_a_node_that_is_not_a_voter_gives_no_vote_and_puts_nothing() {
     let board = cluster.board();
     assert_eq!(outcomes(&board), [(2, Err(Error::NoVote))]);
     assert_eq!(board.blobs, BTreeMap::new());
+}
+
+// Voter 1 of {1, 2} leads nothing while voter 2 is absent.
+#[test]
+fn a_proposal_by_a_voter_that_does_not_lead_gives_not_leader_and_puts_nothing() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1, 2], &[1, 2]).await.unwrap();
+        node.clock().sleep(seconds(5)).await;
+        let proposed = now(pin!(mesh.propose_voters([key(1)].into()))).await;
+        let not_leader = raft::Error::NotLeader { leader: None };
+        assert_eq!(proposed, Poll::Ready(Err(Error::Raft(not_leader))));
+    });
+}
+
+// A `Spec` entry before the joint entry moves the pointer to a tree that the store
+// of the lone voter lacks, so the call tries again after the joint entry. Then the
+// group stops.
+#[test]
+fn a_stop_while_the_moved_tree_is_missing_gives_stopped() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1, 2], &[1]).await.unwrap();
+        lead(&mesh, &node.clock(), home_to(1)).await;
+        let mut spec = pin!(settle_unheld(&mesh));
+        assert!(now(spec.as_mut()).await.is_pending());
+        let mut voters = pin!(mesh.propose_voters([key(1)].into()));
+        assert!(now(voters.as_mut()).await.is_pending());
+        spec.await;
+        assert!(pending_for(voters.as_mut(), &node.clock(), seconds(3)).await);
+        let stopped = Error::Stopped(fail_sync(&node));
+        assert_eq!(mesh.propose(home_to(2)).await, Err(stopped.clone()));
+        let ended = within(&node.clock(), seconds(30), voters).await;
+        assert_eq!(ended, Some(Err(stopped)));
+    });
 }

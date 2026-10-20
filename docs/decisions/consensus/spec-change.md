@@ -53,18 +53,18 @@
   between the propose and the commit cannot leave the pointer at chunks that no majority
   holds. The record lists only the chunks that the base tree lacks, so the rule also
   needs the chunks of the base on a majority after a change of voters (#1231). So
-  `propose_voters` puts the tree of the pointer in force on the new set before its
-  joint entry, and after the entry applies puts the tree of a pointer that moved,
+  `propose_voters` puts the tree of the pointer in force on the new set before its joint
+  entry, and after the entry applies puts the tree in force again when its root moved,
   each `RETRY` of the spec in use until a majority of the set holds it. No failed put
-  after the joint entry fails the call, other than one that cannot run again (a chunk
-  that is not a tree chunk, `Error::Tree`, or a failure of the store): the set is in
-  force. Simple version: `raft`
-  leaves the joint phase on its own, so between that leave and the end of the second
-  put only a majority of the old voters can hold the chunks of a `Spec` entry that
-  came between the read of the pointer and the joint entry. Trigger: before a removed
-  voter can leave the region, the design of the leave of a node closes the window
-  (#3400; the put before a `Remove`, item 1 of the ruling on #3355). Lost: a hook in
-  `raft` that holds the leave. Every
+  after the joint entry fails the call, other than one that cannot run again (a stop, a
+  chunk that does not fit in a tree, which gives `Error::Tree` with
+  `tree::Error::Corrupt`, or a failure of the store): the set is in force. Simple
+  version: `raft` leaves the joint phase on its own, so between that leave and the end
+  of the second put only a majority of the old voters can hold the chunks of a `Spec`
+  entry that came between the read of the pointer and the joint entry. Trigger: before a
+  removed voter can leave the region, the design of the leave of a node closes the
+  window (#3400; the put before a `Remove`, item 1 of the ruling on #3355). Lost: a hook
+  in `raft` that holds the leave. Every
   member applies a change whose base is the pointer, and refuses one whose base is not
   (`Refused::Stale`), so after a change from one base moves the pointer, each later
   change from that base gives `Stale`. The state machine never reads chunks and never
