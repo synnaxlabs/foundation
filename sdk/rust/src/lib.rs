@@ -101,13 +101,13 @@ impl Node {
         Ok((node, subject))
     }
 
-    /// The node that answers first at `addresses`, dialed in this order with a
-    /// stagger, with the public key that it proves. Blocks until a node answers or
-    /// each address fails, then until the transport drains the close of each session
-    /// (up to 3 s), which goes out again for each packet that comes before the end of
-    /// its drain. Trust on first use: nothing proves that it is the node the caller
-    /// means, so the caller pins the result and gives it to each later
-    /// [`Client::connect`]. It sends no hello, so it needs no subject.
+    /// The node that answers first at `addresses`, dialed in this order with a stagger,
+    /// with the public key that it proves. Blocks until each address fails, or until a
+    /// node answers and the transport drains the close of each session (up to 3 s). A
+    /// close goes out again for each packet of the node that comes before its drain
+    /// ends. Trust on first use: nothing proves that it is the node the caller means,
+    /// so the caller pins the result and gives it to each later [`Client::connect`]. It
+    /// sends no hello, so it needs no subject.
     ///
     /// # Errors
     ///
@@ -699,19 +699,12 @@ async fn connect(
     subject: Subject,
     tasks: Tasks,
 ) -> Result<(program::Session, usize), Error> {
-    let clock = os::clock();
-    let entropy = os::entropy();
-    let pool = Rc::new(block::Pool::heap(POOL));
     let frames = Rc::new(block::Pool::heap(FRAMES));
     let reads = reads().map_err(Error::Memory)?;
-    let transport = transport::Client::new(transport::client::Config {
-        net: os::net(),
-        clock: clock.clone(),
-        entropy: entropy.clone(),
-        tasks: tasks.clone(),
-        pool: Rc::clone(&pool),
-    })
-    .map_err(Error::Bind)?;
+    let on = on_os(tasks.clone());
+    let (clock, entropy, pool) =
+        (on.clock.clone(), on.entropy.clone(), Rc::clone(&on.pool));
+    let transport = transport::Client::new(on).map_err(Error::Bind)?;
     let config = program::Config {
         node: node.public_key,
         addresses: node
