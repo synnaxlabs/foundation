@@ -377,12 +377,14 @@ impl<'a> Secured<'a> {
                 trust: self.trust.expose(),
             },
             mode: self.security.mode,
-            user: (self.security.user.as_ref().zip(self.password.as_ref())).map(
-                |(user, password)| client::User {
-                    name: &user.name,
-                    password: password.expose(),
-                },
-            ),
+            user: self.security.user.as_ref().map(|user| client::User {
+                name: &user.name,
+                password: self
+                    .password
+                    .as_ref()
+                    .expect("invariant: Secured::read reads the password of each user")
+                    .expose(),
+            }),
         }
     }
 
