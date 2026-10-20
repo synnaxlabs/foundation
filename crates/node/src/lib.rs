@@ -1616,7 +1616,8 @@ pub enum Error {
     /// The data directory holds no node name and stores no founding, and the start gave
     /// no name.
     Unnamed,
-    /// The data directory holds no file `node.key`: no node has started on it.
+    /// The data directory holds no file `node.key` and no directory of a mesh: no node
+    /// has started on it.
     Unstarted,
     /// The data directory has the directory of a mesh, and the file `node.key` is not
     /// there, or, with no file `name`, it holds a key with no card in the founding of
