@@ -504,6 +504,39 @@ fn a_node_of_another_key_gives_other_key_with_both_keys() {
     shard.join().unwrap();
 }
 
+/// A refused address whose node now proves the pinned key keeps the error of the
+/// connect: the node may have taken its key back between the two dials.
+#[test]
+fn a_refused_address_that_now_proves_the_pinned_key_keeps_the_error() {
+    let (at, stop, server) = serve_key(PrivateKey([7; 32]));
+    let pinned = PrivateKey([7; 32]).public();
+    let refused = || {
+        let cause = transport::Error::Authentication { expected: pinned };
+        program::Error::Transport(transport::Error::Unreachable {
+            peer: Some(pinned),
+            attempts: vec![(transport::Address::Udp(at), cause)].into(),
+        })
+    };
+    let error = refused();
+    let (given, answer) = oneshot::channel();
+    let client = shard(move |tasks| async move {
+        let transport = transport::Client::new(transport::client::Config {
+            net: os::net(),
+            clock: os::clock(),
+            entropy: os::entropy(),
+            tasks,
+            pool: Rc::new(block::Pool::heap(POOL)),
+        })
+        .unwrap();
+        drop(given.send(other_key(&transport, pinned, error).await));
+    });
+    client.unwrap().join().unwrap();
+    let answer = answer.blocking_recv().expect("the shard gives its answer");
+    assert_eq!(answer, Error::Session(refused()));
+    drop(stop);
+    server.join().unwrap();
+}
+
 /// A pinned address where no node answers times out once: no second dial follows a
 /// dial that no key refused.
 #[test]
