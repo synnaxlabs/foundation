@@ -96,7 +96,8 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// As [`Client::dial`], with no peer in [`Error::Unreachable`].
+    /// As [`Client::dial`], with no peer in [`Error::Unreachable`]. A certificate that
+    /// the verifier refuses gives [`Error::Broken`], as no key was dialed.
     ///
     /// ```
     /// use std::net::SocketAddr;

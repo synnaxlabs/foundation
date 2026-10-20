@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::fs::Permissions;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
@@ -9,6 +10,7 @@ use std::time::Duration;
 use tokio::runtime::Builder;
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Dispatch, Event, Metadata, Subscriber};
+use types::time::Span;
 
 use super::*;
 
@@ -24,6 +26,9 @@ fn fixed() -> env::entropy::Entropy {
     sim.node(sim::node::Config::default()).entropy()
 }
 
+/// `private_key` reads the OS, so only `drawn` takes fixed bytes; the test pins it as
+/// `laptop.architect-2` ruled (2026-10-19T23:47:10Z,
+/// <https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279865842>).
 #[test]
 fn a_private_key_is_the_first_32_bytes_of_the_entropy() {
     let mut bytes = [0; 32];
@@ -34,6 +39,72 @@ fn a_private_key_is_the_first_32_bytes_of_the_entropy() {
 #[test]
 fn each_private_key_is_new() {
     assert_ne!(private_key().0, private_key().0);
+}
+
+/// The node sees the close of an answer at once, not at the end of its idle timeout,
+/// also when the shard of the answer ends right after it.
+#[test]
+fn an_answer_closes_its_session_with_code_0() {
+    let server_key = PrivateKey([2; 32]);
+    let proved = server_key.public();
+    let mut sim = sim::Sim::new(sim::Config::default());
+    let client = sim.node(sim::node::Config::default());
+    let server = sim.node(sim::node::Config::default());
+    let at = SocketAddr::new(server.addresses()[0], 4433);
+    let (sent, ended) = mpsc::channel();
+    let own = server.clone();
+    let shard = env::shards::Config {
+        name: "server".into(),
+        core: None,
+    };
+    let started = server.shards().start(shard, move |tasks| async move {
+        let pool = block::Config::new(1 << 20).expect("the budget fits");
+        let memory = block::Heap::new(pool.reservation());
+        let config = transport::Config {
+            private_key: server_key,
+            message_bytes_max: NonZeroUsize::new(1 << 16).expect("not zero"),
+            window_bytes: 1 << 20,
+            streams_max: NonZeroU32::new(16).expect("not zero"),
+            idle: Span::from_nanos(60 * Span::SECOND.nanos()),
+            clock: own.clock(),
+            entropy: own.entropy(),
+            tasks,
+            pool: Rc::new(block::Pool::new(pool, memory)),
+        };
+        let part = transport::Port::bind(&own.net(), at)
+            .expect("a port")
+            .split(NonZeroUsize::MIN)
+            .pop()
+            .expect("one part");
+        let transport = transport::Transport::new(config, part).expect("a transport");
+        let session = transport.accept().await.expect("a session");
+        let start = own.clock().now();
+        let error = session.closed().await;
+        sent.send((error, own.clock().now() - start))
+            .expect("the test keeps the receiver");
+    });
+    let serving = started.expect("the server starts");
+    let answered = sim.run_on(&client, move |node, tasks| async move {
+        let config = transport::client::Config {
+            net: node.net(),
+            clock: node.clock(),
+            entropy: node.entropy(),
+            tasks,
+            pool: Rc::new(block::Pool::heap(POOL)),
+        };
+        answered(&[transport::Address::Udp(at)], config).await
+    });
+    let public_key = answered.expect("the run ends").expect("an answer");
+    serving.join().expect("the server did not panic");
+    assert_eq!(public_key, proved);
+    let (error, waited) = ended.try_recv().expect("the server saw the end");
+    assert_eq!(
+        error,
+        transport::Error::PeerClosed {
+            code: transport::Code(0)
+        }
+    );
+    assert!(waited < Span::SECOND, "{waited:?}");
 }
 
 #[test]

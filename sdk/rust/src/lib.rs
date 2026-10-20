@@ -102,7 +102,8 @@ impl Node {
     }
 
     /// The node that answers first at `addresses`, dialed in this order with a
-    /// stagger, with the public key that it proves. Blocks until a node answers.
+    /// stagger, with the public key that it proves. Blocks until a node answers or each
+    /// address fails.
     /// Trust on first use: nothing proves that it is the node the caller means, so the
     /// caller pins the result and gives it to each later [`Client::connect`]. It sends
     /// no hello, so it needs no subject.
@@ -112,7 +113,8 @@ impl Node {
     /// [`Error::Thread`] when the thread that dials cannot start, [`Error::Bind`] when
     /// the local UDP socket cannot bind, [`Error::Session`] with
     /// [`program::Error::Transport`] when the dial or the handshake fails, and
-    /// [`Error::Panicked`]. No address is unreachable with no attempt.
+    /// [`Error::Panicked`]. With no address, [`Error::Session`] with an `Unreachable`
+    /// of no attempt.
     #[expect(
         clippy::missing_panics_doc,
         clippy::unwrap_in_result,
@@ -127,7 +129,7 @@ impl Node {
         let (sender, key) = mpsc::channel();
         let shard = shard(move |tasks| async move {
             sender
-                .send(answered(&dialed, tasks).await)
+                .send(answered(&dialed, config(tasks)).await)
                 .expect("invariant: `answering` keeps the receiver");
         })?;
         shard.join().map_err(|_panicked| Error::Panicked)?;
@@ -141,20 +143,25 @@ impl Node {
     }
 }
 
-/// The public key of the node that answers first at `addresses`, on the drivers of
-/// `os` and `tasks`. Closes the session with code 0 and waits for its end.
-async fn answered(
-    addresses: &[transport::Address],
-    tasks: Tasks,
-) -> Result<PublicKey, Error> {
-    let transport = transport::Client::new(transport::client::Config {
+/// The config of a transport client on the drivers of `os` and `tasks`.
+fn config(tasks: Tasks) -> transport::client::Config {
+    transport::client::Config {
         net: os::net(),
         clock: os::clock(),
         entropy: os::entropy(),
         tasks,
         pool: Rc::new(block::Pool::heap(POOL)),
-    })
-    .map_err(Error::Bind)?;
+    }
+}
+
+/// The public key of the node that answers first at `addresses`, on a transport
+/// client of `config`. Closes the session with code 0 and waits for its end, so the
+/// node does not wait out its idle timeout.
+async fn answered(
+    addresses: &[transport::Address],
+    config: transport::client::Config,
+) -> Result<PublicKey, Error> {
+    let transport = transport::Client::new(config).map_err(Error::Bind)?;
     let session = transport.dial_any(addresses).await;
     let session = session.map_err(|e| Error::Session(program::Error::Transport(e)))?;
     let transport::Peer::Node(public_key) = session.peer() else {
@@ -226,6 +233,10 @@ pub struct Subject {
 }
 
 /// Gives a new Ed25519 private key, from the randomness of the OS.
+///
+/// # Panics
+///
+/// When the OS gives no randomness.
 #[must_use]
 pub fn private_key() -> PrivateKey {
     drawn(&os::entropy())

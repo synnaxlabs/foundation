@@ -87,7 +87,8 @@
   that `Session::peer` gives. Each other check of the certificate holds.
   `Error::Unreachable` names no peer for such a dial. `dial` does not change, and a
   node always dials a key. Ruling of trust on the first connect: `laptop.architect-2`,
+  2026-10-18T15:53:21Z,
   https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6251937504. A
   function of its own, not a `None` key, so the one dial that trusts any node is easy
-  to find: `laptop.architect-2`, item 1 of
+  to find: `laptop.architect-2`, 2026-10-19T23:24:32Z, item 1 of
   https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279566176.

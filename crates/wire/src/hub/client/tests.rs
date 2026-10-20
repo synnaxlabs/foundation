@@ -245,6 +245,13 @@ mod signed {
             ..signed("ops.ana")
         };
         assert_eq!(decode(new), [Ok(hello.clone()), Ok(hello)]);
+        let small = include_bytes!(
+            "../../../../../oracles/fuzz/wire_hub_client/hello_small_via"
+        );
+        assert_eq!(
+            decode(small),
+            [Err(Error::SmallOrder), Err(Error::SmallOrder)]
+        );
     }
 
     #[test]

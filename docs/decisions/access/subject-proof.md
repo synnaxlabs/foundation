@@ -19,14 +19,14 @@
   Amended by #3212: `via` is the public key that the transport session of the program
   proved, in place of the node key. With trust on the first connect, a host in the
   middle that proves its own key could pass the challenge of the node behind it to the
-  program, and relay the hello that names that node. A hello that names the key of its
-  session gets `VIA` at that node. `Error::Via` gives both public keys, and
-  `hub::Config::public_key` is the `peer` of each client session. The tag stays
-  `foundation/hello/1`: no SDK is released, and the subject length keeps the old and
-  new bytes apart. Lost: a node key in the challenge, which proves nothing; a hello
-  with both keys, two names of one node; a TLS exporter in the hello, which needs a new
-  `transport` surface on each carrier. Decided by `laptop.architect`
-  (2026-10-19T23:45:44Z,
+  program, and relay the hello that names that node. That hello names the public key of
+  the host in the middle, so the node behind it refuses the hello with `VIA`.
+  `Error::Via` gives both public keys, and `hub::Config::public_key` is the `peer` of
+  each client session. The tag stays `foundation/hello/1`: no SDK is released, and the
+  subject length keeps the old and new bytes apart. Lost: a node key in the challenge,
+  which proves nothing; a hello with both keys, two names of one node; a TLS exporter in
+  the hello, which needs a new `transport` surface on each carrier. Decided by
+  `laptop.architect` (2026-10-19T23:45:44Z,
   https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279846281).
 
   A signature binds its kind: `proof::signed(kind, connection, bytes)` with
