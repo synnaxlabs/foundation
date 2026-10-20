@@ -90,6 +90,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "config_profile"
+path = "fuzz_targets/config_profile.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_openssh_private_key"
+path = "fuzz_targets/config_openssh_private_key.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "config_plan"
 path = "fuzz_targets/config_plan.rs"
 test = false
