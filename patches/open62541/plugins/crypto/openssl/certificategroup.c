@@ -450,9 +450,10 @@ openSSLCertificateLabel(const char *name) {
  * another label. A block of any label that `PEM_read_bio` cannot read, such as an
  * empty one, damaged base64, or an `END` line that does not name its label, gives
  * `UA_TRUSTLOAD_DAMAGED`. A certificate block with a header is `UA_TRUSTLOAD_INVALID`,
- * as aws-lc reads a header only as an encryption that needs a password. A block with
- * any byte after its certificate fails, also trust settings, which the verify of the
- * group does not apply. Clears the error queue of the thread.
+ * as aws-lc reads a header only as an encryption that needs a password, and one that
+ * starts with a NUL byte as none. A block with any byte after its certificate fails,
+ * also trust settings, which the verify of the group does not apply. Clears the error
+ * queue of the thread.
  */
 static UA_TrustLoad
 openSSLLoadEachCertificate(const UA_ByteString cert, STACK_OF(X509) *stack,

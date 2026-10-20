@@ -361,6 +361,16 @@ fn a_certificate_block_with_a_header_does_not_parse() {
     assert_eq!(trusting(format!("{other}{server}")), Err(invalid(2)));
 }
 
+/// aws-lc reads a header that starts with a NUL byte as none, as in the loads of the
+/// policies.
+#[test]
+fn a_certificate_block_whose_header_starts_with_a_nul_reads() {
+    let (other, server) = blocks();
+    let server = server.replacen('\n', "\n\0Comment: server\n\n", 1);
+    let read = trusting(format!("{other}{server}")).expect("the client connects");
+    assert_eq!(read.answer, Ok(read.value));
+}
+
 #[test]
 fn a_trust_whose_begin_line_starts_no_block_drops_it() {
     let (other, server) = blocks();

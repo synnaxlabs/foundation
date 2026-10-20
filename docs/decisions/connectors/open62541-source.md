@@ -1038,9 +1038,11 @@
   aws-lc reads as `TRUSTED CERTIFICATE`, which the copy states, as aws-lc does not
   export that rule, and the header through `PEM_get_EVP_CIPHER_INFO` and
   `PEM_do_header` of aws-lc with a callback that refuses a password, so a block with a
-  header gives `Invalid` (round 1 of review of #3469). Then `d2i_X509` reads the bytes
-  of each block, not the leaf loader of the copy, which drops a block that does not
-  start with the exact line `-----BEGIN CERTIFICATE-----` (round 2 of review of #3271).
+  header gives `Invalid` (round 1 of review of #3469). aws-lc reads a header that
+  starts with a NUL byte as none, so that block loads, as in the loads of the policies
+  (round 2 of review of #3469). Then `d2i_X509` reads the bytes of each block, not the
+  leaf loader of the copy, which drops a block that does not start with the exact line
+  `-----BEGIN CERTIFICATE-----` (round 2 of review of #3271).
   `d2i_X509` is the one step of the DER path (#3288 item 4, OK of `laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6266776077). This
   supersedes item 1 of
