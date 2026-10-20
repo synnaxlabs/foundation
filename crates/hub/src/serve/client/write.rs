@@ -7,6 +7,7 @@ use std::future::poll_fn;
 use std::mem;
 use std::pin::{Pin, pin};
 use std::rc::Rc;
+use std::slice;
 use std::sync::Arc;
 use std::task::Poll;
 
@@ -199,14 +200,18 @@ async fn relay(
                     Ok(draft) => frames.draft(draft),
                     Err(error) => {
                         frames.skip();
-                        writes.refuse(sender, &error).await?;
+                        writes.refuse(&error);
+                        flush(sender, &mut writes.replies).await?;
                         Step::More
                     }
                 }
             }
         };
         if let Step::Frame { draft, time } = step {
-            writes.write(state, sender, draft, time).await?;
+            writes.write(state, draft, time);
+            for (block, reply) in writes.replies.drain(..) {
+                send(sender, block, reply).await?;
+            }
         }
     }
 }
@@ -220,9 +225,7 @@ async fn relay(
 struct Writes {
     /// The count of frames of the stream whose head came.
     heads: u64,
-    /// The write of each group of the stream, in group order.
-    groups: Vec<Group>,
-    /// How a frame reaches the groups.
+    /// The write of each group, and how a frame reaches them.
     spread: Spread,
     /// The commit that is due, of the taken frames of each group of `covered`.
     due: Option<::home::Commit>,
@@ -230,15 +233,23 @@ struct Writes {
     covered: Vec<u32>,
     /// Each group that took a frame since the call of the commit in `due`.
     waiting: Vec<u32>,
+    /// The replies to send, in order, with their blocks.
+    replies: Vec<(Unique, Reply)>,
 }
 
-/// How a frame of a stream reaches its groups.
+/// The groups of a stream, and how a frame reaches them.
 enum Spread {
-    /// One group, which takes each frame whole, and the block of the outcome of the
-    /// frame whose head came.
-    One(Option<Unique>),
+    /// One group, which takes each frame whole.
+    One {
+        /// The write of the group.
+        group: Group,
+        /// The block of the outcome of the frame whose head came.
+        block: Option<Unique>,
+    },
     /// Many groups, each of which takes a copy of its series of a frame.
     Many {
+        /// The write of each group, in group order.
+        groups: Vec<Group>,
         /// Each group of the frame whose head came, with the block of its outcome.
         pending: Vec<(u32, Unique)>,
         /// The series of each group of the last frame.
@@ -253,25 +264,27 @@ impl Writes {
     /// The replies of a write of `set` with `writers`, one for each group, in group
     /// order.
     fn new(set: &KeySet, writers: Vec<Writer>) -> Self {
-        let spread = if writers.len() > 1 {
+        let mut groups: Vec<Group> = (0..)
+            .zip(writers)
+            .map(|(number, writer)| Group::new(number, writer))
+            .collect();
+        let spread = if groups.len() > 1 {
             Spread::Many {
+                groups,
                 pending: Vec::new(),
                 parts: Parts::new(set),
             }
         } else {
-            Spread::One(None)
+            let group = groups.pop().expect("invariant: a write has a group");
+            Spread::One { group, block: None }
         };
-        let groups = (0..)
-            .zip(writers)
-            .map(|(number, writer)| Group::new(number, writer))
-            .collect();
         Self {
             heads: 0,
-            groups,
             spread,
             due: None,
             covered: Vec::new(),
             waiting: Vec::new(),
+            replies: Vec::new(),
         }
     }
 
@@ -287,7 +300,7 @@ impl Writes {
             // A head names at least one series and each series its index, so the
             // frame of a stream of one group holds it. This skips the walk of the
             // series.
-            Spread::One(block) => *block = Some(alloc(state, Outcome::LEN_MAX)?),
+            Spread::One { block, .. } => *block = Some(alloc(state, Outcome::LEN_MAX)?),
             Spread::Many { pending, .. } => {
                 for group in layout.groups() {
                     pending.push((group, alloc(state, Outcome::LEN_MAX)?));
@@ -297,67 +310,60 @@ impl Writes {
         Ok(())
     }
 
-    /// Sends the outcome of each group of the frame whose draft found no block with
-    /// `error`.
-    async fn refuse(
-        &mut self,
-        sender: &mut Sender,
-        error: &block::Error,
-    ) -> Result<(), Error> {
+    /// Adds to `replies` the outcome of each group of the frame whose draft found no
+    /// block with `error`.
+    fn refuse(&mut self, error: &block::Error) {
         let frame = self.heads;
         match &mut self.spread {
-            Spread::One(block) => {
+            Spread::One { group, block } => {
                 let block = block.take().expect(TAKEN);
-                let outcome = self.groups[0].refuse(error);
-                send(sender, block, reply(frame, 0, outcome)).await?;
+                let outcome = group.refuse(error);
+                self.replies.push((block, reply(frame, 0, outcome)));
             }
-            Spread::Many { pending, .. } => {
+            Spread::Many {
+                groups, pending, ..
+            } => {
                 for (group, block) in pending.drain(..) {
-                    let outcome = self.groups[to_usize(group)].refuse(error);
-                    send(sender, block, reply(frame, group, outcome)).await?;
+                    let outcome = groups[to_usize(group)].refuse(error);
+                    self.replies.push((block, reply(frame, group, outcome)));
                 }
             }
         }
-        Ok(())
     }
 
-    /// Writes each group of `draft`, the frame whose head came last, and sends the
-    /// outcome of each, in group order, after the `Ended` of a group that ends at it.
-    /// A frame of a stream of one group goes to its group as it is; else each group
-    /// gets a copy of its series.
-    async fn write(
-        &mut self,
-        state: &RefCell<State>,
-        sender: &mut Sender,
-        draft: Draft,
-        time: Time,
-    ) -> Result<(), Error> {
+    /// Writes each group of `draft`, the frame whose head came last, and adds to
+    /// `replies` the outcome of each, in group order, after the `Ended` of a group that
+    /// ends at it. A frame of a stream of one group goes to its group as it is; else
+    /// each group gets a copy of its series. Sync, so the relay's future holds no
+    /// nested one.
+    fn write(&mut self, state: &RefCell<State>, draft: Draft, time: Time) {
         let Self {
             heads,
-            groups,
             spread,
             waiting,
+            replies,
             ..
         } = self;
         match spread {
-            Spread::One(block) => {
+            Spread::One { group, block } => {
                 let block = block.take().expect(TAKEN);
                 let frame = Frame::Whole(draft);
-                let group = &mut groups[0];
-                put(state, sender, group, waiting, *heads, block, frame, time).await?;
+                put(state, group, waiting, replies, *heads, block, frame, time);
             }
-            Spread::Many { pending, parts } => {
+            Spread::Many {
+                groups,
+                pending,
+                parts,
+            } => {
                 parts.split(&draft, pending.iter().map(|&(group, _)| group));
                 for (number, block) in pending.drain(..) {
                     let frame = parts.part(&draft, number);
                     let group = &mut groups[to_usize(number)];
-                    put(state, sender, group, waiting, *heads, block, frame, time)
-                        .await?;
+                    put(state, group, waiting, replies, *heads, block, frame, time);
                 }
             }
         }
         self.call(state);
-        Ok(())
     }
 
     /// Calls a commit for the taken frames of each waiting group when none is due.
@@ -365,7 +371,7 @@ impl Writes {
         if self.due.is_some() {
             return;
         }
-        let groups = &mut self.groups;
+        let groups = self.spread.groups();
         self.waiting
             .retain(|&group| groups[to_usize(group)].cover());
         if !self.waiting.is_empty() {
@@ -374,25 +380,19 @@ impl Writes {
         }
     }
 
-    /// Sends the reply of each group that the due commit covered, which ended with
-    /// `committed`, then calls the next commit.
-    async fn committed(
+    /// Adds to `replies` the reply of each group that the due commit covered, which
+    /// ended with `committed`, then calls the next commit.
+    fn committed(
         &mut self,
         state: &RefCell<State>,
-        sender: &mut Sender,
         committed: &Result<(), env::files::Error>,
-    ) -> Result<(), Error> {
-        let mut covered = mem::take(&mut self.covered);
-        for group in covered.drain(..) {
-            if let Some((block, reply)) =
-                self.groups[to_usize(group)].committed(committed)
-            {
-                send(sender, block, reply).await?;
-            }
+    ) {
+        let groups = self.spread.groups();
+        for group in self.covered.drain(..) {
+            let group = &mut groups[to_usize(group)];
+            self.replies.extend(group.committed(committed));
         }
-        self.covered = covered;
         self.call(state);
-        Ok(())
     }
 
     /// Waits for `received`, and sends the replies of each commit that ends meanwhile.
@@ -414,7 +414,8 @@ impl Writes {
                 Ok(received) => return Ok(received?),
                 Err(committed) => {
                     self.due = None;
-                    self.committed(state, sender, &committed).await?;
+                    self.committed(state, &committed);
+                    flush(sender, &mut self.replies).await?;
                 }
             }
         }
@@ -428,40 +429,60 @@ impl Writes {
         state: &RefCell<State>,
         sender: &mut Sender,
     ) -> Result<(), Error> {
-        for group in &mut self.groups {
+        for group in self.spread.groups() {
             group.close();
         }
         while let Some(due) = self.due.take() {
             let committed = due.await;
-            self.committed(state, sender, &committed).await?;
+            self.committed(state, &committed);
+            flush(sender, &mut self.replies).await?;
         }
         sender.finish()?;
         Ok(())
     }
 }
 
+impl Spread {
+    /// The write of each group, in group order.
+    fn groups(&mut self) -> &mut [Group] {
+        match self {
+            Self::One { group, .. } => slice::from_mut(group),
+            Self::Many { groups, .. } => groups,
+        }
+    }
+}
+
 /// Writes `frame`, the frame `heads` of the stream, to `group`, which adds its number
-/// to `waiting` when it starts to wait for a commit, and sends the `Ended` of the group
-/// when it ends at the frame, then the outcome of the frame in `block`.
+/// to `waiting` when it starts to wait for a commit, and adds to `replies` the `Ended`
+/// of the group when it ends at the frame, then the outcome of the frame in `block`.
 #[expect(
     clippy::too_many_arguments,
     reason = "the parts of a frame that both paths of `Writes::write` give"
 )]
-async fn put(
+fn put(
     state: &RefCell<State>,
-    sender: &mut Sender,
     group: &mut Group,
     waiting: &mut Vec<u32>,
+    replies: &mut Vec<(Unique, Reply)>,
     heads: u64,
     block: Unique,
     frame: Frame<'_>,
     time: Time,
-) -> Result<(), Error> {
+) {
     let (ended, outcome) = group.write(state, frame, time, heads, waiting);
-    if let Some((block, reply)) = ended {
+    replies.extend(ended);
+    replies.push((block, reply(heads, group.number(), outcome)));
+}
+
+/// Sends each of `replies`, in order.
+async fn flush(
+    sender: &mut Sender,
+    replies: &mut Vec<(Unique, Reply)>,
+) -> Result<(), Error> {
+    for (block, reply) in replies.drain(..) {
         send(sender, block, reply).await?;
     }
-    send(sender, block, reply(heads, group.number(), outcome)).await
+    Ok(())
 }
 
 /// Sends `reply` in the last bytes of `block`.
