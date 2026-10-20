@@ -17,16 +17,16 @@
   its progress count, its backoff form, the configs that its check refuses with
   their exact diagnostics, a function that marks its config and gives each secret that
   the marked config reads, and an echo simulator when its device can answer with a
-  text of its own (both approved by the same comment as the next sentence). The kind
-  makes the marked config and the value of each secret, as it owns the shape of both:
-  a secret can need other attributes to check, and a value can need a form, such as
-  PEM (`laptop.architect-2`, 2026-10-20T14:37:34Z:
-  https://github.com/synnaxlabs/foundation/issues/2642#issuecomment-6293427967, and
-  2026-10-20T14:56:38Z:
-  https://github.com/synnaxlabs/foundation/issues/2642#issuecomment-6293847679). The
-  simulator of a kind that subscribes changes its data at least every 100 ms, so its
-  progress grows (item 1 of the same comment): the simulator of `opcua` changes each
-  variable every 100 ms, so the suite runs the default mode, which subscribes.
+  text of its own. The kind makes the marked config and the value of each secret, as
+  it owns the shape of both: a secret can need other attributes to check, and a value
+  can need a form, such as PEM (`laptop.architect-2`, 2026-10-20T14:56:38Z:
+  https://github.com/synnaxlabs/foundation/issues/2642#issuecomment-6293847679, which
+  replaces item 3 of the next comment). The echo simulator is item 2 of
+  https://github.com/synnaxlabs/foundation/issues/2642#issuecomment-6293427967
+  (`laptop.architect-2`, 2026-10-20T14:37:34Z). The simulator of a kind that
+  subscribes changes its data at least every 100 ms, so its progress grows (item 1 of
+  that comment): the simulator of `opcua` changes each variable every 100 ms, so the
+  suite runs the default mode, which subscribes.
   `polled = true` keeps its crate and ONE NODE tests (`laptop.architect-2`,
   2026-10-20T10:03:28Z:
   https://github.com/synnaxlabs/foundation/pull/3548#issuecomment-6288442532). People
@@ -131,26 +131,25 @@
 
   7. **No secret in a status.** For a kind whose config takes secrets, the config of its
      setup reads each of them from a secret whose value holds a marker, and checks. No
-     status, no end of a run, and no check shows the marker. One run meets the
-     simulator, and is Running with progress within 10 s, then its stop, and gives an
-     error within 30 s and 5 s more. A second run meets no device: an error within 10 s,
-     and 5 s more. A third meets the echo simulator, which answers each request with an
-     error whose text holds each header of the request, as a gateway in debug mode does:
-     an error within 10 s, and 5 s more. Then the write form of scenario 5, with the
-     same secrets, for 5 s. The suite asserts that the marked config differs from the
+     status and no end of a run shows the marker. Two runs meet the simulator, and are
+     Running with progress within 10 s. Then the simulator stops for the first, and the
+     device node crashes for the second (`Sim::crash`), and each gives an error within
+     30 s and 5 s more. A third run meets no device: an error within 10 s, and 5 s more.
+     A fourth meets the echo simulator, which answers each request with an error whose
+     text holds each header of the request, as a gateway in debug mode does: an error
+     within 10 s, and 5 s more. Then the write form of scenario 5, with the same
+     secrets, for 5 s. No kind runs the write form yet: `influx` gives no writes, and
+     `opcua` comes with #3610. The suite asserts that the marked config differs from the
      setup, that the kind gives at least one secret, and that each value holds the
-     marker. A refused config and the read form stop before a run reads a secret, so
-     they get no check. A kind with no secret passes with no check. `opcua` is not yet
-     in scenario 7: a certificate needs a secure endpoint of the simulator, which needs
-     a new public surface of `connector_opcua::sim` (#3610). The status hides each
-     secret value that a run read (ruling of `laptop.architect-2` on #2849 item 4,
-     2026-10-16T17:54:49Z:
+     marker. A refused config and the read form stop before a run reads a secret, and a
+     check gets only the name of each secret, so they get no check. A kind with no
+     secret passes with no check. `opcua` is not yet in scenario 7: a certificate needs
+     a secure endpoint of the simulator, which needs a new public surface of
+     `connector_opcua::sim` (#3610). The status hides each secret value that a run read
+     (ruling of `laptop.architect-2` on #2849 item 4, 2026-10-16T17:54:49Z:
      https://github.com/synnaxlabs/foundation/issues/2849#issuecomment-6221505945).
-     Scenario 7 runs 13.1 s of plant time for `influx` with no echo simulator (box1, at
-     2026-10-20). Lost: the crash form of scenario 3, where the device node crashes and
-     no close reaches the plant. It comes back with the `opcua` form of scenario 7
-     (#3610). OK of `laptop.monitor`, 2026-10-20T14:53:46Z:
-     https://github.com/synnaxlabs/foundation/pull/3607#issuecomment-6293785716.
+     Scenario 7 runs 20.1 s of plant time for `influx` with no echo simulator (box1, at
+     2026-10-20).
 
   The numbers are tunable by the architect of `connector`. Plan of
   `laptop.architect-2` at 2026-10-13T21:22:43Z
