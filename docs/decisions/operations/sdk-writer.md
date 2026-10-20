@@ -125,8 +125,8 @@
   names the places of the caller, with nothing sent, and the writer goes on. A call
   checks the place of each item and the type of each value, and keeps at most one item
   more than the places: a call of more items than places that passes these checks
-  holds a place twice and gives `Unordered`, so the kept frame stays bounded by the
-  places (`laptop.architect`, 2026-10-20T12:40:40Z,
+  holds a place twice, so the sort gives `Unordered`, and the kept frame stays bounded
+  by the places (`laptop.architect`, 2026-10-20T12:40:40Z,
   https://github.com/synnaxlabs/foundation/pull/3581#issuecomment-6291063333, item 1;
   `laptop.architect-2`, 2026-10-20T12:42:39Z,
   https://github.com/synnaxlabs/foundation/pull/3581#issuecomment-6291098613). When a
