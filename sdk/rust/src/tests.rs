@@ -136,8 +136,9 @@ fn start<F: Future<Output = ()> + 'static>(
 
 /// In each run where the links lose 10% of datagrams, a node that accepted the
 /// session of an answer sees its close within a second, not at the end of its idle
-/// timeout: the answer sends a lost close again until the close drains. A run with a
-/// lost client Finished has no accept, as the close ends the handshake of the node.
+/// timeout: the answer sends a lost close again until the close drains. The answer
+/// gives the key of the node. A run with a lost client Finished has no accept, as the
+/// close ends the handshake of the node.
 #[test]
 fn a_node_that_accepted_an_answer_sees_its_close_when_a_close_is_lost() {
     let link = sim::link::Config {
@@ -170,7 +171,8 @@ fn a_node_that_accepted_an_answer_sees_its_close_when_a_close_is_lost() {
             let end = Some((error, clock.now() - start));
             *slot.lock().expect("no panic under the lock") = Some(end);
         });
-        let own = program.clone();
+        let answer = Arc::new(Mutex::new(None));
+        let (slot, own) = (Arc::clone(&answer), program.clone());
         start(&program, "program", move |tasks| async move {
             let config = transport::client::Config {
                 net: own.net(),
@@ -179,7 +181,8 @@ fn a_node_that_accepted_an_answer_sees_its_close_when_a_close_is_lost() {
                 tasks,
                 pool: Rc::new(block::Pool::heap(POOL)),
             };
-            drop(answered(&[transport::Address::Udp(at)], config).await);
+            let key = answered(&[transport::Address::Udp(at)], config).await;
+            *slot.lock().expect("no panic under the lock") = Some(key);
         });
         let run = sim.run_for(Span::from_nanos(10 * Span::SECOND.nanos()));
         run.expect("the run ends");
@@ -192,6 +195,9 @@ fn a_node_that_accepted_an_answer_sees_its_close_when_a_close_is_lost() {
             };
             assert_eq!(error, closed, "run {value}");
             assert!(waited < Span::SECOND, "run {value}: {waited:?}");
+            let key = answer.lock().expect("no panic under the lock").take();
+            let public_key = PrivateKey([2; 32]).public();
+            assert_eq!(key, Some(Ok(public_key)), "run {value}");
         }
     }
     assert!(accepts >= 48, "{accepts} of 64 runs accepted");
