@@ -41,12 +41,12 @@
   can lose a status, so a check of an absence can pass. The longest of scenarios 1 to 5
   runs 20.2 s of plant time (`influx`, the device does not answer), and scenario 2 of
   `influx` runs 19.7 s (box1, at 2026-10-17). A later suite measures its own fill. The
-  longest of scenarios 1 to 5 of `modbus` runs 6.1 s (box1, at 2026-10-18). The
-  longest run of scenario 6 takes 50.2 s for `modbus` and `opcua` (seed 0x138), and
-  45.9 s for `influx` (seed 0x370) (box1, at 2026-10-20). Over seeds 0 to 99999 of
-  `modbus` and 0 to 49999 of `influx` and `opcua`, it takes 76.1 s (`modbus`, seed
-  0x11802) (box1, at 2026-10-20). The trigger is the
-  merge of #3050, which trims the ring and adds the two tests that fail now
+  longest of scenarios 1 to 5 of `modbus` runs 6.1 s (box1, at 2026-10-18). The longest
+  run of scenario 6 takes 50.2 s for `modbus` (seed 0x138), 49.7 s for `opcua` (seed
+  0xbf), and 45.9 s for `influx` (seed 0x370) (box1, at 2026-10-20). Over seeds 0 to
+  99999 of `modbus` and 0 to 49999 of `influx` and `opcua`, it takes 76.1 s (`modbus`,
+  seed 0x11802) (box1, at 2026-10-20). The trigger is the merge of #3050, which trims
+  the ring and adds the two tests that fail now
   (https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6241900155). #3050
   removes `RING`, its check in `run`, and the `suite!` tests `fails_past_the_ring` and
   `fails_50_ms_past_the_ring`, with the person's approval, as they are in `oracles/`. OK
