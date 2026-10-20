@@ -251,10 +251,11 @@ class ReaderTest(unittest.TestCase):
         """A reader of `plant.a` with `on_loss`, and the frame after a loss that it got,
         or what it raised. The reader reads on a thread on a new node, while a writer on
         another client writes frames of `COUNT` samples until the node finds no room for
-        one, then frames of one sample until one fits."""
+        one, then frames of one sample of 1.5 until one fits, then one of 2.5, which the
+        reader has not read yet."""
         # The node does not trim its buffer yet (#160), so a full ring has room only at
-        # its end, and how the node batched the frames sets that room. No frame of one
-        # sample fits in about 3 of 10 runs, so the input starts again on a new node.
+        # its end, and how the node batched the frames sets that room. No two frames of
+        # one sample fit in some runs, so the input starts again on a new node.
         for _ in range(10):
             node = Node()
             self.addCleanup(node.stop)
@@ -284,13 +285,12 @@ class ReaderTest(unittest.TestCase):
                     return reader, got[0]
             reader.close()
             thread.join(PATIENCE)
-            self.assertEqual(got, [])
-        self.fail("in 10 runs, no frame of one sample found room after a loss")
+        self.fail("in 10 runs, no two frames of one sample found room after a loss")
 
     def flooded(self, client: foundation.Client) -> bool:
         """Writes frames of `COUNT` samples of `plant.a` on `client` until the node
-        finds no room for one, then frames of one sample. Gives whether one of them
-        fit."""
+        finds no room for one, then frames of one sample of 1.5 until one fits, then one
+        of 2.5. Gives whether a frame of 1.5 and the frame of 2.5 fit."""
         random = np.random.default_rng(3321)
         stamps = Stamps()
         with client.open_writer("plant.a", on_loss="raise") as writer:
@@ -307,10 +307,16 @@ class ReaderTest(unittest.TestCase):
             for _ in range(10):
                 try:
                     writer.write(1.5)
-                    return True
+                    break
                 except foundation.DataLost:
                     pass
-        return False
+            else:
+                return False
+            try:
+                writer.write(2.5)
+            except foundation.DataLost:
+                return False
+        return True
 
     def assert_lost(self, lost: dict) -> str:
         """Asserts that `lost` holds one range of seqs of `plant.a` and its index, and
@@ -321,6 +327,13 @@ class ReaderTest(unittest.TestCase):
         self.assertGreater(len(lost["plant.a"]), 0)
         count = len(lost["plant.a"])
         return f"the reader lost seqs: plant.a ({count}), plant.time ({count})"
+
+    def assert_read_on(self, reader: foundation.Reader) -> None:
+        """Asserts that the next frame of `reader` after its frame after a loss holds
+        the sample of 2.5 that `flooded` wrote last, with no loss."""
+        frame = next(reader)
+        self.assertEqual(frame["plant.a"].tolist(), [2.5])
+        self.assertEqual(frame.lost, {})
 
     def test_a_frame_after_a_loss_raises_data_lost_and_closes_the_reader(
         self,
@@ -342,12 +355,14 @@ class ReaderTest(unittest.TestCase):
         self.assertIsInstance(frame, foundation.Frame)
         text = self.assert_lost(frame.lost)
         self.assertEqual(logs.output, [f"WARNING:foundation:{text}"])
+        self.assert_read_on(reader)
 
     def test_a_frame_after_a_loss_passes_with_on_loss_ignore(self) -> None:
         with self.assertNoLogs("foundation"):
             reader, frame = self.lost("ignore")
         self.assertIsInstance(frame, foundation.Frame)
         self.assert_lost(frame.lost)
+        self.assert_read_on(reader)
 
     def test_open_reader_raises_for_each_argument_that_it_does_not_take(self) -> None:
         cases = [
