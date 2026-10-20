@@ -41,6 +41,14 @@
   https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6252485660, and
   2026-10-18T20:05:17Z,
   https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6254526787).
+  `Node::answering(addresses)` gives the node that answers first at `addresses` and
+  the public key that it proves: one `transport::Client::dial_any`, with no hello, and
+  a close with `Code(0)` that goes out before it returns (`laptop.architect-2`,
+  2026-10-19T23:24:32Z, item 1 of
+  https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279566176).
+  `sdk::private_key()` gives a new key from the randomness of the OS
+  (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279865842).
   `Client::close` blocks until the close of the session goes out, the transport drains
   each close (up to 3 s), and the thread ends. Drop only signals the end, and a panic of
   the thread after a drop goes to the panic hook of the process (`laptop.architect-2`,

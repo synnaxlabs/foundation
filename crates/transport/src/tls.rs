@@ -126,13 +126,13 @@ impl Tls {
     /// Dials a node: accepts the server only when it proves `expected`, or any node
     /// key for `None`. A node sends its certificate, and a program sends none.
     pub(crate) fn client(&self, expected: Option<PublicKey>) -> Arc<ClientConfig> {
-        let pinned =
-            pinned(Arc::clone(&self.provider), Arc::clone(&self.time), expected);
+        let builder =
+            dialing(Arc::clone(&self.provider), Arc::clone(&self.time), expected);
         let mut config = match &self.certified {
-            Some(certified) => pinned.with_client_cert_resolver(
+            Some(certified) => builder.with_client_cert_resolver(
                 Arc::<SingleCertAndKey>::clone(&certified.resolver),
             ),
-            None => pinned.with_no_client_auth(),
+            None => builder.with_no_client_auth(),
         };
         config.alpn_protocols = vec![ALPN.to_vec()];
         config.resumption = rustls::client::Resumption::disabled();
@@ -149,7 +149,7 @@ impl Tls {
 
 /// A TLS 1.3 client from `provider` that accepts the server only when it proves
 /// `expected`, or any node key for `None`, before its client certificate is chosen.
-fn pinned(
+fn dialing(
     provider: Arc<CryptoProvider>,
     time: Arc<dyn TimeProvider>,
     expected: Option<PublicKey>,
@@ -161,7 +161,7 @@ fn pinned(
         .with_protocol_versions(&[&rustls::version::TLS13])
         .expect("invariant: aws-lc-rs has TLS 1.3 suites")
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(Pinned {
+        .with_custom_certificate_verifier(Arc::new(NodeKey {
             expected,
             algorithms,
         }))
@@ -279,15 +279,15 @@ fn key(
         .ok_or_else(|| CertificateError::ApplicationVerificationFailure.into())
 }
 
-/// Accepts a server only when it proves the key the caller dialed, or any node key
-/// when the caller dialed none.
+/// Accepts a server only when it proves a node key: the one the caller dialed, or
+/// any one when the caller dialed none.
 #[derive(Debug)]
-struct Pinned {
+struct NodeKey {
     expected: Option<PublicKey>,
     algorithms: WebPkiSupportedAlgorithms,
 }
 
-impl ServerCertVerifier for Pinned {
+impl ServerCertVerifier for NodeKey {
     fn verify_server_cert(
         &self,
         end_entity: &CertificateDer<'_>,
@@ -393,8 +393,8 @@ pub(crate) fn anonymous(
     provider: CryptoProvider,
     expected: PublicKey,
 ) -> Arc<ClientConfig> {
-    let pinned = pinned(Arc::new(provider), Arc::new(Epoch), Some(expected));
-    let mut config = pinned.with_no_client_auth();
+    let builder = dialing(Arc::new(provider), Arc::new(Epoch), Some(expected));
+    let mut config = builder.with_no_client_auth();
     config.alpn_protocols = vec![ALPN.to_vec()];
     Arc::new(config)
 }

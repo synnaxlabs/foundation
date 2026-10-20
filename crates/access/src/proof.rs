@@ -293,7 +293,9 @@ impl Error {
                 "Add the key to the subject in the spec, or sign with a listed key"
             }
             Self::Signature => "Sign the exact bytes with the key of the hello",
-            Self::Via { .. } => "Name the node that the program connects to as `via`",
+            Self::Via { .. } => {
+                "Check the public key that the program pins for the node"
+            }
             Self::Expired { .. } => {
                 "Send a hello with a later expiry, and renew it before it ends"
             }

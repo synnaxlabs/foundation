@@ -220,11 +220,14 @@ mod signed {
     /// input with a 32-byte `via` decodes.
     #[test]
     fn decodes_the_fuzz_inputs() {
-        let decode = |bytes: &[u8]| {
-            bytes
-                .chunks(1 + usize::from(bytes[0]))
-                .map(|message| Signed::decode(&message[1..]))
-                .collect::<Vec<_>>()
+        let decode = |mut bytes: &[u8]| {
+            let mut decoded = Vec::new();
+            while let Some((&len, rest)) = bytes.split_first() {
+                let (message, rest) = rest.split_at(usize::from(len));
+                decoded.push(Signed::decode(message));
+                bytes = rest;
+            }
+            decoded
         };
         let old = include_bytes!("../../../../../oracles/fuzz/wire_hub_client/hello");
         let refused = || Err(Error::Length { len: 161 });
