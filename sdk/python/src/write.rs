@@ -525,6 +525,7 @@ fn ended(end: End) -> sdk::Error {
     let refusal = match end {
         End::Removed => program::Refusal::Unknown,
         End::Failed => program::Refusal::Failed,
+        End::Refused => program::Refusal::Refused,
     };
     sdk::Error::Stream(program::Error::Refused(refusal))
 }
@@ -890,7 +891,12 @@ np.array = guard(np.array, array)
     fn ended_raises_stopped_with_the_code_of_each_end() {
         Python::initialize();
         Python::attach(|py| {
-            for (end, code) in [(End::Removed, "unknown"), (End::Failed, "failed")] {
+            let ends = [
+                (End::Removed, "unknown"),
+                (End::Failed, "failed"),
+                (End::Refused, "refused"),
+            ];
+            for (end, code) in ends {
                 let error = crate::error(py, &super::ended(end));
                 assert_eq!(error.get_type(py).name().unwrap().to_string(), "Stopped");
                 let given: String =

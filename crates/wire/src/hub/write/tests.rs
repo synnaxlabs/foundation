@@ -60,7 +60,7 @@ const REFUSALS: [(Refusal, u8); 7] = [
     (Refusal::Large, 7),
 ];
 
-const ENDS: [(End, u8); 2] = [(End::Removed, 1), (End::Failed, 2)];
+const ENDS: [(End, u8); 3] = [(End::Removed, 1), (End::Failed, 2), (End::Refused, 3)];
 
 mod pins {
     use super::*;
@@ -508,13 +508,13 @@ mod reply {
 
     #[test]
     fn refuses_a_code_that_no_end_has() {
-        for code in (0..=u8::MAX).filter(|code| !(1..=2).contains(code)) {
+        for code in (0..=u8::MAX).filter(|code| !(1..=3).contains(code)) {
             let want = Error::End { code };
             assert_eq!(Reply::decode(&ended(code)), Err(want));
         }
         assert_eq!(
-            Error::End { code: 3 }.to_string(),
-            "the ended group has code 3, which no end has"
+            Error::End { code: 4 }.to_string(),
+            "the ended group has code 4, which no end has"
         );
     }
 
@@ -1133,7 +1133,7 @@ mod corpus {
     }
 
     /// The input `write_outcome_group` gives each error of an outcome of another group
-    /// than the next, and of an end code that no end has.
+    /// than the next.
     #[test]
     fn refuses_each_outcome_of_another_group_in_the_fuzz_inputs() {
         assert_eq!(
@@ -1154,7 +1154,23 @@ mod corpus {
                     group: 0,
                     next: 2
                 }),
-                Err(Error::End { code: 3 }),
+                Ok(of(2, 1, Outcome::Ended(End::Refused))),
+                Err(Error::Order { frame: 1, next: 2 }),
+                Ok(of(1, 2, Outcome::Taken { range: range(1, 1) })),
+                Ok(Reply::Stored { frames: 2 }),
+            ]
+        );
+    }
+
+    /// The input `write_outcome_end_unknown`, which is `write_outcome_group` with end
+    /// code 4 in place of 3, gives the error of an end code that no end has.
+    #[test]
+    fn refuses_an_end_code_that_no_end_has_in_the_fuzz_inputs() {
+        let replies = decoded(corpus!("write_outcome_end_unknown"));
+        assert_eq!(
+            replies[4..],
+            [
+                Err(Error::End { code: 4 }),
                 Ok(of(2, 1, Outcome::Ended(End::Failed))),
                 Ok(of(1, 2, Outcome::Taken { range: range(1, 1) })),
                 Ok(Reply::Stored { frames: 2 }),

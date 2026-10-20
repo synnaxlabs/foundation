@@ -12,8 +12,8 @@
 //! - [`Reply`]: taken 1 or lost 2, then the frame (`u64`), the group (`u32`), the seq
 //!   (`u64`), and the count (`u32`); refused 3, then the frame, the group, and the code
 //!   (`u8`, waiting 1, reserved 2, expired 3, order 4, codec 5, full 6, large 7); ended
-//!   5, then the frame, the group, and the code (`u8`, removed 1, failed 2); stored 4,
-//!   then the count of frames that it covers (`u64`).
+//!   5, then the frame, the group, and the code (`u8`, removed 1, failed 2, refused 3);
+//!   stored 4, then the count of frames that it covers (`u64`).
 
 use std::collections::VecDeque;
 use std::iter;
@@ -343,15 +343,19 @@ pub enum End {
     Removed,
     /// The home of the group failed.
     Failed,
+    /// The home of the group refused the program's proof for it: its hello, a renewal,
+    /// or the signature of the open. An open with the same hello is refused again.
+    Refused,
 }
 
 impl End {
-    const ALL: [Self; 2] = [Self::Removed, Self::Failed];
+    const ALL: [Self; 3] = [Self::Removed, Self::Failed, Self::Refused];
 
     const fn code(self) -> u8 {
         match self {
             Self::Removed => 1,
             Self::Failed => 2,
+            Self::Refused => 3,
         }
     }
 }

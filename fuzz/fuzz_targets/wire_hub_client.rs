@@ -705,6 +705,7 @@ fn write_write(input: &mut Unstructured) -> arbitrary::Result<()> {
         8 => outcome(Outcome::Refused(Refusal::Full)),
         9 => outcome(Outcome::Ended(End::Removed)),
         10 => outcome(Outcome::Ended(End::Failed)),
+        11 => outcome(Outcome::Ended(End::Refused)),
         _ => outcome(Outcome::Refused(Refusal::Large)),
     };
     assert_eq!(Reply::decode(&reply(&sent)), Ok(sent), "the reply changed");
