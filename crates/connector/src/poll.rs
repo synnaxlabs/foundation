@@ -144,7 +144,7 @@ impl Writer {
                     group, data_type, ..
                 } = *entry;
                 if channel.is_some() {
-                    samples[to_usize(group)] += 1;
+                    samples[stamp::to_usize(group)] += 1;
                 }
                 let scalar = match data_type {
                     Type::Scalar(scalar) => Some(scalar),
@@ -264,13 +264,14 @@ impl Writer {
             let Fill {
                 channel, scalar, ..
             } = fills[entry];
-            let channel = channel.unwrap_or_else(|| stamped_index(entry));
-            value(values, channel, scalar).write(bytes);
+            if let Some(channel) = channel {
+                value(values, channel, scalar).write(bytes);
+            }
         };
         let groups = stamped.write(stamp, &shape.series, fill)?;
         let (mut wrote, mut gone) = (0, 0);
         for &(group, applied) in groups {
-            let n = shape.samples[to_usize(group)];
+            let n = shape.samples[stamp::to_usize(group)];
             if applied {
                 wrote += n;
             } else {
@@ -313,12 +314,14 @@ impl Kept {
         samples.resize(all.samples.len(), 0);
         for fill in fills {
             if fill.channel.is_some_and(|channel| channels[channel]) {
-                samples[to_usize(fill.group)] += 1;
+                samples[stamp::to_usize(fill.group)] += 1;
             }
         }
         let held = |&&(entry, _): &&(usize, usize)| {
             let Fill { group, channel, .. } = fills[entry];
-            channel.map_or(samples[to_usize(group)] > 0, |channel| channels[channel])
+            channel.map_or(samples[stamp::to_usize(group)] > 0, |channel| {
+                channels[channel]
+            })
         };
         shape.series.clear();
         shape.series.extend(all.series.iter().filter(held));
@@ -341,13 +344,6 @@ fn value(values: &[Option<Value>], at: usize, scalar: Option<Scalar>) -> Value {
 #[inline(never)]
 fn left_out(at: usize) -> ! {
     panic!("invariant: a frame keeps no value of channel {at}, which is `None`")
-}
-
-/// As [`left_out`], for the entry of an index, whose sample is the stamp.
-#[cold]
-#[inline(never)]
-fn stamped_index(entry: usize) -> ! {
-    panic!("invariant: a frame fills no value in entry {entry}, an index")
 }
 
 /// Cold and apart from [`Writer::write`], so its fill stores nothing per value for the
@@ -385,9 +381,4 @@ fn index(name: &Name) -> Diagnostic {
         ),
         "Write the value to a data channel".into(),
     )
-}
-
-/// `group` as a position.
-fn to_usize(group: u32) -> usize {
-    usize::try_from(group).expect("invariant: a usize holds a group")
 }

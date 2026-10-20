@@ -26,13 +26,16 @@
   https://github.com/synnaxlabs/foundation/pull/3556#issuecomment-6287471425).
   `after` panics for a stamp under the last stamp, since a refusal of the frame of the
   last stamp never gives one. `stamp::Writer`, crate-private, owns the hub's writer
-  and the `Stamps` of its frames. Its `write` takes the series of a frame and a fill of
-  each data sample. It puts the stamp in each index, gives each group of the frame and
-  whether the home applied it, and writes the refused groups again. A group for which
-  the pool has no block, or that the home loses or refuses for another cause, is not
-  applied. `Expired` and `Codec` panic: a writer with no lease never gets `Expired`,
-  and `codec` refuses only raw bytes that are not samples of their type, which no fill
-  writes (`laptop.architect`, 2026-10-20T09:09:18Z:
+  and the `Stamps` of its frames. Its `write` takes the series of a frame and a fill
+  that gets each entry, an index too. Then it puts the stamp in the index of each
+  present group through `Draft::series_mut`, over what the fill put there, so per
+  series it does the work of one fill (`laptop.architect-2`, 2026-10-20T10:38:11Z:
+  https://github.com/synnaxlabs/foundation/pull/3556#issuecomment-6289012175). It gives
+  each group of the frame and whether the home applied it, and writes the refused groups
+  again. A group for which the pool has no block, or that the home loses or refuses for
+  another cause, is not applied. `Expired` and `Codec` panic: a writer with no lease
+  never gets `Expired`, and `codec` refuses only raw bytes that are not samples of their
+  type, which no fill writes (`laptop.architect`, 2026-10-20T09:09:18Z:
   https://github.com/synnaxlabs/foundation/pull/3556#issuecomment-6287519381).
   `connector::poll::Writer` (POLL WRITER) and the status writer each write through it,
   and neither matches the outcomes itself (`laptop.architect-2`, 2026-10-20T09:06:36Z:
@@ -41,8 +44,8 @@
   Lost: a `write` that takes only the data series and adds the index of each present
   group, so that only `stamp` knows which entries are indexes. It merges the series of
   each frame: 3.3 ns for a frame of one series and 24 ns for 256 on box2, over the cost
-  limit of P1 for a path that counts as once per sample (`laptop.architect-2`,
-  2026-10-20T10:19:11Z,
+  limit of P1 for a frame of one series on a path that counts as once per sample
+  (`laptop.architect-2`, 2026-10-20T10:19:11Z,
   https://github.com/synnaxlabs/foundation/pull/3556#issuecomment-6288704204).
   The status writer of the supervisor stamps its frames with `Stamps::next`
   of its one read of mesh time, so one module holds the stamp rule

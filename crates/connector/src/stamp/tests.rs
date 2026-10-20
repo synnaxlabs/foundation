@@ -386,8 +386,8 @@ type Fills = Vec<(Stamp, usize)>;
 /// What [`stamp::Writer::write`] gives, owned.
 type Wrote = Result<Vec<(u32, bool)>, stamp::Error>;
 
-/// Writes a frame of each entry at the next stamp with `writer`, with 7 in each data
-/// entry, and gives the result, the stamp, and each fill.
+/// Writes a frame of each entry at the next stamp with `writer`, with a fill that puts
+/// 7 in each entry, an index too, and gives the result, the stamp, and each fill.
 fn write(writer: &mut stamp::Writer) -> (Wrote, Stamp, Fills) {
     write_series(writer, &series(writer))
 }
@@ -434,7 +434,10 @@ fn write_writes_a_frame_refused_as_backwards_again_1_ns_after_the_refusal() {
     assert!(stamp < ahead, "{stamp} < {ahead}");
     assert_eq!(wrote, Ok(vec![(groups[0], true)]));
     let after = |n| ahead + Span::from_nanos(n);
-    assert_eq!(fills, [(stamp, 1), (after(1), 1)]);
+    assert_eq!(
+        fills,
+        [(stamp, 0), (stamp, 1), (after(1), 0), (after(1), 1)]
+    );
     assert_eq!(next, after(2));
 }
 
@@ -445,7 +448,7 @@ fn write_writes_a_frame_once_when_the_home_applies_it() {
         (write(&mut writer), groups(&writer))
     });
     assert_eq!(wrote, Ok(vec![(groups[0], true)]));
-    assert_eq!(fills, [(stamp, 1)]);
+    assert_eq!(fills, [(stamp, 0), (stamp, 1)]);
 }
 
 #[test]
@@ -468,9 +471,14 @@ fn write_writes_again_only_the_series_of_the_group_refused_as_backwards() {
     let mut applied = vec![(groups[a], true), (groups[b], true)];
     applied.sort_unstable();
     assert_eq!(wrote, Ok(applied));
-    let mut first = vec![(stamp, a), (stamp, b)];
+    let mut first = vec![(stamp, at(100)), (stamp, a), (stamp, at(200)), (stamp, b)];
     first.sort_unstable_by_key(|&(_, entry)| entry);
-    first.push((ahead + Span::from_nanos(1), a));
+    let mut again = vec![
+        (ahead + Span::from_nanos(1), at(100)),
+        (ahead + Span::from_nanos(1), a),
+    ];
+    again.sort_unstable_by_key(|&(_, entry)| entry);
+    first.extend(again);
     assert_eq!(fills, first);
 }
 
@@ -498,9 +506,14 @@ fn write_writes_again_only_the_group_refused_in_this_write() {
     let mut applied = vec![(groups[a], true), (groups[b], true)];
     applied.sort_unstable();
     assert_eq!(wrote, Ok(applied));
-    let mut second = vec![(stamp, a), (stamp, b)];
+    let mut second = vec![(stamp, at(100)), (stamp, a), (stamp, at(200)), (stamp, b)];
     second.sort_unstable_by_key(|&(_, entry)| entry);
-    second.push((ahead + Span::from_nanos(1), b));
+    let mut again = vec![
+        (ahead + Span::from_nanos(1), at(200)),
+        (ahead + Span::from_nanos(1), b),
+    ];
+    again.sort_unstable_by_key(|&(_, entry)| entry);
+    second.extend(again);
     assert_eq!(fills, second);
 }
 
@@ -525,7 +538,7 @@ fn write_grows_no_buffer_when_it_writes_again() {
         let mut writer = stamp::Writer::new(open(&hub, 1, &["a.state"]).await);
         let before = buffers(&writer);
         let (wrote, _, fills) = write(&mut writer);
-        assert_eq!(fills.len(), 2, "the frame goes again: {wrote:?}");
+        assert_eq!(fills.len(), 4, "the frame goes again: {wrote:?}");
         let one = (before, buffers(&writer));
         drop(writer);
         write_ahead(&hub, "a.restarts", Span::from_nanos(2_000_000)).await;
@@ -535,7 +548,7 @@ fn write_grows_no_buffer_when_it_writes_again() {
         let mut after = Vec::new();
         for (ahead, channel) in [(4, "b.restarts"), (6, "a.restarts")] {
             let (wrote, _, fills) = write(&mut writer);
-            assert_eq!(fills.len(), 3, "one group goes again: {wrote:?}");
+            assert_eq!(fills.len(), 6, "one group goes again: {wrote:?}");
             after.push(buffers(&writer));
             write_ahead(&hub, channel, Span::from_nanos(ahead * 1_000_000)).await;
         }
@@ -599,7 +612,7 @@ fn write_loses_a_frame_of_a_channel_that_a_higher_authority_controls() {
         (wrote, groups(&writer))
     });
     assert_eq!(wrote, Ok(vec![(groups[0], false)]));
-    assert_eq!(fills, [(stamp, 1)]);
+    assert_eq!(fills, [(stamp, 0), (stamp, 1)]);
 }
 
 #[test]
@@ -611,7 +624,7 @@ fn write_gives_the_failure_of_the_hub_when_a_channel_is_removed() {
         (write(&mut writer), key)
     });
     assert_eq!(wrote, Err(stamp::Error::Write(Failure::Removed(key))));
-    assert_eq!(fills, [(stamp, 1)]);
+    assert_eq!(fills, [(stamp, 0), (stamp, 1)]);
 }
 
 /// No caller reaches this panic: the two sends of `stamp::Writer::write` run with no

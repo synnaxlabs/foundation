@@ -118,9 +118,6 @@ pub(crate) struct Writer {
     again: Vec<(usize, usize)>,
     /// `groups` of the frame sent again.
     retried: Vec<(u32, bool)>,
-    /// Whether each entry of the key set is an index, so a send reads one byte for each
-    /// series to tell it.
-    indexes: Box<[bool]>,
 }
 
 /// Why [`Writer::write`] wrote no frame, or no frame again.
@@ -153,9 +150,6 @@ impl Writer {
             groups: Vec::with_capacity(groups),
             backwards: Vec::with_capacity(groups),
             retried: Vec::with_capacity(groups),
-            indexes: (0..set.entries().len())
-                .map(|entry| set.index(entry) == entry)
-                .collect(),
             hub,
             stamps: Stamps::default(),
         }
@@ -185,11 +179,12 @@ impl Writer {
     }
 
     /// Writes one frame of `series`, as [`hub::writer::Writer::draft`] takes them, at
-    /// `stamp` on the live path. Each series holds one sample: the stamp of the frame
-    /// in each index, and what `fill` puts for each other entry, from the stamp of the
-    /// frame, the entry, and the bytes of its sample. The groups that the home refuses
-    /// as `Backwards` are written again once, with only their series, 1 ns after the
-    /// latest stamp that the refusals give, so `fill` can get an entry twice.
+    /// `stamp` on the live path. Each series holds one sample. `fill` gets each entry,
+    /// an index too, with the stamp of the frame and the bytes of its sample, and puts
+    /// its value. Then `write` puts the stamp of the frame in each index, over what
+    /// `fill` put there. The groups that the home refuses as `Backwards` are written
+    /// again once, with only their series, 1 ns after the latest stamp that the
+    /// refusals give, so `fill` can get an entry twice.
     ///
     /// Returns each present group in order, and whether the home applied it, at the
     /// first write or at the write again. A group that the home lost or refused, and
@@ -219,10 +214,8 @@ impl Writer {
             backwards,
             again,
             retried,
-            indexes,
         } = self;
-        let Some(before) =
-            send(hub, indexes, series, stamp, &mut fill, groups, backwards)?
+        let Some(before) = send(hub, series, stamp, &mut fill, groups, backwards)?
         else {
             return Ok(groups);
         };
@@ -238,9 +231,7 @@ impl Writer {
             again.extend(series.iter().filter(refused));
             again
         };
-        if let Some(last) =
-            send(hub, indexes, series, stamp, &mut fill, retried, backwards)?
-        {
+        if let Some(last) = send(hub, series, stamp, &mut fill, retried, backwards)? {
             backwards_again(before, last);
         }
         for &(group, applied) in &*retried {
@@ -254,9 +245,9 @@ impl Writer {
     }
 }
 
-/// Writes one frame of `series` at `stamp` on `hub`, with the stamp in each entry that
-/// `indexes` marks, as [`Writer::write`]. Puts each present group with whether the home
-/// applied it in `groups`, and those that it refused as `Backwards` in `backwards`.
+/// Writes one frame of `series` at `stamp` on `hub`, as [`Writer::write`]. Puts each
+/// present group with whether the home applied it in `groups`, and those that it
+/// refused as `Backwards` in `backwards`.
 ///
 /// Returns the latest stamp that the home gives for a group that it refuses as
 /// `Backwards`.
@@ -270,7 +261,6 @@ impl Writer {
 /// As [`Writer::write`], for `Expired` and `Codec`.
 fn send(
     hub: &mut hub::writer::Writer,
-    indexes: &[bool],
     series: &[(usize, usize)],
     stamp: Stamp,
     fill: &mut impl FnMut(Stamp, usize, &mut [u8]),
@@ -286,7 +276,7 @@ fn send(
         Err(frame::Error::Pool(
             block::Error::Exhausted { .. } | block::Error::Refused { .. },
         )) => {
-            let index = |&&(entry, _): &&(usize, usize)| indexes[entry];
+            let index = |&&(entry, _): &&(usize, usize)| set.index(entry) == entry;
             let lost = |&(entry, _): &(usize, usize)| (entries[entry].group, false);
             groups.extend(series.iter().filter(index).map(lost));
             return Ok(None);
@@ -294,14 +284,17 @@ fn send(
         Err(error) => return Err(Error::Draft(error)),
     };
     for (entry, bytes) in draft.iter_mut() {
-        if indexes[entry] {
-            Value::Stamp(stamp).write(bytes);
-        } else {
-            fill(stamp, entry, bytes);
-        }
+        fill(stamp, entry, bytes);
     }
     draft.set_counts(0, iter::repeat(1));
     groups.extend(draft.ranges().map(|(group, _)| (group, false)));
+    for &(group, _) in &*groups {
+        let index = set.groups()[to_usize(group)];
+        let Some(bytes) = draft.series_mut(index) else {
+            panic!("invariant: the index of group {group}, present, is in the frame");
+        };
+        Value::Stamp(stamp).write(bytes);
+    }
     let outcomes = hub
         .write(Label::Path(Path::Live), draft)
         .map_err(Error::Write)?;
@@ -342,6 +335,11 @@ fn backwards_again(before: Stamp, last: Stamp) -> ! {
         "invariant: a frame stamped after {before}, the last stamp of its index, is not \
          backwards, but the home gives {last} as last"
     )
+}
+
+/// `group` as a position.
+pub(crate) fn to_usize(group: u32) -> usize {
+    usize::try_from(group).expect("invariant: a usize holds a group")
 }
 
 /// The floor of the mean of `a` and `b`, with no overflow.

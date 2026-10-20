@@ -841,7 +841,7 @@ impl Session {
 impl Frame {
     /// Fills `bytes`, the sample of `entry` in a frame at `stamp`, with the last value
     /// of its status channel, with `next` the time of the next try by the hub's clock,
-    /// while one waits.
+    /// while one waits. Puts nothing in the index.
     fn fill(
         &self,
         values: &Values,
@@ -851,6 +851,8 @@ impl Frame {
         bytes: &mut [u8],
     ) {
         let text = match self.positions[entry] {
+            // The index, whose stamp `stamp::Writer::write` puts.
+            0 => return,
             ERROR => &self.error,
             NOTE => &self.note,
             at @ ..ERROR => {
