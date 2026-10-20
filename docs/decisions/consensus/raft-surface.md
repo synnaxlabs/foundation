@@ -285,3 +285,23 @@
   deferred. Trigger: before `MEMBERS_MAX` grows past 128. Supersedes the pace of a
   learner "as it does a voter" of the surface, 2026-10-19T14:40:23Z
   (https://github.com/synnaxlabs/foundation/issues/3375#issuecomment-6269894725).
+  `Message::replaces(&self, older)` tells the caller that `older`, a message that has
+  not gone yet, can drop when this one goes after it. Both have the same sender and the
+  same receiver, and one of these holds: `older` has a lower term, and this one is not a
+  `PreVote` or a `PreVoteReply`, whose term can differ from the sender's own; or both
+  are a `Heartbeat`, both a `PreVote`, both a `Vote`, both a `HeartbeatReply`, or both a
+  `PreVoteReply` with the same answer, and `older` has the same term or a lower one.
+  `raft` owns the rule, and the caller's queue applies it, so the queue of a node that
+  does not read holds one heartbeat, not one for each tick, and a message of a term that
+  its sender left drops when the sender sends that node a message of a later term. Lost:
+  a receiver still at the lower term can apply later, when the commit index that `older`
+  named comes in an append of the new term. Decided by `laptop.architect`,
+  2026-10-19T19:31:21Z
+  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6275544916), for
+  the lower term and the requests of a vote, 2026-10-19T19:53:12Z
+  (https://github.com/synnaxlabs/foundation/pull/3417#issuecomment-6275950285), and for
+  the replies to a heartbeat and a pre-vote, 2026-10-19T20:33:44Z
+  (https://github.com/synnaxlabs/foundation/pull/3417#issuecomment-6276712034), and for
+  its cost, 2026-10-19T19:56:42Z
+  (https://github.com/synnaxlabs/foundation/pull/3417#issuecomment-6276015270, finding
+  3).

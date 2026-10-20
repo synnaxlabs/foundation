@@ -19,7 +19,24 @@ use types::name::Name;
 #[global_allocator]
 static ALLOCATOR: counting::Allocator = counting::Allocator::new();
 
-const PLAIN: [u8; 32] = [0x5a; 32];
+/// The bytes that a scan looks for.
+type Needle = [u8; 32];
+
+/// The needle `scan`. No other value of this test and no fill of one byte gives it,
+/// so a scan finds no copy of another value and no fill of the allocator. `SEALED` is
+/// the needle of two scans: of `seal`, and of the put and get that open its value.
+const fn needle(scan: u8) -> Needle {
+    let mut needle = *b"?a needle that no fill can give.";
+    needle[0] = scan;
+    needle
+}
+
+/// The value that a dropped `Value` holds.
+const DROPPED: Needle = needle(0);
+/// The value that the sealed store holds.
+const SEALED: Needle = needle(1);
+/// The value of the file that the file store refuses.
+const REFUSED: Needle = needle(2);
 
 fn main() {
     let mut sim = sim::Sim::new(sim::Config::default());
@@ -31,17 +48,17 @@ fn main() {
     let ((), found) = ALLOCATOR.freed_holding(&key, || drop(black_box(opener)));
     assert_eq!(found, 0, "a dropped opener erases its key");
 
-    let ((), found) =
-        ALLOCATOR.freed_holding(&PLAIN, || drop(black_box(Value::new(PLAIN.to_vec()))));
+    let ((), found) = ALLOCATOR
+        .freed_holding(&DROPPED, || drop(black_box(Value::new(DROPPED.to_vec()))));
     assert_eq!(found, 0, "a dropped value erases its bytes");
 
     let opener = Opener::generate(&entropy);
     let key = *opener.expose();
     let to = opener.public();
     let mut store = Sealed::new(opener);
-    let value = Value::new(PLAIN.to_vec());
+    let value = Value::new(SEALED.to_vec());
     let (sealed, found) =
-        ALLOCATOR.freed_holding(&PLAIN, || seal(&to, &name, 1, &value, &entropy));
+        ALLOCATOR.freed_holding(&SEALED, || seal(&to, &name, 1, &value, &entropy));
     assert_eq!(found, 0, "seal leaves the value in no freed block");
     let again = seal(&to, &name, 2, &value, &entropy);
     let last = seal(&to, &name, 3, &value, &entropy);
@@ -60,9 +77,9 @@ fn main() {
             panic!("the sealed store answers on the first poll");
         };
         let value = answer.expect("the store has the value");
-        assert_eq!(value.expose(), PLAIN, "the store opens the value put");
+        assert_eq!(value.expose(), SEALED, "the store opens the value put");
     };
-    let ((), found) = ALLOCATOR.freed_holding(&PLAIN, || round(1, sealed));
+    let ((), found) = ALLOCATOR.freed_holding(&SEALED, || round(1, sealed));
     assert_eq!(found, 0, "put and get leave the value in no freed block");
     let ((), found) = ALLOCATOR.freed_holding(&key, || round(2, again));
     assert_eq!(found, 0, "put and get leave the key in no freed block");
@@ -85,9 +102,9 @@ fn main() {
     );
 }
 
-/// A get of the file store, on the sim disk, of a file that holds `PLAIN` and that
-/// other users can read. Gives what it gave and the count of freed
-/// blocks that hold `PLAIN` during the get.
+/// A get of the file store, on the sim disk, of a file that holds `REFUSED` and that
+/// other users can read. Gives what it gave and the count of freed blocks that hold
+/// `REFUSED` during the get.
 fn refused() -> (Result<(), Error>, u64) {
     let mut sim = sim::Sim::new(sim::Config::default());
     let node = sim.node(sim::node::Config::default());
@@ -98,17 +115,17 @@ fn refused() -> (Result<(), Error>, u64) {
             .create_dir(Path::new("secrets"))
             .await
             .expect("makes it");
-        let len = u64::try_from(PLAIN.len()).expect("fits");
+        let len = u64::try_from(REFUSED.len()).expect("fits");
         let file = files.open(path, Mode::Create { len }).await;
         let file = file.expect("makes it");
         let pool = block::Pool::heap(block::Config::new(1 << 18).expect("fits"));
-        let block = pool.copy(&PLAIN).expect("holds it");
+        let block = pool.copy(&REFUSED).expect("holds it");
         file.write_at(0, &[block]).await.expect("writes it");
         file.close().await;
         node.expose_file(path);
     });
     put.expect("the run ends");
-    ALLOCATOR.freed_holding(&PLAIN, || {
+    ALLOCATOR.freed_holding(&REFUSED, || {
         let get = sim.run_on(&node, |node, _| async move {
             let resolver =
                 Resolver::new(Arc::default(), node.files(), Path::new("secrets"));

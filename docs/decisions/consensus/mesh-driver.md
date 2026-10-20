@@ -161,9 +161,25 @@
   (decided by the architect, 2026-10-07T08:15:18Z:
   https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025). The
   messages for one member wait in a queue of 64 that drops its oldest, because `raft`
-  sends again. A write that finds the pool full (`block::Error::Exhausted`), or that the
-  system refuses memory for (`Refused`), does not stop the group, because each may
-  succeed later (MEMORY BOUNDS): the task writes the same `Ready` again at each tick,
+  sends again. Before it adds a message, the queue drops each message that the new one
+  replaces (`raft::Message::replaces`). So the queue for a member that does not read,
+  and that answers only what it read, holds at most one heartbeat, one `PreVote`, one
+  `Vote`, and the appends of its window: one while it probes, else up to `INFLIGHT` (one
+  for a learner). Of the replies to what that member sends, it holds at most one
+  `HeartbeatReply` and one `PreVoteReply` of each answer, and one reply to each append
+  or `Vote` that the member sends (`laptop.architect`, 2026-10-19T19:31:21Z:
+  https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6275544916,
+  2026-10-19T19:53:12Z:
+  https://github.com/synnaxlabs/foundation/pull/3417#issuecomment-6275950285, and
+  2026-10-19T20:33:44Z:
+  https://github.com/synnaxlabs/foundation/pull/3417#issuecomment-6276712034). A member
+  that answers a message that it did not read frees a place of the window at each
+  answer, so only the queue of 64 bounds its queue (`laptop.architect`,
+  2026-10-19T23:33:03Z,
+  https://github.com/synnaxlabs/foundation/pull/3417#issuecomment-6279679805). A write
+  that finds the pool full (`block::Error::Exhausted`), or that the system refuses
+  memory for (`Refused`), does not stop the group, because each may succeed later
+  (MEMORY BOUNDS): the task writes the same `Ready` again at each tick,
   and until then no message leaves, nothing applies, and the group gets no tick. From
   the write that finds no block until the write ends, `propose` and `receive` give
   `Error::Pool` with the cause of the wait, so the group takes no proposal and no

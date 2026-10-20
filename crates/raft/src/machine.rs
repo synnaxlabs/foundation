@@ -935,7 +935,8 @@ impl Raft {
             }
             self.release_removed();
         }
-        // A reply that is not news can answer a probe that `fit` left with no entry.
+        // A reply that is not news can free the slot of an append with no entry, or
+        // answer a probe that `fit` left with no entry.
         self.catch_up(from);
     }
 
@@ -4268,6 +4269,42 @@ mod tests {
             raft
         }
 
+        // Node 3 commits each entry, so node 1 sends node 2, which holds the log, an
+        // append with no entry at each commit until its window is full.
+        #[test]
+        fn a_follower_that_answers_each_append_gets_the_next_entry() {
+            let mut raft = raft(&[1, 2, 3, 4, 5], Hard::default());
+            elect(&mut raft, &[2, 3]);
+            let term = raft.term().0;
+            for from in [2, 3, 2, 3] {
+                raft.step(message(from, term, accepted(1))).unwrap();
+            }
+            sent(&mut raft);
+            for data in 2..=9u8 {
+                raft.propose(vec![data]).unwrap();
+            }
+            sent(&mut raft);
+            raft.step(message(2, term, accepted(9))).unwrap();
+            let mut to_2 = 0;
+            for last in 2..=9 {
+                raft.step(message(3, term, accepted(last))).unwrap();
+                to_2 += sent(&mut raft).iter().filter(|m| m.to == key(2)).count();
+            }
+            assert_eq!(to_2, 8);
+            raft.propose(vec![10]).unwrap();
+            let mut messages = sent(&mut raft);
+            for _ in 0..to_2 {
+                raft.step(message(2, term, accepted(9))).unwrap();
+                messages.extend(sent(&mut raft));
+            }
+            let entries: Vec<u64> = messages
+                .iter()
+                .filter(|m| m.to == key(2))
+                .flat_map(|m| m.body.entries().iter().map(|entry| entry.at.index))
+                .collect();
+            assert_eq!(entries, [10]);
+        }
+
         #[test]
         fn a_follower_refuses_a_proposal_and_names_the_leader_it_knows() {
             let mut raft = raft(&[1, 2, 3], at_term(1));
@@ -5021,7 +5058,8 @@ mod tests {
         }
 
         // Node 9 leaves the set and comes back while a change is pending, so its peer
-        // stays.
+        // stays. It answers the append with no entry that it gets while out of the
+        // set, so no append to it is in flight.
         #[test]
         fn a_learner_that_a_call_adds_again_gets_an_append_at_once() {
             let mut raft = raft(&[1, 2, 3], Hard::default());
@@ -5036,6 +5074,8 @@ mod tests {
             raft.set_learners([]);
             raft.propose(b"y".to_vec()).unwrap();
             sent(&mut raft);
+            accepted(&mut raft, 9, 2);
+            assert!(sent(&mut raft).is_empty());
             raft.set_learners([key(9)]);
             assert_eq!(carrying(&sent(&mut raft), 9).len(), 1);
         }

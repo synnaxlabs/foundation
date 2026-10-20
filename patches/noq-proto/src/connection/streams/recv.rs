@@ -92,8 +92,11 @@ impl Recv {
 
         self.stopped = true;
         self.assembler.clear();
-        // Issue flow control credit for unread data
-        let read_credits = self.end - self.assembler.bytes_read();
+        // Issue flow control credit for unread data, unless a reset already did
+        let read_credits = match self.state {
+            RecvState::Recv { .. } => self.end - self.assembler.bytes_read(),
+            RecvState::ResetRecvd { .. } => 0,
+        };
         // This may send a spurious STOP_SENDING if we've already received all data, but it's a bit
         // fiddly to distinguish that from the case where we've received a FIN but are missing some
         // data that the peer might still be trying to retransmit, in which case a STOP_SENDING is
@@ -182,11 +185,11 @@ impl Recv {
                 "lower than high water mark",
             ));
         }
-        self.credit_consumed_by(final_offset.into(), received, max_data)?;
-
         if matches!(self.state, RecvState::ResetRecvd { .. }) {
             return Ok(false);
         }
+        self.credit_consumed_by(final_offset.into(), received, max_data)?;
+
         self.state = RecvState::ResetRecvd {
             size: final_offset.into(),
             error_code,
