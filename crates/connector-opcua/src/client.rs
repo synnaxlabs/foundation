@@ -108,9 +108,9 @@ pub(crate) unsafe fn unconnected(el: *mut ffi::EventLoop) -> NonNull<ffi::Client
 /// The certificate and private key of a peer, each DER or PEM, and its `trust`: DER
 /// certificates back to back, or PEM. In PEM, a client trusts each block of
 /// `CERTIFICATE`, `X509 CERTIFICATE`, or `TRUSTED CERTIFICATE`, each with one DER
-/// certificate and no byte after it, as `PEM_bytes_read_bio` of aws-lc reads the
-/// blocks. It skips DER bytes and what that reader skips, such as text and a block
-/// of another label, but a block of any label that the reader cannot read refuses
+/// certificate, no header other than one that starts with a NUL byte, and no byte after
+/// it, as `PEM_read_bio` of aws-lc reads the blocks. It skips DER bytes, text, and a
+/// block of another label, but a block of any label that the reader cannot read refuses
 /// the trust. It does not trust a certificate in a skipped part, so the connect to its
 /// server gives `BadCertificateUntrusted`. A client offers each of the three policies
 /// of the copy on them, with the URI of `certificate` as its application URI.
@@ -146,9 +146,9 @@ pub(crate) enum Error {
 }
 
 /// Why open62541 refuses the [`Credentials`] of a client. Its `Display` names the
-/// part, such as "the key does not parse". Each refusal other than `Time` and
-/// `Trailing` can also come from a lack of memory, as its check gives one result for it
-/// and for the cause.
+/// part, such as "the key does not parse". Each refusal other than `Time`,
+/// `Trailing`, and `Line` can also come from a lack of memory, as its check gives one
+/// result for it and for the cause.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Refusal {
     /// `certificate` does not parse or holds no RSA key.
@@ -162,18 +162,23 @@ pub(crate) enum Refusal {
     Time,
     /// `trust` holds no certificate in DER or PEM.
     Empty,
-    /// The certificate `number`, from 1, of `trust` does not parse. In DER, bytes
-    /// after the last certificate are one more. In PEM, a block of any label that
-    /// aws-lc cannot read is one more.
+    /// The certificate `number`, from 1, of `trust` does not parse, or its PEM block
+    /// has a header that does not start with a NUL byte, such as of encryption. In DER,
+    /// bytes after the last certificate are one more.
     Invalid { number: usize },
+    /// A PEM block of any label of `trust` that aws-lc cannot read, such as an empty
+    /// one, damaged base64, or one with no `END` line of its label, comes after
+    /// `after` certificates.
+    Damaged { after: usize },
     /// The PEM block of the certificate `number`, from 1, of `trust` holds bytes after
     /// it, such as trust settings or a second certificate.
     Trailing { number: usize },
-    /// Line `number`, from 1, of `trust`, counted by `\n`, is in a PEM block, and a piece
-    /// of it that aws-lc reads (at most 253 bytes, through its `\n`) holds a byte of 0x80
-    /// to 0xFF after its last byte of 0x21 to 0x7F, or anywhere when it has none, which
-    /// aws-lc reads in two ways by the CPU target.
-    Line { number: usize },
+    /// Line `number`, from 1 and counted by `\n`, of `credential` is in a PEM block
+    /// and holds a byte of 0x80 to 0xFF that the CPU targets read in two ways.
+    Line {
+        credential: Credential,
+        number: usize,
+    },
     /// `certificate` holds no URI in its subject alternative name.
     Uri,
 }
@@ -194,10 +199,21 @@ impl Refusal {
             ffi::Refusal::EMPTY => Self::Empty,
             ffi::Refusal::INVALID => Self::Invalid { number: raw.number },
             ffi::Refusal::TRAILING => Self::Trailing { number: raw.number },
-            ffi::Refusal::LINE => Self::Line { number: raw.number },
+            ffi::Refusal::DAMAGED => Self::Damaged { after: raw.number },
+            ffi::Refusal::TRUST_LINE => Self::line(Credential::Trust, raw),
+            ffi::Refusal::CERTIFICATE_LINE => Self::line(Credential::Certificate, raw),
+            ffi::Refusal::KEY_LINE => Self::line(Credential::Key, raw),
             ffi::Refusal::URI => Self::Uri,
-            kind => panic!("invariant: shim.c gives a refusal of 0 to 9, not {kind}"),
+            kind => panic!("invariant: shim.c gives a refusal of 0 to 12, not {kind}"),
         })
+    }
+
+    /// Gives the `Line` refusal of `credential` at the line of `raw`.
+    fn line(credential: Credential, raw: &ffi::Refusal) -> Self {
+        Self::Line {
+            credential,
+            number: raw.number,
+        }
     }
 }
 
@@ -214,25 +230,46 @@ impl fmt::Display for Refusal {
             ),
             Self::Empty => f.write_str("the trust holds no certificate in DER or PEM"),
             Self::Invalid { number } => {
-                write!(
-                    f,
-                    "certificate {number} of the trust, or a damaged PEM block in its \
-                     place, does not parse"
-                )
+                write!(f, "certificate {number} of the trust does not parse")
             }
+            Self::Damaged { after: 0 } => f.write_str(
+                "a PEM block of the trust is damaged, with no certificate before it",
+            ),
+            Self::Damaged { after } => write!(
+                f,
+                "a PEM block after certificate {after} of the trust is damaged"
+            ),
             Self::Trailing { number } => write!(
                 f,
                 "the PEM block of certificate {number} of the trust holds bytes after it"
             ),
-            Self::Line { number } => write!(
+            Self::Line { credential, number } => write!(
                 f,
-                "line {number} of the trust, in a PEM block, holds a byte of 0x80 to \
-                 0xFF, which PEM does not allow"
+                "line {number} of {credential}, in a PEM block, holds a byte of 0x80 \
+                 to 0xFF, which PEM does not allow"
             ),
             Self::Uri => f.write_str(
                 "the certificate holds no URI in its subject alternative name",
             ),
         }
+    }
+}
+
+/// The field of the [`Credentials`] that a [`Refusal::Line`] names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Credential {
+    Certificate,
+    Key,
+    Trust,
+}
+
+impl fmt::Display for Credential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Certificate => "the certificate",
+            Self::Key => "the key",
+            Self::Trust => "the trust",
+        })
     }
 }
 

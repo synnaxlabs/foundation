@@ -30,7 +30,8 @@ pub async fn open_unsynced(env: Env, delay: Span) -> Hub {
     create_hub(home, interner, time, tasks, entropy)
 }
 
-/// The hub of the node `node::Key::from_u128(1)` on `home`, with no region.
+/// The hub of the node `node::Key::from_u128(1)` on `home`, with the public key of
+/// `PrivateKey([1; 32])` and no region.
 fn create_hub(
     home: home::Shard,
     interner: types::frame::key_set::Interner,
@@ -43,6 +44,7 @@ fn create_hub(
         interner,
         tasks,
         node: types::node::Key::from_u128(1),
+        public_key: types::ed25519::PrivateKey([1; 32]).public(),
         time,
         entropy,
         region: None,

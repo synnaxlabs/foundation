@@ -24,7 +24,7 @@ use types::sample::{Scalar, Type, Value};
 use types::time::{Span, Stamp};
 use types::{frame, hash};
 
-use crate::{DataLost, Rejected, error, owned};
+use crate::{DataLost, Rejected, error, owned, stop};
 
 /// What a write does with a frame that the node took no room for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -437,15 +437,16 @@ impl Writer {
         })
     }
 
-    /// Finishes the stream, and blocks until each frame that the node took is on disk
-    /// and the node finished the stream. Control ends then. A close waits for a call
-    /// that sends, with other Python threads running. A call that a close ends before
-    /// its send raises `RuntimeError`. A close after a close gives `None`, and in a
-    /// forked process it gives `None` and ends nothing.
+    /// Finishes the stream, and blocks until each frame that the node took is on disk,
+    /// or its group ended, and the node finished the stream. Control ends then. A close
+    /// waits for a call that sends, with other Python threads running. A call that a
+    /// close ends before its send raises `RuntimeError`. A close after a close gives
+    /// `None`, and in a forked process it gives `None` and ends nothing.
     ///
-    /// Raises `Stopped` when the node stopped the stream, `ConnectionError` when the
-    /// session failed, `RuntimeError` when the client closed, and `PanicException`
-    /// when the client's thread panicked.
+    /// Raises `Stopped` when the node stopped the stream or the write of its group
+    /// ended, and then a frame that the node took may not be on disk. Raises
+    /// `ConnectionError` when the session failed, `RuntimeError` when the client
+    /// closed, and `PanicException` when the client's thread panicked.
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         if process::id() != self.process {
             return Ok(());
@@ -522,12 +523,7 @@ fn rejection(refusal: Refusal) -> (&'static str, &'static str) {
 /// The error of a writer whose one group ended with `end`: the error of a stream
 /// that the node stopped for the same cause.
 fn ended(end: End) -> sdk::Error {
-    let refusal = match end {
-        End::Removed => program::Refusal::Unknown,
-        End::Failed => program::Refusal::Failed,
-        End::Refused => program::Refusal::Refused,
-    };
-    sdk::Error::Stream(program::Error::Refused(refusal))
+    sdk::Error::Stream(program::Error::Refused(stop(end)))
 }
 
 /// The value of `object` for `place`.
@@ -886,7 +882,8 @@ np.array = guard(np.array, array)
 
     /// The end of the one group of a writer raises `Stopped` with the code of a stream
     /// that the node stopped for the same cause. It calls the map, not `write`: no
-    /// node gives `Outcome::Ended` until #3372, which adds the test through `write`.
+    /// node gives `Outcome::Ended` until PR 2 of #3283, and PR 4 of #3283 adds the
+    /// test through `write`.
     #[test]
     fn ended_raises_stopped_with_the_code_of_each_end() {
         Python::initialize();

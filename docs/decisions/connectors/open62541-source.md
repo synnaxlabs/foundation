@@ -1043,23 +1043,36 @@
   when `d2i_X509` reads its first certificate, or else PEM certificates. The copy loads
   each certificate of each trust entry, and refuses an entry whose load stops before its
   end, and the constructor of the group gives that status (ruling A). PEM is read by the
-  loop of `PEM_bytes_read_bio` of aws-lc on a BIO of the full length, which takes
-  `CERTIFICATE`, `X509 CERTIFICATE`, and `TRUSTED CERTIFICATE` blocks and skips the text
-  outside them, then `d2i_X509` on the bytes of each block, not by the leaf loader of
-  the copy, which drops a block that does not start with the exact line `-----BEGIN
-  CERTIFICATE-----` (round 2 of review of #3271). `d2i_X509` is the one step of the DER
-  path (#3288 item 4, OK of `laptop.architect-2`,
+  loop of `PEM_read_bio` of aws-lc on a BIO of the full length, which reads each block
+  and skips the text outside them. The load takes the `CERTIFICATE`, `X509
+  CERTIFICATE`, and `TRUSTED CERTIFICATE` blocks with no header: the labels that aws-lc
+  reads as `TRUSTED CERTIFICATE`, which the copy states, as aws-lc does not export that
+  rule (`laptop.architect-2`, 2026-10-20 02:38 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3469#issuecomment-6282051598). Lost:
+  `PEM_bytes_read_bio`, which takes the labels in aws-lc, but gives 0 with no error
+  queued for a header such as `Proc-Type: 3`, so that block was `Damaged`. The load
+  reads the header through `PEM_get_EVP_CIPHER_INFO` and `PEM_do_header` of aws-lc with
+  a callback that refuses a password, so a block with a header gives `Invalid` (round 1
+  of review of #3469; `laptop.architect-2`, 2026-10-20 02:03 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3469#issuecomment-6281615454, and 02:38
+  UTC, above). aws-lc reads a header that starts with a NUL byte as none, so that block
+  loads, as in the loads of the policies (round 2 of review of #3469;
+  `laptop.architect-2`, 02:38 UTC, above). Then `d2i_X509` reads the bytes
+  of each block, not the leaf loader of the copy, which drops a block that does not
+  start with the exact line `-----BEGIN CERTIFICATE-----` (round 2 of review of
+  #3271). `d2i_X509` is the one step of the DER path (#3288 item 4, OK of
+  `laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6266776077). This
   supersedes item 1 of
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255744593. A DER
   entry with a byte after its last certificate, and DER then PEM in one entry, make the
   constructor of the group give `BadInternalError`; the client gives the refusals of the
-  PR 2b paragraph below. What aws-lc skips is dropped: text, as the comment of
+  PR 2b paragraph below. What the load skips is dropped: text, as the comment of
   `openSSLLoadEachCertificate` states, DER bytes after PEM, a damaged first DER
   certificate before a PEM block, and a block of another label. A block of any label
-  that aws-lc cannot read fails the load, such as an empty one or one whose `END` line
-  names another label. So the connect fails closed with an untrusted certificate
-  (`laptop.architect-2`, 2026-10-18 22:30 UTC,
+  that `PEM_read_bio` cannot read fails the load, such as an empty one or one whose
+  `END` line names another label. So the connect fails closed with an untrusted
+  certificate (`laptop.architect-2`, 2026-10-18 22:30 UTC,
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255959458; for the
   second, 2026-10-18 22:50 UTC,
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6256155598; and for
@@ -1109,20 +1122,54 @@
   supersedes the first item of
   https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6272707868 for such
   a line). Such an `END` line fails in aws-lc on each target as
-  `client::Refusal::Invalid`, unless it names the label of a block that such a `BEGIN`
+  `client::Refusal::Damaged`, unless it names the label of a block that such a `BEGIN`
   line starts; that block drops
   (https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6278296455;
   `laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/pull/3423#issuecomment-6278381176). Text
-  outside the blocks keeps any bytes. The check is in C, at the start of the PEM branch
-  of `openSSLLoadEachCertificate`, so both loads of a trust pass it. The client gives
-  `client::Refusal::Line { number }`, the line from 1 counted by `\n`, since the check
-  runs before aws-lc counts certificates. PR 2d of #2934, the caller that reads the
-  trust file, puts its path before that text (`laptop.architect-2`, 2026-10-19 18:24
-  UTC, https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6274242216).
-  Lost: a check in Rust in `Client::connect`, which copies the DER rule; a check in the
-  kind, which other callers skip; and aws-lc patched to compare as unsigned, which gives
-  no refusal and no line.
+  outside the blocks keeps any bytes. A further case that each target reads alike
+  needs no message to `laptop.monitor`: this text records it, with a test
+  (`laptop.monitor`, message c4c6936d,
+  https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6278296455). The
+  rule holds for each PEM read of the copy, so for a PEM key and certificate too
+  (#3428). The check is in C, in `UA_OpenSSL_PemBio` of `securitypolicy_common.c`, the
+  one PEM entry of the copy: it makes the BIO of each PEM read, and first refuses such
+  a piece (`laptop.architect-2`, 2026-10-19 20:55 UTC,
+  https://github.com/synnaxlabs/foundation/issues/3428#issuecomment-6277130219). A site
+  that tries DER first does it before the entry, on the bytes: `d2i_X509`,
+  `d2i_X509_REQ`, `d2i_X509_CRL`, and `d2i_AutoPrivateKey` in place of their `_bio`
+  forms. So a DER key over 100 KiB, which `d2i_PrivateKey_bio` refused, loads
+  (`laptop.architect-2`, 2026-10-19 23:26 UTC,
+  https://github.com/synnaxlabs/foundation/issues/3428#issuecomment-6279597410, item
+  3). `cargo xtask open62541` admits `BIO_new_mem_buf` only in the entry, and no `_bio`
+  DER read or `BIO_reset`. The test
+  `a_begin_line_at_a_piece_of_253_bytes_of_a_long_line_starts_a_block` pins the piece
+  size of aws-lc. `UA_CertificateUtils_certificateLine` and
+  `UA_CertificateUtils_keyLine` of `certificategroup.h` run the loaders of the policies
+  and give the line at which the entry refuses the own certificate or key, and
+  `shim_client_secure` checks the certificate, then the key, before the policies. The
+  client gives `client::Refusal::Line { credential, number }`, with the field of
+  `Credentials` that holds the line (`client::Credential`) and the line from 1 counted
+  by `\n`, since the check runs before aws-lc counts certificates (`laptop.architect-2`,
+  items 1 and 2 of
+  https://github.com/synnaxlabs/foundation/issues/3428#issuecomment-6279597410; the
+  name `Credential` in place of `Part`, which `client.rs` holds: `laptop.architect-2`,
+  2026-10-19 23:38 UTC,
+  https://github.com/synnaxlabs/foundation/issues/3428#issuecomment-6279750751, which
+  also approves one entry BIO for each PEM read of `openSSLLoadPublicKey` in place of
+  `BIO_reset`). A site that the client does not reach
+  keeps its own failure for a refused line: a CRL fails as a damaged one,
+  `UA_CertificateUtils_comparePublicKeys` skips the PEM read, and
+  `UA_CertificateUtils_decryptPrivateKey` gives `BadSecurityChecksFailed`. A
+  certificate of the server from the wire that the entry refuses does not load, as a
+  damaged one. PR 2d of #2934, the caller that reads the files, puts the path of the
+  file of that field before that text (`laptop.architect-2`, 2026-10-19 18:24 UTC,
+  https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6274242216). Lost:
+  a check in Rust in `Client::connect`, which copies the DER rule; a check in the kind,
+  which other callers skip; aws-lc patched to compare as unsigned, which gives no
+  refusal and no line; a filter BIO, whose refusal comes out of aws-lc as a read error;
+  and a check of the raw bytes in the shim, which refuses a DER certificate that the
+  load reads.
   The validity check of the own certificate and the map of each refusal in `kind.rs`
   move to PR 2b (`laptop.architect-2`, 2026-10-18 21:37 UTC,
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255457069, items 1
@@ -1147,8 +1194,9 @@
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6267044406). PR 2b
   of #2934 refuses the credentials before the dial with the cause as data:
   `client::Error::Refused` with a `client::Refusal`, which names the part that fails and
-  the number from 1 of a trust certificate that does not load. The copy gives the cause
-  through `UA_CertificateUtils_checkTrust` and `UA_CertificateUtils_checkTime`, and
+  the number from 1 of a trust certificate that does not load, or the count of the
+  certificates before a damaged PEM block. The copy gives the cause through
+  `UA_CertificateUtils_checkTrust` and `UA_CertificateUtils_checkTime`, and
   `shim_client_secure` is the one place that turns a cause into a kind. It checks the
   policies, the key pair, the window, the trust, then the URI: the config takes the URI
   that its check allocates, so no refusal comes after that allocation. A check refuses
@@ -1158,10 +1206,13 @@
   for out of memory and the cause (`BadCertificateInvalid` of the policies when
   `UA_OpenSSL_LoadCertificate` gives NULL, `BadInvalidArgument` of the policies when
   `i2d_X509` fails, the key pair check, the URI check when `X509_get_ext_d2i` gives
-  NULL, and the trust load when `d2i_X509` or `PEM_bytes_read_bio` fails, which gives
-  `Invalid`, or `Empty` at the first DER certificate, as the load does not read the
-  `ERR_R_MALLOC_FAILURE` of aws-lc, #3391), the refusal names the cause, and the time
-  check gives `Failed(BadCertificateInvalid)` when its load of the certificate fails
+  NULL, and the trust load when `d2i_X509` fails, which gives `Invalid`, or `Empty` at
+  the first DER certificate, or `PEM_read_bio` fails, which gives `Damaged` (the
+  split: `laptop.architect-2`, 2026-10-19 18:26 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3371#issuecomment-6274275532, item 1),
+  as the load does not read the `ERR_R_MALLOC_FAILURE` of aws-lc, #3483), the refusal
+  names the cause, and the time check gives `Failed(BadCertificateInvalid)` when its
+  load of the certificate fails
   (`laptop.monitor`, 2026-10-19 14:46 UTC,
   https://github.com/synnaxlabs/foundation/pull/3371#issuecomment-6270025607, item 2;
   `laptop.architect-2`, 2026-10-19 14:49 UTC,

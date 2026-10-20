@@ -27,7 +27,11 @@ use crate::serve::{Error, alloc, unless};
 use crate::writer::{self, Failure, Homed, Writer};
 
 /// The bytes of the block of a `Stored` reply.
-const STORED_BYTES: usize = Reply::Stored { frames: 0 }.encoded_len();
+const STORED_BYTES: usize = Reply::Stored {
+    group: 0,
+    frames: 0,
+}
+.encoded_len();
 
 /// The stream that carried the open of a write to this node.
 #[derive(Clone, Copy)]
@@ -634,7 +638,9 @@ impl Replies {
     ) -> Result<(), Error> {
         let (_, frames, block) = self.due.take().expect("invariant: a commit is due");
         self.call(state);
-        send(sender, block, Reply::Stored { frames }).await
+        // The set of a write stream is one group.
+        let reply = Reply::Stored { group: 0, frames };
+        send(sender, block, reply).await
     }
 
     /// Waits for the commit of each taken frame, sends its `Stored`, and finishes the

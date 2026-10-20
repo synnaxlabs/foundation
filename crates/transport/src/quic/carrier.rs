@@ -87,7 +87,7 @@ impl Carrier {
         peer: PublicKey,
         remote: SocketAddr,
     ) -> Result<Session, Error> {
-        let session = self.handle().dial(peer, remote)?;
+        let session = self.handle().dial(Some(peer), remote)?;
         poll_fn(|cx| session.poll_connected(cx)).await?;
         Ok(session)
     }
@@ -174,7 +174,8 @@ impl Handle {
         Poll::Pending
     }
 
-    /// Starts a dial to `remote` that `peer` must answer, and gives its session,
+    /// Starts a dial to `remote` that `peer` must answer, or any node for `None`, and
+    /// gives its session,
     /// which [`Session::poll_connected`] waits on. Dropping the session closes the
     /// dial. `remote` is in the form of a reply source, as `dial::route` gives it:
     /// in another form, each reply comes from an unknown peer and the dial times out.
@@ -188,7 +189,7 @@ impl Handle {
     /// When no datagram can go to `remote`: its port is 0 or its IP is unspecified.
     pub(crate) fn dial(
         &self,
-        peer: PublicKey,
+        peer: Option<PublicKey>,
         remote: SocketAddr,
     ) -> Result<Session, Error> {
         self.check()?;
@@ -1650,7 +1651,7 @@ mod tests {
             drop(carrier);
             let closed = Error::Closed { code: Code(0) };
             assert_eq!(handle.check(), Err(closed.clone()));
-            let session = crate::dial::dial(&handle, SERVER.public(), &at).await;
+            let session = crate::dial::dial(&handle, Some(SERVER.public()), &at).await;
             assert_eq!(session.err(), Some(closed));
         });
         assert_eq!(sim.run(), Ok(()));

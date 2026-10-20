@@ -34,7 +34,7 @@
 //! - [`Challenge`]: kind 4, the nonce (16), then the earliest and the latest mesh time
 //!   (`i64` nanoseconds each).
 //! - [`Signed`]: kind 4, the hello as [`Hello::encode`] writes it (the subject's
-//!   length (`u8`) and bytes, the key (32), `via` (`u128`), the connection (16), the
+//!   length (`u8`) and bytes, the key (32), `via` (32), the connection (16), the
 //!   nonce (16), `expires` (`i64` nanoseconds)), and the signature (64). These are the
 //!   signed bytes of the hello with no tag.
 //! - [`Request`]: kind 5, the body's length (`u64`), and the signature (64).
@@ -61,7 +61,6 @@ use types::connection;
 use types::ed25519::PublicKey;
 use types::hello::Hello;
 use types::name::{self, Name};
-use types::node;
 use types::sample;
 use types::time::{Interval, Stamp};
 
@@ -231,7 +230,7 @@ pub enum Error {
     },
     /// The subject of a hello is not a name.
     Subject(text::Error<Box<name::Error>>),
-    /// The key of a hello is a point of small order.
+    /// The key or `via` of a hello is a point of small order.
     SmallOrder,
     /// A message comes after the body of a request, a response, or a read.
     Trailing,
@@ -339,7 +338,7 @@ impl fmt::Display for Error {
                 write!(f, "the subject of the hello is not a name: {cause}")
             }
             Self::SmallOrder => {
-                f.write_str("the key of the hello is a point of small order")
+                f.write_str("the key or via of the hello is a point of small order")
             }
             Self::Trailing => {
                 f.write_str("a hub message came after the body of the stream")
@@ -536,7 +535,7 @@ impl Signed {
         let [len] = *fields.take()?;
         let subject = fields.take_slice(usize::from(len))?;
         let key = *fields.take()?;
-        let via = u128::from_le_bytes(*fields.take()?);
+        let via = *fields.take()?;
         let connection = *fields.take()?;
         let nonce = *fields.take()?;
         let expires = stamp(*fields.take()?);
@@ -544,11 +543,12 @@ impl Signed {
         fields.end()?;
         let subject: Name = text::read(subject).map_err(Error::Subject)?;
         let key = PublicKey::new(key).map_err(|_small| Error::SmallOrder)?;
+        let via = PublicKey::new(via).map_err(|_small| Error::SmallOrder)?;
         Ok(Self {
             hello: Hello {
                 subject,
                 key,
-                via: node::Key::from_u128(via),
+                via,
                 connection: connection::Key(connection),
                 nonce,
                 expires,

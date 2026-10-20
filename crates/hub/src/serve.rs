@@ -94,7 +94,7 @@ pub enum Error {
     /// `Unsynced` when it has no mesh time for a challenge, and `Expired` when the
     /// admitted hello ends ([`access::proof::Admitted::ends`]). Code: the one that
     /// CLIENT HELLO gives for the error, `REFUSED` for each that tells about the spec.
-    Access(access::proof::Error),
+    Access(Box<access::proof::Error>),
     /// The hello does not echo the nonce of the last challenge. Code `STALE`.
     Stale,
     /// A later stream before the link admitted a hello. Code `MALFORMED`.

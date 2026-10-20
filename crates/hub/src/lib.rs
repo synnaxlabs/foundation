@@ -23,6 +23,7 @@ use std::task::Waker;
 use spec::channel::Kind;
 use spec::definition::Definition;
 use types::channel::Key;
+use types::ed25519::PublicKey;
 use types::frame::key_set::Interner;
 use types::hash;
 use types::name::Name;
@@ -69,8 +70,10 @@ pub struct Config {
     pub interner: Interner,
     /// Where the hub spawns its commit task and the task of each remote reader.
     pub tasks: env::tasks::Tasks,
-    /// This node's key. A client's hello must name it as `via`.
+    /// This node's key.
     pub node: types::node::Key,
+    /// This node's public key. A client's hello must name it as `via`.
+    pub public_key: PublicKey,
     /// Mesh time, which the hub checks each hello and request against, and which
     /// [`Hub::writer`] waits for: the reader that `home` was made with.
     pub time: clock::Reader,
@@ -133,6 +136,7 @@ struct State {
     /// The error that ended the home's buffer.
     failed: Option<env::files::Error>,
     node: types::node::Key,
+    public_key: PublicKey,
     time: clock::Reader,
     entropy: env::entropy::Entropy,
     /// Empty, so refusing each hello, until [`Hub::set_rules`] first runs.
@@ -162,6 +166,7 @@ impl Hub {
             interner,
             tasks,
             node,
+            public_key,
             time,
             entropy,
             region,
@@ -190,6 +195,7 @@ impl Hub {
             gate: task::Waiter::default(),
             failed: None,
             node,
+            public_key,
             time: time.clone(),
             entropy,
             rules: access::Rules::default(),

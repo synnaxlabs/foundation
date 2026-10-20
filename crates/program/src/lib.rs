@@ -42,9 +42,8 @@ const RETRY: Span = Span::from_nanos(10 * Span::MILLISECOND.nanos());
 /// What a [`Session`] is given.
 #[derive(Debug)]
 pub struct Config {
-    /// The key of the node to connect to, which each hello names as `via`.
-    pub via: types::node::Key,
-    /// The public key that the node proves in the handshake.
+    /// The public key that the node proves in the handshake, which each hello names
+    /// as `via`.
     pub node: PublicKey,
     /// Where the node listens, tried as `transport::Client::dial` tries them.
     pub addresses: Vec<Address>,
@@ -99,7 +98,7 @@ struct Shared {
     session: transport::Session,
     pair: Pair,
     subject: Name,
-    via: types::node::Key,
+    via: PublicKey,
     connection: connection::Key,
     clock: env::clock::Clock,
     tasks: env::tasks::Tasks,
@@ -128,7 +127,6 @@ impl Session {
         config: Config,
     ) -> Result<Self, Error> {
         let Config {
-            via,
             node,
             addresses,
             subject,
@@ -148,7 +146,7 @@ impl Session {
             session,
             pair: Pair::new(&key),
             subject,
-            via,
+            via: node,
             connection: connection::Key(connection),
             clock,
             tasks: tasks.clone(),
@@ -561,6 +559,13 @@ pub enum Error {
         /// The form of the frame.
         form: Form,
     },
+    /// Each group that it names ended with a frame that its home took and whose
+    /// `Stored` did not come, so that frame may not be on disk. Each item is the place
+    /// of the index of the group and why the group ended. The other groups go on.
+    /// [`Writer::stored`] gives it once each taken frame of every other group is on
+    /// disk, and again at each later call, so an `Ok` never says that a frame of an
+    /// ended group is on disk. [`Writer::finish`] gives it after `Finished`.
+    Unstored(Vec<(usize, write::End)>),
 }
 
 impl fmt::Display for Error {
@@ -612,6 +617,16 @@ impl fmt::Display for Error {
                 "a frame that the node stamps holds 1 sample in the raw form, not \
                  {count} in the {form:?} form, so it was not sent"
             ),
+            Self::Unstored(groups) => {
+                f.write_str(
+                    "the write ended with a taken frame that may not be on disk for",
+                )?;
+                for (at, (place, end)) in groups.iter().enumerate() {
+                    let and = if at == 0 { "" } else { "," };
+                    write!(f, "{and} the group of index place {place} ({end:?})")?;
+                }
+                Ok(())
+            }
         }
     }
 }

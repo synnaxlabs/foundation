@@ -83,7 +83,6 @@ pub(crate) async fn session(
     .unwrap();
     let frames = Rc::new(block::Pool::heap(budget(frames)));
     let config = program::Config {
-        via: node.key,
         node: node.public_key,
         addresses: node
             .addresses

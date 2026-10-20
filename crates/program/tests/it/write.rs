@@ -8,7 +8,7 @@ use std::task::Poll;
 
 use env::clock::Clock;
 use env::tasks::Tasks;
-use program::write::{Config, Outcome, Refusal as Refused, Time};
+use program::write::{Config, End, Outcome, Refusal as Refused, Time};
 use program::{Error, Reader, Session, Writer};
 use spec::channel::{Channel, Data, Kind};
 use spec::data_type::DataType;
@@ -238,6 +238,11 @@ async fn reply(write: &mut Incoming, reply: Reply) {
     let mut bytes = vec![0; reply.encoded_len()];
     reply.encode(&mut bytes);
     send(write.sender.as_mut().expect("two-way"), &bytes).await;
+}
+
+/// Sends a `Stored` of `frames` frames of group 0 on `write`.
+async fn stored(write: &mut Incoming, frames: u64) {
+    reply(write, Reply::Stored { group: 0, frames }).await;
 }
 
 fn taken(seq: u64, count: u32) -> Outcome {
@@ -1308,7 +1313,7 @@ fn ends_the_writer_at_an_outcome_past_the_frames_sent() {
             take_frame(&mut write).await;
             answer(&mut write, 1, taken(0, 1)).await;
             answer(&mut write, 2, Outcome::Refused(Refused::Order)).await;
-            reply(&mut write, Reply::Stored { frames: 1 }).await;
+            stored(&mut write, 1).await;
             let sender = write.sender.as_mut().expect("two-way");
             sender.finish().expect("finishes");
             assert_eq!(reset(&mut write).await, Code(MALFORMED));
@@ -1338,7 +1343,7 @@ fn ends_the_writer_at_a_stored_past_the_outcomes() {
         741,
         |session, node| async move {
             let mut write = opened(&session).await;
-            reply(&mut write, Reply::Stored { frames: 9 }).await;
+            stored(&mut write, 9).await;
             // The reset can come before the frame does.
             let mut messages = 0;
             let code = loop {
@@ -1362,6 +1367,7 @@ fn ends_the_writer_at_a_stored_past_the_outcomes() {
                     session.writer(config(&["value"], 1)).await.expect("opens");
                 frame(&mut writer, 1, 0, &[(2, 1)]).await;
                 let error = wire::hub::Error::Stored {
+                    group: 0,
                     frames: 9,
                     bound: 0,
                 };
@@ -1410,7 +1416,7 @@ fn waits_in_finish_for_the_stored_of_each_taken_frame() {
                 .map(|got| got.map(|b| b.to_vec()));
             assert_eq!(got, Ok(None), "the held draft is not sent");
             node.clock().sleep(QUIET).await;
-            reply(&mut write, Reply::Stored { frames: 1 }).await;
+            stored(&mut write, 1).await;
             node.clock().sleep(QUIET).await;
             let sender = write.sender.as_mut().expect("two-way");
             sender.finish().expect("finishes");
@@ -1465,6 +1471,181 @@ fn gives_finished_to_a_finish_with_a_taken_frame_not_stored() {
             })
         },
     );
+}
+
+/// A group that ends with a taken frame whose `Stored` did not come makes `stored`
+/// give `Unstored` with the place of its index at once, the writer goes on, and
+/// `finish` gives it after the node finishes. Its message names each group.
+#[test]
+fn gives_unstored_for_a_group_that_ended_with_a_taken_frame_not_on_disk() {
+    by_hand(
+        768,
+        |session, node| async move {
+            let mut write = opened(&session).await;
+            take_frame(&mut write).await;
+            answer(&mut write, 1, taken(0, 1)).await;
+            let end = End::Failed;
+            reply(&mut write, Reply::Ended { group: 0, end }).await;
+            take_frame(&mut write).await;
+            answer(&mut write, 2, Outcome::Ended(end)).await;
+            let got = write.receiver.recv().await.map(|got| got.is_some());
+            assert_eq!(got, Ok(false));
+            let sender = write.sender.as_mut().expect("two-way");
+            sender.finish().expect("finishes");
+            node.clock().sleep(QUIET).await;
+        },
+        |session, node| {
+            Box::pin(async move {
+                let mut writer =
+                    session.writer(config(&["value"], 1)).await.expect("opens");
+                frame(&mut writer, 1, 0, &[(2, 1)]).await;
+                assert_eq!(writer.write(Time::Node).await, Ok(taken(0, 1)));
+                let unstored = Err(Error::Unstored(vec![(0, End::Failed)]));
+                assert_eq!(writer.stored().await, unstored);
+                frame(&mut writer, 1, 0, &[(2, 2)]).await;
+                let outcome = writer.write(Time::Node).await;
+                assert_eq!(outcome, Ok(Outcome::Ended(End::Failed)));
+                assert_eq!(writer.stored().await, unstored);
+                assert_eq!(writer.finish().await, unstored);
+                node.clock().sleep(QUIET).await;
+            })
+        },
+    );
+    let two = Error::Unstored(vec![(0, End::Failed), (3, End::Removed)]);
+    assert_eq!(
+        two.to_string(),
+        "the write ended with a taken frame that may not be on disk for the group of \
+         index place 0 (Failed), the group of index place 3 (Removed)"
+    );
+}
+
+/// A group that ends with each taken frame on disk, or with none taken, leaves
+/// `stored` and `finish` with no error.
+#[test]
+fn gives_no_unstored_for_a_group_that_ended_with_each_taken_frame_on_disk() {
+    for (seed, taken_first) in [(769, false), (770, true)] {
+        by_hand(
+            seed,
+            move |session, node| async move {
+                let mut write = opened(&session).await;
+                let end = End::Removed;
+                let mut frame = 1;
+                if taken_first {
+                    take_frame(&mut write).await;
+                    answer(&mut write, frame, taken(0, 1)).await;
+                    stored(&mut write, 1).await;
+                    frame += 1;
+                }
+                reply(&mut write, Reply::Ended { group: 0, end }).await;
+                take_frame(&mut write).await;
+                answer(&mut write, frame, Outcome::Ended(end)).await;
+                let got = write.receiver.recv().await.map(|got| got.is_some());
+                assert_eq!(got, Ok(false));
+                let sender = write.sender.as_mut().expect("two-way");
+                sender.finish().expect("finishes");
+                node.clock().sleep(QUIET).await;
+            },
+            move |session, node| {
+                Box::pin(async move {
+                    let mut writer =
+                        session.writer(config(&["value"], 1)).await.expect("opens");
+                    if taken_first {
+                        frame(&mut writer, 1, 0, &[(2, 1)]).await;
+                        assert_eq!(writer.write(Time::Node).await, Ok(taken(0, 1)));
+                    }
+                    frame(&mut writer, 1, 0, &[(2, 2)]).await;
+                    let outcome = writer.write(Time::Node).await;
+                    assert_eq!(outcome, Ok(Outcome::Ended(End::Removed)));
+                    assert_eq!(writer.stored().await, Ok(()), "{taken_first}");
+                    assert_eq!(writer.finish().await, Ok(()), "{taken_first}");
+                    node.clock().sleep(QUIET).await;
+                })
+            },
+        );
+    }
+}
+
+/// How the node answers a write of two groups whose group 1 ended with a taken frame:
+/// with no `Stored`, with the `Stored` of group 0, or with it after a wait.
+#[derive(Clone, Copy, Debug)]
+enum Store {
+    None,
+    Now,
+    Late,
+}
+
+/// A write of two groups whose group 1 ends with a taken frame not stored gives
+/// `Unstored` with the place of its index, not its group. `stored` waits for the
+/// `Stored` of group 0 first, and `finish` gives `Finished` first when the node
+/// finishes before it.
+#[test]
+fn gives_unstored_with_the_index_place_of_a_second_group_after_the_first_is_stored() {
+    for (seed, store) in [(771, Store::None), (772, Store::Now), (773, Store::Late)] {
+        by_hand(
+            seed,
+            move |session, node| async move {
+                let mut write = opened_with(&session, &two_groups()).await;
+                for _ in ["head", "ends and counts", "body"] {
+                    message(&mut write).await;
+                }
+                for group in [0, 1] {
+                    let outcome = taken(0, 1);
+                    let frame = 1;
+                    let answer = Reply::Outcome {
+                        frame,
+                        group,
+                        outcome,
+                    };
+                    reply(&mut write, answer).await;
+                }
+                let end = End::Failed;
+                reply(&mut write, Reply::Ended { group: 1, end }).await;
+                if let Store::Late = store {
+                    node.clock()
+                        .sleep(Span::from_nanos(2 * QUIET.nanos()))
+                        .await;
+                }
+                if !matches!(store, Store::None) {
+                    stored(&mut write, 1).await;
+                }
+                let got = write.receiver.recv().await.map(|got| got.is_some());
+                assert_eq!(got, Ok(false));
+                let sender = write.sender.as_mut().expect("two-way");
+                sender.finish().expect("finishes");
+                node.clock().sleep(QUIET).await;
+            },
+            move |session, node| {
+                Box::pin(async move {
+                    let clock = node.clock();
+                    let mut writer =
+                        session.writer(config(&["a", "b"], 1)).await.expect("opens");
+                    let series = [(0, 8), (1, 8), (2, 8), (3, 8)];
+                    let draft =
+                        writer.draft(Form::Raw, 1, &series).await.expect("a frame");
+                    draft.set_count(1, 1);
+                    let outcome = writer.write(Time::Frame(Path::Live)).await;
+                    assert!(
+                        matches!(outcome, Ok(Outcome::Taken { .. })),
+                        "{outcome:?}"
+                    );
+                    let unstored = Err(Error::Unstored(vec![(2, End::Failed)]));
+                    if let Store::Late = store {
+                        let before = clock.now();
+                        assert_eq!(writer.stored().await, unstored);
+                        assert!(clock.now() >= before + QUIET, "stored waits");
+                    }
+                    let finished = writer.finish().await;
+                    if let Store::None = store {
+                        let reply = Err(Error::Reply(wire::hub::Error::Finished));
+                        assert_eq!(finished, reply);
+                    } else {
+                        assert_eq!(finished, unstored, "{store:?}");
+                    }
+                    node.clock().sleep(QUIET).await;
+                })
+            },
+        );
+    }
 }
 
 /// A draft whose series break a rule of the layout gives `Layout` with no block
@@ -1733,7 +1914,7 @@ fn ends_the_finish_at_a_reply_that_wire_refuses() {
             answer(&mut write, 1, taken(0, 1)).await;
             let got = write.receiver.recv().await.map(|got| got.is_some());
             assert_eq!(got, Ok(false));
-            reply(&mut write, Reply::Stored { frames: 9 }).await;
+            stored(&mut write, 9).await;
             let sender = write.sender.as_mut().expect("two-way");
             sender.finish().expect("finishes");
             node.clock().sleep(QUIET).await;
@@ -1745,6 +1926,7 @@ fn ends_the_finish_at_a_reply_that_wire_refuses() {
                 frame(&mut writer, 1, 0, &[(2, 1)]).await;
                 assert_eq!(writer.write(Time::Node).await, Ok(taken(0, 1)));
                 let error = wire::hub::Error::Stored {
+                    group: 0,
                     frames: 9,
                     bound: 1,
                 };

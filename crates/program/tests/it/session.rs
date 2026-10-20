@@ -112,7 +112,7 @@ fn refuses_a_hello_of_a_key_the_spec_does_not_list() {
         subject: name(SUBJECT),
         key: public_key(&OTHER),
     };
-    assert_eq!(home.served, [Err(serve::Error::Access(unlisted))]);
+    assert_eq!(home.served, [Err(serve::Error::Access(Box::new(unlisted)))]);
 }
 
 #[test]
@@ -127,7 +127,9 @@ fn refuses_to_connect_to_a_node_with_no_mesh_time() {
     assert_eq!(got, Some(Err(Error::Refused(Refusal::Unsynced))));
     assert_eq!(
         home.served,
-        [Err(serve::Error::Access(access::proof::Error::Unsynced))]
+        [Err(serve::Error::Access(Box::new(
+            access::proof::Error::Unsynced
+        )))]
     );
 }
 

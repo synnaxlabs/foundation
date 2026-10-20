@@ -9,6 +9,7 @@ use std::task::Poll;
 use access::proof;
 use transport::Code;
 use transport::stream::{Incoming, Receiver, Sender};
+use types::ed25519::PublicKey;
 use types::hash;
 use types::name::Name;
 
@@ -87,11 +88,11 @@ pub(crate) struct Gate {
 }
 
 impl Gate {
-    /// The gate of a new client session of `node`.
-    pub(crate) fn new(node: types::node::Key) -> Self {
+    /// The gate of a new client session of the node with `public_key`.
+    pub(crate) fn new(public_key: PublicKey) -> Self {
         Self {
             hello_taken: Cell::default(),
-            admission: Admission::new(node),
+            admission: Admission::new(public_key),
             open: Cell::default(),
         }
     }
@@ -307,7 +308,7 @@ async fn challenge(session: &Session, sender: &mut Sender) -> Result<[u8; 16], E
             .time
             .now()
             .mesh
-            .ok_or(Error::Access(proof::Error::Unsynced))?;
+            .ok_or_else(|| Error::Access(Box::new(proof::Error::Unsynced)))?;
         state.entropy.fill(&mut nonce);
         let mut block = alloc(&session.state, Challenge::LEN)?;
         Challenge { nonce, now }.encode(&mut block);
@@ -542,7 +543,6 @@ mod tests {
     fn each_refusal_has_its_code() {
         let subject: types::name::Name = "ops.agent".parse().expect("a name");
         let key = types::ed25519::PrivateKey([3; 32]).public();
-        let node = types::node::Key::from_u128(1);
         let stamp = Stamp::from_nanos(1);
         let cases = [
             (
@@ -556,8 +556,8 @@ mod tests {
             (proof::Error::Unsynced, UNSYNCED),
             (
                 proof::Error::Via {
-                    via: node,
-                    peer: node,
+                    via: key,
+                    peer: key,
                 },
                 VIA,
             ),
