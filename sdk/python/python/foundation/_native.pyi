@@ -179,14 +179,15 @@ class Client:
     ) -> Writer:
         """Opens a writer of `channels` at the homes of their indexes, and blocks until
         the node opened it. `channels` is one channel name or an iterable of names, of
-        any index. Place `n` is `channels[n]`; then comes the index of each group that
-        `channels` does not name, in the order of the first channel of each group.
-        `authority` (0 to 255) is the writer's authority over its channels: a writer of
-        a higher authority takes control from it. `lease` is the seconds that the writer
-        may go with no write and keep control, or `None` for no limit. `on_loss` is what
-        a write does when the node took no room for a live frame: `"warn"` logs a
-        warning on the `foundation` logger, `"raise"` raises `DataLost`, and `"ignore"`
-        does nothing. Other Python threads run while it waits.
+        any index. The channels of one index, and that index, are a group. Place `n` is
+        `channels[n]`; then comes the index of each group that `channels` does not name,
+        in the order of the first channel of each group. `authority` (0 to 255) is the
+        writer's authority over its channels: a writer of a higher authority takes
+        control from it. `lease` is the seconds that the writer may go with no write and
+        keep control, or `None` for no limit. `on_loss` is what a write does when the
+        node took no room for a live frame: `"warn"` logs a warning on the `foundation`
+        logger, `"raise"` raises `DataLost`, and `"ignore"` does nothing. Other Python
+        threads run while it waits.
 
         Raises `TypeError` for an argument of a wrong type; `ValueError` for no channel,
         a name that does not parse, an `authority` outside 0 to 255, a `lease` that,
