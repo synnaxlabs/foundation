@@ -1119,6 +1119,31 @@ fn panics_at_a_write_after_an_unsent_with_no_new_draft() {
     });
 }
 
+/// A fill gives each present entry and its series through `iter_mut`, in entry
+/// order, and the write sends the bytes put there.
+#[test]
+fn sends_the_series_filled_through_each_entry_of_a_fill() {
+    on_hub(798, |session, _| async move {
+        let mut reader = reader(&session, &["value"]).await;
+        let mut writer = session.writer(config(&["value"], 1)).await.expect("opens");
+        let series = [(0, 1, 8), (1, 1, 8)];
+        let mut fill = writer.draft(Form::Raw, &series).await.expect("a frame");
+        let entries: Vec<_> = (fill.iter_mut())
+            .map(|(entry, bytes)| {
+                bytes.copy_from_slice(&7_i64.to_le_bytes());
+                entry
+            })
+            .collect();
+        assert_eq!(entries, [0, 1]);
+        assert_eq!(
+            writer.write(Time::Node).await.map(<[_]>::to_vec),
+            Ok(one(taken(0, 1)))
+        );
+        let got = reader.next().await.expect("a frame");
+        assert_eq!(samples(&reader, &got)[0], (key(2), vec![7]));
+    });
+}
+
 /// A swap of the fills of two writers swaps only the borrows: each writer sends its
 /// own draft, with the bytes put through the fill of the other.
 #[test]
