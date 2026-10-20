@@ -634,8 +634,8 @@ fn resets_the_write_as_failed_when_the_home_stops_it_as_malformed() {
 }
 
 /// A reply out of order, a finish of the home before the program's, or a finish with
-/// an outcome due breaks HUB WIRE: the member stops the forward as `MALFORMED` and
-/// resets the program's write as `FAILED`.
+/// an outcome due breaks HUB WIRE: the member resets the program's write as `FAILED`,
+/// and stops the forward as `MALFORMED` when the home has not finished.
 fn resets_a_broken_forward(
     seed: u64,
     finished: bool,

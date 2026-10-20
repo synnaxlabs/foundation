@@ -92,8 +92,9 @@
   home. The member holds the places in the subject's share until it sends them to the
   program, so a home that sends more than the share holds gives `BUSY`. While it waits
   for the places, it sends the home each renewal of the hello. A code of the home before
-  the places stops the program's stream with that code, `NOT_HOME` included, as
-  `serve::Error::Forward { home, refusal }`, and an end of the stream with no code gives
+  the places stops the program's stream with that code, `NOT_HOME` included, and with
+  `FAILED` in place of `MALFORMED`, as `serve::Error::Forward { home, refusal }`, and
+  an end of the stream with no code gives
   `FAILED`. The member finds no new home (#3541). A write whose lease is zero gets
   `MALFORMED` before the find of its home, not the `FAILED` of a forward that the home
   refuses. After the places, the member splices: each message of the program goes to the
@@ -105,8 +106,9 @@
   the forward is cut, the member resets the program's write with the code of the home,
   and with `FAILED` in place of `MALFORMED`. It also gives `FAILED` for a reply that
   `Replies` refuses, a finish of the home before the program's, a finish with an outcome
-  due, and an error of the session to the home. For the first three, it stops the home
-  with `MALFORMED`. A reply that the member read but did not send has an unknown fate,
+  due, and an error of the session to the home. For the first two, it stops the home
+  with `MALFORMED`. At a finish with an outcome due, both halves have ended, and the
+  home gets no code. A reply that the member read but did not send has an unknown fate,
   as for each reset of a write. Lost: an end of group 0 with `Reply::Ended`, which needs
   an end of unknown fate in `wire` (PR 4b). The cut reset: `laptop.monitor`, key choice
   4, 2026-10-20T08:17:05Z
