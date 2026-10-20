@@ -444,7 +444,10 @@ async fn start(
             },
         )
         .await?;
-    let mut decoder = Opening::default();
+    // Each channel adds at most two places, itself and its index.
+    let most =
+        u32::try_from(open.channels.len()).map_or(u32::MAX, |n| n.saturating_mul(2));
+    let mut decoder = Opening::new(most);
     loop {
         let message = receiver.recv().await?;
         if let Some(start) = decoder.decode(message.as_deref())? {

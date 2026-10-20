@@ -73,9 +73,17 @@ fn check(length: u64) {
 }
 
 /// A decoder of the start of a write stream at the program: the places and their run.
-#[derive(Debug, Default)]
+/// Its default takes up to [`PLACES_MAX`] places.
+#[derive(Debug)]
 pub struct Opening {
     next: Next,
+    most: u32,
+}
+
+impl Default for Opening {
+    fn default() -> Self {
+        Self::new(PLACES_MAX)
+    }
 }
 
 /// The message the stream expects next.
@@ -84,7 +92,10 @@ enum Next {
     #[default]
     Places,
     Run(Run),
-    Given,
+    /// The decoder gave the start, whose places hold these bytes.
+    Given {
+        held: u64,
+    },
 }
 
 /// The start of a write stream, at the program.
@@ -98,6 +109,28 @@ pub struct Start {
 }
 
 impl Opening {
+    /// A decoder of a stream of at most `most` places, and at most [`PLACES_MAX`].
+    #[must_use]
+    pub fn new(most: u32) -> Self {
+        Self {
+            next: Next::Places,
+            most,
+        }
+    }
+
+    /// The bytes that the places it decoded hold: the room it reserved for each
+    /// place, and the bytes of each name. It counts the places of the start that it
+    /// gave too, which the caller holds until it drops the start. It does not count
+    /// their key set. A refused message leaves it as it was.
+    #[must_use]
+    pub fn held(&self) -> u64 {
+        match &self.next {
+            Next::Places => 0,
+            Next::Run(run) => run.held(),
+            Next::Given { held } => *held,
+        }
+    }
+
     /// Decodes the next message from the node, up to the last place, or `None` when
     /// the node finished the stream. Gives the start with the last place, else
     /// `None`.
@@ -106,11 +139,12 @@ impl Opening {
     ///
     /// [`Error::Finished`] when `message` is `None`. The first message decodes as
     /// [`Places`] and gives its errors: [`Error::Empty`], [`Error::Kind`] for another
-    /// kind, [`Error::Length`], or [`Error::Places`]. A message of the run gives the
-    /// error of its bytes ([`Error::Empty`], [`Error::Length`], [`Error::Sample`], or
-    /// [`Error::Name`]), then [`Error::Run`] when it holds more places than remain.
-    /// The last message then gives, for the first place in place order that breaks a
-    /// rule, [`Error::Index`] when its index is not a place whose index is itself, or
+    /// kind, [`Error::Length`], or [`Error::Places`], also for a count over the bound
+    /// of [`Opening::new`]. A message of the run gives the error of its bytes
+    /// ([`Error::Empty`], [`Error::Length`], [`Error::Sample`], or [`Error::Name`]),
+    /// then [`Error::Run`] when it holds more places than remain. The last message
+    /// then gives, for the first place in place order that breaks a rule,
+    /// [`Error::Index`] when its index is not a place whose index is itself, or
     /// [`Error::Unstamped`] when it is an index whose sample type is not `Stamp`.
     /// Last, [`Error::Repeated`] when the places name a channel more than once.
     ///
@@ -122,19 +156,26 @@ impl Opening {
     /// When it gave the start before.
     pub fn decode(&mut self, message: Option<&[u8]>) -> Result<Option<Start>, Error> {
         match (&mut self.next, message) {
-            (Next::Given, _) => {
+            (Next::Given { .. }, _) => {
                 panic!("a stream is decoded after the decoder gave its start")
             }
             (_, None) => Err(Error::Finished),
             (Next::Places, Some(message)) => {
-                self.next = Next::Run(Run::new(Places::decode(message)?));
+                let places = Places::decode(message)?;
+                if places.count > self.most {
+                    return Err(Error::Places {
+                        count: places.count,
+                        cap: self.most,
+                    });
+                }
+                self.next = Next::Run(Run::new(places));
                 Ok(None)
             }
             (Next::Run(run), Some(message)) => {
-                let Some((places, set)) = run.decode(message)? else {
+                let Some((places, set, held)) = run.decode(message)? else {
                     return Ok(None);
                 };
-                self.next = Next::Given;
+                self.next = Next::Given { held };
                 Ok(Some(Start {
                     places,
                     set: Arc::new(set),
@@ -150,6 +191,8 @@ struct Run {
     places: Places,
     remain: u32,
     arrived: Vec<Place>,
+    /// The bytes of the names of `arrived`.
+    names: u64,
 }
 
 impl Run {
@@ -157,35 +200,57 @@ impl Run {
         Self {
             places,
             remain: places.count,
-            arrived: Vec::new(),
+            // Once for the whole run, so `arrived` never doubles past the count.
+            arrived: Vec::with_capacity(to_usize(places.count)),
+            names: 0,
         }
     }
 
-    /// Decodes the next message of the run. Gives the places and their key set, from
-    /// [`KeySet::ordered`], with the last message, else `None`. Gives the errors of a
-    /// message of the run that [`Opening::decode`] states, and a refused message
-    /// leaves the run as it was.
+    /// The bytes that the places that arrived hold.
+    fn held(&self) -> u64 {
+        let room = self.arrived.capacity().saturating_mul(size_of::<Place>());
+        to_u64(room).saturating_add(self.names)
+    }
+
+    /// Decodes the next message of the run. Gives the places, their key set, from
+    /// [`KeySet::ordered`], and their [`Run::held`], with the last message, else
+    /// `None`. Gives the errors of a message of the run that [`Opening::decode`]
+    /// states, and a refused message leaves the run as it was.
     fn decode(
         &mut self,
         message: &[u8],
-    ) -> Result<Option<(Vec<Place>, KeySet)>, Error> {
+    ) -> Result<Option<(Vec<Place>, KeySet, u64)>, Error> {
+        let before = self.names;
         let Self {
             places,
             remain,
             arrived: all,
+            names,
         } = self;
-        let run = place::decode(message)?;
-        let rest = rest_of_run(*remain, run.len())?;
         let first = places.count.checked_sub(*remain).unwrap_or_else(|| {
             panic!(
                 "invariant: remain {remain} is at most count {}",
                 places.count
             )
         });
-        // Once for the whole run, so `all` never doubles past the cap, and the last
-        // message moves into it before the key set is built.
-        all.reserve_exact(to_usize(*remain));
-        all.extend(run);
+        let count = to_usize(places.count);
+        let mut added = 0_u64;
+        // A place past the count drops at once, so `all` stays in the room of
+        // `Run::new` and an error comes in the order of the bytes.
+        let read = place::each(message, |place| {
+            if all.len() < count {
+                added = added.saturating_add(to_u64(place.name.as_str().len()));
+                all.push(place);
+            }
+        });
+        let rest = match read.and_then(|count| Ok(rest_of_run(*remain, count)?)) {
+            Ok(rest) => rest,
+            Err(error) => {
+                all.truncate(to_usize(first));
+                return Err(error);
+            }
+        };
+        *names = before.saturating_add(added);
         if rest > 0 {
             *remain = rest;
             return Ok(None);
@@ -194,9 +259,13 @@ impl Run {
             .iter()
             .map(|place| (place.key, place.data_type, place.index));
         match KeySet::ordered(channels) {
-            Ok(set) => Ok(Some((std::mem::take(all), set))),
+            Ok(set) => {
+                let held = self.held();
+                Ok(Some((std::mem::take(&mut self.arrived), set, held)))
+            }
             Err(error) => {
                 all.truncate(to_usize(first));
+                *names = before;
                 Err(match error {
                     key_set::Error::Index { entry, index } => Error::Index {
                         place: to_u32(entry),
@@ -384,11 +453,22 @@ pub mod place {
     /// [`Error::Name`] when its name does not. The first defect in the order of the
     /// bytes gives the error.
     pub fn decode(message: &[u8]) -> Result<Vec<Place>, Error> {
+        let mut places = Vec::new();
+        each(message, |place| places.push(place))?;
+        Ok(places)
+    }
+
+    /// Gives each place in `message` to `take`, in order, and gives their count. Gives
+    /// the errors of [`decode`], after the places before the defect.
+    pub(super) fn each(
+        message: &[u8],
+        mut take: impl FnMut(Place),
+    ) -> Result<usize, Error> {
         if message.is_empty() {
             return Err(Error::Empty);
         }
         let mut fields = Fields::new(message);
-        let mut places = Vec::new();
+        let mut count = 0_usize;
         while !fields.is_empty() {
             let key = u128::from_le_bytes(*fields.take()?);
             let index = u32::from_le_bytes(*fields.take()?);
@@ -398,15 +478,20 @@ pub mod place {
             let [len] = *fields.take()?;
             let name = text::read(fields.take_slice(usize::from(len))?)
                 .map_err(Error::Name)?;
-            places.push(Place {
+            take(Place {
                 key: channel::Key::from_u128(key),
                 data_type,
                 name,
                 index: to_usize(index),
             });
+            count = count.saturating_add(1);
         }
-        Ok(places)
+        Ok(count)
     }
+}
+
+fn to_u64(n: usize) -> u64 {
+    u64::try_from(n).expect("invariant: a u64 holds a usize")
 }
 
 fn to_usize(n: u32) -> usize {

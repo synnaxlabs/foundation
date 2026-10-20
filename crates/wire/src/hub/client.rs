@@ -262,7 +262,8 @@ pub enum Error {
     /// The open of a read has a pattern that does not read, or none that includes
     /// names.
     Selector(text::Error<Box<name::Error>>),
-    /// The places of a read or a write are 0 or over [`PLACES_MAX`].
+    /// The places of a read or a write are 0 or over their cap: [`PLACES_MAX`], or the
+    /// bound of a [`write::Opening`].
     Places {
         /// The count of places.
         count: u32,

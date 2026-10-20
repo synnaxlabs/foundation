@@ -245,8 +245,9 @@ impl Session {
     /// not the home when the write reaches it, `REFUSED` for a signature that the node
     /// or the home refuses, `VIA` or `CHANGED` when the home refuses the hello that the
     /// node carried, `BUSY` when the node or the home has no room for the open),
-    /// [`Error::Transport`], [`Error::Message`] for places that `wire` refuses or a
-    /// stream that ends before the last place, [`Error::Unplaced`] for places that hold
+    /// [`Error::Transport`], [`Error::Message`] for places that `wire` refuses (also a
+    /// count of places over two for each channel of the open) or a stream that ends
+    /// before the last place, [`Error::Unplaced`] for places that hold
     /// no place of a channel of the open, and [`Error::Pool`] when no block of
     /// [`Config::pool`] holds the open, or the head, an end of each place, and a count
     /// of each group of a frame, which stops the stream.

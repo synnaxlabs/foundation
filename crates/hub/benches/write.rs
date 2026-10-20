@@ -100,12 +100,19 @@ async fn run(
     for (frame, stamp) in (0..FRAMES).zip(now.nanos()..) {
         let draft = draft(&writer, scalar, stamp);
         floor.push(table::timed(&ALLOCATOR, || ()).1);
-        figures.push(table::timed(&ALLOCATOR, || common::write(&mut writer, draft)).1);
+        figures.push(write(&mut writer, draft));
         if frame % BATCH == BATCH - 1 {
             node.clock().sleep(SETTLE).await;
         }
     }
     (floor, figures)
+}
+
+/// The figure of one write of `draft`. Its code stays apart from that of the open, so
+/// a change of the open does not move it.
+#[inline(never)]
+fn write(writer: &mut Writer, draft: Draft) -> (u64, u64) {
+    table::timed(&ALLOCATOR, || common::write(writer, draft)).1
 }
 
 /// `time` with key 1, and `c0` to `c255`, from key 2 on, each a channel of `scalar` on

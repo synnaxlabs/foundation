@@ -105,9 +105,23 @@
   member that forwards a write holds the ends and counts of each channel of its open and
   one index, from the find of its home until the stream ends, and its open, encoded, in
   place of its names until the home gives its places, because a new try of the dial
-  sends it again. It also holds the places of the home, the size of a `Place` for each
-  place that the home counts and the bytes of each message of places after the first,
-  until it sends them to the program (#3104 PR 4a, HUB FORWARD). A write open is at most
+  sends it again. It also holds the places of the home, the bytes that
+  `write::Opening::held` gives after each message of places (the size of a `Place` for
+  each place that the home counts, and the bytes of each name), until it sends them to
+  the program (#3104 PR 4a, HUB FORWARD; #3559, `laptop.architect`,
+  2026-10-20T16:17:34Z:
+  https://github.com/synnaxlabs/foundation/issues/3559#issuecomment-6295589076).
+  Lost: the member reserves after each decode, not before, so a decode can take the
+  room of up to the bound of its `Opening` and the names of one message before the
+  share refuses them with `BUSY`: 48 bytes for each place on a 64-bit target, at most
+  1,572,912 bytes for an open of 32,768 channels, and fewer bytes of names than the
+  message. The refusal drops it in the same step, so at most one is live on each hub
+  thread. The last message also builds the key set of the start, which the budget does
+  not count (Limits): 32 bytes for each place and 8 for each index, from that decode
+  until the stream ends, and 48 more for each place while it builds. The overshoot is
+  bounded: the forward already holds the ends and counts of the same channels, 20 bytes
+  for each, so the room that a decode takes before the share refuses it is a fixed
+  factor of what the share counted. A write open is at most
   `OPEN_BYTES_MAX` (64 KiB), with at least 2 bytes for each channel, and each channel
   adds at most two places, itself and its index, so its ends and counts are at most
   1,280 KiB, and the budget bounds the places of all write streams of a node at
