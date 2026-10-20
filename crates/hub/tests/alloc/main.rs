@@ -7,10 +7,10 @@
 //! a depth it reached before. An open of a reader of many channels makes no
 //! allocation for each channel. The names of a reader make no allocation at a change
 //! to a key set no larger than one before. A client read makes as many allocations for
-//! each frame it relays as a HUB WIRE session, and a client write makes none. A
-//! complete reader that catches up from disk allocates only at each read. This binary
-//! has no test harness: the count covers each thread, and a harness allocates on its
-//! own thread at any time.
+//! each frame it relays as a HUB WIRE session, and a client write of one or two groups
+//! makes none. A complete reader that catches up from disk allocates only at each
+//! read. This binary has no test harness: the count covers each thread, and a harness
+//! allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -484,7 +484,9 @@ fn main() {
     for mode in [client::Mode::Latest, client::Mode::Complete] {
         relay::relays_a_frame_with_the_allocations_of_a_wire_session(mode);
     }
-    write::relays_a_frame_with_no_allocation();
+    for groups in [write::Groups::One, write::Groups::Two] {
+        write::relays_a_frame_with_no_allocation(groups);
+    }
     catch_up_from_disk();
     woken_of_a_reader_that_takes_each_frame();
     woken_of_a_reader_that_falls_behind_again();

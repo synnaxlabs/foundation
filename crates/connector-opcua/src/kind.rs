@@ -1,5 +1,5 @@
-//! The `opcua` kind: reads OPC UA nodes at a fixed rate, and writes at most one frame
-//! per tick.
+//! The `opcua` kind: subscribes to OPC UA nodes and writes each change, or reads them
+//! at a fixed rate and writes at most one frame per tick.
 
 use std::ffi::CStr;
 use std::{fmt, future};
@@ -28,6 +28,10 @@ use crate::value::{self, Cause, Fault, SCALARS, Value};
 #[cfg(test)]
 #[cfg(feature = "sim")]
 mod tests;
+mod watch;
+
+#[cfg(feature = "sim")]
+pub use watch::drives;
 
 const SAMPLE_TYPE: Code = Code::new("opcua.sample-type");
 const LARGE_READ: Code = Code::new("opcua.large-read");
@@ -38,15 +42,18 @@ const NO_READ: &str = "the connector has no `read` block, so it reads nothing. \
                        `read` block for each.";
 
 /// The counts of the status of each connector: the samples that the home applied,
-/// the ticks that the timer skipped, the samples that a frame lost, and the values
-/// that a frame leaves out as Bad, as Uncertain, and as of another type.
+/// the ticks that the timer skipped or the changes after a full queue of the server,
+/// the samples that a frame lost, and the values that a frame leaves out as Bad, as
+/// Uncertain, and as of another type.
 const COUNTS: [&str; 6] = {
     let [applied, lost] = poll::COUNTS;
     [applied, "missed", lost, "bad", "uncertain", "mistyped"]
 };
 
-/// The `opcua` kind: reads the Value of OPC UA nodes at a fixed rate, in Read requests
-/// that each fit one message of the server, and writes at most one frame per tick.
+/// The `opcua` kind: subscribes to the Value of OPC UA nodes and writes each change at
+/// the mesh time of its timestamp, or, with `polled`, reads them at a fixed rate in
+/// Read requests that each fit one message of the server, and writes at most one frame
+/// per tick.
 #[derive(Debug, Default)]
 #[non_exhaustive]
 pub struct Kind;
@@ -55,11 +62,11 @@ impl kind::Kind for Kind {
     type Config = Config;
     const SCHEMA: Body = config::BODY;
 
-    /// Reads `address`, `rate`, the sources `certificate`, `key`, and `trust` of a
-    /// secure channel with the bool `unencrypted`, and zero or more `read` blocks, each
-    /// with the channel as its label and a `node_id`, and no other key or block. A
-    /// `certificate` needs `key` and `trust`, and each of the other three needs
-    /// `certificate`.
+    /// Reads `address`, `rate`, an optional bool `polled`, the sources `certificate`,
+    /// `key`, and `trust` of a secure channel with the bool `unencrypted`, and zero or
+    /// more `read` blocks, each with the channel as its label and a `node_id`, and no
+    /// other key or block. A `certificate` needs `key` and `trust`, and each of the
+    /// other three needs `certificate`.
     fn parse(&self, config: &Document) -> Result<Config, Vec<Diagnostic>> {
         config::parse(config)
     }
@@ -81,20 +88,43 @@ impl kind::Kind for Kind {
 
     /// Reads the secrets of the secure channel, when the config has one, and connects
     /// to the server over that channel in `SignAndEncrypt`, or in `Sign` with
-    /// `unencrypted = true`. Then it reads each node once per tick of the rate until
-    /// the cancel. Each tick writes a frame of the values that are Good and of the
-    /// sample type of their channel (Boolean for `bool`, `SByte` to `UInt64` for `i8`
-    /// to `u64`, Float for `f32`, and Double for `f64`), stamped at the midpoint of the
-    /// read. It leaves out each other value: an Uncertain one adds 1 to the count
+    /// `unencrypted = true`. Until the cancel, it subscribes to each node, or with
+    /// `polled` reads each node once per tick of the rate. A frame holds the values
+    /// that are Good and of the sample type of their channel (Boolean for `bool`,
+    /// `SByte` to `UInt64` for `i8` to `u64`, Float for `f32`, and Double for `f64`).
+    /// It leaves out each other value: an Uncertain one adds 1 to the count
     /// `uncertain`, another one that is not Good adds 1 to `bad`, and one of another
     /// type adds 1 to `mistyped`. The note names the first node of another type of the
-    /// latest tick that has one, and a tick with none clears it. A tick that leaves out
-    /// each value writes no frame. When 10 s pass with no read, the run reads the state
-    /// of the server to check the connection. After a cancel or an error, the run
-    /// closes its session: it sends `CloseSession`, waits at most 1 s for the answer,
-    /// then closes the connection. So a run ends within 1 s of a cancel. Call
-    /// [`Context::clear_error`] once the run reaches the device: until then, the status
-    /// shows the error of the last run.
+    /// latest frame that has one. A later value of that node that is of its sample
+    /// type, or that is not Good, clears it. A frame that leaves out each value is not
+    /// written.
+    ///
+    /// The subscription samples each node once per period of the rate. The server sends
+    /// the changes once per publishing interval: the period, but at least 100 ms and at
+    /// most 1 min. Each change goes in a frame at the mesh time of its device time: its
+    /// source timestamp, or its server timestamp when that is earlier or the source
+    /// timestamp is absent, or the device time of the change before it of its node in
+    /// one Publish answer when that is later, so the changes of a node keep their
+    /// order. The run maps the clock of the server to mesh time from a read of its
+    /// current time at the start, each 10 s, and at once when a server timestamp is
+    /// after the arrival of its change, or the newest server timestamp of the changes
+    /// is older than that of the changes before. One frame holds the
+    /// changes of one device time, one value per channel. The queue of each node in the
+    /// server holds the samples of two publishing intervals, or of two round trips of
+    /// the first read when they are longer. A change after values that the server
+    /// dropped from a full queue adds 1 to `missed`. When the server answers the
+    /// subscribe with `BadServiceUnsupported` or `BadNotImplemented`, the run closes
+    /// the session and polls as `polled` does on a new session until the cancel or an
+    /// error, and the note says so.
+    ///
+    /// Each tick of `polled` writes one frame stamped at the midpoint of the read.
+    /// When 10 s pass with no read, the run reads the state of the server to check
+    /// the connection.
+    ///
+    /// After a cancel or an error, the run closes its session: it sends `CloseSession`,
+    /// waits at most 1 s for the answer, then closes the connection. So a run ends
+    /// within 1 s of a cancel. Call [`Context::clear_error`] once the run reaches the
+    /// device: until then, the status shows the error of the last run.
     ///
     /// With no `read` block, the run connects, clears the error, and shows the note
     /// that the connector reads nothing and that `browse` and `import` add reads. Then
@@ -109,11 +139,17 @@ impl kind::Kind for Kind {
     /// failed write. [`Error::Config`] with `connector.index` for each channel that is
     /// an index; that error comes alone. Else [`Error::Config`] with
     /// `opcua.sample-type` for each channel whose sample type is not `bool`, `i8` to
-    /// `u64`, `f32`, or `f64`, and with `opcua.large-read` when the Read of one node
-    /// alone is past one message of the server. [`Error::Device`] when the connect, a
-    /// read, or one check fails: a check fails on a bad service result or on no answer
-    /// in 5 s. Also [`Error::Device`], at once, when the client loses its channel or
-    /// its session between two ticks.
+    /// `u64`, `f32`, or `f64`, and, when it polls (with `polled` or after the
+    /// fallback), with `opcua.large-read` when the Read of one node alone is past one
+    /// message of the server. [`Error::Device`] when the connect, a read, or one check
+    /// fails: a check fails on a bad service result or on no answer in 5 s. Also
+    /// [`Error::Device`], at once, when the client loses its channel or its session
+    /// between two ticks. With no `polled`, also [`Error::Device`] when a read of the
+    /// current time or the subscribe fails, when the server does not watch a node, and
+    /// when the subscription ends, and [`Error::Config`] with `opcua.large-watch` when
+    /// the `CreateMonitoredItems` call of one node alone is past one message of the
+    /// server, and with `opcua.no-timestamp` for a Good change with no timestamp that
+    /// maps to mesh time.
     fn run(&self, ctx: Context<Config>) -> impl Future<Output = Result<(), Error>> {
         run(ctx)
     }
@@ -222,17 +258,41 @@ async fn run(ctx: Context<Config>) -> Result<(), Error> {
     let Some(mut frames) = Frames::open(&ctx).await? else {
         return Ok(());
     };
-    let time = event::Time::mesh(ctx.clock().clone(), frames.writer.time());
-    let ran = session(
-        time,
-        ctx.span().clone(),
-        ctx.net().clone(),
-        &mut ctx.rng(),
-        &ctx.config().address,
+    let ran = connect(
+        &ctx,
+        frames.writer.time(),
         secured.as_ref(),
-        ctx.cancel().wait(),
-        async |client| read(&ctx, client, &mut frames).await,
+        async |client| {
+            if ctx.config().polled {
+                read(&ctx, client, &mut frames).await.map(|()| None)
+            } else {
+                watch::run(&ctx, client, &mut frames).await
+            }
+        },
     )
+    .await?;
+    match ran.transpose()?.flatten() {
+        Some(status) => fall_back(&ctx, &mut frames, secured.as_ref(), status).await,
+        None => Ok(()),
+    }
+}
+
+/// Notes that the server answered the subscribe with `status`, and polls as [`read`]
+/// does on a new session, so that the client and the server keep nothing of the
+/// subscribe.
+#[cold]
+async fn fall_back(
+    ctx: &Context<Config>,
+    frames: &mut Frames<'_>,
+    secured: Option<&Secured<'_>>,
+    status: Status,
+) -> Result<(), Error> {
+    frames.note.polls = Some(status);
+    frames.note.show(ctx, None);
+    let mesh = frames.writer.time();
+    let ran = connect(ctx, mesh, secured, async |client| {
+        read(ctx, client, frames).await
+    })
     .await?;
     ran.unwrap_or(Ok(()))
 }
@@ -245,7 +305,25 @@ async fn idle(
 ) -> Result<(), Error> {
     // The status channels opened, so the node has mesh time and this gives at once.
     let mesh = ctx.time().await;
-    let ran = session(
+    let ran = connect(ctx, mesh, secured, async |client| {
+        ctx.clear_error();
+        ctx.note(&NO_READ);
+        let idle = client.idle(ctx.cancel().wait()).await;
+        idle.map_err(|status| failed(client.url(), Call::Check, status))
+    })
+    .await?;
+    ran.unwrap_or(Ok(()))
+}
+
+/// Runs `work` on a session to the server of `ctx` until its cancel, as [`session`]
+/// does, with the mesh time `mesh`, over the channel of `secured`.
+async fn connect<T>(
+    ctx: &Context<Config>,
+    mesh: hub::Time,
+    secured: Option<&Secured<'_>>,
+    work: impl AsyncFnOnce(&mut Client) -> T,
+) -> Result<Option<T>, Error> {
+    session(
         event::Time::mesh(ctx.clock().clone(), mesh),
         ctx.span().clone(),
         ctx.net().clone(),
@@ -253,15 +331,9 @@ async fn idle(
         &ctx.config().address,
         secured,
         ctx.cancel().wait(),
-        async |client| {
-            ctx.clear_error();
-            ctx.note(&NO_READ);
-            let idle = client.idle(ctx.cancel().wait()).await;
-            idle.map_err(|status| failed(client.url(), Call::Check, status))
-        },
+        work,
     )
-    .await?;
-    ran.unwrap_or(Ok(()))
+    .await
 }
 
 /// The credentials of a secure channel, read from the sources of the config.
@@ -321,6 +393,34 @@ impl<'a> Secured<'a> {
         };
         Error::Retry(format!("{source}: {refusal}. {fix}").into())
     }
+
+    /// The cause of a server that refused the secure channel, with the names of the
+    /// certificate to install.
+    fn distrusted(&self) -> String {
+        format!(
+            "the server refused the secure channel; most likely it does not trust the \
+             certificate of the node. Install the certificate {}{} in the trust list of \
+             the server",
+            self.security.certificate,
+            self.names()
+        )
+    }
+
+    /// The thumbprint and the subject of the certificate, as ` (SHA-1 thumbprint ...,
+    /// subject ...)`, with no subject when it is empty, or empty when the certificate
+    /// gives no names.
+    fn names(&self) -> String {
+        match client::names(self.certificate.expose()) {
+            None => String::new(),
+            Some(names) if names.subject.is_empty() => {
+                format!(" (SHA-1 thumbprint {})", names.thumbprint)
+            }
+            Some(names) => format!(
+                " (SHA-1 thumbprint {}, subject {})",
+                names.thumbprint, names.subject
+            ),
+        }
+    }
 }
 
 /// Connects to `address` with `time`, `span`, `net`, `rng`, and the credentials of
@@ -349,7 +449,11 @@ async fn session<T>(
     let connected =
         Client::connect(time, span, net, rng, address, security, until).await;
     let connected = connected.map_err(|error| match error {
-        client::Error::Failed(status) => failed(address, Call::Connect, status),
+        client::Error::Failed(status) => device(Failure::Connect {
+            address: address.to_string_lossy().into_owned(),
+            status,
+            cause: cause(status, secured),
+        }),
         client::Error::Refused(refusal) => {
             let secured =
                 secured.expect("invariant: a client with no credentials refuses none");
@@ -364,6 +468,83 @@ async fn session<T>(
     Ok(Some(done))
 }
 
+/// The likely cause, which ends with its fix, of a connect over `secured`, or in the
+/// mode None when it is `None`, that failed with `status`. `None` when the status names
+/// no cause. A server can send the trust, time, URI, and use statuses about the
+/// certificate of the node too, so their causes name both certificates. The connector
+/// has no `user`, so `BadIdentityTokenRejected` names the endpoints of an anonymous
+/// user.
+fn cause(status: Status, secured: Option<&Secured<'_>>) -> Option<String> {
+    if status == Status::BAD_IDENTITY_TOKEN_REJECTED {
+        return Some(unoffered(secured.map(|secured| secured.security.mode)));
+    }
+    let secured = secured?;
+    let (certificate, trust) = (&secured.security.certificate, &secured.security.trust);
+    let cause = match status {
+        Status::BAD_SECURITY_CHECKS_FAILED => secured.distrusted(),
+        Status::BAD_CERTIFICATE_UNTRUSTED => format!(
+            "the trust holds neither the certificate of the server nor the CA that \
+             issued it, or the server does not trust the certificate of the node \
+             {certificate}. Check the trust {trust}, and install the certificate \
+             {certificate}{} in the trust list of the server",
+            secured.names()
+        ),
+        Status::BAD_CERTIFICATE_TIME_INVALID => format!(
+            "the mesh time is outside the validity window of the certificate of the \
+             server, or the clock of the server is outside the window of the \
+             certificate of the node {certificate}. Check the trust {trust} and the \
+             clock of the server"
+        ),
+        Status::BAD_CERTIFICATE_ISSUER_TIME_INVALID => format!(
+            "the mesh time is outside the validity window of the CA that issued the \
+             certificate of the server, or the clock of the server is outside the \
+             window of the CA that issued the certificate of the node {certificate}. \
+             Check the trust {trust}, the clock of the server, and the window of the \
+             CA that issued the certificate {certificate}"
+        ),
+        Status::BAD_CERTIFICATE_URI_INVALID => format!(
+            "the URI of the certificate of the server is not the application URI of \
+             its endpoint, or the server refused the URI of the certificate of the \
+             node {certificate}. Check the trust {trust} and the certificate \
+             {certificate}"
+        ),
+        Status::BAD_CERTIFICATE_USE_NOT_ALLOWED => format!(
+            "the certificate of the server, or the certificate of the node \
+             {certificate}, is the certificate of a CA. Check the trust {trust}, and \
+             make the certificate of the node with `basicConstraints = CA:FALSE`"
+        ),
+        _ => return None,
+    };
+    Some(cause)
+}
+
+/// The cause of a server that offers no endpoint in `mode`, or in the mode None when it
+/// is `None`, with an anonymous user and a policy of the client.
+fn unoffered(mode: Option<client::Mode>) -> String {
+    let (mode, fix) = match mode {
+        None => {
+            return "the server offers no endpoint in the mode None that lets in an \
+                    anonymous user. For a server with only secure endpoints, give \
+                    `certificate`, `key`, and `trust`"
+                .into();
+        }
+        Some(client::Mode::SignAndEncrypt) => (
+            "SignAndEncrypt",
+            "For a server with only Sign endpoints, set `unencrypted = true`; else \
+             turn on one of these policies on the server",
+        ),
+        Some(client::Mode::Sign) => (
+            "Sign",
+            "Turn on one of these policies in the mode Sign on the server",
+        ),
+    };
+    let [first, second, third] = client::POLICIES;
+    format!(
+        "the server offers no endpoint in the mode {mode} with the policy {first}, \
+         {second}, or {third} that lets in an anonymous user. {fix}"
+    )
+}
+
 /// Reads each node once per tick until the cancel, and writes the frame of each tick.
 async fn read(
     ctx: &Context<Config>,
@@ -375,7 +556,7 @@ async fn read(
     let nodes: Vec<Node> = reads.iter().map(|read| read.node.clone()).collect();
     let nodes = client.nodes(&nodes);
     if let Some(large) = nodes.large().first() {
-        return Err(large_read(reads, large));
+        return Err(too_large(LARGE_READ, "Read", reads, large));
     }
     let missed = ctx.count("missed");
     let mut timer = pace::Timer::new(ctx.clock(), ctx.config().rate);
@@ -398,7 +579,7 @@ async fn read(
             Ok(values) => values,
             Err(status) => return Err(failed(client.url(), Call::Read, status)),
         };
-        frames.write(values, stamp)?;
+        frames.write(values.iter().map(Some), stamp)?;
     }
     Ok(())
 }
@@ -445,7 +626,7 @@ pub async fn writes(
         let ((), stamp) = frames.writer.request(std::future::ready(())).await;
         let mut written = Ok(());
         measures.push(measure(&mut || {
-            written = frames.write(&values, stamp);
+            written = frames.write(values.iter().map(Some), stamp);
         }));
         written?;
     }
@@ -461,6 +642,7 @@ struct Frames<'a> {
     /// The sample type of the channel of each read, in order.
     types: Vec<Scalar>,
     left: Left,
+    note: Note,
 }
 
 /// The counts of the values that a frame leaves out.
@@ -468,7 +650,14 @@ struct Left {
     bad: status::Count,
     uncertain: status::Count,
     mistyped: status::Count,
-    /// The read and the type that the note names, or `None` when it shows none.
+}
+
+/// The note of a run.
+struct Note {
+    /// The answer to the subscribe for which the run polls, which the note names
+    /// first.
+    polls: Option<Status>,
+    /// The read and the type that the note names, or `None` when it names none.
     noted: Option<(usize, value::Type)>,
 }
 
@@ -505,15 +694,19 @@ impl<'a> Frames<'a> {
                 bad: ctx.count("bad"),
                 uncertain: ctx.count("uncertain"),
                 mistyped: ctx.count("mistyped"),
+            },
+            note: Note {
+                polls: None,
                 noted: None,
             },
         }))
     }
 
-    /// Writes one frame of `values`, the values of the reads in order, at `stamp`,
-    /// with each value that is Good and of the sample type of its channel. It counts
-    /// each other value in [`Left`], and the note of the context names the first node
-    /// of another type.
+    /// Writes one frame of `values`, the value or `None` of each read in order, at
+    /// `stamp`, with each value that is Good and of the sample type of its channel. It
+    /// counts each other value in [`Left`]. The note of the context names the first
+    /// node of another type, and a frame with none keeps the note unless it has a
+    /// value of the node of the note.
     ///
     /// # Errors
     ///
@@ -521,15 +714,21 @@ impl<'a> Frames<'a> {
     ///
     /// # Panics
     ///
-    /// When `values` does not have one value for each read.
-    fn write(
+    /// When `values` does not have one value or `None` for each read.
+    fn write<'v>(
         &mut self,
-        values: &[Result<Value, Fault>],
+        values: impl IntoIterator<Item = Option<&'v Result<Value, Fault>>>,
         stamp: Stamp,
     ) -> Result<(), Error> {
         let (mut bad, mut uncertain, mut mistyped) = (0, 0, 0);
         let mut first = None;
-        let kept = values.iter().enumerate().map(|(at, value)| {
+        let noted = self.note.noted.map(|(at, _)| at);
+        let mut absent = false;
+        let kept = values.into_iter().enumerate().map(|(at, value)| {
+            let Some(value) = value else {
+                absent |= noted == Some(at);
+                return None;
+            };
             let sample = self.types[at];
             match Why::of(value, sample) {
                 Ok(value) => Some(value),
@@ -551,24 +750,38 @@ impl<'a> Frames<'a> {
         // `write` takes each value before it returns, so the counts are whole after it.
         let written = self.writer.write(kept, stamp);
         self.left.add(bad, uncertain, mistyped);
-        self.left.note(self.ctx, first);
+        if first.is_some() || !absent {
+            self.note.set(self.ctx, first);
+        }
         written
+    }
+
+    /// Clears the note when it names a read whose last value is not Good, by
+    /// `faulted` of each read, as a frame with that value does.
+    fn faulted(&mut self, faulted: &[bool]) {
+        if self.note.noted.is_some_and(|(at, _)| faulted[at]) {
+            self.note.set(self.ctx, None);
+        }
     }
 }
 
 impl Left {
     /// Adds the counts of the values that one frame leaves out.
+    #[inline]
     fn add(&self, bad: u64, uncertain: u64, mistyped: u64) {
         self.bad.add(bad);
         self.uncertain.add(uncertain);
         self.mistyped.add(mistyped);
     }
+}
 
-    /// Sets the note of `ctx` for `mistyped`, when it is not the note of the tick
+impl Note {
+    /// Sets the note of `ctx` for `mistyped`, when it is not the note of the frame
     /// before: the read at a value of another type, its type, and the sample type of
-    /// its channel. `None` clears the note.
+    /// its channel, after the note of [`fall_back`] for `polls`. `None` shows only
+    /// that note, or none.
     #[inline]
-    fn note(
+    fn set(
         &mut self,
         ctx: &Context<Config>,
         mistyped: Option<(usize, value::Type, Scalar)>,
@@ -585,14 +798,19 @@ impl Left {
         mistyped: Option<(usize, value::Type, Scalar)>,
     ) {
         self.noted = mistyped.map(|(at, value, _)| (at, value));
+        let polls = self.polls.map(|status| {
+            format!("polls: the server has no subscriptions ({status:?})")
+        });
+        let polls = polls.as_deref().unwrap_or_default();
         let Some((at, value, sample)) = mistyped else {
-            ctx.note(&"");
+            ctx.note(&polls);
             return;
         };
         let read = &ctx.config().reads[at];
+        let gap = if polls.is_empty() { "" } else { "; " };
         ctx.note(&format_args!(
-            "leaves out the values of the node `{}` of the channel `{}`: they are of \
-             type {value}, and the channel has samples of type {}",
+            "{polls}{gap}leaves out the values of the node `{}` of the channel `{}`: \
+             they are of type {value}, and the channel has samples of type {}",
             read.node,
             read.channel,
             Type::Scalar(sample),
@@ -616,11 +834,16 @@ impl Why {
         match value {
             Ok(value) if value.scalar() == sample => Ok(sample::Value::from(*value)),
             Ok(value) => Err(Self::Mistyped(value.type_of())),
-            Err(fault) => Err(match fault.cause() {
-                Cause::Type(opc_type) => Self::Mistyped(opc_type),
-                Cause::Status(status) if status.uncertain() => Self::Uncertain,
-                Cause::Status(_) => Self::Bad,
-            }),
+            Err(fault) => Err(Self::fault(*fault)),
+        }
+    }
+
+    /// Why a frame leaves out a value of `fault`.
+    fn fault(fault: Fault) -> Self {
+        match fault.cause() {
+            Cause::Type(opc_type) => Self::Mistyped(opc_type),
+            Cause::Status(status) if status.uncertain() => Self::Uncertain,
+            Cause::Status(_) => Self::Bad,
         }
     }
 }
@@ -643,16 +866,21 @@ fn sample_type(read: &Read, data_type: Type) -> Diagnostic {
     )
 }
 
-/// The error of a read of `reads` whose node alone needs a Read past one message of the
-/// server.
-fn large_read(reads: &[Read], &Large { index, bytes, most }: &Large) -> Error {
+/// The error `code` of a read of `reads` whose node alone needs a `call` past one
+/// message of the server.
+fn too_large(
+    code: Code,
+    call: &str,
+    reads: &[Read],
+    &Large { index, bytes, most }: &Large,
+) -> Error {
     let read = &reads[index];
     Error::Config(vec![Diagnostic::new(
-        LARGE_READ,
+        code,
         None,
         format!(
-            "a Read of the node `{}` of the channel `{}` needs {bytes} bytes, past the \
-             {most} bytes of one message of the server",
+            "a {call} of the node `{}` of the channel `{}` needs {bytes} bytes, past \
+             the {most} bytes of one message of the server",
             read.node, read.channel,
         ),
         "Raise the message size of the server".into(),
@@ -662,21 +890,36 @@ fn large_read(reads: &[Read], &Large { index, bytes, most }: &Large) -> Error {
 /// A call to the server that a [`Failure::Client`] names.
 #[derive(Debug)]
 pub(crate) enum Call {
-    Connect,
     Read,
     Check,
     Browse,
+    Subscribe,
 }
 
 /// Why a run ended with [`Error::Device`].
 #[derive(Debug)]
 pub(crate) enum Failure {
+    /// The connect to the server at `address` failed with `status`, for `cause`, which
+    /// ends with its fix, when the status names one.
+    Connect {
+        address: String,
+        status: Status,
+        cause: Option<String>,
+    },
     /// `call` to the server at `address` failed with `status`.
     Client {
         address: String,
         call: Call,
         status: Status,
     },
+    /// The server does not watch `node` of the read of `channel`, with `status`.
+    Unwatched {
+        node: String,
+        channel: String,
+        status: Status,
+    },
+    /// The subscription to the server at `address` ended with `status`.
+    Ended { address: String, status: Status },
     /// The tags and names before the pages of a browse pass [`crate::browse::BYTES`].
     Names,
     /// A browse for a cursor of an earlier browse reads past
@@ -687,19 +930,45 @@ pub(crate) enum Failure {
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Connect {
+                address,
+                status,
+                cause,
+            } => {
+                write!(f, "the connect to {address} failed with {}", status.name())?;
+                match cause {
+                    Some(cause) => write!(f, ": {cause}"),
+                    None => Ok(()),
+                }
+            }
             Self::Client {
                 address,
                 call,
                 status,
             } => {
                 let call = match call {
-                    Call::Connect => "the connect to",
                     Call::Read => "the read from",
                     Call::Check => "the connectivity check of",
                     Call::Browse => "the browse of",
+                    Call::Subscribe => "the subscribe to",
                 };
                 write!(f, "{call} {address} failed with {}", status.name())
             }
+            Self::Unwatched {
+                node,
+                channel,
+                status,
+            } => write!(
+                f,
+                "the server does not watch the node `{node}` of the channel \
+                 `{channel}`: {}",
+                status.name()
+            ),
+            Self::Ended { address, status } => write!(
+                f,
+                "the subscription to {address} ended with {}",
+                status.name()
+            ),
             Self::Names => write!(
                 f,
                 "the tags and names of the browse pass {} MiB",

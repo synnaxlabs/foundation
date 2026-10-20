@@ -18,7 +18,7 @@ use env::tasks::{self, Tasks};
 use raft::{Admission, Data, Entry, Position, Raft, Ready, Start, Voters};
 use spec::Pointer;
 use spec::tree::Chunks;
-use transport::{Address, Code, Session, Transport};
+use transport::{Code, Session, Transport};
 use types::channel;
 use types::digest::Digest;
 use types::ed25519::{PrivateKey, PublicKey};
@@ -255,8 +255,7 @@ impl Mesh {
                 .map_err(Error::Member)?;
         check_members(&state, &config, &voters).await?;
         put(&config.store, &config.pool, &chunks, &tree.chunks).await?;
-        let pool = Rc::clone(&config.pool);
-        let files = &config.files;
+        let (pool, files) = (Rc::clone(&config.pool), &config.files);
         let (log, stored) = open_log(files, &config.dir, Rc::clone(&pool)).await?;
         let logged = stored != log::Stored::default();
         let blocks = log.blocks();
@@ -286,6 +285,7 @@ impl Mesh {
         tasks.tasks().spawn(used::keep(
             Weak::clone(&weak),
             Rc::clone(&config.store),
+            Rc::clone(&config.transport),
             config.files,
             config.dir,
             config.clock.clone(),
@@ -964,10 +964,20 @@ impl Group {
 
     // The public key of member `key` and the addresses of its card, as the group
     // holds them now.
-    fn contact(&self, key: node::Key) -> Option<(PublicKey, Vec<Address>)> {
+    fn contact(&self, key: node::Key) -> Option<peer::Contact> {
         let member = self.state.member(key)?;
         let addresses = member.card.card().addresses.as_slice().to_vec();
         Some((member.public_key(), addresses))
+    }
+
+    // Each other voter that has a card, in key order.
+    fn voters(&self) -> Vec<(node::Key, peer::Contact)> {
+        let own = self.raft.key();
+        let voters = self.raft.voters();
+        let others = voters.nodes().filter(|&key| key != own);
+        others
+            .filter_map(|key| Some((key, self.contact(key)?)))
+            .collect()
     }
 
     // Gives `raft` an input, and wakes each call when the leader or the term changes.
@@ -1554,8 +1564,10 @@ mod tests {
         applies: BTreeMap<u8, Proposal>,
         /// The base and the definitions that each node gives `Mesh::apply` next.
         changes: BTreeMap<u8, (Pointer, BTreeMap<Name, Definition>)>,
-        /// The node that answers no blob stream.
-        silent: Option<u8>,
+        /// The nodes that answer no blob stream.
+        silent: BTreeSet<u8>,
+        /// The blob streams that each node served.
+        blobs: BTreeMap<u8, usize>,
         /// Each spec change of `applies` that returned, in order: its node, the
         /// pointer on that node at the return, and what the change gave.
         applied: Vec<(u8, Pointer, Result<Pointer, Error>)>,
@@ -1834,7 +1846,12 @@ mod tests {
                         };
                         let (protocol, _) = wire::header::decode(&header).unwrap();
                         if protocol == Protocol::Blob {
-                            let silent = board.lock().unwrap().silent == Some(id);
+                            let silent = {
+                                let mut board = board.lock().unwrap();
+                                let blobs = board.blobs.entry(id).or_default();
+                                *blobs = blobs.checked_add(1).unwrap();
+                                board.silent.contains(&id)
+                            };
                             if silent {
                                 std::future::pending::<()>().await;
                             }
@@ -3125,6 +3142,7 @@ mod tests {
     mod cards;
     mod contested;
     mod founding;
+    mod gets;
     mod home;
     mod in_use;
     mod join;

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use document::diagnostic::{Code, Diagnostic, Note};
 use document::schema::{self, Body, Presence};
 use document::value::{Kind, Value};
-use document::{Attribute, Block, Document, Label, Map, read};
+use document::{Block, Document, read};
 use types::ed25519::PublicKey;
 use types::name::Name;
 
@@ -51,8 +51,9 @@ const BODY: Body = Body {
             value: "the path of an OpenSSH Ed25519 private key file",
             presence: Presence::Optional,
             summary: "The key file of `subject`, which it needs. A relative path is \
-                      relative to the directory of the profile, and a path that \
-                      starts with `~/` to the home directory. Without it, \
+                      in the directory of the profile's path, also when the profile \
+                      is a link, and a path that starts with `~/` is in the home \
+                      directory. Without it, \
                       `~/.foundation/<subject>.key`, made when it is not there.",
         },
         schema::Attribute {
@@ -102,9 +103,9 @@ pub struct Profile {
     /// The subject that a program acts as, if the profile names one.
     pub subject: Option<Name>,
     /// The key file of `subject` as the profile writes it, if it names one. A relative
-    /// path is relative to the directory of the profile, and a path that starts with
-    /// `~/` to the home directory; the program joins it. When it is `Some`, so is
-    /// `subject`.
+    /// path is in the directory of the profile's path, also when the profile is a link,
+    /// and a path that starts with `~/` is in the home directory; the program joins it.
+    /// When it is `Some`, so is `subject`.
     pub private_key: Option<PathBuf>,
     /// Whether a node that no source pins is refused, not trusted on first use.
     pub strict: bool,
@@ -209,33 +210,10 @@ fn alarms(document: &Document) -> Vec<Diagnostic> {
 /// The `node` block that pins `public_key` at `address`. [`decode`] reads it back, with
 /// the flow label of a V6 address as 0.
 #[must_use]
-#[expect(
-    clippy::missing_panics_doc,
-    reason = "a map of one attribute has no repeated key"
-)]
 pub fn node(address: SocketAddr, public_key: PublicKey) -> Block {
-    let attribute = Attribute {
-        key: "public_key".into(),
-        key_span: None,
-        value: Value {
-            kind: Kind::String(openssh::line(public_key).into()),
-            span: None,
-        },
-    };
-    Block {
-        keyword: NODE.keyword.into(),
-        keyword_span: None,
-        labels: vec![Label {
-            text: address.to_string().into(),
-            span: None,
-        }],
-        body: Document {
-            attributes: Map::new(vec![attribute])
-                .expect("invariant: each key is written once"),
-            blocks: Vec::new(),
-        },
-        span: None,
-    }
+    let key = crate::string(&openssh::line(public_key));
+    let address = address.to_string();
+    crate::block(NODE.keyword, &address, vec![("public_key", key)])
 }
 
 /// The address and the public key of a `node` block, or `None` with each problem in

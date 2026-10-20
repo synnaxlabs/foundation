@@ -1,6 +1,7 @@
 //! Writer sessions: what one opens with, why one does not open, and the session.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -159,7 +160,8 @@ pub struct Writer {
     /// Why the hub ended the writer.
     ending: Ending,
     set: Arc<KeySet>,
-    /// The entry in `set` of each channel of the config, in its order.
+    /// The entry in `set` of each channel of the config, in its order, or none for a
+    /// writer of [`Homed::split`].
     entries: Box<[usize]>,
     /// The outcomes of the last write.
     outcomes: Vec<::home::Outcome>,
@@ -249,51 +251,109 @@ impl Homed {
         }))
     }
 
-    /// Opens the writer at the home, and gives it with the channels of its config.
-    /// Call it with no wait after [`Homed::new`] or [`Homed::one`], so that the
-    /// channels and their homes are as it found them.
-    pub(crate) fn open(self) -> Result<(Writer, Vec<Name>), Error> {
-        let Self {
-            state,
-            holder,
-            lease,
-            mut keys,
-            groups,
-            channels,
-        } = self;
-        let mut borrowed = state.borrow_mut();
+    /// Opens the writer at the home. Call it with no wait after [`Homed::new`], so
+    /// that the channels and their homes are as it found them.
+    pub(crate) fn open(self) -> Result<Writer, Error> {
+        let mut borrowed = self.state.borrow_mut();
         let borrowed = &mut *borrowed;
-        for &(index, _) in &groups {
-            borrowed.carry(index);
-        }
-        let groups: Vec<_> = groups
-            .iter()
-            .map(|(index, data)| Group {
-                index: *index,
-                data,
-            })
-            .collect();
+        let groups = self.carry(borrowed);
+        let indexes = groups.iter().map(|group| group.index);
+        let keys = self.keys.iter().copied().chain(indexes).collect();
+        let mut writer = self.writer(borrowed, &groups, keys)?;
+        writer.entries = entries(&writer.set, &self.keys);
+        Ok(writer)
+    }
+
+    /// The places of the set of all groups: each index and each of its data
+    /// channels.
+    pub(crate) fn places(&self) -> usize {
+        self.groups.iter().map(|(_, data)| data.len() + 1).sum()
+    }
+
+    /// Opens one writer at the home for each group, in the group order of the set of
+    /// all groups, as [`Homed::open`] opens one. Gives the writers with that set, the
+    /// entry in it of each channel of the config, in its order, and the channels of
+    /// the config. When an open fails, the writers before it close.
+    pub(crate) fn split(self) -> Result<Split, Error> {
+        let mut writers = Vec::with_capacity(self.groups.len());
+        let mut borrowed = self.state.borrow_mut();
+        let borrowed = &mut *borrowed;
+        let groups = self.carry(borrowed);
         let set = borrowed.interner.intern(&groups);
-        let entries = entries(&set, &keys);
+        let of: BTreeMap<channel::Key, &Group<'_>> =
+            groups.iter().map(|group| (group.index, group)).collect();
+        for &index in set.groups() {
+            let index = set.entries()[index].key;
+            let group = of
+                .get(&index)
+                .expect("invariant: each group of the set is a group of the writer");
+            let keys = group.data.iter().map(|&(key, _)| key);
+            let keys = keys.chain([index]).collect();
+            let groups = std::slice::from_ref(*group);
+            writers.push(self.writer(borrowed, groups, keys)?);
+        }
+        let entries = entries(&set, &self.keys);
+        drop(groups);
+        Ok(Split {
+            set,
+            entries,
+            writers,
+            channels: self.channels,
+        })
+    }
+
+    /// Carries each index at the home, and gives the groups of the writer.
+    fn carry(&self, state: &mut State) -> Vec<Group<'_>> {
+        self.groups
+            .iter()
+            .map(|(index, data)| {
+                state.carry(*index);
+                Group {
+                    index: *index,
+                    data,
+                }
+            })
+            .collect()
+    }
+
+    /// Opens a writer of `groups` at the home, with no entries, which ends once a
+    /// channel of `keys`, each channel of `groups`, is removed.
+    fn writer(
+        &self,
+        state: &mut State,
+        groups: &[Group<'_>],
+        keys: Vec<channel::Key>,
+    ) -> Result<Writer, Error> {
+        let set = state.interner.intern(groups);
         let writer = ::home::writer::Writer {
-            holder,
-            lease,
+            holder: self.holder.clone(),
+            lease: self.lease,
             set: Arc::clone(&set),
         };
-        let key = borrowed.home.open_writer(writer).map_err(Error::Home)?;
-        borrowed.gate.wake();
-        keys.extend(groups.iter().map(|group| group.index));
-        let ending = borrowed.writers.add(key, keys);
-        let writer = Writer {
-            state: Rc::clone(&state),
+        let key = state.home.open_writer(writer).map_err(Error::Home)?;
+        state.gate.wake();
+        let ending = state.writers.add(key, keys);
+        Ok(Writer {
+            state: Rc::clone(&self.state),
             key,
             ending,
             set,
-            entries,
+            entries: Box::default(),
             outcomes: Vec::new(),
-        };
-        Ok((writer, channels))
+        })
     }
+}
+
+/// The writers of [`Homed::split`]: one for each group of `set`, in group order.
+pub(crate) struct Split {
+    /// The set of all groups.
+    pub(crate) set: Arc<KeySet>,
+    /// The entry in `set` of each channel of the config, in its order.
+    pub(crate) entries: Box<[usize]>,
+    /// The writer of each group.
+    pub(crate) writers: Vec<Writer>,
+    /// The channels of the config.
+    pub(crate) channels: Vec<Name>,
 }
 
 impl Writer {

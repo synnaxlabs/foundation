@@ -19,7 +19,7 @@ import uuid
 import numpy as np
 
 import foundation
-from test_client import PATIENCE, Node, fork
+from test_client import PATIENCE, Node, fork, home
 from test_stubs import assert_stated, called
 from test_writer import CHANNELS, UNKNOWN, planted
 
@@ -31,6 +31,10 @@ MORE = "".join(
     )
 )
 COUNT = 3000
+
+
+def setUpModule() -> None:
+    home(unittest.addModuleCleanup)
 
 
 class Stamps:

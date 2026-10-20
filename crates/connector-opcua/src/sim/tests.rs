@@ -30,7 +30,6 @@ const BAD: Quality = Quality(0x8000_0000);
 const CLAMPED: Quality = Quality(0x0030_0000);
 const UNCERTAIN: Quality = Quality(0x4090_0000);
 const BAD_USER_ACCESS_DENIED: Status = Status(0x801F_0000);
-const BAD_IDENTITY_TOKEN_REJECTED: Status = Status(0x8021_0000);
 const QUALITIES: [Quality; 4] = [Quality::GOOD, CLAMPED, UNCERTAIN, BAD];
 /// The reads of a variable with each of [`QUALITIES`] in turn.
 const READS: [Result<Value, Fault>; 4] = [
@@ -873,7 +872,7 @@ fn on_spike<T: Send + 'static>(
 /// Subscribes `client` to [`SPIKE`], and gives its first changes.
 async fn subscribe_spike(client: &mut Client) -> Vec<Change> {
     let spike = SPIKE.parse::<Node>().expect("a node");
-    let revised = client.subscribe(&[spike], Span::SECOND).await;
+    let revised = client.subscribe(&[spike], Span::SECOND, Span::ZERO).await;
     assert!(revised.is_ok(), "{revised:?}");
     client
         .changes(future::pending())
@@ -1012,10 +1011,10 @@ fn secure_connects() -> (Option<Status>, Option<client::Error>, Result<Value, Fa
 #[test]
 fn a_secure_server_offers_only_its_policy_in_its_mode() {
     let (none, sign, read) = secure_connects();
-    assert_eq!(none, Some(BAD_IDENTITY_TOKEN_REJECTED));
+    assert_eq!(none, Some(Status::BAD_IDENTITY_TOKEN_REJECTED));
     assert_eq!(
         sign,
-        Some(client::Error::Failed(BAD_IDENTITY_TOKEN_REJECTED))
+        Some(client::Error::Failed(Status::BAD_IDENTITY_TOKEN_REJECTED))
     );
     assert_eq!(read, Ok(Value::F64(0.0)));
 }

@@ -39,15 +39,13 @@ pub use client::{Reply, Request};
 /// The most bytes of client bodies that one hub holds at once, over each of its links:
 /// the body of a request from its decode until the caller sends or drops its [`Reply`],
 /// the open of a read until it decodes after the wait for the home of its index, the
-/// open of a write until it decodes, and the ends and counts of each write stream, 20
-/// bytes for each channel of its open and one for its index, from the decode of the
-/// open until the stream ends (for a forward, from its last place, for the channels of
-/// its group), and its decoded names, 16 bytes and the length of each, and the places
-/// of a forward, 4 bytes for each channel of its open, with its names, from that
-/// decode until it sends its places. A body that does not fit stops with `BUSY` before
-/// the hub reads a byte of it, and ends or names that do not fit stop with `BUSY`
-/// before the writer opens. The bodies of one subject hold at most [`BODY_BYTES_MAX`]
-/// of it ([`Error::Share`]).
+/// open of a write until it decodes, the decoded names of each write stream, 16 bytes
+/// and the length of each, and the places of a forward, 4 bytes for each channel of
+/// its open, from that decode until it sends its places, and its ends and counts, 20
+/// bytes for each place of its writers, from the home of each index until the stream
+/// ends. A body that does not fit stops with `BUSY` before the hub reads a byte of it,
+/// and ends or names that do not fit stop with `BUSY` before the writer opens. The
+/// bodies of one subject hold at most [`BODY_BYTES_MAX`] of it ([`Error::Share`]).
 pub const BODIES_BYTES_MAX: u64 = 2 * BODY_BYTES_MAX;
 
 /// Why [`Link::serve`](crate::Link::serve) ended a stream.
@@ -63,8 +61,8 @@ pub enum Error {
     OneWay,
     /// The stream's class is not the class of the open's mode. Code `MALFORMED`.
     Class(Class),
-    /// The keys of the open of a read, or the channels of the open of a write, are on
-    /// more than one index. Code `MALFORMED`.
+    /// The keys of the open of a read, or the channels of the group of a forward, are
+    /// on more than one index. Code `MALFORMED`.
     ManyIndexes,
     /// The selector of a read matches more than [`wire::hub::client::PLACES_MAX`]
     /// places with their index. Code `MALFORMED`.

@@ -191,6 +191,9 @@ exclude_re = [
   # counting-allocator test opens remote readers yet (#2015). The unit test of
   # `Sessions::add` kills it through the length of the list.
   'crates/hub/src/reader/remote\.rs:.*replace > with >= in Sessions::add',
+  # While no commit is due, no group waits, so a call when no group began to wait
+  # finds the list empty and does nothing.
+  'crates/hub/src/serve/client/write\.rs:.*replace > with >= in Writes::write$',
   # Equal keys get no rule (ONE SESSION PER PEER, rule 4), so no test can pin `<`.
   'crates/transport/src/table\.rs:.*replace < with <= in Table::arrive',
   # Only the `wal` bench calls `buffer::bench::Group::commit`, and it gives nothing
@@ -272,4 +275,18 @@ exclude_re = [
   'sdk/rust/src/read\.rs:.*replace served with \(\)$',
   # No writer opens, and each test of `crates/node/tests/it/sdk.rs` that writes fails.
   'sdk/rust/src/write\.rs:.*replace served with \(\)$',
+  # Once the temporary file exists in the directory of `path`, a test can make
+  # `hard_link` fail only with `AlreadyExists`.
+  'sdk/python/src/profile\.rs:.*replace match guard e\.kind\(\) == io::ErrorKind::AlreadyExists with true in made$',
+  # `linked` runs only after `fs::canonicalize` gave NotFound. Its walk ends at a file
+  # that is there and is not a link only when another program makes the file between
+  # the two, as two first pins at once can, and this mutant then gives the OSError of
+  # `read_link`. Only a test hook between the two could force that race.
+  'sdk/python/src/profile\.rs:.*replace match guard file\.file_type\(\)\.is_symlink\(\) with true in linked$',
+  # Each other error of `symlink_metadata` comes again, with the same text, from the
+  # next open of the same path in `pin`.
+  'sdk/python/src/profile\.rs:.*replace match guard e\.kind\(\) != io::ErrorKind::NotFound with false in linked$',
+  # With the mutant, the node refuses each writer of one index, and each writer test of
+  # `crates/node/tests/it/sdk.rs` fails at its open.
+  'sdk/rust/src/write\.rs:.*replace != with == in served$',
 ]

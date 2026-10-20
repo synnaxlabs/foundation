@@ -216,13 +216,14 @@ impl Hub {
     /// may name. It skips each definition that is not a channel. A known channel whose
     /// key, name, and definition stay keeps its sessions. Each other known channel is
     /// removed, and each session on it ends at once: [`writer::Failure::Removed`],
-    /// [`reader::Ended::Removed`], and [`serve::Error::Removed`]. Then each new
-    /// channel is defined. The home stops carrying each index whose key is not an index
-    /// of `definitions`, and carries an index from the first session that finds this
-    /// node is its home. A reader of a data channel takes each series of its key with
-    /// its sample type in the frames of its index, also one written before a removal
-    /// of the channel while its index stayed, so a rename keeps the history of the
-    /// channel.
+    /// [`reader::Ended::Removed`], and [`serve::Error::Removed`]. A write stream ends
+    /// only the group of the channel, with [`wire::hub::write::Outcome::Ended`] of
+    /// [`wire::hub::write::End::Removed`]. Then each new channel is defined. The home
+    /// stops carrying each index whose key is not an index of `definitions`, and
+    /// carries an index from the first session that finds this node is its home. A
+    /// reader of a data channel takes each series of its key with its sample type in
+    /// the frames of its index, also one written before a removal of the channel while
+    /// its index stayed, so a rename keeps the history of the channel.
     ///
     /// # Panics
     ///
@@ -265,7 +266,7 @@ impl Hub {
         &self,
         config: writer::Config,
     ) -> Result<Writer, writer::Error> {
-        let (writer, _) = writer::Homed::new(&self.0, config).await?.open()?;
+        let writer = writer::Homed::new(&self.0, config).await?.open()?;
         Ok(writer)
     }
 

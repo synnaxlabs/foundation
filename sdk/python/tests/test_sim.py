@@ -6,8 +6,12 @@ import unittest
 import numpy as np
 
 from foundation import _native
-from test_client import Node
+from test_client import Node, home
 from test_writer import planted
+
+
+def setUpModule() -> None:
+    home(unittest.addModuleCleanup)
 
 
 class SimTest(unittest.TestCase):

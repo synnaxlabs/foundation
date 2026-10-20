@@ -89,14 +89,15 @@ fn monitored(
     sampling: Span,
     limit: impl FnOnce(&Peer<'_>) + Send + 'static,
 ) -> Subscribed {
-    limited(count, sampling, None, limit)
+    limited(count, sampling, Span::ZERO, None, limit)
 }
 
-/// [`monitored`], with a client whose receive buffer is `receive` bytes, or the
-/// default of open62541 for `None`.
+/// [`monitored`], with a round trip of `round_trip` and a client whose receive buffer
+/// is `receive` bytes, or the default of open62541 for `None`.
 fn limited(
     count: u32,
     sampling: Span,
+    round_trip: Span,
     receive: Option<u32>,
     limit: impl FnOnce(&Peer<'_>) + Send + 'static,
 ) -> Subscribed {
@@ -112,7 +113,7 @@ fn limited(
             let counts = peer.server.count();
             let url = peer.url.clone();
             let mut client = peer.limited(&url, receive, None).await;
-            let revised = client.subscribe(&nodes, sampling).await;
+            let revised = client.subscribe(&nodes, sampling, round_trip).await;
             let calls = counts.monitors();
             let mut changes = Vec::new();
             let mut wait = pin!(peer.clock.sleep(ms(3000)));
@@ -153,6 +154,7 @@ fn made(count: usize) -> Revised {
     Revised {
         interval: ms(100),
         items: vec![Ok(item); count],
+        large: Vec::new(),
     }
 }
 
@@ -164,6 +166,31 @@ fn the_items_take_calls_of_at_most_the_max_monitored_items_per_call() {
     assert_eq!(tens, (Ok(made(25)), 3, numbers(25)));
     let none = monitored(25, SAMPLING, |peer| peer.server.set_per_monitor(0));
     assert_eq!(none, (Ok(made(25)), 1, numbers(25)));
+}
+
+/// The queue holds the values of two round trips when they are longer than two
+/// intervals: 4 values of two intervals of 100 ms for a round trip of 50 ms, and 20 of
+/// two round trips of 500 ms.
+#[test]
+fn the_queue_holds_the_values_of_two_round_trips_past_two_intervals() {
+    for (round_trip, queue) in [(ms(50), 4), (ms(500), 20)] {
+        let (revised, ..) = limited(1, SAMPLING, round_trip, None, |_| {});
+        let item = Sampled {
+            sampling: SAMPLING,
+            queue,
+        };
+        let interval = ms(100);
+        let items = vec![Ok(item)];
+        assert_eq!(
+            revised,
+            Ok(Revised {
+                interval,
+                items,
+                large: Vec::new()
+            }),
+            "{round_trip:?}"
+        );
+    }
 }
 
 /// A sampling interval past 100 ms is the publishing interval, and the queue holds
@@ -180,7 +207,8 @@ fn a_sampling_past_100_ms_is_the_publishing_interval() {
         revised,
         Ok(Revised {
             interval,
-            items: vec![Ok(item)]
+            items: vec![Ok(item)],
+            large: Vec::new(),
         })
     );
 }
@@ -199,7 +227,7 @@ fn rewritten(
             relayed(&node, &Relay::default(), rewrite, async {
                 let mut client = peer.connect(&url).await.expect("the client connects");
                 let nodes = [numbered(0), numbered(1)];
-                let revised = client.subscribe(&nodes, SAMPLING).await;
+                let revised = client.subscribe(&nodes, SAMPLING, Span::ZERO).await;
                 client.close().await;
                 revised
             })
@@ -251,7 +279,7 @@ fn a_deleted_subscription_ends_with_bad_no_subscription() {
             };
             relayed(&node, &Relay::default(), rewrite, async {
                 let mut client = peer.connect(&url).await.expect("the client connects");
-                let revised = client.subscribe(&[numbered(0)], LEVEL).await;
+                let revised = client.subscribe(&[numbered(0)], LEVEL, Span::ZERO).await;
                 assert!(revised.is_ok(), "{revised:?}");
                 let first = client.changes(future::pending()).await.map(untimed);
                 assert_eq!(first, Ok(vec![changed_to(0.0, false)]));
@@ -304,7 +332,7 @@ fn refused(
             };
             relayed(&node, &Relay::default(), rewrite, async {
                 let mut client = peer.connect(&url).await.expect("the client connects");
-                let revised = client.subscribe(&[numbered(0)], LEVEL).await;
+                let revised = client.subscribe(&[numbered(0)], LEVEL, Span::ZERO).await;
                 assert!(revised.is_ok(), "{revised:?}");
                 let first = client.changes(future::pending()).await.map(untimed);
                 assert_eq!(first, Ok(vec![changed_to(0.0, false)]));
@@ -374,7 +402,9 @@ fn kept_alive(least: u32) -> (Result<Span, Status>, usize) {
             peer.server.set_keep_alives(least);
             let mut client = peer.connected().await;
             let counts = peer.server.count();
-            let revised = client.subscribe(&[numbered(0)], Span::SECOND).await;
+            let revised = client
+                .subscribe(&[numbered(0)], Span::SECOND, Span::ZERO)
+                .await;
             let idle = client.idle(peer.clock.sleep(ms(5000))).await;
             assert_eq!(idle, Ok(()));
             client.close().await;
@@ -440,7 +470,7 @@ fn the_server_holds_at_most_publishes_at_a_long_sampling() {
             add_level(&peer);
             let mut client = peer.connected().await;
             let sampling = Span::from_nanos(2 * Span::MINUTE.nanos());
-            let revised = client.subscribe(&[numbered(0)], sampling).await;
+            let revised = client.subscribe(&[numbered(0)], sampling, Span::ZERO).await;
             let first = client.changes(future::pending()).await.map(untimed);
             assert_eq!(first, Ok(vec![changed_to(0.0, false)]));
             let mut held = Vec::new();
@@ -473,7 +503,9 @@ fn an_idle_subscription_gets_one_publish_answer_a_minute() {
             add_level(&peer);
             let mut client = peer.connected().await;
             let counts = peer.server.count();
-            let revised = client.subscribe(&[numbered(0)], Span::SECOND).await;
+            let revised = client
+                .subscribe(&[numbered(0)], Span::SECOND, Span::ZERO)
+                .await;
             assert!(revised.is_ok(), "{revised:?}");
             let at_subscribe = counts.publishes();
             let first = client.changes(future::pending()).await.map(untimed);
@@ -575,7 +607,7 @@ fn on_level<T: Send + 'static>(
             peer.server.set_per_publish(u32::MAX);
             let mut client = peer.connected().await;
             let nodes = [numbered(0)];
-            let revised = client.subscribe(&nodes, LEVEL).await;
+            let revised = client.subscribe(&nodes, LEVEL, Span::ZERO).await;
             let revised = revised.expect("the subscription");
             let item = Sampled {
                 sampling: LEVEL,
@@ -585,7 +617,8 @@ fn on_level<T: Send + 'static>(
                 revised,
                 Revised {
                     interval: Span::SECOND,
-                    items: vec![Ok(item)]
+                    items: vec![Ok(item)],
+                    large: Vec::new(),
                 }
             );
             let first = client.changes(future::pending()).await.map(untimed);
@@ -613,9 +646,10 @@ fn a_publish_answer_holds_the_most_changes_that_fit_the_client() {
 /// with no error, so each Publish answer fits it.
 #[test]
 fn each_publish_answer_fits_a_small_client() {
-    let (revised, _, changes) = limited(3000, SAMPLING, Some(8192), |peer| {
-        peer.server.set_per_publish(u32::MAX);
-    });
+    let (revised, _, changes) =
+        limited(3000, SAMPLING, Span::ZERO, Some(8192), |peer| {
+            peer.server.set_per_publish(u32::MAX);
+        });
     assert_eq!((revised, changes), (Ok(made(3000)), numbers(3000)));
 }
 
@@ -722,7 +756,7 @@ fn a_take_keeps_the_publish_requests_that_a_refusal_lowers() {
             peer.server.set_held(1);
             let counts = peer.server.count();
             let mut client = peer.connected().await;
-            let revised = client.subscribe(&[numbered(0)], LEVEL).await;
+            let revised = client.subscribe(&[numbered(0)], LEVEL, Span::ZERO).await;
             assert!(revised.is_ok(), "{revised:?}");
             let first = client.changes(future::pending()).await.map(untimed);
             assert_eq!(first, Ok(vec![changed_to(0.0, false)]));
@@ -771,7 +805,7 @@ fn an_answer_past_the_reserve_keeps_its_memory_as_one_block() {
         serve(&node, 4, async |mut peer| {
             peer.server.add_bytes(&numbered(0), 4096);
             let mut client = peer.connected().await;
-            let revised = client.subscribe(&[numbered(0)], LEVEL).await;
+            let revised = client.subscribe(&[numbered(0)], LEVEL, Span::ZERO).await;
             assert!(revised.is_ok(), "{revised:?}");
             let reserved = blocks(&client);
             let changes = client.changes(future::pending()).await.map(<[_]>::len);
@@ -844,7 +878,7 @@ fn an_answer_keeps_no_field_of_the_answer_before() {
             };
             relayed(&node, &Relay::default(), rewrite, async {
                 let mut client = peer.connect(&url).await.expect("the client connects");
-                let revised = client.subscribe(&[numbered(0)], LEVEL).await;
+                let revised = client.subscribe(&[numbered(0)], LEVEL, Span::ZERO).await;
                 assert!(revised.is_ok(), "{revised:?}");
                 let mut stamped = Vec::new();
                 for value in 1..=3 {
@@ -909,7 +943,7 @@ fn an_answer_takes_at_most_128_bytes_for_each_of_its_bytes() {
             };
             relayed(&node, &Relay::default(), rewrite, async {
                 let mut client = peer.connect(&url).await.expect("the client connects");
-                let revised = client.subscribe(&[numbered(0)], LEVEL).await;
+                let revised = client.subscribe(&[numbered(0)], LEVEL, Span::ZERO).await;
                 assert!(revised.is_ok(), "{revised:?}");
                 let first = client.changes(future::pending()).await.map(untimed);
                 assert_eq!(first, Ok(vec![changed_to(0.0, false)]));
@@ -1021,7 +1055,7 @@ fn a_subscribed_client_keeps_reads_for_the_publish_requests() {
 fn a_second_subscribe_panics() {
     let panic = on_level(100, async |_, client, _| {
         let nodes = [numbered(0)];
-        let second = caught(client.subscribe(&nodes, SAMPLING)).await;
+        let second = caught(client.subscribe(&nodes, SAMPLING, Span::ZERO)).await;
         let panic = second.expect_err("the subscribe panics");
         panic.downcast_ref::<String>().cloned()
     });
@@ -1037,7 +1071,7 @@ fn a_sampling_of_zero_panics() {
         serve(&node, 4, async |mut peer| {
             let mut client = peer.connected().await;
             let nodes = [numbered(0)];
-            let zero = caught(client.subscribe(&nodes, Span::ZERO)).await;
+            let zero = caught(client.subscribe(&nodes, Span::ZERO, Span::ZERO)).await;
             client.close().await;
             let panic = zero.expect_err("the subscribe panics");
             panic.downcast_ref::<&str>().copied()
@@ -1046,4 +1080,50 @@ fn a_sampling_of_zero_panics() {
     })
     .0;
     assert_eq!(panic, Some("invariant: a sampling interval is positive"));
+}
+
+/// A Publish answer that fails to decode ends the changes with its status, after the
+/// changes of the answers before it: past the first answer, a relay gives the value of
+/// a change a type id that no type has.
+#[test]
+fn a_publish_answer_that_fails_to_decode_ends_the_changes() {
+    let got = run(0, async |node| {
+        serve(&node, 4, async |mut peer| {
+            let level = add_level(&peer);
+            let url = format!("opc.tcp://{}:{RELAY}", node.addresses()[0]);
+            let answers = Cell::new(0);
+            let rewrite = |message: &mut Vec<u8>| {
+                let found =
+                    message.windows(DATA_CHANGE.len()).any(|w| w == DATA_CHANGE);
+                if is(message, PUBLISH_RESPONSE) && found {
+                    answers.set(answers.get() + 1);
+                    if answers.get() == 2 {
+                        let value = at(message, &[0x0F, 0x0B]) + 1;
+                        message[value] = 0x3F;
+                    }
+                }
+            };
+            relayed(&node, &Relay::default(), rewrite, async {
+                let mut client = peer.connect(&url).await.expect("the client connects");
+                let revised = client.subscribe(&[numbered(0)], LEVEL, Span::ZERO).await;
+                assert!(revised.is_ok(), "{revised:?}");
+                let first = client.changes(future::pending()).await.map(untimed);
+                level.set(1.0);
+                let second = client.changes(future::pending()).await.map(untimed);
+                let third = client.changes(future::pending()).await.map(untimed);
+                client.close().await;
+                (
+                    first,
+                    second.map_err(Status::name),
+                    third.map_err(Status::name),
+                )
+            })
+            .await
+        })
+        .await
+    })
+    .0;
+    assert_eq!(got.0, Ok(vec![changed_to(0.0, false)]));
+    assert_eq!(got.1, Err("BadDecodingError"));
+    assert_eq!(got.2, Err("BadDecodingError"));
 }

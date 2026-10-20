@@ -209,28 +209,18 @@ fn a_client_dials_the_next_address_when_the_first_does_not_answer() {
 }
 
 #[test]
-fn a_client_with_a_wrong_public_key_gets_the_error_of_the_handshake() {
+fn a_client_with_a_wrong_public_key_gets_both_keys() {
     let mut rig = Rig::new();
     rig.start();
     let (node, subject) = admin(&rig);
-    let peer = PrivateKey([7; 32]).public();
+    let proved = node.public_key;
+    let pinned = PrivateKey([7; 32]).public();
     let node = Node {
-        public_key: peer,
+        public_key: pinned,
         ..node
     };
     let error = Client::connect(&node, subject).unwrap_err();
-    let unreachable = transport::Error::Unreachable {
-        peer: Some(peer),
-        attempts: vec![(
-            transport::Address::Udp(node.addresses[0]),
-            transport::Error::Authentication { expected: peer },
-        )]
-        .into_boxed_slice(),
-    };
-    assert_eq!(
-        error,
-        Error::Session(program::Error::Transport(unreachable))
-    );
+    assert_eq!(error, Error::OtherKey { pinned, proved });
     rig.stop();
 }
 
@@ -400,6 +390,25 @@ fn an_open_of_a_writer_of_an_unknown_name_gives_unknown_and_the_client_goes_on()
     let channels = vec!["plant.a".parse().unwrap()];
     let writer = client.open_writer(Config::new(channels)).unwrap();
     assert_eq!(writer.close(), Ok(()));
+    assert_eq!(client.close(), Ok(()));
+    rig.stop();
+}
+
+/// The `sdk` writes one group: it refuses channels of two indexes, and ends the write,
+/// so that a writer of each channel writes.
+#[test]
+fn an_open_of_a_writer_of_two_indexes_gives_malformed_and_the_client_goes_on() {
+    let (mut rig, node, subject) = planted();
+    let client = Client::connect(&node, subject).unwrap();
+    let channels = vec!["plant.a".parse().unwrap(), "cell.c".parse().unwrap()];
+    let opened = client.open_writer(Config::new(channels)).map(drop);
+    let malformed = Error::Stream(program::Error::Refused(Refusal::Malformed));
+    assert_eq!(opened, Err(malformed));
+    for name in ["plant.a", "cell.c"] {
+        let mut writer = client.open_writer(Config::new(vec![name.parse().unwrap()]));
+        let writer = writer.as_mut().unwrap();
+        assert_eq!(writer.write(&[(0, Value::I64(7))]), Ok(taken(0, 1)));
+    }
     assert_eq!(client.close(), Ok(()));
     rig.stop();
 }
