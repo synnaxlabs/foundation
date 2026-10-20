@@ -327,11 +327,13 @@
   2026-10-19T19:46:05Z,
   https://github.com/synnaxlabs/foundation/pull/3415#issuecomment-6275819044, finding 2;
   the plan of PR 2b of #3140, 2026-10-20T04:26:42Z,
-  https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6283370668; the
-  text, 2026-10-20T05:21:52Z,
-  https://github.com/synnaxlabs/foundation/pull/3517#issuecomment-6284026549; the
-  attempt that goes on, 2026-10-20T05:46:34Z,
-  https://github.com/synnaxlabs/foundation/pull/3517#issuecomment-6284329185). A stop of
+  https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6283370668; a text,
+  2026-10-20T05:21:52Z,
+  https://github.com/synnaxlabs/foundation/pull/3517#issuecomment-6284026549; the review
+  that asked for the text of the attempt, 2026-10-20T05:46:34Z,
+  https://github.com/synnaxlabs/foundation/pull/3517#issuecomment-6284329185; the text
+  with the order of round 1, the stop, and the bound, 2026-10-20T06:51:17Z,
+  https://github.com/synnaxlabs/foundation/pull/3517#issuecomment-6285184329). A stop of
   the group drops each handle. `Transport::dial` gives the one open session to a peer
   (#1363), so a call can take its session from `dial`. #1598 decides whether the handle
   goes back to the task.

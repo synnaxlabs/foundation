@@ -258,8 +258,10 @@
   each voter after the last message of the old one, and up to a third of the idle
   timeout of the transport more when the new leader restarted while the learner held a
   session to it (MESH DRIVER; `laptop.architect`, 2026-10-19T19:46:05Z,
-  https://github.com/synnaxlabs/foundation/pull/3415#issuecomment-6275819044, finding
-  2). Fan-out from any voter is deferred to #3368, with its trigger: a region needs more
+  https://github.com/synnaxlabs/foundation/pull/3415#issuecomment-6275819044, finding 2;
+  the bound, 2026-10-20T06:51:17Z,
+  https://github.com/synnaxlabs/foundation/pull/3517#issuecomment-6285184329). Fan-out
+  from any voter is deferred to #3368, with its trigger: a region needs more
   than 128 members. A member that stops answering costs the leader its queue. For a
   member that answers only what it read, MESH DRIVER bounds that queue: one heartbeat,
   at most one `PreVote` and one `Vote`, and the appends of its window (one while it
