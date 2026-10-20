@@ -517,6 +517,13 @@ struct Secure {
     /// The secrets [`CERTIFICATE`], [`KEY`], and [`TRUST`] of the connector, each
     /// written before the run when it is `Some`.
     credentials: [Option<&'static [u8]>; 3],
+    /// The `user` of the connector and its password, the secret [`PASSWORD`], which is
+    /// written before the run when it is `Some`. No `user` when it is `None`.
+    user: Option<(&'static str, Option<&'static [u8]>)>,
+    /// The only logins that the server lets in, else an anonymous user.
+    users: Option<&'static [(&'static str, &'static [u8])]>,
+    /// The user token policy of the server has the policy `None`.
+    cleartext: bool,
 }
 
 /// The secret of the certificate of [`PLC`].
@@ -525,6 +532,10 @@ const CERTIFICATE: &str = "plant.opcua_certificate";
 const KEY: &str = "plant.opcua_key";
 /// The secret of the trust of [`PLC`].
 const TRUST: &str = "plant.opcua_trust";
+/// The secret of the password of [`PLC`].
+const PASSWORD: &str = "plant.opcua_password";
+/// The one login of a server that needs a user.
+const LOGINS: &[(&str, &[u8])] = &[("operator", b"pass\0word")];
 
 impl Secure {
     /// A channel in `policy` and the mode `SignAndEncrypt` on the credentials of
@@ -544,6 +555,21 @@ impl Secure {
                 Some(CLIENT.key),
                 Some(SERVER.certificate),
             ],
+            user: None,
+            users: None,
+            cleartext: false,
+        }
+    }
+
+    /// [`Secure::of`], with the user of [`LOGINS`] on the connector and the server.
+    fn with_user(policy: Policy) -> Self {
+        let [(user, password)] = LOGINS else {
+            unreachable!("one login")
+        };
+        Self {
+            user: Some((user, Some(password))),
+            users: Some(LOGINS),
+            ..Self::of(policy)
         }
     }
 
@@ -557,6 +583,12 @@ impl Secure {
     ) {
         variables.secure(self.server, self.policy, self.offered);
         variables.set_clock(self.ahead);
+        if let Some(users) = self.users {
+            variables.admit(users);
+        }
+        if self.cleartext {
+            variables.cleartext();
+        }
         if self.plain {
             return;
         }
@@ -569,8 +601,15 @@ impl Secure {
         if self.unencrypted {
             attributes.push(attribute("unencrypted", value::Kind::Bool(true)));
         }
+        let mut password = None;
+        if let Some((user, held)) = self.user {
+            attributes.push(attribute("user", value::Kind::String(user.into())));
+            attributes.push(attribute("password", secret(PASSWORD)));
+            password = held;
+        }
         config.attributes = Map::new(attributes).expect("unique keys");
-        let held = [CERTIFICATE, KEY, TRUST].into_iter().zip(self.credentials);
+        let held = ([CERTIFICATE, KEY, TRUST, PASSWORD].into_iter())
+            .zip(self.credentials.into_iter().chain([password]));
         for (text, bytes) in held {
             if let Some(bytes) = bytes {
                 testing::create_secret(&node.files(), &name(text), bytes).await;
@@ -3046,20 +3085,37 @@ fn an_expired_ca_of_the_node_certificate_names_the_certificate() {
 /// `certificate`, the key of [`CLIENT`], and [`SERVER`] as the trust, whose sources are
 /// variables of the environment.
 fn cause_on(status: Status, certificate: &[u8]) -> Option<String> {
+    let security = cause_security();
+    cause(status, Some(&secured_on(&security, certificate, None)))
+}
+
+/// A channel in `SignAndEncrypt` with no user, whose sources are variables of the
+/// environment.
+fn cause_security() -> Security {
     let env = |name: &str| secret::Source::Env(name.into());
-    let security = Security {
+    Security {
         certificate: env("CERTIFICATE"),
         key: env("KEY"),
         trust: env("TRUST"),
         mode: client::Mode::SignAndEncrypt,
-    };
-    let secured = Secured {
-        security: &security,
+        user: None,
+    }
+}
+
+/// `security` read as `certificate`, the key of [`CLIENT`], [`SERVER`] as the trust,
+/// and `password` as the password of its user.
+fn secured_on<'a>(
+    security: &'a Security,
+    certificate: &[u8],
+    password: Option<secret::Value>,
+) -> Secured<'a> {
+    Secured {
+        security,
         certificate: secret::Value::new(certificate.to_vec()),
         key: secret::Value::new(CLIENT.key.to_vec()),
         trust: secret::Value::new(SERVER.certificate.to_vec()),
-    };
-    cause(status, Some(&secured))
+        user: security.user.as_ref().zip(password),
+    }
 }
 
 /// The certificate to install has its names when it parses, no subject when its
@@ -3208,6 +3264,162 @@ fn a_secure_server_asks_a_plain_connector_for_credentials() {
                  anonymous user. For a server with only secure endpoints, give \
                  `certificate`, `key`, and `trust`";
     connect_fails(secure, "BadIdentityTokenRejected", cause);
+}
+
+/// The password of [`LOGINS`] holds a NUL byte, so a read lands only when the client
+/// sends all of it.
+#[test]
+fn reads_with_a_user_over_a_secure_channel_of_each_policy_in_each_mode() {
+    for policy in Policy::ALL {
+        for unencrypted in [false, true] {
+            let offered = if unencrypted {
+                client::Mode::Sign
+            } else {
+                client::Mode::SignAndEncrypt
+            };
+            let outcome = secured(Secure {
+                offered,
+                unencrypted,
+                ..Secure::with_user(policy)
+            });
+            let at = format!("{policy:?}, unencrypted {unencrypted}");
+            assert!(outcome.result.is_ok(), "{at}: {:?}", outcome.result);
+            assert_eq!(errors(&outcome.statuses), [], "{at}");
+            assert_eq!(outcome.frames.len(), 11, "{at}");
+            assert_eq!(values(&outcome.frames, 2), served(&outcome, A), "{at}");
+        }
+    }
+}
+
+const REFUSED_USER: &str = "the server refused the user \"operator\" with the password \
+                            secret(\"plant.opcua_password\"). Check `user` and the \
+                            password secret(\"plant.opcua_password\")";
+
+#[test]
+fn a_wrong_password_names_the_user_and_the_password() {
+    let secure = Secure {
+        user: Some(("operator", Some(b"pass"))),
+        ..Secure::with_user(Policy::Basic256Sha256)
+    };
+    connect_fails(secure, "BadUserAccessDenied", REFUSED_USER);
+}
+
+#[test]
+fn a_refused_identity_token_names_the_user_and_the_password() {
+    let security = Security {
+        user: Some(config::User {
+            name: "operator".into(),
+            password: secret::Source::Secret(name(PASSWORD)),
+        }),
+        ..cause_security()
+    };
+    let password = secret::Value::new(b"pass".to_vec());
+    let secured = secured_on(&security, CLIENT.certificate, Some(password));
+    for status in [
+        Status::BAD_USER_ACCESS_DENIED,
+        Status::BAD_IDENTITY_TOKEN_INVALID,
+    ] {
+        let cause = cause(status, Some(&secured));
+        assert_eq!(cause.as_deref(), Some(REFUSED_USER), "{}", status.name());
+    }
+}
+
+/// With no `user`, the two statuses name no cause.
+#[test]
+fn a_refused_anonymous_user_names_no_cause() {
+    for status in [
+        Status::BAD_USER_ACCESS_DENIED,
+        Status::BAD_IDENTITY_TOKEN_INVALID,
+    ] {
+        let cause = cause_on(status, CLIENT.certificate);
+        assert_eq!(cause, None, "{}", status.name());
+    }
+}
+
+#[test]
+fn a_server_with_no_users_asks_to_turn_them_on() {
+    let secure = Secure {
+        users: None,
+        ..Secure::with_user(Policy::Basic256Sha256)
+    };
+    let cause = format!(
+        "{UNOFFERED} SignAndEncrypt {POLICIES} that lets in a user name and password. \
+         For a server with only Sign endpoints, set `unencrypted = true`; else turn on \
+         one of these policies with user names and passwords on the server"
+    );
+    connect_fails(secure, "BadIdentityTokenRejected", &cause);
+}
+
+#[test]
+fn a_server_that_needs_a_user_asks_an_anonymous_connector_as_before() {
+    let secure = Secure {
+        user: None,
+        ..Secure::with_user(Policy::Basic256Sha256)
+    };
+    let cause = format!(
+        "{UNOFFERED} SignAndEncrypt {POLICIES} that lets in an anonymous user. For a \
+         server with only Sign endpoints, set `unencrypted = true`; else turn on one \
+         of these policies on the server"
+    );
+    connect_fails(secure, "BadIdentityTokenRejected", &cause);
+}
+
+/// The server takes a password in clear over `Sign`, so the read would land if the
+/// client sent it.
+#[test]
+fn never_sends_a_password_in_clear() {
+    let secure = Secure {
+        offered: client::Mode::Sign,
+        unencrypted: true,
+        cleartext: true,
+        ..Secure::with_user(Policy::Basic256Sha256)
+    };
+    let cause = format!(
+        "{UNOFFERED} Sign {POLICIES} that lets in a user name and password. Turn on one \
+         of these policies in the mode Sign with user names and passwords on the server"
+    );
+    connect_fails(secure, "BadIdentityTokenRejected", &cause);
+}
+
+/// `SignAndEncrypt` encrypts the password that the token policy does not.
+#[test]
+fn reads_with_a_token_policy_in_none_over_sign_and_encrypt() {
+    let outcome = secured(Secure {
+        cleartext: true,
+        ..Secure::with_user(Policy::Basic256Sha256)
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    assert_eq!(errors(&outcome.statuses), []);
+    assert_eq!(outcome.frames.len(), 11);
+    assert_eq!(values(&outcome.frames, 2), served(&outcome, A));
+}
+
+/// A run with no secret of the password ends with the error of the store, and the run
+/// after the secret is written reads.
+#[test]
+fn a_missing_password_ends_the_run_until_it_is_written() {
+    let secure = Secure {
+        user: Some(("operator", None)),
+        ..Secure::with_user(Policy::Basic256Sha256)
+    };
+    let outcome = run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
+        scene.after(ms(1_050), |scene| async move {
+            let [(_, password)] = LOGINS else {
+                unreachable!("one login")
+            };
+            testing::create_secret(&scene.node.files(), &name(PASSWORD), password)
+                .await;
+        });
+        scene.supervise(ms(5_050)).await
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    let unread = "the secret secret(\"plant.opcua_password\"): the file \
+                  /data/secrets/plant.opcua_password is not there. Write the value to \
+                  it, unreadable by other users: chmod o-r \
+                  /data/secrets/plant.opcua_password";
+    assert_eq!(errors(&outcome.statuses), [(RETRY, unread.to_owned())]);
+    assert!(!outcome.frames.is_empty());
+    assert_eq!(values(&outcome.frames, 2), served(&outcome, A));
 }
 
 #[test]

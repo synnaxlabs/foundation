@@ -57,6 +57,7 @@ fn connect(
             certificate: client.certificate,
             key: client.key,
             trust: trust.as_ref(),
+            user: None,
         };
         let time = event::Time::since(node.clock(), server_wall);
         serve_on(

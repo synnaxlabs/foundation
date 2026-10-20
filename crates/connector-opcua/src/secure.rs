@@ -273,6 +273,7 @@ impl Identity {
             certificate: self.certificate,
             key: self.key,
             trust,
+            user: None,
         }
     }
 }

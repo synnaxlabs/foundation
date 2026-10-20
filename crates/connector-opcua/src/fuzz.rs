@@ -51,6 +51,7 @@ fn read(clock: Clock, data: &[u8]) -> (Status, Status) {
         certificate: SERVER.certificate,
         key: SERVER.key,
         trust: &[],
+        user: None,
     }
     .raw();
     let (mut verified, mut named) = (0, 0);

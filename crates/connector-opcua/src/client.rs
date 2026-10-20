@@ -123,9 +123,19 @@ pub(crate) struct Credentials<'a> {
     pub(crate) certificate: &'a [u8],
     pub(crate) key: &'a [u8],
     pub(crate) trust: &'a [u8],
+    /// The user of the session, or `None` for an anonymous session. A server takes
+    /// no user.
+    pub(crate) user: Option<User<'a>>,
 }
 
-/// Prints `<credentials>`, never the key.
+/// The user name and password of a session, which [`Credentials`] holds.
+#[derive(Clone, Copy)]
+pub(crate) struct User<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) password: &'a [u8],
+}
+
+/// Prints `<credentials>`, never the key or the password.
 impl fmt::Debug for Credentials<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("<credentials>")
@@ -453,9 +463,9 @@ impl Client {
     /// Makes a client on its own manager over `time`, `span`, `net`, and `rng`, as
     /// [`Manager::new`] does, and connects it to the server at the endpoint `url` with
     /// the credentials and mode of `security`, or the security mode `None` when it is
-    /// `None`, and an anonymous session. It gives the client once the session is active
-    /// and it has read the `MaxNodesPerRead` of the server, or `None` when `until` ends
-    /// first. After an error, or when `until` ends first, it closes the session that
+    /// `None`, and with the user of the credentials, else an anonymous session. It
+    /// gives the client once the session is active and it has read the
+    /// `MaxNodesPerRead` of the server, or `None` when `until` ends first. After an error, or when `until` ends first, it closes the session that
     /// the connect made, as [`Client::close`] does, so it ends within [`GRACE`] of
     /// either. A drop of the future drops the client.
     ///
@@ -507,6 +517,24 @@ impl Client {
             }
             if status != Status::GOOD {
                 return Err(Error::Failed(status));
+            }
+            if let Some(user) = credentials.user {
+                let (name, password) = (
+                    ffi::Bytes::of(user.name.as_bytes()),
+                    ffi::Bytes::of(user.password),
+                );
+                // SAFETY: the client lives and has not connected, and it copies `name`
+                // and `password`.
+                let status = Status(unsafe {
+                    ffi::shim_client_user(
+                        client.raw.as_ptr(),
+                        &raw const name,
+                        &raw const password,
+                    )
+                });
+                if status != Status::GOOD {
+                    return Err(Error::Failed(status));
+                }
             }
         }
         let opened = {
