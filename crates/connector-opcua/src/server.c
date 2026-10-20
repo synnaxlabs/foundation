@@ -19,13 +19,19 @@
 
 #include "shim.h"
 
-/* Gives `server` the policies of `security`, with an endpoint in Sign and in
- * SignAndEncrypt for each of the `count` policy URIs of `policies`, in that order, and a
- * channel check that trusts only the certificates that `security` trusts. Gives
- * `BadSecurityPolicyRejected` for a URI that the copy does not compile. */
+/* Gives `server` the policies of `security` and, in place of the endpoint in None, an
+ * endpoint in each of the `kinds` modes of `modes` for each of the `count` policy URIs
+ * of `policies`, in that order, and a channel check that trusts only the certificates
+ * that `security` trusts. Gives `BadSecurityPolicyRejected` for a URI that the copy
+ * does not compile. */
 static UA_StatusCode secure_server(UA_ServerConfig *config,
                                    const shim_security *security,
-                                   const char *const *policies, size_t count) {
+                                   const char *const *policies, size_t count,
+                                   const UA_MessageSecurityMode *modes, size_t kinds) {
+    UA_Array_delete(config->endpoints, config->endpointsSize,
+                    &UA_TYPES[UA_TYPES_ENDPOINTDESCRIPTION]);
+    config->endpoints = NULL;
+    config->endpointsSize = 0;
     size_t first = config->securityPoliciesSize;
     UA_StatusCode status = shim_add_policies(&config->securityPolicies,
                                              &config->securityPoliciesSize, security,
@@ -38,10 +44,8 @@ static UA_StatusCode secure_server(UA_ServerConfig *config,
             at++;
         if(at == config->securityPoliciesSize)
             return UA_STATUSCODE_BADSECURITYPOLICYREJECTED;
-        status = UA_ServerConfig_addEndpoint(config, uri, UA_MESSAGESECURITYMODE_SIGN);
-        if(status == UA_STATUSCODE_GOOD)
-            status = UA_ServerConfig_addEndpoint(config, uri,
-                                                 UA_MESSAGESECURITYMODE_SIGNANDENCRYPT);
+        for(size_t j = 0; status == UA_STATUSCODE_GOOD && j < kinds; j++)
+            status = UA_ServerConfig_addEndpoint(config, uri, modes[j]);
     }
     if(status != UA_STATUSCODE_GOOD)
         return status;
@@ -54,13 +58,14 @@ static UA_StatusCode secure_server(UA_ServerConfig *config,
 /* Gives a server on `el` with the minimal config, the one server URL
  * `opc.tcp://{host}:{port}`, room for `sessions` sessions and secure channels, and at
  * most `chunks` chunks in a message, or NULL on a failure. With `security`, the server
- * also has an endpoint in Sign and in SignAndEncrypt for each of the `count` policy
- * URIs of `policies`, in that order, and its channels trust only the certificates that
- * `security` trusts. */
+ * has no endpoint in None, but an endpoint in each of the `kinds` modes of `modes` for
+ * each of the `count` policy URIs of `policies`, in that order, and its channels trust
+ * only the certificates that `security` trusts. */
 UA_Server *shim_server_new(UA_EventLoop *el, UA_UInt16 port, const char *host,
                            UA_UInt16 sessions, UA_UInt32 chunks,
                            const shim_security *security,
-                           const char *const *policies, size_t count) {
+                           const char *const *policies, size_t count,
+                           const UA_MessageSecurityMode *modes, size_t kinds) {
     UA_ServerConfig config;
     memset(&config, 0, sizeof(config));
     /* The loop of `shim_loop_new` owns its logger, which is not const. */
@@ -68,7 +73,9 @@ UA_Server *shim_server_new(UA_EventLoop *el, UA_UInt16 port, const char *host,
     config.eventLoop = el;
     config.externalEventLoop = true;
     if(UA_ServerConfig_setMinimal(&config, port, NULL) != UA_STATUSCODE_GOOD ||
-       (security && secure_server(&config, security, policies, count) != UA_STATUSCODE_GOOD)) {
+       (security &&
+        secure_server(&config, security, policies, count, modes, kinds) !=
+            UA_STATUSCODE_GOOD)) {
         UA_ServerConfig_clear(&config);
         return NULL;
     }

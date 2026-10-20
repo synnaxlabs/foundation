@@ -3,6 +3,8 @@
 from foundation._native import (
     Client,
     DataLost,
+    Frame,
+    Reader,
     Refused,
     Rejected,
     Stopped,
@@ -10,4 +12,14 @@ from foundation._native import (
     connect,
 )
 
-__all__ = ["Client", "DataLost", "Refused", "Rejected", "Stopped", "Writer", "connect"]
+__all__ = [
+    "Client",
+    "DataLost",
+    "Frame",
+    "Reader",
+    "Refused",
+    "Rejected",
+    "Stopped",
+    "Writer",
+    "connect",
+]

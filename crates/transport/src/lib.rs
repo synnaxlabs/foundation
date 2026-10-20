@@ -440,7 +440,10 @@ mod tests {
     use types::ed25519::PrivateKey;
     use types::time::Span;
 
+    use env::tasks::Group;
+
     use super::{Config, Error, Transport};
+    use crate::client::{self, Client};
     use crate::testing::{self, Shard};
     use crate::{Address, Class, Code, Peer, Port};
 
@@ -954,6 +957,153 @@ mod tests {
             (0..Span::MILLISECOND.nanos()).contains(&late),
             "the peer saw its close {after:?} after the drop, not {delay:?}"
         );
+    }
+
+    /// Runs 64 runs at a loss of 10%, in each of which `dial` dials the server at the
+    /// address that it gets, closes the session with `Code(0)` at once, and waits for
+    /// the drain. Asserts that each server that accepted the session sees the close in
+    /// less than 1 s, not at its idle timeout of 30 s: while a close drains, a packet of
+    /// the server that comes makes the close go out again. A run with a lost client
+    /// Finished has no accept, as the close ends the handshake of the server.
+    fn a_lost_close_reaches_the_peer_while_it_drains<D, F>(dial: D)
+    where
+        D: FnOnce(Shard, sim::node::Node, SocketAddr) -> F + Send + Copy + 'static,
+        F: Future<Output = ()> + 'static,
+    {
+        let link = sim::link::Config {
+            loss: 0.1,
+            ..sim::link::Config::default()
+        };
+        let idle = testing::spans(Span::SECOND, 30);
+        let mut accepts = 0;
+        for value in 0..64 {
+            let (mut sim, client, server) = testing::nodes(value);
+            sim.link(&client, &server, link);
+            sim.link(&server, &client, link);
+            let at = testing::address(&server);
+            // `Some(None)` from the accept to the end.
+            let ended = Arc::new(Mutex::new(None));
+            let slot = Arc::clone(&ended);
+            testing::shard(&server, SERVER, move |config, node| async move {
+                let part = testing::part(&node.net(), at);
+                let transport = Transport::new(Config { idle, ..config }, part);
+                let transport = transport.expect("a transport");
+                let session = transport.accept().await.expect("a session");
+                *slot.lock().unwrap() = Some(None);
+                let start = node.clock().now();
+                let error = session.closed().await;
+                *slot.lock().unwrap() = Some(Some((error, node.clock().now() - start)));
+            });
+            testing::start(&client, move |shard, node| dial(shard, node, at));
+            let run = sim.run_for(testing::spans(Span::SECOND, 10));
+            run.expect("the run ends");
+            if let Some(end) = ended.lock().unwrap().take() {
+                accepts += 1;
+                let (error, waited) =
+                    end.unwrap_or_else(|| panic!("run {value}: no end"));
+                let closed = Error::PeerClosed { code: Code(0) };
+                assert_eq!(error, closed, "run {value}");
+                assert!(waited < Span::SECOND, "run {value}: {waited:?}");
+            }
+        }
+        assert!(accepts >= 48, "{accepts} of 64 runs accepted");
+    }
+
+    #[test]
+    fn the_peer_of_a_dial_sees_a_lost_close_while_it_drains() {
+        a_lost_close_reaches_the_peer_while_it_drains(|shard, node, at| async move {
+            let idle = testing::spans(Span::SECOND, 30);
+            let config = Config {
+                idle,
+                ..shard.config(CLIENT, idle)
+            };
+            let part = testing::part(&node.net(), testing::address(&node));
+            let transport = Transport::new(config, part).expect("a transport");
+            let at = [Address::Udp(at)];
+            if let Ok(session) = transport.dial(SERVER.public(), &at).await {
+                session.close(Code(0));
+            }
+            let ended = transport.ended();
+            drop(transport);
+            ended.await;
+        });
+    }
+
+    #[test]
+    fn the_node_of_a_client_sees_a_lost_close_while_it_drains() {
+        a_lost_close_reaches_the_peer_while_it_drains(|shard, _, at| async move {
+            let config = shard.client();
+            let group = Group::new(config.tasks.clone());
+            let config = client::Config {
+                tasks: group.tasks().clone(),
+                ..config
+            };
+            let client = Client::new(config).expect("a client");
+            let at = [Address::Udp(at)];
+            if let Ok(session) = client.dial(SERVER.public(), &at).await {
+                session.close(Code(0));
+            }
+            drop(client);
+            group.ended().await;
+        });
+    }
+
+    /// The server closes each session that it accepts at once, and the dialer sees the
+    /// close in less than 1 s, as in [`a_lost_close_reaches_the_peer_while_it_drains`].
+    #[test]
+    fn the_dialer_sees_a_lost_close_of_an_accepted_session_while_it_drains() {
+        let link = sim::link::Config {
+            loss: 0.1,
+            ..sim::link::Config::default()
+        };
+        let idle = testing::spans(Span::SECOND, 30);
+        let mut dials = 0;
+        for value in 0..64 {
+            let (mut sim, client, server) = testing::nodes(value);
+            sim.link(&client, &server, link);
+            sim.link(&server, &client, link);
+            let at = testing::address(&server);
+            // `Some(None)` from the dial to the end.
+            let ended = Arc::new(Mutex::new(None));
+            let slot = Arc::clone(&ended);
+            testing::shard(&server, SERVER, move |config, node| async move {
+                let part = testing::part(&node.net(), at);
+                let transport = Transport::new(Config { idle, ..config }, part);
+                let transport = transport.expect("a transport");
+                if let Ok(session) = transport.accept().await {
+                    session.close(Code(0));
+                }
+                let ended = transport.ended();
+                drop(transport);
+                ended.await;
+            });
+            testing::start(&client, move |shard, node| async move {
+                let config = Config {
+                    idle,
+                    ..shard.config(CLIENT, idle)
+                };
+                let part = testing::part(&node.net(), testing::address(&node));
+                let transport = Transport::new(config, part).expect("a transport");
+                let to = [Address::Udp(at)];
+                if let Ok(session) = transport.dial(SERVER.public(), &to).await {
+                    *slot.lock().unwrap() = Some(None);
+                    let start = node.clock().now();
+                    let error = session.closed().await;
+                    *slot.lock().unwrap() =
+                        Some(Some((error, node.clock().now() - start)));
+                }
+            });
+            let run = sim.run_for(testing::spans(Span::SECOND, 10));
+            run.expect("the run ends");
+            if let Some(end) = ended.lock().unwrap().take() {
+                dials += 1;
+                let (error, waited) =
+                    end.unwrap_or_else(|| panic!("run {value}: no end"));
+                assert_eq!(error, Error::PeerClosed { code: Code(0) }, "run {value}");
+                assert!(waited < Span::SECOND, "run {value}: {waited:?}");
+            }
+        }
+        assert!(dials >= 48, "{dials} of 64 runs dialed");
     }
 
     /// The drop closes the dial, whose handshake gets no answer, so the stop does not

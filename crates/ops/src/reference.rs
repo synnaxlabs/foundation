@@ -101,19 +101,25 @@ fn presence(presence: Presence) -> String {
     match presence {
         Presence::Required => "Required.".to_owned(),
         Presence::Unless(others) => {
-            let names: Vec<String> = others.iter().map(|o| format!("`{o}`")).collect();
-            let names = match names.as_slice() {
-                [.., last] if names.len() > 1 => {
-                    let rest = names[..names.len() - 1].join(", ");
-                    let and = if names.len() > 2 { ", and" } else { " and" };
-                    format!("{rest}{and} {last}")
-                }
-                _ => names.concat(),
-            };
-            format!("Required unless the body holds {names}.")
+            format!("Required unless the body holds {}.", list(others, "and"))
+        }
+        Presence::When(others) => {
+            format!("Required when the body holds {}.", list(others, "or"))
         }
         Presence::Default(value) => format!("Default: {value}."),
         Presence::Optional => "Optional.".to_owned(),
+    }
+}
+
+/// `names` in backticks, joined with commas and `word` before the last.
+fn list(names: &[&str], word: &str) -> String {
+    let names: Vec<String> = names.iter().map(|name| format!("`{name}`")).collect();
+    match names.as_slice() {
+        [rest @ .., last] if !rest.is_empty() => {
+            let comma = if rest.len() > 1 { "," } else { "" };
+            format!("{}{comma} {word} {last}", rest.join(", "))
+        }
+        _ => names.concat(),
     }
 }
 
