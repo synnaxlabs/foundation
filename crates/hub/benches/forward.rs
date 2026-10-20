@@ -421,14 +421,16 @@ impl<F: Future<Output = Result<Served, serve::Error>>> Serving<F> {
 
     /// Polls when woken until `done`.
     async fn until(&mut self, node: &sim::node::Node, done: impl Fn() -> bool) {
-        let end = node.clock().now() + ROUND_MAX;
-        while !done() {
-            assert!(node.clock().now() < end, "the serve is stuck");
+        let polled = || {
+            if done() {
+                return true;
+            }
             if self.woken() {
                 assert!(self.poll().is_pending(), "the serve ended");
             }
-            node.clock().sleep(STEP).await;
-        }
+            false
+        };
+        wait(node, polled, || "the serve is stuck".into()).await;
     }
 
     /// Serves the write of `case` until its sender finishes it, and gives its line.
@@ -449,7 +451,7 @@ impl<F: Future<Output = Result<Served, serve::Error>>> Serving<F> {
             let due = progress.taken.load(Ordering::Relaxed) + case.frames;
             progress.go.fetch_add(1, Ordering::Relaxed);
             let sending = || progress.sent.load(Ordering::Relaxed) >= sent;
-            wait(node, sending, &format!("round {round} is not sent")).await;
+            wait(node, sending, || format!("round {round} is not sent")).await;
             node.clock().sleep(common::SETTLE).await;
             let end = node.clock().now() + ROUND_MAX;
             while progress.taken.load(Ordering::Relaxed) < due {
@@ -510,11 +512,15 @@ async fn write(
     node.clock().sleep(STEP).await;
 }
 
-/// Waits until `done`, and panics with `stuck` after [`ROUND_MAX`].
-async fn wait(node: &sim::node::Node, done: impl Fn() -> bool, stuck: &str) {
+/// Waits until `done`, and panics with the text of `stuck` after [`ROUND_MAX`].
+async fn wait(
+    node: &sim::node::Node,
+    mut done: impl FnMut() -> bool,
+    stuck: impl Fn() -> String,
+) {
     let end = node.clock().now() + ROUND_MAX;
     while !done() {
-        assert!(node.clock().now() < end, "{stuck}");
+        assert!(node.clock().now() < end, "{}", stuck());
         node.clock().sleep(STEP).await;
     }
 }
@@ -532,7 +538,10 @@ async fn forward(
     tasks.spawn(async move { clock.run(wall).await });
     let ready =
         || progress.stamp.load(Ordering::Relaxed) != 0 && mesh.now().mesh.is_some();
-    wait(&node, ready, "the home and the mesh time are not ready").await;
+    wait(&node, ready, || {
+        "the home and the mesh time are not ready".into()
+    })
+    .await;
     let pool = net::own_pool();
     let transport = net::transport(&node, &tasks, &pool, net::PEER, MESSAGE);
     let public_key = net::public_key(&net::HOME);
@@ -599,7 +608,7 @@ impl Sender {
         for _ in 0..WARMUP + ROUNDS {
             self.round += 1;
             let go = || progress.go.load(Ordering::Relaxed) >= self.round;
-            wait(node, go, &format!("round {} does not go", self.round)).await;
+            wait(node, go, || format!("round {} does not go", self.round)).await;
             for _ in 0..case.frames {
                 let (ends, body) = frame(&start.places, self.stamp);
                 self.stamp += 1;

@@ -30,7 +30,7 @@ use super::{
     unnamed, without, write, write_samples, write_series, write_wide,
 };
 use crate::forwarded::accept_hub;
-use crate::net::{self, HOME, PEER, PORT, own_pool, public_key, transport_sized};
+use crate::net::{HOME, PEER, PORT, STREAMS, own_pool, public_key, transport_sized};
 
 /// The fewest bytes that a transport takes in one message.
 const MESSAGE_MIN: usize = 1472;
@@ -122,7 +122,7 @@ fn remote_sized<H, R>(
     let (node, kept) = (nodes[0].clone(), Arc::clone(&steps));
     let main = move |tasks: Tasks| async move {
         let transport =
-            transport_sized(&node, &tasks, &own_pool(), HOME, sizes[0], net::STREAMS);
+            transport_sized(&node, &tasks, &own_pool(), HOME, sizes[0], STREAMS);
         let region = super::region::open(
             &node,
             &tasks,
@@ -149,7 +149,7 @@ fn remote_sized<H, R>(
     let node = nodes[1].clone();
     let main = move |tasks: Tasks| async move {
         let transport =
-            transport_sized(&node, &tasks, &own_pool(), PEER, sizes[1], net::STREAMS);
+            transport_sized(&node, &tasks, &own_pool(), PEER, sizes[1], STREAMS);
         home(node, tasks, transport, steps).await;
     };
     drop(
@@ -467,9 +467,6 @@ fn two_readers_that_open_at_once_at_one_home_each_get_its_frames() {
     );
 }
 
-/// The streams that the home's transport allows the reader's node at once.
-const STREAMS: usize = 16;
-
 #[test]
 fn a_reader_past_the_streams_of_its_home_opens_once_another_reader_drops() {
     remote(
@@ -480,7 +477,7 @@ fn a_reader_past_the_streams_of_its_home_opens_once_another_reader_drops() {
         },
         |test, _| async move {
             let mut readers = Vec::new();
-            for _ in 0..STREAMS {
+            for _ in 0..STREAMS as usize {
                 readers.push(test.reader(&["value"], Mode::Complete).await);
             }
             let mut opening = pin!(test.reader(&["value"], Mode::Complete));
@@ -501,7 +498,7 @@ fn a_reader_past_the_streams_of_its_home_opens_once_another_reader_drops() {
 
 #[test]
 fn a_reader_past_the_streams_opens_once_a_reader_that_holds_a_full_window_drops() {
-    churn_with_frames(STREAMS, true);
+    churn_with_frames(STREAMS as usize, true);
 }
 
 #[test]
@@ -537,7 +534,7 @@ fn churn_with_frames(held: usize, drops: bool) {
             }
             steps.open();
             test.clock.sleep(Span::from_nanos(100_000_000)).await;
-            for round in 0..STREAMS - held + 32 * usize::from(drops) {
+            for round in 0..STREAMS as usize - held + 32 * usize::from(drops) {
                 if drops {
                     drop(readers.pop_front());
                 }
@@ -3129,7 +3126,7 @@ fn a_removal_ends_a_remote_reader_that_waits_for_a_stream() {
         },
         |test, _| async move {
             let mut readers = Vec::new();
-            for _ in 0..STREAMS {
+            for _ in 0..STREAMS as usize {
                 readers.push(test.reader(&["value-c"], Mode::Complete).await);
             }
             let names = ["value"];
