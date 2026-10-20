@@ -117,9 +117,8 @@ impl kind::Kind for Kind {
     /// the session and polls as `polled` does on a new session until the cancel or an
     /// error, and the note says so.
     ///
-    /// Each tick of `polled` writes one frame stamped at the midpoint of the read.
-    /// When 10 s pass with no read, the run reads the state of the server to check
-    /// the connection.
+    /// Each frame of a tick of `polled` has the midpoint of the read. When 10 s pass
+    /// with no read, the run reads the state of the server to check the connection.
     ///
     /// After a cancel or an error, the run closes its session: it sends `CloseSession`,
     /// waits at most 1 s for the answer, then closes the connection. So a run ends
