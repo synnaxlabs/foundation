@@ -204,14 +204,14 @@ class Node:
     def stop(self, patience: float = PATIENCE) -> bytes:
         """Stops the node with SIGTERM, waits until it exits, removes the directory,
         then stops the watcher, and gives the rest of the standard error of the node.
-        Raises `subprocess.TimeoutExpired` after it kills a node that runs on for
-        `patience` s."""
+        Kills the node when the wait raises, as `subprocess.TimeoutExpired` for a node
+        that runs on for `patience` s or `KeyboardInterrupt`, then raises it."""
         if self.process.poll() is None:
             self.process.send_signal(signal.SIGCONT)
             self.process.send_signal(signal.SIGTERM)
         try:
             _, error = self.process.communicate(timeout=patience)
-        except subprocess.TimeoutExpired:
+        except BaseException:
             self.process.kill()
             self.process.communicate()
             raise
@@ -603,6 +603,29 @@ class NodeTest(unittest.TestCase):
         try:
             with self.assertRaises(subprocess.TimeoutExpired):
                 node.stop(patience=1)
+            state = (node.process.returncode, *ended(node)[1:])
+        finally:
+            node.stop()
+        self.assertEqual(state, (-signal.SIGKILL, -signal.SIGKILL, False))
+
+    def test_an_interrupted_stop_kills_the_node_before_the_watcher(self) -> None:
+        deaf = self.binary('trap "" TERM; echo; while :; do sleep 0.1; done')
+        node = Node.__new__(Node)
+        with mock.patch.dict(os.environ, {"FOUNDATION_NODE": deaf}):
+            node.start()
+        stopped = []
+        communicate = node.process.communicate
+
+        def interrupted(timeout: float | None = None) -> tuple[bytes, bytes]:
+            if not stopped:
+                stopped.append(timeout)
+                raise KeyboardInterrupt
+            return communicate(timeout=timeout)
+
+        try:
+            with mock.patch.object(node.process, "communicate", interrupted):
+                with self.assertRaises(KeyboardInterrupt):
+                    node.stop()
             state = (node.process.returncode, *ended(node)[1:])
         finally:
             node.stop()
