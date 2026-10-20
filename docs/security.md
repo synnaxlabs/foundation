@@ -329,10 +329,11 @@ state on `main`.
   put: the dial with the open of the stream, the `Stored` of each chunk, and the end.
   So a silent peer costs a get that time for each call, and a put that time after its
   last `Stored`. A slow peer that stores a chunk within each `peer::DEADLINE` holds a
-  put for at most `peer::DEADLINE` for each listed chunk. A peer whose sessions end gets
-  at most two more dials at the start of a put and after each session that stored a
-  chunk, each within `peer::DEADLINE`. An end that fails or passes the deadline after
-  each `Stored` fails no put.
+  put for at most `peer::DEADLINE` for each listed chunk, one more for the dial, and
+  one more for the end. A peer whose sessions end gets at most two more dials at the
+  start of a put and after each session that stored a chunk, each within
+  `peer::DEADLINE`. An end that fails or passes the deadline after each `Stored` fails
+  no put.
 
 ### Time source to `estimate`
 
