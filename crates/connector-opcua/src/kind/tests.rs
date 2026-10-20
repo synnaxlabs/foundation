@@ -3399,7 +3399,9 @@ fn a_rejected_token_of_a_user_names_both_causes_in_each_mode() {
     }
 }
 
-/// A user with no password is a broken invariant, never an anonymous session.
+/// A user with no password is a broken invariant, never an anonymous session. No
+/// caller can see it: [`Secured::read`] reads the password of each user, so only this
+/// private call of [`Secured::session`] makes the case.
 #[test]
 #[should_panic(expected = "invariant: Secured::read reads the password of each user")]
 fn a_user_with_no_password_panics() {
