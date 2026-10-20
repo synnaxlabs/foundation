@@ -11,6 +11,7 @@ pub mod openssh;
 mod placement;
 pub mod plan;
 mod private_key;
+pub mod profile;
 mod retention;
 mod subject;
 mod unfilled;

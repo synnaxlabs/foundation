@@ -144,7 +144,7 @@ fn subject(value: &Value) -> Result<Subject, Diagnostic> {
 }
 
 /// Reads a public key, which is the line of an OpenSSH `.pub` file of an Ed25519 key.
-fn key(value: &Value) -> Result<PublicKey, Diagnostic> {
+pub(crate) fn key(value: &Value) -> Result<PublicKey, Diagnostic> {
     let fix = "Use the one line of a `.pub` file, such as `ssh-ed25519 AAAA... \
                alice@laptop`";
     let Kind::String(text) = &value.kind else {
