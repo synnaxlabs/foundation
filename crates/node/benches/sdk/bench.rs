@@ -35,6 +35,8 @@ const HELD: Duration = Duration::from_millis(1);
 enum Timed {
     /// A write.
     Write,
+    /// A write of one value of each of two indexes.
+    Two,
     /// A write, then the read of its frame.
     Read,
     /// A write, then the read of its frame by a reader that names a channel twice.
@@ -57,6 +59,7 @@ pub(crate) fn run() {
     };
     let program = program_line(false);
     let sdk = sdk_line(calls, Timed::Write);
+    let two = sdk_line(calls, Timed::Two);
     let program_read = program_line(true);
     let sdk_read = sdk_line(calls, Timed::Read);
     let twice = sdk_line(calls, Timed::Twice);
@@ -70,6 +73,7 @@ pub(crate) fn run() {
         ("leg to task", legs.0),
         ("leg to caller", legs.1),
         ("sdk", sdk),
+        ("sdk two indexes", two),
         ("program", program),
         ("sdk read", sdk_read),
         ("program read", program_read),
@@ -99,7 +103,8 @@ fn alone<T>(line: impl FnOnce(&sdk::Node, sdk::Subject) -> T) -> T {
 
 /// The spans of each of `rounds` rounds of `calls` writes of 2 values through an
 /// `sdk::Writer` at `node`, timed as `timed`, with the read of each frame through a
-/// reader of the same channels and client when `timed` reads.
+/// reader of the same channels and client when `timed` reads. The values of
+/// [`Timed::Two`] are of `plant.a` and `cell.c`, of two indexes.
 fn spans(
     node: &sdk::Node,
     subject: sdk::Subject,
@@ -108,9 +113,15 @@ fn spans(
     timed: Timed,
 ) -> Vec<Vec<Duration>> {
     let client = Client::connect(node, subject).expect("the client connects");
-    let config = sdk::write::Config::new(names());
+    let channels = match timed {
+        Timed::Two => ["plant.a", "cell.c"]
+            .map(|name| name.parse().expect("a name"))
+            .into(),
+        _ => names(),
+    };
+    let config = sdk::write::Config::new(channels);
     let mut writer = client.open_writer(config).expect("the writer opens");
-    let mut reader = (timed != Timed::Write).then(|| {
+    let mut reader = (!matches!(timed, Timed::Write | Timed::Two)).then(|| {
         let mut channels = names();
         if timed == Timed::Twice {
             channels.push(channels[0].clone());
@@ -129,7 +140,10 @@ fn spans(
         let written = writer.write(&values);
         // Before the read: no frame comes for a write that is not taken.
         assert!(
-            matches!(written, Ok(sdk::write::Outcome::Taken { .. })),
+            written.as_ref().is_ok_and(|outcomes| {
+                (outcomes.iter())
+                    .all(|(_, outcome)| matches!(outcome, Outcome::Taken { .. }))
+            }),
             "{written:?}"
         );
         if matches!(timed, Timed::Held | Timed::HeldWithin) {

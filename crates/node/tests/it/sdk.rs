@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 
 use env::tasks::{Group, Tasks};
-use sdk::write::{Config, Outcome, Refusal as Refused};
+use sdk::write::{Config, Outcome, Refusal as Refused, Series};
 use sdk::{Client, Error, Node, Subject};
 use types::ed25519::PrivateKey;
 use types::frame::Range;
@@ -92,6 +92,15 @@ fn now() -> i64 {
 fn taken(seq: u64, count: u32) -> Outcome {
     Outcome::Taken {
         range: Range { seq, count },
+    }
+}
+
+/// The series of `count` samples of `bytes` at `place`.
+fn of(place: usize, count: u32, bytes: &[u8]) -> Series<'_> {
+    Series {
+        place,
+        count,
+        bytes,
     }
 }
 
@@ -315,9 +324,10 @@ fn a_writer_writes_values_and_series_that_a_reader_gets_in_order() {
         writer.places().iter().map(|p| p.name.to_string()).collect();
     assert_eq!(names, ["plant.b", "plant.a", "plant.time"]);
     let (b, a, time) = (0, 1, 2);
-    assert_eq!(writer.index(), time);
+    let indexes: Vec<usize> = writer.places().iter().map(|p| p.index).collect();
+    assert_eq!(indexes, [time; 3]);
     let values = [(b, Value::I64(2)), (a, Value::I64(1))];
-    assert_eq!(writer.write(&values), Ok(taken(0, 1)));
+    assert_eq!(writer.write(&values), Ok(&[(time, taken(0, 1))][..]));
     let first = wait(&read);
     let stamp = first["plant.time"][0];
     assert!(
@@ -337,15 +347,15 @@ fn a_writer_writes_values_and_series_that_a_reader_gets_in_order() {
     let given = Value::Stamp(Stamp::from_nanos(stamp + 5));
     assert_eq!(
         writer.write(&[(a, Value::I64(3)), (time, given)]),
-        Ok(taken(1, 1))
+        Ok(&[(time, taken(1, 1))][..])
     );
     let second = wait(&read);
     assert_eq!(second["plant.time"], [stamp + 5]);
     assert_eq!(samples(&second), [("plant.a".into(), vec![3])]);
     let stamps = [stamp + 10, stamp + 20].map(i64::to_le_bytes).concat();
     let counts = [4_i64, 5].map(i64::to_le_bytes).concat();
-    let series = [(b, counts.as_slice()), (time, stamps.as_slice())];
-    assert_eq!(writer.write_series(2, &series), Ok(taken(2, 2)));
+    let series = [of(b, 2, &counts), of(time, 2, &stamps)];
+    assert_eq!(writer.write_series(&series), Ok(&[(time, taken(2, 2))][..]));
     assert_eq!(writer.close(), Ok(()));
     let third = wait(&read);
     assert_eq!(third["plant.time"], [stamp + 10, stamp + 20]);
@@ -372,7 +382,8 @@ fn a_write_of_a_value_of_another_type_sends_nothing_and_the_writer_goes_on() {
     };
     assert_eq!(error, value);
     assert_eq!(error.to_string(), format!("place {a} holds i64, not f64"));
-    assert_eq!(writer.write(&[(a, Value::I64(7))]), Ok(taken(0, 1)));
+    let taken = Ok(&[(1, taken(0, 1))][..]);
+    assert_eq!(writer.write(&[(a, Value::I64(7))]), taken);
     assert_eq!(wait(&read)["plant.a"], [7]);
     assert_eq!(writer.close(), Ok(()));
     assert_eq!(client.close(), Ok(()));
@@ -394,21 +405,209 @@ fn an_open_of_a_writer_of_an_unknown_name_gives_unknown_and_the_client_goes_on()
     rig.stop();
 }
 
-/// The `sdk` writes one group: it refuses channels of two indexes, and ends the write,
-/// so that a writer of each channel writes.
+/// The name and the place of the index of each place of `writer`.
+fn indexed(writer: &sdk::write::Writer) -> Vec<(String, usize)> {
+    let places = writer.places().iter();
+    places.map(|p| (p.name.to_string(), p.index)).collect()
+}
+
+/// A writer of two indexes gives each channel, then the index of each group that the
+/// channels do not name, in the order of the first channel of each group.
 #[test]
-fn an_open_of_a_writer_of_two_indexes_gives_malformed_and_the_client_goes_on() {
+fn a_writer_of_two_indexes_gives_its_channels_then_the_index_of_each_group() {
     let (mut rig, node, subject) = planted();
     let client = Client::connect(&node, subject).unwrap();
-    let channels = vec!["plant.a".parse().unwrap(), "cell.c".parse().unwrap()];
-    let opened = client.open_writer(Config::new(channels)).map(drop);
-    let malformed = Error::Stream(program::Error::Refused(Refusal::Malformed));
-    assert_eq!(opened, Err(malformed));
-    for name in ["plant.a", "cell.c"] {
-        let mut writer = client.open_writer(Config::new(vec![name.parse().unwrap()]));
-        let writer = writer.as_mut().unwrap();
-        assert_eq!(writer.write(&[(0, Value::I64(7))]), Ok(taken(0, 1)));
+    let channels = ["plant.a", "cell.c", "plant.b"].map(|n| n.parse().unwrap());
+    let writer = client.open_writer(Config::new(channels.into())).unwrap();
+    let places = [
+        ("plant.a".into(), 3),
+        ("cell.c".into(), 4),
+        ("plant.b".into(), 3),
+        ("plant.time".into(), 3),
+        ("cell.time".into(), 4),
+    ];
+    assert_eq!(indexed(&writer), places);
+    assert_eq!(writer.close(), Ok(()));
+    let channels = ["cell.time", "plant.a", "cell.c"].map(|n| n.parse().unwrap());
+    let writer = client.open_writer(Config::new(channels.into())).unwrap();
+    let places = [
+        ("cell.time".into(), 0),
+        ("plant.a".into(), 3),
+        ("cell.c".into(), 0),
+        ("plant.time".into(), 3),
+    ];
+    assert_eq!(indexed(&writer), places);
+    assert_eq!(writer.close(), Ok(()));
+    assert_eq!(client.close(), Ok(()));
+    rig.stop();
+}
+
+/// A writer of two indexes writes values with the node's stamps, values with their
+/// own stamps, and series of one count for each group, and a reader of each index
+/// gets each frame of its group.
+#[test]
+fn a_writer_of_two_indexes_writes_each_group_that_a_reader_of_each_gets() {
+    let (mut rig, node, subject) = planted();
+    let plant = reader(&node, &subject, "plant.*", 3);
+    let cell = reader(&node, &subject, "cell.*", 3);
+    let client = Client::connect(&node, subject).unwrap();
+    let channels = ["cell.c", "plant.a"].map(|n| n.parse().unwrap());
+    let mut writer = client.open_writer(Config::new(channels.into())).unwrap();
+    let (c, a, cell_time, plant_time) = (0, 1, 2, 3);
+    let both = |seq, count| {
+        let taken = [
+            (cell_time, taken(seq, count)),
+            (plant_time, taken(seq, count)),
+        ];
+        Ok(taken.to_vec())
+    };
+    let values = [(a, Value::I64(1)), (c, Value::I64(2))];
+    assert_eq!(writer.write(&values).map(<[_]>::to_vec), both(0, 1));
+    let (first, other) = (wait(&plant), wait(&cell));
+    assert_eq!((&first["plant.a"], &other["cell.c"]), (&vec![1], &vec![2]));
+    let stamps = [first["plant.time"][0], other["cell.time"][0]];
+    let stamp = stamps[0].max(stamps[1]);
+    for stamp in stamps {
+        assert!(
+            (now() - stamp).abs() < 60_000_000_000,
+            "{stamp} is near now"
+        );
     }
+    let at = |nanos| Value::Stamp(Stamp::from_nanos(nanos));
+    let values = [
+        (plant_time, at(stamp + 6)),
+        (c, Value::I64(3)),
+        (a, Value::I64(4)),
+        (cell_time, at(stamp + 5)),
+    ];
+    assert_eq!(writer.write(&values).map(<[_]>::to_vec), both(1, 1));
+    let (second, other) = (wait(&plant), wait(&cell));
+    assert_eq!(
+        (&second["plant.time"], &second["plant.a"]),
+        (&vec![stamp + 6], &vec![4])
+    );
+    assert_eq!(
+        (&other["cell.time"], &other["cell.c"]),
+        (&vec![stamp + 5], &vec![3])
+    );
+    let bytes = |values: &[i64]| values.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let (plant_stamps, plant_values): (Vec<u8>, Vec<u8>) =
+        (bytes(&[stamp + 10, stamp + 20]), bytes(&[7, 8]));
+    let (cell_stamps, cell_values): (Vec<u8>, Vec<u8>) =
+        (bytes(&[stamp + 15]), bytes(&[9]));
+    let series = [
+        of(plant_time, 2, &plant_stamps),
+        of(c, 1, &cell_values),
+        of(a, 2, &plant_values),
+        of(cell_time, 1, &cell_stamps),
+    ];
+    let given = Ok(vec![(cell_time, taken(2, 1)), (plant_time, taken(2, 2))]);
+    assert_eq!(writer.write_series(&series).map(<[_]>::to_vec), given);
+    assert_eq!(writer.close(), Ok(()));
+    let (third, other) = (wait(&plant), wait(&cell));
+    assert_eq!(third["plant.time"], [stamp + 10, stamp + 20]);
+    assert_eq!(third["plant.a"], [7, 8]);
+    assert_eq!(
+        (&other["cell.time"], &other["cell.c"]),
+        (&vec![stamp + 15], &vec![9])
+    );
+    assert_eq!(client.close(), Ok(()));
+    rig.stop();
+}
+
+/// Values that stamp one group of two, and series of one group with two counts, each
+/// give their exact error in the places of the writer with nothing sent, and the
+/// writer goes on.
+#[test]
+fn a_call_of_two_indexes_that_the_writer_cannot_send_gives_its_error_in_its_places() {
+    let (mut rig, node, subject) = planted();
+    let plant = reader(&node, &subject, "plant.*", 1);
+    let client = Client::connect(&node, subject).unwrap();
+    let channels = ["cell.c", "plant.a", "plant.b"].map(|n| n.parse().unwrap());
+    let mut writer = client.open_writer(Config::new(channels.into())).unwrap();
+    let (c, a, b, cell_time, plant_time) = (0, 1, 2, 3, 4);
+    let stamp = Value::Stamp(Stamp::from_nanos(now()));
+    let values = [(a, Value::I64(1)), (c, Value::I64(2)), (plant_time, stamp)];
+    let absent = types::frame::Error::IndexAbsent {
+        entry: c,
+        index: cell_time,
+    };
+    let absent = Err(Error::Stream(program::Error::Layout(absent)));
+    assert_eq!(writer.write(&values).map(<[_]>::to_vec), absent);
+    let (one, two) = (
+        1_i64.to_le_bytes(),
+        [1_i64, 2].map(i64::to_le_bytes).concat(),
+    );
+    let series = [
+        of(plant_time, 2, &two),
+        of(b, 1, &one),
+        of(c, 1, &one),
+        of(a, 2, &two),
+        of(cell_time, 1, &one),
+    ];
+    let count = program::Error::Count {
+        place: a,
+        count: 2,
+        other: b,
+        other_count: 1,
+    };
+    let counted = writer.write_series(&series).map(<[_]>::to_vec);
+    assert_eq!(counted, Err(Error::Stream(count)));
+    let values = [(b, Value::I64(5)), (plant_time, stamp)];
+    let taken = Ok(&[(plant_time, taken(0, 1))][..]);
+    assert_eq!(writer.write(&values), taken);
+    let frame = wait(&plant);
+    assert_eq!(frame["plant.b"], [5]);
+    assert!(!frame.contains_key("plant.a"), "{frame:?}");
+    assert_eq!(writer.close(), Ok(()));
+    assert_eq!(client.close(), Ok(()));
+    rig.stop();
+}
+
+/// Once a channel of one group of two is removed, each write of that group gives
+/// `Partial` with the exact channels written and not written, the other group goes
+/// on, and the close gives no error for the group that ended.
+#[test]
+fn a_write_of_a_group_whose_channel_was_removed_gives_partial_and_the_writer_goes_on() {
+    let (mut rig, node, subject) = planted();
+    let client = Client::connect(&node, subject).unwrap();
+    let channels = ["cell.c", "plant.a"].map(|n| n.parse().unwrap());
+    let mut writer = client.open_writer(Config::new(channels.into())).unwrap();
+    let (c, a, cell_time, plant_time) = (0, 1, 2, 3);
+    let cell =
+        "channel \"cell.c\" {\n  data_type = \"i64\"\n  index = \"cell.time\"\n}\n";
+    rig.config(&crate::plant::CHANNELS.replace(cell, ""));
+    rig.apply();
+    let values = [(c, Value::I64(1)), (a, Value::I64(2))];
+    let mut seq = 0;
+    let partial = rig.wait("a write gives partial", || {
+        match writer.write(&values).map(<[_]>::to_vec) {
+            Ok(outcomes) => {
+                seq += 1;
+                Err(format!("{outcomes:?}"))
+            }
+            Err(error) => Ok(error),
+        }
+    });
+    let names = |names: &[&str]| names.iter().map(|n| n.parse().unwrap()).collect();
+    let removed = Outcome::Ended(sdk::write::End::Removed);
+    let partial_at = |seq| Error::Partial {
+        written: names(&["plant.a", "plant.time"]),
+        unwritten: names(&["cell.c", "cell.time"]),
+        outcomes: vec![(cell_time, removed), (plant_time, taken(seq, 1))],
+    };
+    assert_eq!(partial, partial_at(seq));
+    assert_eq!(
+        partial.to_string(),
+        "channels cell.c, cell.time were not written; channels plant.a, plant.time were"
+    );
+    assert_eq!(
+        writer.write(&values).map(<[_]>::to_vec),
+        Err(partial_at(seq + 1))
+    );
+    let taken = Ok(&[(plant_time, taken(seq + 2, 1))][..]);
+    assert_eq!(writer.write(&[(a, Value::I64(3))]), taken);
+    assert_eq!(writer.close(), Ok(()));
     assert_eq!(client.close(), Ok(()));
     rig.stop();
 }
@@ -421,12 +620,14 @@ fn a_write_of_series_whose_bytes_are_not_count_samples_is_refused() {
     let client = Client::connect(&node, subject).unwrap();
     let channels = vec!["plant.a".parse().unwrap()];
     let mut writer = client.open_writer(Config::new(channels)).unwrap();
-    let (a, time) = (0, writer.index());
+    let (a, time) = (0, 1);
     let stamps = [1_i64, 2].map(i64::to_le_bytes).concat();
     let short = 4_i64.to_le_bytes();
-    let written = writer.write_series(2, &[(time, &stamps), (a, &short)]);
-    assert_eq!(written, Ok(Outcome::Refused(Refused::Codec)));
-    assert_eq!(writer.write(&[(a, Value::I64(5))]), Ok(taken(0, 1)));
+    let written = writer.write_series(&[of(time, 2, &stamps), of(a, 2, &short)]);
+    let refused = Outcome::Refused(Refused::Codec);
+    assert_eq!(written, Ok(&[(time, refused)][..]));
+    let taken = Ok(&[(time, taken(0, 1))][..]);
+    assert_eq!(writer.write(&[(a, Value::I64(5))]), taken);
     assert_eq!(writer.close(), Ok(()));
     assert_eq!(client.close(), Ok(()));
     rig.stop();
@@ -441,10 +642,11 @@ fn a_close_of_a_client_with_a_live_writer_returns_and_ends_the_writer() {
     let channels = vec!["plant.a".parse().unwrap()];
     let mut writer = client.open_writer(Config::new(channels)).unwrap();
     let a = 0;
-    assert_eq!(writer.write(&[(a, Value::I64(1))]), Ok(taken(0, 1)));
+    let taken = Ok(&[(1, taken(0, 1))][..]);
+    assert_eq!(writer.write(&[(a, Value::I64(1))]), taken);
     assert_eq!(client.close(), Ok(()));
     assert_eq!(writer.write(&[(a, Value::I64(2))]), Err(Error::Closed));
-    assert_eq!(writer.write_series(1, &[]), Err(Error::Closed));
+    assert_eq!(writer.write_series(&[]), Err(Error::Closed));
     assert_eq!(writer.close(), Err(Error::Closed));
     rig.stop();
 }
@@ -479,7 +681,8 @@ fn the_node_stamps_each_write_of_values_after_the_one_before_it() {
     let channels = vec!["plant.a".parse().unwrap()];
     let mut writer = client.open_writer(Config::new(channels)).unwrap();
     for seq in 0..3 {
-        assert_eq!(writer.write(&[(0, Value::I64(1))]), Ok(taken(seq, 1)));
+        let taken = Ok(&[(1, taken(seq, 1))][..]);
+        assert_eq!(writer.write(&[(0, Value::I64(1))]), taken);
     }
     let stamps: Vec<i64> = (0..3).map(|_| wait(&read)["plant.time"][0]).collect();
     assert!(stamps.is_sorted_by(|a, b| a < b), "{stamps:?} increase");
@@ -504,14 +707,17 @@ fn a_writer_of_a_channel_given_twice_writes_it_at_each_place() {
     let names: Vec<String> =
         writer.places().iter().map(|p| p.name.to_string()).collect();
     assert_eq!(names, ["plant.a", "plant.a", "plant.time"]);
-    assert_eq!(writer.index(), 2);
+    assert!(writer.places().iter().all(|p| p.index == 2));
     let unordered = types::frame::Error::Unordered { entry: 1, last: 0 };
     assert_eq!(
         writer.write(&[(0, Value::I64(3)), (1, Value::I64(4))]),
         Err(Error::Stream(program::Error::Layout(unordered)))
     );
-    assert_eq!(writer.write(&[(0, Value::I64(1))]), Ok(taken(0, 1)));
-    assert_eq!(writer.write(&[(1, Value::I64(2))]), Ok(taken(1, 1)));
+    let taken = |seq| Ok(vec![(2, taken(seq, 1))]);
+    let written = writer.write(&[(0, Value::I64(1))]).map(<[_]>::to_vec);
+    assert_eq!(written, taken(0));
+    let written = writer.write(&[(1, Value::I64(2))]).map(<[_]>::to_vec);
+    assert_eq!(written, taken(1));
     assert_eq!(wait(&read)["plant.a"], [1]);
     assert_eq!(wait(&read)["plant.a"], [2]);
     assert_eq!(writer.close(), Ok(()));
@@ -527,14 +733,14 @@ fn a_writer_that_names_the_index_writes_its_stamp_at_that_place() {
     let client = Client::connect(&node, subject).unwrap();
     let channels = ["plant.time".parse().unwrap(), "plant.a".parse().unwrap()];
     let mut writer = client.open_writer(Config::new(channels.into())).unwrap();
-    assert_eq!(writer.index(), 0);
-    assert_eq!(writer.places().len(), 2);
+    let indexes: Vec<usize> = writer.places().iter().map(|p| p.index).collect();
+    assert_eq!(indexes, [0, 0]);
     let stamp = now();
     let values = [
         (1, Value::I64(4)),
         (0, Value::Stamp(Stamp::from_nanos(stamp))),
     ];
-    assert_eq!(writer.write(&values), Ok(taken(0, 1)));
+    assert_eq!(writer.write(&values), Ok(&[(0, taken(0, 1))][..]));
     let frame = wait(&read);
     assert_eq!(
         (&frame["plant.time"], &frame["plant.a"]),
@@ -566,19 +772,14 @@ fn a_call_that_the_writer_cannot_send_gives_its_error_and_the_writer_goes_on() {
     };
     let past = Err(Error::Stream(program::Error::Layout(range)));
     assert_eq!(writer.write(&[(2, Value::I64(1))]), past);
-    assert_eq!(
-        writer.write_series(1, &[(2, 1_i64.to_le_bytes().as_slice())]),
-        past
-    );
+    let one = 1_i64.to_le_bytes();
+    assert_eq!(writer.write_series(&[of(2, 1, &one)]), past);
     let layout = |error| Err(Error::Stream(program::Error::Layout(error)));
     let twice = [(0, Value::I64(1)), (0, Value::I64(2))];
     let unordered = types::frame::Error::Unordered { entry: 0, last: 0 };
     assert_eq!(writer.write(&twice), layout(unordered));
     let absent = types::frame::Error::IndexAbsent { entry: 0, index: 1 };
-    assert_eq!(
-        writer.write_series(1, &[(0, 1_i64.to_le_bytes().as_slice())]),
-        layout(absent)
-    );
+    assert_eq!(writer.write_series(&[of(0, 1, &one)]), layout(absent));
     let samples = 4096_u32;
     let stamps: Vec<u8> = (1..=i64::from(samples))
         .flat_map(i64::to_le_bytes)
@@ -589,10 +790,11 @@ fn a_call_that_the_writer_cannot_send_gives_its_error_and_the_writer_goes_on() {
         largest: 57344,
     };
     assert_eq!(
-        writer.write_series(samples, &[(0, values.as_slice()), (1, stamps.as_slice())]),
+        writer.write_series(&[of(0, samples, &values), of(1, samples, &stamps)]),
         Err(Error::Stream(program::Error::Pool(large)))
     );
-    assert_eq!(writer.write(&[(0, Value::I64(5))]), Ok(taken(0, 1)));
+    let taken = Ok(&[(1, taken(0, 1))][..]);
+    assert_eq!(writer.write(&[(0, Value::I64(5))]), taken);
     assert_eq!(writer.close(), Ok(()));
     assert_eq!(client.close(), Ok(()));
     rig.stop();
@@ -607,10 +809,10 @@ fn a_layout_error_names_the_places_of_the_writer() {
     let channels = ["plant.b".parse().unwrap(), "plant.a".parse().unwrap()];
     let mut writer = client.open_writer(Config::new(channels.into())).unwrap();
     let (b, a, time) = (0, 1, 2);
-    assert_eq!(writer.index(), time);
     let one = 1_i64.to_le_bytes();
-    let absent = writer.write_series(1, &[(a, one.as_slice())]);
+    let absent = writer.write_series(&[of(a, 1, &one)]).map(<[_]>::to_vec);
     let twice = writer.write(&[(b, Value::I64(1)), (b, Value::I64(2))]);
+    let twice = twice.map(<[_]>::to_vec);
     let layout = |error| Err(Error::Stream(program::Error::Layout(error)));
     assert_eq!(
         (absent, twice),
@@ -656,9 +858,10 @@ fn each_call_after_the_node_ended_the_session_gives_the_cause() {
     assert_eq!(client.close(), Err(ended));
 }
 
-/// Only Unix: `counting::Local` names the thread with `pthread_self`. A warm `write`,
-/// `write_series`, and `next` make no allocation on the caller's thread. Two calls of
-/// `count` at once panic, so this is the one test of the binary that counts (#3319).
+/// Only Unix: `counting::Local` names the thread with `pthread_self`. A warm `write`
+/// of one index and of two, `write_series`, and `next` make no allocation on the
+/// caller's thread. Two calls of `count` at once panic, so this is the one test of the
+/// binary that counts (#3319).
 #[cfg(unix)]
 #[test]
 fn a_warm_call_makes_no_allocation_on_the_thread_of_its_caller() {
@@ -673,15 +876,39 @@ fn a_warm_call_makes_no_allocation_on_the_thread_of_its_caller() {
     let values = [(0, Value::I64(1)), (1, Value::I64(2))];
     let mut write = || {
         let written = writer.write(&values);
-        assert!(matches!(written, Ok(Outcome::Taken { .. })), "{written:?}");
+        assert!(
+            matches!(written, Ok([(2, Outcome::Taken { .. })])),
+            "{written:?}"
+        );
     };
     (0..WARMUP).for_each(|_| write());
     let ((), allocations) = crate::ALLOCATOR.count(|| (0..CALLS).for_each(|_| write()));
     assert_eq!(allocations, 0, "{CALLS} warm writes of values allocate");
     assert_eq!(writer.close(), Ok(()));
 
+    let two = ["plant.a", "cell.c"].map(|name| name.parse().unwrap());
+    let mut writer = client.open_writer(Config::new(two.to_vec())).unwrap();
+    let values = [(1, Value::I64(1)), (0, Value::I64(2))];
+    let mut write = || {
+        let written = writer.write(&values);
+        assert!(
+            matches!(
+                written,
+                Ok([(2, Outcome::Taken { .. }), (3, Outcome::Taken { .. })])
+            ),
+            "{written:?}"
+        );
+    };
+    (0..WARMUP).for_each(|_| write());
+    let ((), allocations) = crate::ALLOCATOR.count(|| (0..CALLS).for_each(|_| write()));
+    assert_eq!(
+        allocations, 0,
+        "{CALLS} warm writes of two indexes allocate"
+    );
+    assert_eq!(writer.close(), Ok(()));
+
     let mut writer = client.open_writer(config()).unwrap();
-    let index = writer.index();
+    let index = writer.places()[0].index;
     let len = 8 * usize::try_from(SAMPLES).unwrap();
     let (values, mut stamps) = (vec![3_u8; len], vec![0_u8; len]);
     let mut next = now() + 1_000_000_000;
@@ -690,9 +917,12 @@ fn a_warm_call_makes_no_allocation_on_the_thread_of_its_caller() {
             stamp.copy_from_slice(&next.to_le_bytes());
             next += 1;
         }
-        let series = [(0, values.as_slice()), (index, stamps.as_slice())];
-        let written = writer.write_series(SAMPLES, &series);
-        assert!(matches!(written, Ok(Outcome::Taken { .. })), "{written:?}");
+        let series = [of(0, SAMPLES, &values), of(index, SAMPLES, &stamps)];
+        let written = writer.write_series(&series);
+        assert!(
+            matches!(written, Ok([(2, Outcome::Taken { .. })])),
+            "{written:?}"
+        );
     };
     (0..WARMUP).for_each(|_| write());
     let ((), allocations) = crate::ALLOCATOR.count(|| (0..CALLS).for_each(|_| write()));

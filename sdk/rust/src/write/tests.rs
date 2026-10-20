@@ -139,7 +139,10 @@ fn answered(frame: &mut Frame, outcome: impl Fn(usize) -> Outcome) {
         .collect();
     groups.sort_unstable_by(|a, b| b.cmp(a));
     groups.dedup();
-    frame.outcomes = groups.into_iter().map(|group| (group, outcome(group))).collect();
+    frame.outcomes = groups
+        .into_iter()
+        .map(|group| (group, outcome(group)))
+        .collect();
 }
 
 /// A writer of `channels` whose open gives `places()`.
@@ -359,7 +362,8 @@ fn a_write_that_stamps_each_group_sends_its_stamps() {
 }
 
 #[test]
-fn a_write_that_stamps_some_groups_gives_index_absent_in_its_places_and_sends_nothing() {
+fn a_write_that_stamps_some_groups_gives_index_absent_in_its_places_and_sends_nothing()
+{
     let (mut writer, served) = writer_of(&["heat", "count", "level"], by_group);
     let stamp = Value::Stamp(Stamp::from_nanos(5));
     let values = [(2, Value::F64(1.0)), (0, Value::I64(8)), (3, stamp)];
@@ -431,7 +435,12 @@ fn a_write_of_series_of_one_group_with_two_counts_gives_count_in_its_places() {
         of(3, 1, &one),
     ];
     assert_eq!(writer.write_series(&both), count(0, 2, 3, 1));
-    let even = [of(4, 1, &one), of(1, 1, &one), of(0, 2, &two), of(3, 2, &two)];
+    let even = [
+        of(4, 1, &one),
+        of(1, 1, &one),
+        of(0, 2, &two),
+        of(3, 2, &two),
+    ];
     let given: Given<'_> = Ok(&[(3, WAITING), (4, by_group(0))]);
     assert_eq!(writer.write_series(&even), given);
     assert_eq!(writer.close(), Ok(()));

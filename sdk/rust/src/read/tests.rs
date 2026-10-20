@@ -519,10 +519,6 @@ fn a_layout_puts_each_name_at_its_place_then_the_index_unless_a_name_names_it() 
         (&["plant.a", "cell.c"], None),
     ];
     for (named, layout) in cases {
-        assert_eq!(
-            super::layout(&names(named), &entries),
-            layout,
-            "{named:?}"
-        );
+        assert_eq!(super::layout(&names(named), &entries), layout, "{named:?}");
     }
 }

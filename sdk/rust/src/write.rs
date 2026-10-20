@@ -375,8 +375,10 @@ impl Writer {
         self.frame.sort();
         let parts = &self.frame.parts;
         for pair in parts.windows(2) {
-            if pair[0].node == pair[1].node {
-                let (entry, last) = (pair[1].place, pair[0].place);
+            if let [last, next] = pair
+                && last.node == next.node
+            {
+                let (entry, last) = (next.place, last.place);
                 return layout(frame::Error::Unordered { entry, last });
             }
         }
