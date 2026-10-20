@@ -69,9 +69,6 @@ pub(super) struct Changes {
     /// The status of the first status change, or `BadNoSubscription` when open62541
     /// deleted the subscription with none.
     ended: Cell<Option<Status>>,
-    /// The count of Publish requests in flight that the first change into the empty
-    /// buffer replaced with 0, and that [`Changes::take`] restores.
-    publishes: Cell<u16>,
 }
 
 impl Changes {
@@ -110,15 +107,13 @@ impl Changes {
         let mut buffer = self.buffer.borrow_mut();
         if buffer.is_empty() {
             // SAFETY: the caller keeps the client alive.
-            self.publishes
-                .set(unsafe { ffi::shim_client_publishes(client, 0) });
+            unsafe { ffi::shim_client_publishes(client, true) };
         }
         buffer.push(change);
     }
 
     /// Swaps the changes into `given`, which it clears first. When it gives changes,
-    /// it resumes the Publish requests of `client` at the count that the stop
-    /// replaced, so a count that open62541 lowered holds.
+    /// it resumes the Publish requests of `client`.
     ///
     /// # Safety
     ///
@@ -128,7 +123,7 @@ impl Changes {
         mem::swap(given, &mut self.buffer.borrow_mut());
         if !given.is_empty() {
             // SAFETY: the caller keeps the client alive.
-            unsafe { ffi::shim_client_publishes(client, self.publishes.get()) };
+            unsafe { ffi::shim_client_publishes(client, false) };
         }
     }
 }
@@ -210,7 +205,9 @@ impl Client {
             return Err(Status::BAD_OUT_OF_RANGE);
         }
         // SAFETY: the client lives.
-        unsafe { ffi::shim_client_publishes(self.raw.as_ptr(), PUBLISHES) };
+        unsafe { ffi::shim_client_publish_count(self.raw.as_ptr(), PUBLISHES) };
+        // SAFETY: the client lives.
+        unsafe { ffi::shim_client_publishes(self.raw.as_ptr(), false) };
         let sampling = ms(sampling);
         let queue = queue(interval, sampling);
         let build =
@@ -263,8 +260,9 @@ impl Client {
     ///
     /// The errors of [`Client::idle`]. Once no change is left: the status of the
     /// first status change of the subscription, which can be Good, such as
-    /// `GoodSubscriptionTransferred`, or `BadNoSubscription` when open62541 deleted it
-    /// with no status change.
+    /// `GoodSubscriptionTransferred`, `BadTooManyPublishRequests` when the server
+    /// refuses a Publish request while the client keeps 1 in flight, or
+    /// `BadNoSubscription` when open62541 deleted it with no status change.
     #[cfg_attr(
         not(any(test, feature = "sim")),
         expect(dead_code, reason = "PR 5 of #2622 calls it")

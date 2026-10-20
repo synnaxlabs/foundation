@@ -334,9 +334,9 @@ fn refused(
     .0
 }
 
-/// open62541 lowers its count of Publish requests at each refusal, and deletes the
-/// subscription at a count of 1. While a change waits, the count is 0, so a refusal
-/// of a request sent before the stop leaves the subscription, and the next change
+/// open62541 lowers its count of Publish requests at each refusal, and ends the
+/// subscription at a count of 1. A refusal of a request sent before the stop of a
+/// waiting change lowers the count to 1 and keeps the subscription, so the next change
 /// comes, then stops the Publish requests again.
 #[test]
 fn a_refusal_while_a_change_waits_keeps_the_subscription() {
@@ -345,13 +345,23 @@ fn a_refusal_while_a_change_waits_keeps_the_subscription() {
     assert_eq!(next, Ok(vec![changed_to(3.0, false)]));
 }
 
-/// A server that refuses each Publish request ends the changes once the count is 1,
-/// with no service call from within the answer.
+/// The resume after a refusal while a change waits sends 1 Publish request, not
+/// [`PUBLISHES`], so the next refusal comes at a count of 1 and ends the changes with
+/// its status.
+#[test]
+fn a_resume_after_a_refusal_keeps_the_lowered_count() {
+    let (one, next) = bounded(|| refused(2));
+    assert_eq!(one, Ok(vec![changed_to(1.0, false)]));
+    assert_eq!(next, Err(TOO_MANY));
+}
+
+/// A server that refuses each Publish request ends the changes with the status of the
+/// refusal once the count is 1, with no service call from within the answer.
 #[test]
 fn a_refusal_at_one_publish_request_ends_the_changes() {
     let (one, next) = bounded(|| refused(u32::MAX));
     assert_eq!(one, Ok(vec![changed_to(1.0, false)]));
-    assert_eq!(next, Err(Status::BAD_NO_SUBSCRIPTION));
+    assert_eq!(next, Err(TOO_MANY));
 }
 
 /// Gives the publishing interval of a subscribe at a sampling of 1 s on a server that

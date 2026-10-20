@@ -220,6 +220,7 @@ struct UA_Client {
     LIST_HEAD(, UA_Client_Subscription) subscriptions;
     UA_UInt32 monitoredItemHandles;
     UA_UInt16 currentlyOutStandingPublishRequests;
+    UA_Boolean publishStopped; /* The caller sends no PublishRequest */
 
     /* Internal namespaces. The table maps the namespace Uri to its index. This
      * is used for the automatic namespace mapping in de/encoding. */
