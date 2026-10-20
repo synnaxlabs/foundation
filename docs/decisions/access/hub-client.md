@@ -518,11 +518,14 @@
   and approved on #3558 at 2026-10-20T09:20:44Z
   (https://github.com/synnaxlabs/foundation/pull/3558#issuecomment-6287720622).
   Supersedes the `Writer::index` of
-  https://github.com/synnaxlabs/foundation/issues/3266#issuecomment-6255066811. A
-  write panics, before it sends, on a draft of a group that its writer does not have,
-  which only a draft of another writer, swapped in, holds.
-  `wire::hub::write::Replies::frames` gives the frame of the last send, so the writer
-  keeps only the outcomes of that frame. Plan:
+  https://github.com/synnaxlabs/foundation/issues/3266#issuecomment-6255066811. The
+  writer keeps the address of the block of the draft that it gave, and a write panics,
+  before it sends, on a draft in another block: after a swap of two `&mut Draft`, the
+  next write of each writer panics. `wire::hub::write::Replies::frames` gives the frame
+  of the last send, so the writer keeps only the outcomes of that frame. Both ruled by
+  `laptop.architect` at 2026-10-20T09:26:59Z
+  (https://github.com/synnaxlabs/foundation/pull/3558#issuecomment-6287830271). Lost: a
+  check of the key set, which cannot tell two writers apart. Plan:
   https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6286854444. Lost: a
   draft that takes one count for each group, which makes the caller find the group of
   each place.

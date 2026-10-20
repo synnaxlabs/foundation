@@ -43,6 +43,9 @@ pub struct Writer {
     set: Arc<KeySet>,
     /// The frame that the next write sends.
     draft: Option<Draft>,
+    /// The address of the body of the last draft given, which a swap of two
+    /// `&mut Draft` does not move.
+    drafted: usize,
     replies: Replies,
     /// The entry and byte length of each series of the last draft.
     lens: Vec<(usize, usize)>,
@@ -93,6 +96,7 @@ impl Writer {
             outcomes: Vec::with_capacity(groups),
             set,
             draft: None,
+            drafted: 0,
             cut: false,
             ended: None,
         })
@@ -112,8 +116,8 @@ impl Writer {
     /// series of one group holds one count. The entry of place `n` is `n`. A frame holds the index series of each
     /// group that it holds. It drops a held draft that no write sent. While the pool is
     /// full, it waits as each block of the session waits: the blocks of a frame come
-    /// back as the node acknowledges it. The writer holds the draft, so a draft of
-    /// another writer reaches its write only through a swap of two `&mut Draft`.
+    /// back as the node acknowledges it. The writer holds the draft; after a swap of
+    /// two `&mut Draft`, the next [`Writer::write`] of each writer panics.
     ///
     /// # Errors
     ///
@@ -153,6 +157,7 @@ impl Writer {
             // A group holds a count when it holds a series, so in group order.
             draft.set_counts(0, counts.iter().flatten().map(|&(_, count)| count));
         }
+        self.drafted = draft.body_mut().as_ptr().addr();
         Ok(self.draft.insert(draft))
     }
 
@@ -185,21 +190,17 @@ impl Writer {
     ///
     /// # Panics
     ///
-    /// When the writer holds no draft, or a draft of a group that it does not have,
-    /// which only a draft of another writer, swapped in, holds.
+    /// When the writer holds no draft, or holds a draft that [`Writer::draft`] of this
+    /// writer did not give.
     pub async fn write(&mut self, time: Time) -> Result<&[(usize, Outcome)], Error> {
-        let frame = self
+        let mut frame = self
             .draft
             .take()
             .expect("a write sends the draft of a call of `Writer::draft`");
-        let groups = self.set.groups().len();
-        // The ranges are in group order.
-        if let Some((group, _)) = frame.ranges().last() {
-            assert!(
-                to_usize(group) < groups,
-                "a write sends a draft of its own groups, not group {group} of {groups}"
-            );
-        }
+        assert!(
+            frame.body_mut().as_ptr().addr() == self.drafted,
+            "a write sends the draft that `Writer::draft` of its writer gave"
+        );
         self.check()?;
         let form = frame.form();
         let unsent = |count| {

@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::future::poll_fn;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::pin;
 use std::rc::Rc;
 use std::task::Poll;
@@ -1121,22 +1122,39 @@ fn panics_at_a_write_after_an_unsent_with_no_new_draft() {
     });
 }
 
-/// A draft of two groups, swapped into a writer of one group, is a bug of the
-/// program: the write panics before it sends.
+/// After a swap of the drafts of two writers of one shape, the write of each panics
+/// before it sends, and each writer goes on with its own drafts.
 #[test]
-#[should_panic(expected = "a write sends a draft of its own groups, not group 1 of 1")]
-fn panics_at_a_write_of_a_swapped_draft_of_a_group_that_the_writer_does_not_have() {
+fn panics_at_each_write_of_a_draft_that_its_writer_did_not_give() {
     on_hub(797, |session, _| async move {
-        let mut one = session.writer(config(&["value"], 1)).await.expect("opens");
-        let mut two = session
-            .writer(config(&["value", "b"], 1))
-            .await
-            .expect("opens");
-        let mine = frame(&mut one, 1, 0, &[(2, 1)]).await;
-        let series = [(0, 1, 8), (1, 1, 8), (2, 1, 8), (3, 1, 8)];
-        let other = two.draft(Form::Raw, &series).await.expect("a frame");
+        let mut first = session.writer(config(&["value"], 1)).await.expect("opens");
+        let mut second = session.writer(config(&["b"], 1)).await.expect("opens");
+        let series = [(0, 1, 8), (1, 1, 8)];
+        let mine = first.draft(Form::Raw, &series).await.expect("a frame");
+        let other = second.draft(Form::Raw, &series).await.expect("a frame");
         std::mem::swap(mine, other);
-        drop(one.write(Time::Node).await.map(<[_]>::to_vec));
+        for writer in [&mut first, &mut second] {
+            let panic = poll_fn(|cx| {
+                Poll::Ready(catch_unwind(AssertUnwindSafe(|| {
+                    drop(pin!(writer.write(Time::Node)).poll(cx));
+                })))
+            })
+            .await
+            .expect_err("panics");
+            assert_eq!(
+                panic.downcast_ref::<&str>(),
+                Some(
+                    &"a write sends the draft that `Writer::draft` of its writer gave"
+                ),
+            );
+        }
+        for writer in [&mut first, &mut second] {
+            writer.draft(Form::Raw, &series).await.expect("a frame");
+            assert_eq!(
+                writer.write(Time::Node).await.map(<[_]>::to_vec),
+                Ok(one(taken(0, 1)))
+            );
+        }
     });
 }
 
