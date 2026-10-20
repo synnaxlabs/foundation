@@ -2937,12 +2937,19 @@ fn reads_over_a_secure_channel_of_each_policy_in_each_mode() {
                 );
                 assert!(outcome.result.is_ok(), "{at}: {:?}", outcome.result);
                 assert_eq!(errors(&outcome.statuses), [], "{at}");
+                assert_eq!(notes(&outcome.statuses), Vec::<String>::new(), "{at}");
                 let mut served = served(&outcome, A);
-                if stage.subscribed {
+                let frames = if stage.subscribed {
                     served.dedup();
+                    2
                 } else {
-                    assert_eq!(outcome.frames.len(), 11, "{at}");
-                }
+                    11
+                };
+                assert_eq!(
+                    keys(&outcome.frames),
+                    vec![vec![1, 2, 3, 4]; frames],
+                    "{at}"
+                );
                 assert_eq!(values(&outcome.frames, 2), served, "{at}");
             }
         }
