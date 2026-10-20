@@ -758,6 +758,12 @@ impl Replies {
         Ok(())
     }
 
+    /// The count of frames sent, which is the frame of the last [`Replies::sent`].
+    #[must_use]
+    pub fn frames(&self) -> u64 {
+        self.sent
+    }
+
     /// Whether each group of each frame sent got its outcome.
     #[must_use]
     pub fn answered(&self) -> bool {
