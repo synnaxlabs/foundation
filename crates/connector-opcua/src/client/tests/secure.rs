@@ -272,7 +272,8 @@ fn element(der: &mut CBS, tag: i64) -> CBS {
     out
 }
 
-/// The key read skips the attributes, so only a strict read sees their lengths.
+/// The key read skips what the attributes hold, so only a strict read sees the lengths
+/// inside them.
 #[test]
 fn the_long_key_nests_its_pad_in_one_attribute() {
     let mut der = CBS {
