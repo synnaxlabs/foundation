@@ -9,7 +9,8 @@
   https://github.com/synnaxlabs/foundation/pull/3272#issuecomment-6255674282). The
   `[[test]]` entry of each kind is part of the oracle. The scenarios use only public
   items: the rig of `connector::testing`, `hub::testing::Env`, the sim, `env`,
-  `document`, `types`, and the `kind`, `status`, and `cancel` modules of `connector`.
+  `document`, `types`, and the `kind`, `status`, `reader`, and `cancel` modules of
+  `connector`.
   Each runs two sim nodes: the plant (the rig and the connector) and the device (the
   kind's simulator). A `Suite` gives plain inputs: its table, a setup that defines what
   the connector needs and starts each writer that feeds it, its simulator, the name of
@@ -20,8 +21,8 @@
   other attributes to check (`laptop.architect-2`, 2026-10-20T14:37:34Z:
   https://github.com/synnaxlabs/foundation/issues/2642#issuecomment-6293427967). The
   simulator of a kind that subscribes changes its data at least every 100 ms, so its
-  progress grows: the simulator of `opcua` changes each variable every 100 ms, so the
-  suite runs the default mode, which subscribes.
+  progress grows (item 1 of the same comment): the simulator of `opcua` changes each
+  variable every 100 ms, so the suite runs the default mode, which subscribes.
   `polled = true` keeps its crate and ONE NODE tests (`laptop.architect-2`,
   2026-10-20T10:03:28Z:
   https://github.com/synnaxlabs/foundation/pull/3548#issuecomment-6288442532). People
@@ -130,12 +131,14 @@
      device for 10 s, the simulator for 5 s, and its stop for 10 s. A second run meets
      the echo simulator, which answers each request with an error whose text holds each
      header of the request, as a gateway in debug mode does: an error within 10 s, and 5
-     s more. Then each refused config, and the read and write forms of scenario 5, each
-     with the same secrets and each for 5 s. A kind with no secret passes with no check.
+     s more. Then the write form of scenario 5, with the same secrets, for 5 s. A refused
+     config and the read form stop before a run reads a secret, so they get no check.
+     A kind with no secret passes with no check.
      The status hides each secret value that a run read (ruling of `laptop.architect-2`
      on #2849 item 4, 2026-10-16T17:54:49Z:
      https://github.com/synnaxlabs/foundation/issues/2849#issuecomment-6221505945).
-     Scenario 7 runs 30.1 s of plant time for `opcua` (box1, at 2026-10-20).
+     Scenario 7 runs 30.1 s of plant time for `opcua`, and 25.1 s for `influx` with
+     no echo simulator (box1, at 2026-10-20).
 
   The numbers are tunable by the architect of `connector`. Plan of
   `laptop.architect-2` at 2026-10-13T21:22:43Z

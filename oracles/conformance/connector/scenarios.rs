@@ -61,10 +61,8 @@ pub(crate) mod inputs {
         /// reaches the device at `address`.
         pub setup:
             for<'a> fn(Plant<'a>) -> Pin<Box<dyn Future<Output = Document> + 'a>>,
-        /// Runs the kind's simulator on `address` of the device node until `until`,
-        /// then closes each connection and returns. The simulator of a kind that
-        /// subscribes changes its data at least every 100 ms while it serves, so the
-        /// progress count grows.
+        /// Runs the kind's simulator. The simulator of a kind that subscribes changes
+        /// its data at least every 100 ms while it serves, so the progress count grows.
         pub serve: Simulator,
         /// The count that grows while data moves.
         pub progress: &'static str,
@@ -95,7 +93,8 @@ pub(crate) mod inputs {
         })
     }
 
-    /// A simulator, as [`Suite::serve`] says.
+    /// A simulator: it serves on `address` of the device node until `until`, then
+    /// closes each connection and returns.
     pub(crate) type Simulator = fn(Serve) -> Pin<Box<dyn Future<Output = ()>>>;
 
     impl Suite {
@@ -476,14 +475,6 @@ impl Scene {
         while let Some(reading) = before(late.as_mut(), run.next()).await {
             unmarked(&reading);
         }
-    }
-
-    /// Supervises `config` for [`GLANCE`], and panics when a status or the end of
-    /// the run shows [`MARKER`].
-    async fn glance(&self, config: Document) {
-        let mut run = self.supervise(config).await;
-        self.watch(&mut run, GLANCE).await;
-        ended_unmarked(&run.stop().await);
     }
 
     /// Gives what `future` gives, and panics when it takes longer than `within`.
@@ -1102,7 +1093,7 @@ pub(crate) fn keeps_each_secret_from_the_status(suite: &'static Suite) {
         assert_ne!(config, setup, "the kind reads a secret");
         let kinds = (suite.kinds)();
         let checked = kinds.check(suite.kind(), None, &config);
-        let checked = checked.expect("the config with secrets checks");
+        let writes = checked.expect("the config with secrets checks").writes;
         let mut run = scene.supervise(config.clone()).await;
         scene.watch(&mut run, WATCH).await;
         let served = scene.serve();
@@ -1122,17 +1113,11 @@ pub(crate) fn keeps_each_secret_from_the_status(suite: &'static Suite) {
             ended_unmarked(&run.stop().await);
             scene.stop(served).await;
         }
-        for (refused, _) in (suite.refused)() {
-            let refused = marked(refused, SECRET);
-            unmarked(&kinds.check(suite.kind(), None, &refused));
-            ended_unmarked(&scene.supervise(refused).await.stop().await);
-        }
-        if checked.reader.is_some() {
-            scene.glance(undefined(config.clone())).await;
-        }
-        if let Some(missing) = checked.writes.first() {
+        if let Some(missing) = writes.first() {
             scene.rig.remove(std::slice::from_ref(missing));
-            scene.glance(config).await;
+            let mut run = scene.supervise(config).await;
+            scene.watch(&mut run, GLANCE).await;
+            ended_unmarked(&run.stop().await);
         }
     });
 }
