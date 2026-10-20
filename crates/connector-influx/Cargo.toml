@@ -18,6 +18,7 @@ bytes.workspace = true
 codec = { path = "../codec" }
 connector = { path = "../connector" }
 document = { path = "../document" }
+form_urlencoded.workspace = true
 env = { path = "../env", optional = true }
 http.workspace = true
 hub = { path = "../hub" }

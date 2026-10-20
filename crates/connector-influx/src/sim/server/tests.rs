@@ -53,6 +53,15 @@ impl Network {
     /// A network whose server serves with `scheme`, and takes only `token`, when
     /// given.
     fn serving(scheme: Scheme, token: Option<&str>) -> Self {
+        Self::with(scheme, token, "edge")
+    }
+
+    /// A network whose server serves the database `database`.
+    fn named(database: &str) -> Self {
+        Self::with(Scheme::Plain, None, database)
+    }
+
+    fn with(scheme: Scheme, token: Option<&str>, database: &str) -> Self {
         let mut sim = Sim::new(sim::Config {
             seed: 7,
             steps_max: 10_000_000,
@@ -72,13 +81,12 @@ impl Network {
         let listener = server.net().listen(&listen).expect("the port is free");
         let store = Arc::new(Mutex::new(Store::default()));
         let held = Arc::clone(&store);
-        let token = token.map(str::to_owned);
+        let (token, database) = (token.map(str::to_owned), database.to_owned());
         let handle = server
             .shards()
             .start(shard("server"), move |tasks| async move {
                 let until = Token::new();
-                let end =
-                    serve(listener, tasks, until, scheme, held, "edge".into(), token);
+                let end = serve(listener, tasks, until, scheme, held, database, token);
                 panic!("the listener failed: {:?}", end.await);
             })
             .expect("the shard starts");
@@ -343,6 +351,32 @@ fn answers_another_database_with_404_and_stores_nothing() {
         ]
     );
     assert_eq!(network.times("m"), [0_i64; 0]);
+}
+
+#[test]
+fn decodes_each_value_of_the_query_as_a_form() {
+    let mut network = Network::named("a b&c=d");
+    let requests = vec![
+        network.post("/write?db=a+b%26c%3Dd", "m v=1 1"),
+        network.post("/write?db=a%20b%26c%3Dd&precision=n%73", "m v=2 2"),
+        network.post("/api/v2/write?org=%26&bucket=a+b%26c%3Dd", "m v=3 3"),
+        network.post("/write?db=a+b&c=d", "m v=4 4"),
+        network.post("/write?db=a+b%26c%3Dd&precision=n+s", "m v=5 5"),
+    ];
+    assert_eq!(
+        network.send(vec![requests]),
+        [
+            answer(StatusCode::NO_CONTENT, ""),
+            answer(StatusCode::NO_CONTENT, ""),
+            answer(StatusCode::NO_CONTENT, ""),
+            answer(StatusCode::NOT_FOUND, "no db named \"a b\""),
+            answer(
+                StatusCode::BAD_REQUEST,
+                "the store takes precision ns only, not \"n s\""
+            ),
+        ]
+    );
+    assert_eq!(network.times("m"), [1, 2, 3]);
 }
 
 #[test]

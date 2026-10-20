@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use connector::http::Roots;
@@ -245,6 +246,27 @@ impl Plant {
                 connector::http::sim::serve(listener, tasks, until, scheme, answer);
             panic!("the listener failed: {:?}", serve.await);
         });
+    }
+
+    /// Starts [`crate::sim::serve`] with the database `database` in place of the
+    /// InfluxDB of [`Plant::serve`], and gives its store.
+    fn simulate(&self, database: &str) -> Arc<Mutex<crate::sim::Store>> {
+        let listen = tcp::Listen {
+            local: self.address,
+            backlog: 4,
+            options: OPTIONS,
+        };
+        let listener = self.net.listen(&listen).expect("the port is free");
+        let store = Arc::default();
+        let (tasks, held) = (self.tasks.clone(), Arc::clone(&store));
+        let (scheme, database) = (self.scheme, database.to_owned());
+        self.tasks.spawn(async move {
+            let until = cancel::Token::new();
+            let serve =
+                crate::sim::serve(listener, tasks, until, scheme, held, database, None);
+            panic!("the listener failed: {:?}", serve.await);
+        });
+        store
     }
 
     /// The config of an influx connector at this plant's InfluxDB.
@@ -531,7 +553,7 @@ fn writes_one_line_for_each_sample_time_to_its_database() {
         line("1.5e0", "2e0", first) + &format!("telemetry edge.b=4e0 {}\n", first + 1);
     assert_eq!(
         got,
-        vec![("/write?db=plant%20a%2Fb&precision=ns".into(), body)]
+        vec![("/write?db=plant+a%2Fb&precision=ns".into(), body)]
     );
 }
 
@@ -554,7 +576,7 @@ fn writes_to_a_bucket_in_its_org() {
         (plant.got(), first)
     });
     let (got, first) = got;
-    let uri = "/api/v2/write?org=a%20b&bucket=edge%2F1&precision=ns";
+    let uri = "/api/v2/write?org=a+b&bucket=edge%2F1&precision=ns";
     assert_eq!(got, vec![(uri.into(), line("1e0", "2e0", first))]);
 }
 
@@ -582,6 +604,37 @@ fn writes_to_a_bucket_and_an_org_of_the_longest_names() {
     let encoded = "%2F".repeat(4_096);
     let uri = format!("/api/v2/write?org={encoded}&bucket={encoded}&precision=ns");
     assert_eq!(got, vec![(uri, line("1e0", "2e0", first))]);
+}
+
+/// The query of the writer and the decode of [`crate::sim::serve`] agree on names
+/// with a space, `&`, and `=`.
+#[test]
+fn writes_to_the_simulated_influxdb_by_a_name_with_a_space_an_ampersand_and_an_equals()
+{
+    const NAME: &str = "a b&c=d";
+    let database = |plant: &Plant| with(plant.config(), "database", &string(NAME));
+    let bucket = |plant: &Plant| {
+        let target = [(60, "bucket", string(NAME)), (62, "org", string("o p&q=r"))];
+        plus(without(plant.config(), "database"), &target)
+    };
+    for config in [database, bucket] {
+        let (times, first) = run(move |node, tasks| async move {
+            let plant = Plant::unserved(node, tasks).await;
+            let store = plant.simulate(NAME);
+            let run = plant.supervise(config(&plant)).await;
+            let mut writer = plant.writer(&["edge.time", "edge.a", "edge.b"]).await;
+            plant.clock.sleep(Span::SECOND).await;
+            let first = writer.now().nanos();
+            write(&mut writer, first, &[(1.0, 2.0)]);
+            plant.clock.sleep(Span::SECOND).await;
+            run.stop().await.expect("ok after a cancel");
+            let store = store.lock().expect("no panic under the lock");
+            let points = store.points("telemetry", &[]);
+            let times: Vec<_> = points.map(|point| point.time.nanos()).collect();
+            (times, first)
+        });
+        assert_eq!(times, [first]);
+    }
 }
 
 /// The fix in the text of a 400 or a 422.

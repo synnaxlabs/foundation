@@ -21,6 +21,7 @@ comrak = { version = "0.56.0", default-features = false }
 core_affinity = "0.8.3"
 crc32c = "0.6.8"
 divan = "0.1.21"
+form_urlencoded = "1.2.2"
 getrandom = "0.4.3"
 hdrhistogram = { version = "7.6.0", default-features = false }
 http = "1.5.0"

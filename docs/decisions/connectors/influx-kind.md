@@ -90,13 +90,14 @@
   `document.missing-attribute`. A `database` is written with `POST
   /write?db=<database>&precision=ns`, and a `bucket` with `POST
   /api/v2/write?org=<org>&bucket=<bucket>&precision=ns`, which InfluxDB 2 and InfluxDB 3
-  Core take. InfluxDB 3 takes any `org`. Each name is percent-encoded in the query. An
-  optional `token` is a source of a secret (SECRET SOURCES), so `plan` on the node of
-  the connector, by a subject that may apply it, refuses a `token` with no value
-  (`secret.unresolved`). Each request sends it as `Authorization: Token <value>`, which
-  InfluxDB 2 and 3 take, and a request with no `token` has no `Authorization`. `run`
-  reads the token at its start, and again after a 401 or a 403 before the next attempt.
-  This is option A of key choice Q6
+  Core take. InfluxDB 3 takes any `org`. The query is encoded as a form with
+  `form_urlencoded`: a space is `+`, and each other byte outside `A-Z a-z 0-9 * - . _`
+  is `%XX` (#1530). An optional `token` is a source of a secret (SECRET SOURCES), so
+  `plan` on the node of the connector, by a subject that may apply it, refuses a
+  `token` with no value (`secret.unresolved`). Each request sends it as
+  `Authorization: Token <value>`, which InfluxDB 2 and 3 take, and a request with no
+  `token` has no `Authorization`. `run` reads the token at its start, and again after
+  a 401 or a 403 before the next attempt. This is option A of key choice Q6
   (https://github.com/synnaxlabs/foundation/issues/2583#issuecomment-6154974514,
   2026-10-13T20:52:58Z), which item 9 of the ruling of `laptop.architect-2` kept on
   2026-10-13T21:05:46Z

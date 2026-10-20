@@ -121,10 +121,11 @@
   only `Bearer` fails here (`laptop.architect-2`, 2026-10-14T04:16:45Z:
   https://github.com/synnaxlabs/foundation/issues/2583#issuecomment-6160767913).
   `database`
-  stays out of `Store`: the 404 is an answer of the HTTP front. The front compares names
-  as the query writes them, with no percent-decoding, until the first PR of
-  `connector-influx` that writes a name into a query (#1530). Decided by architect-2
-  (2026-10-07T16:33:22Z
+  stays out of `Store`: the 404 is an answer of the HTTP front. The front decodes the
+  query with `form_urlencoded`, the codec that the writer encodes it with, so `+` is a
+  space and `%XX` a byte, as InfluxDB reads it (#1530,
+  https://github.com/synnaxlabs/foundation/issues/1530#issuecomment-6266650269).
+  Decided by architect-2 (2026-10-07T16:33:22Z
   https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042291321,
   2026-10-07T16:41:29Z
   https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042446508,

@@ -1,7 +1,6 @@
 //! The loop that sends the lines of a reader's frames to InfluxDB.
 
 use std::cell::RefCell;
-use std::fmt::Write as _;
 use std::future::{self, Future as _, poll_fn};
 use std::pin::pin;
 use std::rc::Rc;
@@ -364,37 +363,25 @@ impl Token {
 
 /// The write URI of `target` at `address`, with nanosecond times.
 fn write_uri(address: &Uri, target: &Target) -> Uri {
-    let mut path = String::new();
-    match target {
+    let mut query = form_urlencoded::Serializer::new(String::new());
+    let path = match target {
         Target::Database(database) => {
-            path.push_str("/write?db=");
-            encode(&mut path, database);
+            query.append_pair("db", database);
+            "/write"
         }
         Target::Bucket { name, org } => {
-            path.push_str("/api/v2/write?org=");
-            encode(&mut path, org);
-            path.push_str("&bucket=");
-            encode(&mut path, name);
+            query.append_pair("org", org).append_pair("bucket", name);
+            "/api/v2/write"
         }
-    }
-    path.push_str("&precision=ns");
+    };
+    let query = query.append_pair("precision", "ns").finish();
     let mut parts = address.clone().into_parts();
     parts.path_and_query = Some(
-        path.parse()
+        format!("{path}?{query}")
+            .parse()
             .expect("invariant: names of at most NAME_MAX bytes fit in a query"),
     );
     Uri::from_parts(parts).expect("invariant: an address with a path is a URI")
-}
-
-/// Writes `text` into `path`, with each byte other than an unreserved one encoded.
-fn encode(path: &mut String, text: &str) {
-    for &byte in text.as_bytes() {
-        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
-            path.push(char::from(byte));
-        } else {
-            write!(path, "%{byte:02X}").expect("invariant: a write to a String works");
-        }
-    }
 }
 
 #[cfg(test)]

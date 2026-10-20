@@ -20,8 +20,8 @@ use super::Store;
 /// (InfluxDB 2 and 3) give 204 when the store takes each line, and 400 with the text
 /// of the store's error when it refuses one. The store still keeps each valid line,
 /// as InfluxDB does. `database` is the one `db` and `bucket` that the store holds:
-/// another name gives 404. It compares names as the query writes them, with no
-/// percent-decoding. A request with a missing or empty `db` or `bucket`, a write to
+/// another name gives 404. It decodes the query as a form, as InfluxDB does: `+` is a
+/// space, and `%XX` a byte. A request with a missing or empty `db` or `bucket`, a write to
 /// `/api/v2/write` with a missing or empty `org` and `orgID`, or a `precision` other
 /// than `ns` gives 400 and stores nothing; a missing or empty `precision` is `ns`.
 /// Any other path gives 404, and another method on a write path gives 405. A request
@@ -97,10 +97,8 @@ fn route(
         );
     }
     let query = |key: &str| {
-        uri.query()
-            .unwrap_or_default()
-            .split('&')
-            .find_map(|pair| pair.strip_prefix(key)?.strip_prefix('='))
+        form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes())
+            .find_map(|(given, value)| (given == key).then_some(value))
             .filter(|value| !value.is_empty())
     };
     let Some(given) = query(key) else {
@@ -112,10 +110,10 @@ fn route(
             "no org or orgID in the query".into(),
         );
     }
-    if given != database {
+    if *given != *database {
         return reply(StatusCode::NOT_FOUND, format!("no {key} named {given:?}"));
     }
-    if let Some(precision) = query("precision").filter(|&precision| precision != "ns") {
+    if let Some(precision) = query("precision").filter(|precision| precision != "ns") {
         return reply(
             StatusCode::BAD_REQUEST,
             format!("the store takes precision ns only, not {precision:?}"),
