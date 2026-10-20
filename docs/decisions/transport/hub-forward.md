@@ -38,16 +38,16 @@
   `Open` by `Forward::decode`. A forward from a node that is not a member panics: the
   route checks the member in the same turn. The home admits the hello with the public
   key that the node's transport session proved as its carrier (SUBJECT PROOF), and with
-  no nonce check, as `access::proof` states. From then on, the
-  stream races the end of the hello, which stops it with `EXPIRED`. The stream polls
-  first, so a renewal moves the end in the poll that admits it. The home reads the
-  `Write` and its body as a program's write, verifies the open, holds its decoded names
-  and 4 bytes for each channel of the open (MEMORY BOUNDS), and takes the places. The
-  end of the stream before the last place finishes the stream and opens nothing. The
-  group is the channels of the open at the places, and the write goes on as a program's
-  write, with the member as the `via` of its handoff. A message of kind 4 is a renewal
-  only during the wait for the home and between frames, where `write::Frames::between`
-  is true (`laptop.architect`, 2026-10-20T01:49:00Z:
+  no nonce check, as `access::proof` states. From then on, the stream races the end of
+  the hello, which stops it with `EXPIRED`. The stream polls first, so a renewal moves
+  the end in the poll that admits it. The home reads the `Write` and its body as a
+  program's write, verifies the open, holds its decoded names and 4 bytes for each
+  channel of the open (MEMORY BOUNDS), and takes the places. The end of the stream
+  before the last place finishes the stream and opens nothing. The group is the channels
+  of the open at the places, and the write goes on as a program's write, with the member
+  as the `via` of its handoff. A message of kind 4 is a renewal only during the wait for
+  the home and between frames, where `write::Frames::between` is true
+  (`laptop.architect`, 2026-10-20T01:49:00Z:
   https://github.com/synnaxlabs/foundation/pull/3480#issuecomment-6281429498). A message
   inside a frame has no kind byte, so a first byte of 4 there is data. A refusal of the
   proof stops the stream with its code. PR 4 gives `REFUSED`, `VIA`, and `CHANGED` to
