@@ -502,3 +502,17 @@
   one home writer for all groups, which cannot end one group, one block of `Stored`
   for all groups, which can pass the largest block of the pool, and one due commit for
   each group, which polls each group at each message.
+  PR 3a: a `program::Writer` writes channels of any index. `Writer::draft(form,
+  series)` takes the place, count, and byte length of each series, and gives
+  `Error::Count { place, count, other, other_count }`, with no block taken, when two
+  series of one group hold two counts. `Writer::write(time)` gives the place of the
+  index and the outcome of each group of the frame, in group order, and `Unsent` applies
+  to each group of it. The lease is for each group, and with `Time::Node` each group
+  gets its own stamp: the docs of `Config::lease` and `Writer::write` say so.
+  `Writer::index` is gone: the `index` of each place gives it. Ruled by
+  `laptop.architect` at 2026-10-19T13:10:34Z
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268011114, items
+  4 and 5). Plan:
+  https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6286854444. Lost: a
+  draft that takes one count for each group, which makes the caller find the group of
+  each place.
