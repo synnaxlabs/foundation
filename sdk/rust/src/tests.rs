@@ -330,7 +330,8 @@ fn each_error_names_its_cause() {
              of the process",
             "the OS refused memory for the frames of the client's readers; free memory or \
              raise the commit limit of the system",
-            "channels plant.a, plant.b were not written; channels cell.c, cell.time were",
+            "channels plant.a, plant.b were not written; channels cell.c, cell.time \
+             were",
             "channels plant.a were not written; no channel was",
         ]
     );

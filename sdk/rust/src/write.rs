@@ -182,7 +182,7 @@ impl Writer {
         self.frame.bytes.clear();
         let mut stamped = false;
         for &(place, value) in values {
-            let (node, data_type) = self.place(place)?;
+            let (node, group, data_type) = self.place(place)?;
             let scalar = value.scalar();
             if data_type != Type::Scalar(scalar) {
                 return Err(Error::Value {
@@ -191,9 +191,9 @@ impl Writer {
                     data_type,
                 });
             }
-            stamped |= node == self.nodes[self.places[place].index];
-            self.frame
-                .push(node, place, scalar.width(), |sample| value.write(sample));
+            stamped |= node == group;
+            let fill = |sample: &mut [u8]| value.write(sample);
+            self.frame.push(node, group, place, scalar.width(), fill);
         }
         if stamped {
             return self.call(Time::Frame(Path::Live));
@@ -239,8 +239,8 @@ impl Writer {
             bytes,
         } in series
         {
-            let (node, _) = self.place(place)?;
-            self.frame.copy(node, place, count, bytes);
+            let (node, group, _) = self.place(place)?;
+            self.frame.copy(node, group, place, count, bytes);
         }
         self.call(Time::Frame(Path::Live))
     }
@@ -274,8 +274,9 @@ impl Writer {
         })
     }
 
-    /// The place of the node and the type of `place`.
-    fn place(&self, place: usize) -> Result<(usize, Type), Error> {
+    /// The place of the node of `place`, the place of the node of its group's index,
+    /// and its type.
+    fn place(&self, place: usize) -> Result<(usize, usize, Type), Error> {
         let past = || {
             let entries = self.places.len();
             let range = frame::Error::OutOfRange {
@@ -285,31 +286,22 @@ impl Writer {
             Error::Stream(program::Error::Layout(range))
         };
         let node = *self.nodes.get(place).ok_or_else(past)?;
-        Ok((node, self.places[place].data_type))
-    }
-
-    /// The place of the node of the index of `part`'s group.
-    fn group(&self, part: &Part) -> usize {
-        self.nodes[self.places[part.place].index]
+        let Place {
+            index, data_type, ..
+        } = self.places[place];
+        Ok((node, self.nodes[index], data_type))
     }
 
     /// Adds an empty stamp at the index of each group of the frame, which holds no
     /// series of an index.
     fn stamps(&mut self) {
-        let Self {
-            places,
-            nodes,
-            firsts,
-            frame,
-            ..
-        } = self;
-        let group = |part: &Part| nodes[places[part.place].index];
-        frame.parts.sort_unstable_by_key(group);
+        let frame = &mut self.frame;
+        frame.parts.sort_unstable_by_key(|part| part.group);
         for at in 0..frame.parts.len() {
-            let index = group(&frame.parts[at]);
-            if at == 0 || index != group(&frame.parts[at - 1]) {
+            let group = frame.parts[at].group;
+            if at == 0 || group != frame.parts[at - 1].group {
                 let width = Scalar::Stamp.width();
-                frame.push(index, firsts[index], width, |_| {});
+                frame.push(group, group, self.firsts[group], width, |_| {});
             }
         }
     }
@@ -385,10 +377,7 @@ impl Writer {
         let absent = parts
             .iter()
             .filter(|part| {
-                let index = self.group(part);
-                parts
-                    .binary_search_by_key(&index, |part| part.node)
-                    .is_err()
+                (parts.binary_search_by_key(&part.group, |part| part.node)).is_err()
             })
             .map(|part| part.place)
             .min();
@@ -409,39 +398,26 @@ impl Writer {
         let counts = &mut self.counts;
         counts.fill(None);
         for part in parts {
-            let group = &mut counts[self.nodes[self.places[part.place].index]];
-            match *group {
-                Some((place, _)) if place < part.place => {}
-                _ => *group = Some((part.place, part.count)),
+            let lowest = &mut counts[part.group];
+            if lowest.is_none_or(|(place, _)| part.place < place) {
+                *lowest = Some((part.place, part.count));
             }
         }
-        let mut found: Option<program::Error> = None;
-        for part in parts {
-            let group = self.nodes[self.places[part.place].index];
-            let Some((place, count)) = counts[group] else {
-                unreachable!("invariant: each group of the frame has its count");
-            };
-            if part.count == count {
-                continue;
-            }
-            let lower = match found {
-                Some(program::Error::Count {
-                    place: at,
-                    other: other_at,
-                    ..
-                }) => (place, part.place) < (at, other_at),
-                _ => true,
-            };
-            if lower {
-                found = Some(program::Error::Count {
+        let other = |part: &Part| {
+            let (place, count) = counts[part.group]?;
+            (part.count != count).then_some((place, count, part.place, part.count))
+        };
+        match parts.iter().filter_map(other).min() {
+            Some((place, count, other, other_count)) => {
+                Err(Error::Stream(program::Error::Count {
                     place,
                     count,
-                    other: part.place,
-                    other_count: part.count,
-                });
+                    other,
+                    other_count,
+                }))
             }
+            None => Ok(()),
         }
-        found.map_or(Ok(()), |error| Err(Error::Stream(error)))
     }
 }
 
@@ -483,11 +459,12 @@ struct Frame {
 }
 
 impl Frame {
-    /// Adds a series of one sample of `len` bytes at `node` and `place`, which `fill`
-    /// writes.
+    /// Adds a series of one sample of `len` bytes at `node` and `place`, in the group
+    /// of `group`, which `fill` writes.
     fn push(
         &mut self,
         node: usize,
+        group: usize,
         place: usize,
         len: usize,
         fill: impl FnOnce(&mut [u8]),
@@ -497,6 +474,7 @@ impl Frame {
         fill(&mut self.bytes[start..]);
         self.parts.push(Part {
             node,
+            group,
             place,
             count: 1,
             start,
@@ -504,10 +482,19 @@ impl Frame {
         });
     }
 
-    /// Adds `bytes`, a series of `count` samples, at `node` and `place`.
-    fn copy(&mut self, node: usize, place: usize, count: u32, bytes: &[u8]) {
+    /// Adds `bytes`, a series of `count` samples, at `node` and `place`, in the group
+    /// of `group`.
+    fn copy(
+        &mut self,
+        node: usize,
+        group: usize,
+        place: usize,
+        count: u32,
+        bytes: &[u8],
+    ) {
         self.parts.push(Part {
             node,
+            group,
             place,
             count,
             start: self.bytes.len(),
@@ -540,6 +527,8 @@ impl Frame {
 struct Part {
     /// The place of the node.
     node: usize,
+    /// The place of the node of the index of its group.
+    group: usize,
     /// The place of the caller.
     place: usize,
     count: u32,

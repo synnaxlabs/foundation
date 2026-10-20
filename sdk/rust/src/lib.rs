@@ -495,8 +495,8 @@ pub enum Error {
     },
     /// The node refused the open of a stream, or a call of a writer or a reader
     /// failed. The session goes on. After `Layout`, `Count`, `Unsent`, and `Pool` of a
-    /// writer, nothing was sent and the writer goes on. Each other error of a writer, and each
-    /// error of a reader, ended it, and each later call of it gives it again.
+    /// writer, nothing was sent and the writer goes on. Each other error of a writer,
+    /// and each error of a reader, ended it, and each later call of it gives it again.
     Stream(program::Error),
     /// The data directory of [`Node::local`] names no node to reach, as the cause says.
     Local(sector::local::Error),

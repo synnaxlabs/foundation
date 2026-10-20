@@ -477,8 +477,6 @@ fn rejection(refusal: Refusal) -> (&'static str, &'static str) {
     }
 }
 
-/// The error of a writer whose one group ended with `end`: the error of a stream
-/// that the node stopped for the same cause.
 /// The outcome of the one group of a frame of a writer of one index, from what a call
 /// of the `sdk` writer gave: the end of the group for `Partial`.
 fn one(
@@ -500,6 +498,8 @@ fn one(
     }
 }
 
+/// The error of a writer whose one group ended with `end`: the error of a stream
+/// that the node stopped for the same cause.
 fn ended(end: End) -> sdk::Error {
     sdk::Error::Stream(program::Error::Refused(stop(end)))
 }

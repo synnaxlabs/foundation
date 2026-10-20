@@ -216,8 +216,7 @@ fn an_open_sends_its_config_and_gives_its_channels_in_its_order_then_the_index()
 }
 
 #[test]
-fn an_open_gives_the_index_of_each_group_it_does_not_name_in_the_order_of_its_first_channel()
- {
+fn an_open_places_each_index_it_does_not_name_in_the_order_of_its_first_channel() {
     let writer = opened(&["heat", "level", "count"]);
     let places = [at(4, 3), at(2, 4), at(1, 4), at(3, 3), at(0, 4)];
     assert_eq!(writer.places(), places);
