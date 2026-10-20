@@ -120,8 +120,8 @@ impl Opening {
 
     /// The bytes that the places it decoded hold: the room it reserved for each
     /// place, and the bytes of each name. It counts the places of the start that it
-    /// gave too, not their key set, so the caller holds them until it drops the start.
-    /// A refused message leaves it as it was.
+    /// gave too, which the caller holds until it drops the start. It does not count
+    /// their key set. A refused message leaves it as it was.
     #[must_use]
     pub fn held(&self) -> u64 {
         match &self.next {

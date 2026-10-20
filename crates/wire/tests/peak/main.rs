@@ -134,8 +134,8 @@ fn held_over_a_refused_message() {
 }
 
 /// The start of a run in two messages keeps what the decoder holds and its key set,
-/// which `held` does not count: 32 bytes for each place and a few headers. Its last
-/// decode peaks at no more than that and 48 bytes for each place.
+/// which `held` does not count: 32 bytes for each place, 8 for each index, and a few
+/// headers. Its last decode peaks at no more than that and 48 bytes for each place.
 fn held_by_a_start() {
     const COUNT: usize = 2600;
     let places = tiny(COUNT);
