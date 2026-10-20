@@ -70,6 +70,7 @@ pub(crate) fn mesh(error: &mesh::Error) -> Option<&files::Error> {
         | mesh::Error::Unfounded { .. }
         | mesh::Error::Unjoined { .. }
         | mesh::Error::CardFile { .. }
+        | mesh::Error::JoinFile { .. }
         | mesh::Error::Soon => None,
     }
 }
