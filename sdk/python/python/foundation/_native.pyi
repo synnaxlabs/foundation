@@ -89,13 +89,14 @@ class Refused(ConnectionError):
 
 class Stopped(Exception):
     """The node stopped a write, with a code. At the open, no writer opened, and the
-    session goes on. From a call, the node stopped the stream: the writer has ended,
-    and each later call raises it again. Its subclass `GroupEnded` is the end of the
-    write of one or more groups only. `code` is its name in lower case. At the
-    open: `unknown` for a name of no channel, `not_home` when the node is not the home
-    of an index, `malformed` for a reader of channels of more than one index, `failed`
-    when the home cannot open the write, `refused` when the access check of the node
-    refuses the write, and `busy` when the node has no room for the open. Later:
+    session goes on. From `write` or `write_series`, the node stopped the stream: the
+    writer has ended, and each later call raises it again. From `close`, also the write
+    of a group ended with a frame that may not be on disk. Its subclass `GroupEnded` is
+    the end of the write of one or more groups only. `code` is its name in lower case.
+    At the open: `unknown` for a name of no channel, `not_home` when the node is not the
+    home of an index, `malformed` for a reader of channels of more than one index,
+    `failed` when the home cannot open the write, `refused` when the access check of the
+    node refuses the write, and `busy` when the node has no room for the open. Later:
     `unknown` when a channel was removed, `failed` when the home failed, `refused` when
     the home refuses the program's proof, such as a renewal of its hello, `busy` when
     the home has no room for the outcome of a frame, and `malformed` for a frame that
