@@ -19,18 +19,45 @@ when its PR merges, `mcp__factory__next` clears it and starts `/build` again.
    by the exact path that its task notification gives, other than after a crash or a
    restart (`docs/coordination.md`, "Worktrees"). Never loop over `.claude/worktrees` or
    `git worktree list`: the worktrees of other sessions are there too.
-2. An open issue labeled `owner:$FACTORY_NAME` comes first: resume it from its last
-   state comment. Skip one labeled `blocked` while an issue that it waits on is open or
-   a question on it has no answer. When neither holds, remove `blocked` and resume it.
-   With none to resume, take the oldest `ready` issue whose crates no other open issue
-   with an `owner:` label holds: `gh issue list --label ready --search
-   "sort:created-asc"`. On the night lane, take only issues that also have `night`.
-3. Claim it: `gh issue edit <n> --add-label "owner:$FACTORY_NAME" --remove-label ready`
+2. Run the waits script. It prints each `blocked` issue with its owner and its state.
+   For each with your name or `-`, `ended` is a wait that has ended (Rules). At
+   `dropped`, an issue or PR that it waits on closed with no merge or as not done: put
+   in its place the issue or PR that the close comment of the closed one names
+   (`Replaced by #<n>`, a duplicate, or the issue that took its work), or else
+   `the person`, and ask on the issue what it waits on now (Rules). Keep `blocked`.
+   Give each of yours with `no line` its line (Rules). Its exits mean what they mean in
+   step 4. Then an open issue labeled `owner:$FACTORY_NAME` that is not
+   `blocked` comes first, one with no open PR before one with an open PR: resume it
+   from its last state comment. Run "Wait once" in the background for the PR of each
+   other one that has auto-merge on.
+
+   ```sh
+   w=$(git show origin/main:.claude/skills/build/waits.sh) || exit 3
+   sh -c "$w" waits.sh
+   ```
+3. Give back each issue labeled `owner:$FACTORY_NAME` that you do not resume and that
+   no open PR closes or has in its branch: comment its state, and remove your `owner:`
+   label. Add `ready` to each that is not `blocked` and that the path table of the
+   milestone's plan issue names (on #1737, "Path after the demo"). The state comment
+   of each other one that is not `blocked` says that it waits for the path. You then
+   hold at most one owned issue with no open PR.
+4. With none to resume, take the first issue that the free script prints (on the night
+   lane, `sh -c "$s" free.sh night`): the oldest `ready` issue whose crates no issue
+   with an `owner:` label holds. An owned issue holds its crates while an open PR
+   closes it or has its number in its branch, or while its owner builds it, which is
+   while it is not `blocked`. Exit 3: git could not get the script. Another exit that
+   is not 0: fix what gh printed, and run it again.
+
+   ```sh
+   s=$(git show origin/main:.claude/skills/build/free.sh) || exit 3
+   sh -c "$s" free.sh
+   ```
+5. Claim it: `gh issue edit <n> --add-label "owner:$FACTORY_NAME" --remove-label ready`
    (the first time, `gh label create "owner:$FACTORY_NAME"`). If it then has a second
    `owner:` label, remove yours and take the next one.
-4. Day lane: when fewer than two `ready` issues remain, file the next ones on the
+6. Day lane: when fewer than two `ready` issues remain, file the next ones on the
    milestone path (Rules).
-5. An issue labeled `model:fable`: ask your engineer to switch with `/model` first.
+7. An issue labeled `model:fable`: ask your engineer to switch with `/model` first.
 
 Read only this before you plan: the issue and its comments, the records of
 `docs/decisions/` for your crate (the folder of its topic, and `grep -rl` for its name),
@@ -84,9 +111,9 @@ or a line range.
 
     Never check by hand, `/loop`, or `ScheduleWakeup`. A message or the script's exit
     wakes you.
-    - Exit 0 (merged): comment the final state on the issue, call
-      `mcp__factory__next`, and end your turn. On the night lane, take the next
-      `night` issue in this context instead.
+    - Exit 0 (merged): comment the final state on the issue. While you build another
+      issue, go on with it. Else call `mcp__factory__next`, and end your turn. On the
+      night lane, take the next `night` issue in this context instead.
     - Exit 1: read the cause it prints (`gh pr checks <n>`,
       `gh run view <id> --log-failed | tail -60`, or the review). Fix it, run the gate
       on what changed, `gh pr merge <n> --auto`, and wait again.
@@ -145,7 +172,19 @@ take the next issue meanwhile.
 - Ask the person in a comment on the issue or PR, then send `laptop.coordinator` the
   link to that comment at once (`docs/coordination.md`, "Messages"). A comment alone
   reaches no one. When no part of the issue is left to build, add `blocked` and take
-  other work (Take an issue). Remove `blocked` when the answer comes.
+  other work (Take an issue). A `blocked` issue names each wait in one line of its body,
+  never wrapped, `Waits on #<n>, #<m>.`, for issues and PRs, with `the person` for a
+  question (`Waits on #12 and the person.`). When the answer comes, put in place of
+  `the person` each issue or PR that the answer says the issue waits on, or else take
+  `the person` out. Delete the line when nothing is left in it. A wait has ended when
+  you delete the line, or when each issue that it names closed as completed, each PR
+  merged, and it names no `the person`, as `ended` of the waits script says (step 2).
+  Then remove `blocked` if it is there. If the issue has your `owner:` label and no open
+  PR closes it or has its number in its branch, also give it back at once, as step 3
+  says, so that step 2 does not resume it. With no `owner:` label, send its link to
+  `laptop.coordinator`, which admits it (`/coordinate`, "Admit"; `docs/coordination.md`,
+  "Messages", while it is paused). If you build no other issue, take one (Take an
+  issue).
 - A key choice (`CLAUDE.md`, "The person decides the design"): send it to
   `laptop.monitor` when you make it, before work builds on it, then go on. Never add
   `blocked` for it.
@@ -156,11 +195,13 @@ take the next issue meanwhile.
   comment link.
 - Send the architect only a change to the public surface or to the meaning of a ruling.
   A fix of wording or links in a ruling needs no new approval.
-- Each issue that you file (step 4, or for your issue: its later steps, a deferral of a
+- Each issue that you file (step 6, or for your issue: its later steps, a deferral of a
   finding of your PR, or an issue that your PR waits on) states its goal, crates, tests
   that must pass, and decisions section, with a `crate:` label for each of its crates.
   Send its link to `laptop.coordinator` when you file it, which admits it
   (`/coordinate`, "Admit"; `docs/coordination.md`, "Messages", while it is paused).
-  Claim it (step 3) only when step 2 takes it. Your next state comment on your issue
+  Claim it (step 5) only when step 4 takes it. Your next state comment on your issue
   links each one that you file for it.
 - Before you stop, comment your state on the issue: done, next step, open questions.
+- A change to `free.sh` or `waits.sh` passes its test first:
+  `sh .claude/skills/build/free_test.sh` or `sh .claude/skills/build/waits_test.sh`.
