@@ -335,7 +335,8 @@ async fn connect<T>(
     .await
 }
 
-/// The credentials of a secure channel, read from the sources of the config.
+/// The credentials of a secure channel and the user of its session, read from the
+/// sources of the config.
 struct Secured<'a> {
     security: &'a Security,
     certificate: secret::Value,
@@ -367,11 +368,14 @@ impl<'a> Secured<'a> {
         }))
     }
 
-    fn credentials(&self) -> Credentials<'_> {
-        Credentials {
-            certificate: self.certificate.expose(),
-            key: self.key.expose(),
-            trust: self.trust.expose(),
+    fn session(&self) -> client::Session<'_> {
+        client::Session {
+            credentials: Credentials {
+                certificate: self.certificate.expose(),
+                key: self.key.expose(),
+                trust: self.trust.expose(),
+            },
+            mode: self.security.mode,
             user: (self.user.as_ref()).map(|(user, password)| client::User {
                 name: &user.name,
                 password: password.expose(),
@@ -451,12 +455,9 @@ async fn session<T>(
     until: impl Future<Output = ()>,
     work: impl AsyncFnOnce(&mut Client) -> T,
 ) -> Result<Option<T>, Error> {
-    let credentials =
-        secured.map(|secured| (secured.credentials(), secured.security.mode));
-    let security =
-        (credentials.as_ref()).map(|(credentials, mode)| (credentials, *mode));
+    let session = secured.map(Secured::session);
     let connected =
-        Client::connect(time, span, net, rng, address, security, until).await;
+        Client::connect(time, span, net, rng, address, session.as_ref(), until).await;
     let connected = connected.map_err(|error| match error {
         client::Error::Failed(status) => device(Failure::Connect {
             address: address.to_string_lossy().into_owned(),
@@ -492,7 +493,8 @@ fn cause(status: Status, secured: Option<&Secured<'_>>) -> Option<String> {
     let cause = match status {
         Status::BAD_SECURITY_CHECKS_FAILED => secured.distrusted(),
         Status::BAD_USER_ACCESS_DENIED | Status::BAD_IDENTITY_TOKEN_INVALID => {
-            format!("the server {}", refused(secured.security.user.as_ref()?))
+            let (user, _) = secured.user.as_ref()?;
+            format!("the server {}", refused(user))
         }
         Status::BAD_CERTIFICATE_UNTRUSTED => format!(
             "the trust holds neither the certificate of the server nor the CA that \
@@ -535,13 +537,13 @@ fn cause(status: Status, secured: Option<&Secured<'_>>) -> Option<String> {
 /// the client. With a user, it also names a refusal of the user, and in the mode Sign a
 /// user token that would send the password in clear.
 fn unoffered(secured: Option<&Secured<'_>>) -> String {
-    let Some(security) = secured.map(|secured| secured.security) else {
+    let Some(secured) = secured else {
         return "the server offers no endpoint in the mode None that lets in an \
                 anonymous user. For a server with only secure endpoints, give \
                 `certificate`, `key`, and `trust`"
             .into();
     };
-    let (mode, fix) = match security.mode {
+    let (mode, fix) = match secured.security.mode {
         client::Mode::SignAndEncrypt => (
             "SignAndEncrypt",
             "For a server with only Sign endpoints, set `unencrypted = true`; else \
@@ -556,10 +558,10 @@ fn unoffered(secured: Option<&Secured<'_>>) -> String {
         "the server offers no endpoint in the mode {mode} with the policy {first}, \
          {second}, or {third} that lets in"
     );
-    let Some(user) = &security.user else {
+    let Some((user, _)) = &secured.user else {
         return format!("{offers} an anonymous user. {fix} on the server");
     };
-    let (clear, token) = match security.mode {
+    let (clear, token) = match secured.security.mode {
         client::Mode::SignAndEncrypt => (",", "user names and passwords"),
         client::Mode::Sign => (
             ", it offers only a user name token whose policy is None, which would send \
