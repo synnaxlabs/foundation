@@ -464,6 +464,22 @@ fn untaken(written: Result<&[(usize, Outcome)], sdk::Error>) -> Untaken {
 /// What the text of a loss in a frame of a writer names.
 const LOST: &str = "samples were lost";
 
+/// `failed` with `raised` at the end of its context chain, as Python chains an error
+/// raised while it handles another. A cycle in the chain ends at its last new error.
+fn chained(py: Python<'_>, failed: PyErr, raised: PyErr) -> PyErr {
+    let mut seen = vec![failed.value(py).as_ptr()];
+    let mut tail = failed.clone_ref(py);
+    while let Some(next) = tail
+        .context(py)
+        .filter(|next| !seen.contains(&next.value(py).as_ptr()))
+    {
+        seen.push(next.value(py).as_ptr());
+        tail = next;
+    }
+    tail.set_context(py, Some(raised));
+    failed
+}
+
 /// Answers a frame whose groups did not all get `Taken`, by the first rule that holds:
 /// a group whose write ended raises `GroupEnded`; a refused group raises `Rejected`;
 /// and a lost group does what `loss` says, with the channels of the lost groups, so it
@@ -517,11 +533,10 @@ pub(crate) fn answer(
         value.setattr("unwritten", PyTuple::new(py, unwritten)?)?;
         value.setattr("lost", crate::seqs(py, gone())?)?;
         if loss == Loss::Warn && gone().next().is_some() {
-            // The error of a logging handler goes up, with the error of the frame
-            // as its context, so the program can still reach the lists.
+            // The error of a logging handler goes up, so the program can still reach
+            // the lists through its context chain.
             if let Err(failed) = loss.act(py, LOST, gone(), py.None().bind(py)) {
-                failed.set_context(py, Some(raised));
-                return Err(failed);
+                return Err(chained(py, failed, raised));
             }
         }
         Err(raised)

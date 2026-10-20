@@ -1,5 +1,5 @@
 use std::env;
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -696,34 +696,29 @@ fn logged(
     })
 }
 
-/// The class of the error of `answer` under `warn`, with a handler of the `foundation`
-/// logger that raises the builtin `error`, the class of its `__context__`, and the
-/// `unwritten` of the one of the two that has it.
+/// The classes, joined by `, `, of the context chain of the error of `answer` under
+/// `warn`, with a handler of the `foundation` logger whose `emit` runs `body`, and the
+/// `unwritten` of the one error of the chain that has it.
 fn failing(
     places: &[sdk::Place],
     outcomes: &[(usize, Outcome)],
     frame: &[usize],
-    error: &str,
-) -> (String, String, Vec<String>) {
+    body: &str,
+) -> (String, Vec<String>) {
     Python::initialize();
     Python::attach(|py| {
         let globals = PyDict::new(py);
-        let builtins = py.import("builtins").unwrap();
-        globals
-            .set_item("error", builtins.getattr(error).unwrap())
+        let source = format!(
+            "import logging\n\
+             class Failing(logging.Handler):\n    def emit(self, record):\n{}\n\
+             handler = Failing()\n",
+            body.lines()
+                .map(|line| format!("        {line}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        py.run(&CString::new(source).unwrap(), Some(&globals), None)
             .unwrap();
-        py.run(
-            c"
-import logging
-class Failing(logging.Handler):
-    def emit(self, record):
-        raise error('the handler failed')
-handler = Failing()
-",
-            Some(&globals),
-            None,
-        )
-        .unwrap();
         let handler = globals.get_item("handler").unwrap().unwrap();
         let foundation = py
             .import("logging")
@@ -744,21 +739,27 @@ handler = Failing()
         foundation
             .call_method1("removeHandler", (&handler,))
             .unwrap();
-        let context = error.context(py).unwrap();
-        let listed = [&error, &context]
-            .into_iter()
-            .find(|raised| raised.value(py).hasattr("unwritten").unwrap())
-            .unwrap();
-        let unwritten = listed
-            .value(py)
-            .getattr("unwritten")
-            .unwrap()
-            .extract()
-            .unwrap();
+        let chain: Vec<PyErr> =
+            std::iter::successors(Some(error), |raised| raised.context(py))
+                .take(8)
+                .collect();
+        let listed: Vec<_> = chain
+            .iter()
+            .filter(|raised| raised.value(py).hasattr("unwritten").unwrap())
+            .collect();
+        assert_eq!(listed.len(), 1);
         (
-            error.get_type(py).name().unwrap().to_string(),
-            context.get_type(py).name().unwrap().to_string(),
-            unwritten,
+            chain
+                .iter()
+                .map(|raised| raised.get_type(py).name().unwrap().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+            listed[0]
+                .value(py)
+                .getattr("unwritten")
+                .unwrap()
+                .extract()
+                .unwrap(),
         )
     })
 }
@@ -767,7 +768,7 @@ handler = Failing()
 /// in `lost` for each loss, and with `warn` also logs the warning of the loss. A frame
 /// with an end and a loss raises `GroupEnded` with `lost`, and one with no loss gives
 /// an empty `lost` and logs nothing. The error of a logging handler that raises goes
-/// up, with `Rejected` or `GroupEnded` as its `__context__`.
+/// up, with `Rejected` or `GroupEnded` at the end of its context chain.
 #[test]
 fn answer_gives_the_seqs_of_the_lost_groups_in_lost_for_each_loss() {
     let places = grouped();
@@ -815,26 +816,28 @@ fn answer_gives_the_seqs_of_the_lost_groups_in_lost_for_each_loss() {
         ("Rejected".to_owned(), Vec::new(), Vec::new())
     );
     let cell = || vec!["cell.a".to_owned(), "cell.time".to_owned()];
+    let rejected = |body| failing(&places, &refused, &[1, 2, 3], body);
+    let raises = "raise RuntimeError('the handler failed')";
     assert_eq!(
-        failing(&places, &refused, &[1, 2, 3], "RuntimeError"),
-        ("RuntimeError".to_owned(), "Rejected".to_owned(), cell())
+        rejected(raises),
+        ("RuntimeError, Rejected".to_owned(), cell())
     );
     assert_eq!(
-        failing(&places, &ended, &[0, 2], "RuntimeError"),
-        (
-            "RuntimeError".to_owned(),
-            "GroupEnded".to_owned(),
-            Vec::new()
-        )
+        failing(&places, &ended, &[0, 2], raises),
+        ("RuntimeError, GroupEnded".to_owned(), Vec::new())
     );
+    let interrupt = rejected("raise KeyboardInterrupt");
     assert_eq!(
-        failing(&places, &refused, &[1, 2, 3], "KeyboardInterrupt"),
-        (
-            "KeyboardInterrupt".to_owned(),
-            "Rejected".to_owned(),
-            cell()
-        )
+        interrupt,
+        ("KeyboardInterrupt, Rejected".to_owned(), cell())
     );
+    let handled = "try:\n    raise OSError('disk')\n\
+                   except OSError:\n    raise RuntimeError('x')";
+    let chain = ("RuntimeError, OSError, Rejected".to_owned(), cell());
+    assert_eq!(rejected(handled), chain);
+    let cycle = "a = RuntimeError('a')\nb = OSError('b')\n\
+                 a.__context__ = b\nb.__context__ = a\nraise a";
+    assert_eq!(rejected(cycle), chain);
 }
 
 /// A writer of `plant.time`, `plant.a`, and `plant.time` whose frame gives the stamp at
