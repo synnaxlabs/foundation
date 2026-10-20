@@ -3,13 +3,23 @@
   rounded up, so an idle of 4.5 ms counts as 5 ms. From an idle timeout of 5 ms, with no
   round-trip sample, the first PTO comes at 3 initial RTTs and the second by 9, as PROBE
   GAP only makes the gap shorter. Both come within 9/10 of the idle timeout, so a lost
-  Finished goes again before the server's idle timer forgets the connection. An idle
+  Finished goes again before the server's idle timer forgets the connection. When the
+  peer's transport parameters come before the first round-trip sample, the local patch
+  of noq-proto lowers the initial RTT to a tenth of the negotiated idle timeout, the
+  lesser of the two sides' timeouts. The client gets them before it sends its Finished,
+  and the server in the client's first Initial, so the bound holds also when the two
+  sides have different idle timeouts. Lost: a cap of PROBE GAP below the PTO base with
+  no sample (it changes a ruled decision, and leaves a dialer of 1 s to a node of 30 s);
+  this record narrowed to equal idle timeouts (a program dials with 30 s, so it is
+  outside the bound with each node of an idle under 3.33 s). Decided by
+  `laptop.architect-2` (2026-10-20T05:06:07Z:
+  https://github.com/synnaxlabs/foundation/pull/3498#issuecomment-6283832539). An idle
   timeout of 3.33 s or more keeps 333 ms, so the node's default of 30 s does not change.
   `Config` keeps any positive idle timeout, as a short one is a fast check for a dead
   peer. The reset of the PTO backoff when keys are discarded is a local patch of
-  noq-proto (#1726). Lost: a floor on `Config::idle` (it refuses a real use); a
-  fixed lower initial RTT (more false handshake retransmits on a long path with a long
-  idle timeout). Decided by `laptop.architect-2` (2026-10-08T01:52:12Z:
+  noq-proto (#1726). Lost: a floor on `Config::idle` (it refuses a real use); a fixed
+  lower initial RTT (more false handshake retransmits on a long path with a long idle
+  timeout). Decided by `laptop.architect-2` (2026-10-08T01:52:12Z:
   https://github.com/synnaxlabs/foundation/issues/1723#issuecomment-6050539702, item 1).
   Before the first round-trip sample, 3 PTO is at most 9/10 of `idle` from 5 ms, so a
   dial waits `idle` for the first answer. Lost: a floor in the formula (one under 333 ms

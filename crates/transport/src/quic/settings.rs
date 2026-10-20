@@ -843,51 +843,133 @@ mod tests {
             });
         }
 
+        /// An idle timeout over 3.33 s, as of a program.
+        const LONG: Span = Span::from_nanos(30 * Span::SECOND.nanos());
+
+        /// A tenth of the idle timeout of a [`Pair`]: the initial RTT of each side
+        /// once it has the peer's transport parameters.
+        const TENTH: Duration = Duration::from_millis(100);
+
+        /// A [`Pair`] whose client is an endpoint of `setup`, with a connection
+        /// dialed.
+        fn dial_from(shard: &testing::Shard, setup: &Setup) -> Pair {
+            let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+            pair.client.endpoint =
+                Endpoint::new(setup, CLIENT_SHARD, NonZeroUsize::MIN);
+            pair.dial(pair::SERVER_KEY.public());
+            pair
+        }
+
+        /// Runs `pair` for 3 s. The server loses each ACK of the client's Initials, so
+        /// the client has no round-trip sample. The client loses its ACK of the
+        /// server's Initials, then its Finished. Gives the client's RTT when it sends
+        /// its Finished, its error, and whether the server connected.
+        ///
+        /// # Panics
+        ///
+        /// When datagram 4 of the client is not of the Handshake space, or none after
+        /// it is.
+        fn lose_finished(pair: &mut Pair) -> (Option<Duration>, Option<Error>, bool) {
+            // Indices in `sent`.
+            let (client, server) = ([3, 4], [0, 1]);
+            let mut rtt = None;
+            for _ in 0..3000 {
+                let sent = pair.client.sent.len();
+                pair.client.drops = usize::from(client.contains(&sent));
+                let sent = pair.server.sent.len();
+                pair.server.drops = usize::from(server.contains(&sent));
+                pair.run(Duration::from_millis(1));
+                if rtt.is_none() && pair.client.sent.len() > 4 {
+                    rtt = pair.client.connection().rtt(PathId::ZERO);
+                }
+            }
+            // A long header of the Handshake space; noq-proto greases the fixed bit.
+            let handshake =
+                |(_, _, datagram): &(_, _, Vec<u8>)| datagram[0] & 0xb0 == 0xa0;
+            let first = pair.client.sent[4].2[0];
+            assert!(
+                handshake(&pair.client.sent[4]),
+                "datagram 4 starts {first:#04x}"
+            );
+            let count = pair.client.sent.len();
+            assert!(
+                pair.client.sent[5..].iter().any(handshake),
+                "no Handshake datagram after 4 of {count}"
+            );
+            let error = lost(&pair.client).map(|(_, error)| error.clone());
+            (rtt, error, connected(&pair.server))
+        }
+
         #[test]
         fn keeps_a_connection_whose_finished_is_lost_with_no_round_trip_sample() {
-            let (client, server) = testing::run(1, |shard| {
+            let (initial, (rtt, client, server)) = testing::run(1, |shard| {
                 let mut pair = Pair::new(shard, Span::SECOND, DELAY);
                 pair.dial(pair::SERVER_KEY.public());
-                // Indices in `sent`. The server loses each ACK of the client's
-                // Initials, so the client has no round-trip sample. The client loses
-                // its ACK of the server's Initials, then its Finished.
-                let (client, server) = ([3, 4], [0, 1]);
                 let initial = pair.client.connection().rtt(PathId::ZERO);
-                assert!(initial.is_some(), "no initial RTT");
-                let mut rtt = None;
-                for _ in 0..3000 {
-                    let sent = pair.client.sent.len();
-                    pair.client.drops = usize::from(client.contains(&sent));
-                    let sent = pair.server.sent.len();
-                    pair.server.drops = usize::from(server.contains(&sent));
-                    pair.run(Duration::from_millis(1));
-                    if rtt.is_none() && pair.client.sent.len() > 4 {
-                        rtt = pair.client.connection().rtt(PathId::ZERO);
-                    }
-                }
-                assert_eq!(
-                    rtt, initial,
-                    "a round-trip sample before the Finished is lost"
-                );
-                // A long header of the Handshake space; noq-proto greases the fixed
-                // bit.
-                let handshake =
-                    |(_, _, datagram): &(_, _, Vec<u8>)| datagram[0] & 0xb0 == 0xa0;
-                let first = pair.client.sent[4].2[0];
-                assert!(
-                    handshake(&pair.client.sent[4]),
-                    "datagram 4 starts {first:#04x}"
-                );
-                let count = pair.client.sent.len();
-                assert!(
-                    pair.client.sent[5..].iter().any(handshake),
-                    "no Handshake datagram after 4 of {count}"
-                );
-                let client = lost(&pair.client).map(|(_, error)| error.clone());
-                (client, connected(&pair.server))
+                (initial, lose_finished(&mut pair))
             });
             assert_eq!(client, None);
             assert!(server);
+            assert!(initial.is_some(), "no initial RTT");
+            assert_eq!(
+                rtt, initial,
+                "a round-trip sample before the Finished is lost"
+            );
+        }
+
+        #[test]
+        fn a_program_keeps_a_connection_whose_finished_is_lost() {
+            let (rtt, client, server) = testing::run(1, |shard| {
+                let setup = shard.client().setup().expect("a setup");
+                lose_finished(&mut dial_from(shard, &setup))
+            });
+            assert_eq!(client, None);
+            assert!(server);
+            assert_eq!(
+                rtt,
+                Some(TENTH),
+                "a round-trip sample before the Finished is lost"
+            );
+        }
+
+        #[test]
+        fn a_node_of_a_longer_idle_keeps_a_connection_whose_finished_is_lost() {
+            let (rtt, client, server) = testing::run(1, |shard| {
+                let setup = testing::setup(&shard.config(pair::CLIENT_KEY, LONG));
+                lose_finished(&mut dial_from(shard, &setup))
+            });
+            assert_eq!(client, None);
+            assert!(server);
+            assert_eq!(
+                rtt,
+                Some(TENTH),
+                "a round-trip sample before the Finished is lost"
+            );
+        }
+
+        #[test]
+        fn keeps_a_dial_to_a_node_of_a_longer_idle_whose_first_answers_are_lost() {
+            let (rtt, client, server) = testing::run(1, |shard| {
+                let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                let setup = testing::setup(&shard.config(pair::SERVER_KEY, LONG));
+                pair.server.endpoint =
+                    Endpoint::new(&setup, SERVER_SHARD, NonZeroUsize::MIN);
+                pair.dial(pair::SERVER_KEY.public());
+                // The server loses each datagram it sends in the first 700 ms, so it
+                // has no round-trip sample.
+                pair.server.drops = usize::MAX;
+                pair.run(Duration::from_millis(700));
+                let mut connections = pair.server.endpoint.connections.iter().flatten();
+                let connection = connections.next().expect("a connection");
+                let rtt = connection.inner.rtt(PathId::ZERO);
+                pair.server.drops = 0;
+                pair.run(Duration::from_millis(2300));
+                let client = lost(&pair.client).map(|(_, error)| error.clone());
+                (rtt, client, connected(&pair.server))
+            });
+            assert_eq!(client, None);
+            assert!(server);
+            assert_eq!(rtt, Some(TENTH), "a round-trip sample before 700 ms");
         }
 
         #[test]
