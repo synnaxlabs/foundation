@@ -246,7 +246,7 @@ struct Lanes {
     held: BTreeMap<(SocketAddr, SocketAddr, u64), Held>,
     /// The lost ACK of each stream in each direction, by source, destination, and
     /// stream.
-    acks: BTreeMap<(SocketAddr, SocketAddr, u64), Ack>,
+    acks: BTreeMap<(SocketAddr, SocketAddr, u64), LostAck>,
     yet: Option<&'static str>,
 }
 
@@ -305,7 +305,7 @@ struct Held {
 
 /// A lost ACK. As ACKs are cumulative, the next segment of its stream in its
 /// direction carries it, and it goes again only when none arrives first.
-struct Ack {
+struct LostAck {
     tries: Tries,
     /// The segments in flight in its direction at its last loss, which arrive
     /// before one that can carry it.
@@ -420,7 +420,7 @@ impl Lanes {
                 (ack.ahead, ack.segment) = (ahead, lost);
             }
             Entry::Vacant(ack) => {
-                ack.insert(Ack {
+                ack.insert(LostAck {
                     tries,
                     ahead,
                     segment: lost,
@@ -469,7 +469,8 @@ impl Lanes {
             .map(|(&key, _)| key)
             .collect();
         for key in due {
-            let Ack { tries, segment, .. } = self.acks.remove(&key).expect("invariant");
+            let LostAck { tries, segment, .. } =
+                self.acks.remove(&key).expect("invariant");
             if tries.timed_out(now, &segment) {
                 failed.push(segment);
             } else if let Err(lost) = self.transmit(wire, now, segment)
