@@ -1,7 +1,13 @@
 use std::ffi::CString;
 use std::future;
 use std::net::SocketAddr;
+use std::ptr;
 
+use aws_lc_sys::{
+    CBS, CBS_ASN1_CONSTRUCTED, CBS_ASN1_CONTEXT_SPECIFIC, CBS_ASN1_INTEGER,
+    CBS_ASN1_OBJECT, CBS_ASN1_OCTETSTRING, CBS_ASN1_SEQUENCE, CBS_ASN1_SET,
+    CBS_ASN1_TAG,
+};
 use types::time::{Span, Stamp};
 
 use super::{Client, PORT, VALUE, fits, fitting, long, run, serve_on};
@@ -251,6 +257,42 @@ fn a_der_key_past_100_kib_reads() {
     );
     let read = read.expect("the client connects");
     assert_eq!(read.answer, Ok(read.value));
+}
+
+/// The contents of the DER element of `tag` at the start of `der`, which it takes.
+fn element(der: &mut CBS, tag: i64) -> CBS {
+    let tag = CBS_ASN1_TAG::try_from(tag).expect("a tag of aws-lc");
+    let mut out = CBS {
+        data: ptr::null(),
+        len: 0,
+    };
+    // SAFETY: `der` points to live bytes, and `out` to a place to write.
+    let found = unsafe { aws_lc_sys::CBS_get_asn1(der, &raw mut out, tag) };
+    assert_eq!(found, 1, "an element of tag {tag:#x} that fits its parent");
+    out
+}
+
+/// The key read skips the attributes, so only a strict read sees their lengths.
+#[test]
+fn the_long_key_nests_its_pad_in_one_attribute() {
+    let mut der = CBS {
+        data: LONG_KEY.key.as_ptr(),
+        len: LONG_KEY.key.len(),
+    };
+    let mut info = element(&mut der, CBS_ASN1_SEQUENCE.into());
+    for tag in [CBS_ASN1_INTEGER, CBS_ASN1_SEQUENCE, CBS_ASN1_OCTETSTRING] {
+        element(&mut info, tag.into());
+    }
+    let attributes = i64::from(CBS_ASN1_CONSTRUCTED) | CBS_ASN1_CONTEXT_SPECIFIC;
+    let mut attributes = element(&mut info, attributes);
+    let mut attribute = element(&mut attributes, CBS_ASN1_SEQUENCE.into());
+    element(&mut attribute, CBS_ASN1_OBJECT.into());
+    let mut values = element(&mut attribute, CBS_ASN1_SET.into());
+    let pad = element(&mut values, CBS_ASN1_OCTETSTRING.into());
+    assert!(pad.len >= 100 << 10, "a pad of {} bytes", pad.len);
+    for rest in [der, info, attributes, attribute, values] {
+        assert_eq!(rest.len, 0);
+    }
 }
 
 /// The refusal of a trust whose certificate `number` does not parse.

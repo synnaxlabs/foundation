@@ -105,7 +105,7 @@ const fn with_high_byte<const LENGTH: usize>(pem: &[u8]) -> [u8; LENGTH] {
     out
 }
 
-/// [`CLIENT`] with its key in a PKCS #8 whose attributes hold [`PAD`] bytes, past
+/// [`CLIENT`] with its key in a PKCS #8 whose one attribute holds [`PAD`] bytes, past
 /// the 100 KiB that a DER read through a BIO takes.
 pub(crate) const LONG_KEY: Identity = Identity {
     certificate: CLIENT.certificate,
@@ -114,10 +114,10 @@ pub(crate) const LONG_KEY: Identity = Identity {
 
 const PAD: usize = (100 << 10) + 1;
 
-static LONG_KEY_DER: [u8; CLIENT.key.len() + PAD + 37] = long_key(CLIENT.key);
+static LONG_KEY_DER: [u8; CLIENT.key.len() + PAD + 58] = long_key(CLIENT.key);
 
-/// The PKCS #8 of the RSA PKCS #1 key `key`, with attributes of one OCTET STRING of
-/// [`PAD`] zero bytes.
+/// The PKCS #8 of the RSA PKCS #1 key `key`, with one attribute, `unstructuredName`
+/// of PKCS #9, whose value is an OCTET STRING of [`PAD`] zero bytes.
 ///
 /// # Panics
 ///
@@ -129,13 +129,20 @@ const fn long_key<const LENGTH: usize>(key: &[u8]) -> [u8; LENGTH] {
         0x02, 0x01, 0x00, 0x30, 0x0D, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D,
         0x01, 0x01, 0x01, 0x05, 0x00,
     ];
+    // The OID 1.2.840.113549.1.9.2.
+    const NAME: [u8; 11] = [
+        0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x02,
+    ];
     assert!(key.len() >= 256 && key.len() <= 0xFFFF, "a two-byte length");
     let mut out = [0; LENGTH];
     let mut at = header(&mut out, 0, 0x30, LENGTH - 5);
     at = copy(&mut out, at, &HEAD);
     at = header(&mut out, at, 0x04, key.len());
     at = copy(&mut out, at, key);
-    at = header(&mut out, at, 0xA0, PAD + 5);
+    at = header(&mut out, at, 0xA0, PAD + 26);
+    at = header(&mut out, at, 0x30, PAD + 21);
+    at = copy(&mut out, at, &NAME);
+    at = header(&mut out, at, 0x31, PAD + 5);
     at = header(&mut out, at, 0x04, PAD);
     assert!(at + PAD == LENGTH, "the length of the PKCS #8");
     out
