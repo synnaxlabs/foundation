@@ -3,8 +3,8 @@
   OPC UA": https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6154297722).
   Security: with no `certificate`, the kind connects with the mode None and an
   anonymous user, so it is only for an isolated network or a test. With `certificate`,
-  it connects with SignAndEncrypt or Sign (the secure channel item below). User names
-  and passwords come in a later part of #2934, before a release (question:
+  it connects with SignAndEncrypt or Sign (the secure channel paragraph below). User
+  names and passwords come in a later part of #2934, before a release (question:
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6150341828). Tests:
   the tests of the kind and exit test 1 run against the open62541 test server on the
   simulated clock and network. One more test on real I/O against `opc-plc` runs in CI
@@ -222,11 +222,11 @@
   https://github.com/synnaxlabs/foundation/issues/3269#issuecomment-6255400141), and the
   new check case at 2026-10-18T21:35:52Z:
   https://github.com/synnaxlabs/foundation/issues/3269#issuecomment-6255436768).
-- **Secure channel (#2934).** `opcua` takes `certificate`, `key`, and `trust`, each a
-  secret source (`env(...)`, `file(...)`, or `secret(...)`), and the bool `unencrypted`.
-  With `certificate`, the channel is `SignAndEncrypt`, or `Sign` with `unencrypted =
-  true`. With no `certificate`, the mode is None. Four codes split the refusals of the
-  config: `opcua.no-certificate` for each of `key`, `trust`, and `unencrypted` with no
+  Secure channel (#2934): `opcua` takes `certificate`, `key`, and `trust`, each a secret
+  source (`env(...)`, `file(...)`, or `secret(...)`), and the bool `unencrypted`. With
+  `certificate`, the channel is `SignAndEncrypt`, or `Sign` with `unencrypted = true`.
+  With no `certificate`, the mode is None. Four codes split the refusals of the config:
+  `opcua.no-certificate` for each of `key`, `trust`, and `unencrypted` with no
   `certificate`, `opcua.no-key` for a `certificate` with no `key`, `opcua.no-trust` for
   a `certificate` with no `trust`, and `opcua.bad-unencrypted` for an `unencrypted` that
   is not a bool. `opcua.no-trust` is its own code, as a code that names a key for a
@@ -243,9 +243,11 @@
   which a bad own certificate or key ended the run with `Error::Config` until a change
   of the spec (the person, through `laptop.monitor`, 2026-10-20T02:25Z:
   https://github.com/synnaxlabs/foundation/pull/3471#issuecomment-6281907935). `session`
-  keeps one invariant `expect`: a connect with no credentials gives no refusal, as
-  `Client::connect` takes the credentials as an `Option` and `Refused` is a variant of
-  its error for each input (`laptop.architect-2`, 2026-10-17T06:46:05Z, the schema:
+  keeps one invariant `expect`: a connect with no credentials gives no refusal. Its type
+  cannot say so: `Client::connect` takes the credentials as an `Option`, with one error
+  type, with `Refused`, for both cases (`laptop.architect-2`, 2026-10-20T02:59:28Z:
+  https://github.com/synnaxlabs/foundation/pull/3471#issuecomment-6282298334;
+  `laptop.architect-2`, 2026-10-17T06:46:05Z, the schema:
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6230838999;
   2026-10-19T23:51:54Z, PR 2d:
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6279925761;
