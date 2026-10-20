@@ -192,7 +192,9 @@
   gives it, with no drop. While a change waits, the client sends no Publish request, so
   at most the answers of the `PUBLISHES` requests in flight wait in it, as section 4 of
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6157348272 sizes the
-  buffer, and later values wait in the queues of the server, the oldest dropped. A
+  buffer, and later values wait in the queues of the server, the oldest dropped
+  (`laptop.architect-2`, 2026-10-19T22:48:51Z,
+  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6279061464). A
   change that waits past the revised lifetime of the subscription ends it: the server
   deletes it, and `changes` ends as its doc states, after it gives the waiting changes.
   At `subscribe`, the client reserves in each change buffer the changes of
@@ -218,8 +220,21 @@
   subscription, so `changes` ends with `BadNoSubscription` and no Publish request goes
   out again; the release only logs it and sends again at once
   (`laptop.architect-2`, 2026-10-19T22:06:54Z,
-  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6278430237). This caps
-  the publishing interval of item 1 of
+  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6278430237). At
+  `BadTooManyPublishRequests` with 1 Publish request kept, the patched open62541 also
+  deletes each local subscription and gives each the status of the refusal, so
+  `changes` ends with `BadTooManyPublishRequests`; the release calls a delete service
+  from within the answer, which runs the event loop of the client with no end
+  (`laptop.architect-2`, 2026-10-20T00:06:45Z,
+  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6280116432, and the
+  status, 2026-10-20T00:06:58Z,
+  https://github.com/synnaxlabs/foundation/issues/3456#issuecomment-6280119278). A flag
+  in the client stops the Publish requests while a change waits, and the take clears
+  it. `subscribe` sets the count once, and open62541 alone writes it after, so a
+  refusal while a change waits lowers it as at any other time, and the resume keeps it
+  (`laptop.architect-2`, 2026-10-20T00:39:50Z,
+  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6280562003). The
+  `subscribe` rule caps the publishing interval of item 1 of
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6157348272 at 1 min,
   and adds the keep-alive count. Lost: no check, as a server that revises the keep-alive
   up can hold a Publish request past its timeout and break the bound of `READS`. Lost: a

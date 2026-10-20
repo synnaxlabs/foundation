@@ -7,6 +7,7 @@ use document::value::{Kind as ValueKind, Value};
 use document::{Attribute, Document, Map};
 use env::tasks::Tasks;
 
+use crate::ffi::Status;
 use crate::kind::Kind;
 
 /// The config of an `opcua` connector of `address`.
@@ -61,6 +62,12 @@ pub(super) fn rebuilt(chunk: &[u8], kind: u8, body: &[u8]) -> Vec<u8> {
 /// Whether `message` is a MSG chunk of the service type `kind`.
 pub(crate) fn is(message: &[u8], kind: [u8; 4]) -> bool {
     message.starts_with(b"MSG") && message[HEADER..HEADER + 4] == kind
+}
+
+/// Sets the service result of the answer `message` to `status`.
+pub(super) fn set_result(message: &mut [u8], status: Status) {
+    // The type of the answer, then its time and request handle.
+    message[40..44].copy_from_slice(&status.0.to_le_bytes());
 }
 
 /// The body of the MSG chunk `chunk`.

@@ -796,15 +796,16 @@ UA_Client *shim_client_new(UA_EventLoop *el, UA_UInt32 chunks, UA_UInt32 queued,
 }
 
 /* Sets the count of Publish requests that `client` keeps in flight while it has a
- * subscription, and sends the ones that it lacks. With 0, it sends no more. Gives the
- * count that it replaces, which open62541 lowers at each answer of
- * BadTooManyPublishRequests. */
-UA_UInt16 shim_client_publishes(UA_Client *client, UA_UInt16 count) {
-    UA_ClientConfig *config = UA_Client_getConfig(client);
-    UA_UInt16 replaced = config->outStandingPublishRequests;
-    config->outStandingPublishRequests = count;
+ * subscription. open62541 alone lowers it later, at each BadTooManyPublishRequests. */
+void shim_client_publish_count(UA_Client *client, UA_UInt16 count) {
+    UA_Client_getConfig(client)->outStandingPublishRequests = count;
+}
+
+/* Stops the Publish requests of `client` while `stopped`, or sends the ones that it
+ * lacks. */
+void shim_client_publishes(UA_Client *client, UA_Boolean stopped) {
+    client->publishStopped = stopped;
     __Client_Subscriptions_backgroundPublish(client);
-    return replaced;
 }
 
 /* Makes the memory of `client` for the decode of a Publish answer hold an answer of

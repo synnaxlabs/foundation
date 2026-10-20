@@ -8,7 +8,7 @@ use std::rc::Rc;
 use types::quality::Quality;
 use types::time::Span;
 
-use super::common::is;
+use super::common::{is, set_result};
 use super::{
     Peer, READS, RELAY, Relay, drop_reads, numbered, recount_of, relayed, run, serve,
 };
@@ -33,6 +33,8 @@ const MONITOR_RESPONSE: [u8; 4] = [0x01, 0x00, 0xF2, 0x02];
 const PUBLISH_RESPONSE: [u8; 4] = [0x01, 0x00, 0x3D, 0x03];
 /// `GoodCallAgain`, a service result that is not Good and not Bad.
 const GOOD_CALL_AGAIN: Status = Status(0x00A9_0000);
+/// `BadTooManyPublishRequests`.
+const TOO_MANY: Status = Status(0x8078_0000);
 
 /// Gives the span of `ms` ms.
 const fn ms(ms: i64) -> Span {
@@ -231,7 +233,7 @@ fn rewritten(
 fn called_again(kind: [u8; 4]) -> Result<Revised, Status> {
     rewritten(move |message| {
         if is(message, kind) {
-            message[40..44].copy_from_slice(&GOOD_CALL_AGAIN.0.to_le_bytes());
+            set_result(message, GOOD_CALL_AGAIN);
             if kind == MONITOR_RESPONSE {
                 recount_of(message, 0);
             }
@@ -262,8 +264,7 @@ fn a_deleted_subscription_ends_with_bad_no_subscription() {
             let armed = Cell::new(false);
             let rewrite = |message: &mut Vec<u8>| {
                 if armed.get() && is(message, PUBLISH_RESPONSE) {
-                    let status = Status::BAD_SESSION_CLOSED.0.to_le_bytes();
-                    message[40..44].copy_from_slice(&status);
+                    set_result(message, Status::BAD_SESSION_CLOSED);
                 }
             };
             relayed(&node, &Relay::default(), rewrite, async {
@@ -287,6 +288,98 @@ fn a_deleted_subscription_ends_with_bad_no_subscription() {
     .0;
     let end = Err(Status::BAD_NO_SUBSCRIPTION);
     assert_eq!(ends, [end.clone(), end]);
+}
+
+/// Gives what `run` gives, or panics when it takes more than 60 s of wall time, as a
+/// client that spins in a poll never moves the clock of the sim.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a test bounds its own run time, as the client thread can spin"
+)]
+fn bounded<T: Send + 'static>(run: impl FnOnce() -> T + Send + 'static) -> T {
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || send.send(run()));
+    let ran = receive.recv_timeout(std::time::Duration::from_secs(60));
+    ran.expect("the run ends within 60 s of wall time")
+}
+
+/// The server refuses the Publish answers as `BadTooManyPublishRequests` from the
+/// change of 2.0 on, `refusals` of them, while the change of 1.0 waits. Gives the
+/// changes of 1.0, then those up to 5 s after changes to 3.0 and, 1 s later, 4.0.
+fn refused(
+    refusals: u32,
+) -> (Result<Vec<Change>, Status>, Result<Vec<Change>, Status>) {
+    run(0, async move |node| {
+        serve(&node, 4, async |mut peer| {
+            let level = add_level(&peer);
+            let url = format!("opc.tcp://{}:{RELAY}", node.addresses()[0]);
+            let left = Cell::new(0);
+            let rewrite = |message: &mut Vec<u8>| {
+                if left.get() > 0 && is(message, PUBLISH_RESPONSE) {
+                    left.set(left.get() - 1);
+                    set_result(message, TOO_MANY);
+                }
+            };
+            relayed(&node, &Relay::default(), rewrite, async {
+                let mut client = peer.connect(&url).await.expect("the client connects");
+                let revised = client.subscribe(&[numbered(0)], LEVEL, Span::ZERO).await;
+                assert!(revised.is_ok(), "{revised:?}");
+                let first = client.changes(future::pending()).await.map(untimed);
+                assert_eq!(first, Ok(vec![changed_to(0.0, false)]));
+                let idle = client.idle(peer.clock.sleep(ms(100))).await;
+                assert_eq!(idle, Ok(()));
+                level.set(1.0);
+                let idle = client.idle(peer.clock.sleep(ms(1000))).await;
+                assert_eq!(idle, Ok(()));
+                left.set(refusals);
+                level.set(2.0);
+                let idle = client.idle(peer.clock.sleep(ms(1000))).await;
+                assert_eq!(idle, Ok(()));
+                let one = client.changes(future::ready(())).await.map(untimed);
+                level.set(3.0);
+                let idle = client.idle(peer.clock.sleep(ms(1000))).await;
+                assert_eq!(idle, Ok(()));
+                level.set(4.0);
+                let next = client.changes(peer.clock.sleep(ms(5000))).await;
+                let next = next.map(untimed);
+                client.close().await;
+                (one, next)
+            })
+            .await
+        })
+        .await
+    })
+    .0
+}
+
+/// open62541 lowers its count of Publish requests at each refusal, and ends the
+/// subscription at a count of 1. A refusal of a request sent before the stop of a
+/// waiting change lowers the count to 1 and keeps the subscription, so the next change
+/// comes, then stops the Publish requests again.
+#[test]
+fn a_refusal_while_a_change_waits_keeps_the_subscription() {
+    let (one, next) = bounded(|| refused(1));
+    assert_eq!(one, Ok(vec![changed_to(1.0, false)]));
+    assert_eq!(next, Ok(vec![changed_to(3.0, false)]));
+}
+
+/// The resume after a refusal while a change waits sends 1 Publish request, not
+/// [`PUBLISHES`], so the next refusal comes at a count of 1 and ends the changes with
+/// its status.
+#[test]
+fn a_resume_after_a_refusal_keeps_the_lowered_count() {
+    let (one, next) = bounded(|| refused(2));
+    assert_eq!(one, Ok(vec![changed_to(1.0, false)]));
+    assert_eq!(next, Err(TOO_MANY));
+}
+
+/// A server that refuses each Publish request ends the changes with the status of the
+/// refusal once the count is 1, with no service call from within the answer.
+#[test]
+fn a_refusal_at_one_publish_request_ends_the_changes() {
+    let (one, next) = bounded(|| refused(u32::MAX));
+    assert_eq!(one, Ok(vec![changed_to(1.0, false)]));
+    assert_eq!(next, Err(TOO_MANY));
 }
 
 /// Gives the publishing interval of a subscribe at a sampling of 1 s on a server that

@@ -810,7 +810,8 @@ unsafe extern "C" {
         refusal: *mut Refusal,
     ) -> u32;
     pub(crate) fn shim_client_timeout(client: *mut Client) -> u32;
-    pub(crate) fn shim_client_publishes(client: *mut Client, count: u16) -> u16;
+    pub(crate) fn shim_client_publish_count(client: *mut Client, count: u16);
+    pub(crate) fn shim_client_publishes(client: *mut Client, stopped: bool);
     pub(crate) fn shim_client_reserve(client: *mut Client, changes: usize) -> u32;
     pub(crate) fn shim_client_limits(
         client: *mut Client,

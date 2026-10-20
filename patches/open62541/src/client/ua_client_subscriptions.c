@@ -823,13 +823,14 @@ MonitoredItems_create_async_handler(UA_Client *client, void *data,
         if(!mon)
             continue;
 
-        /* Delete MonitoredItem if the creation failed */
-        UA_MonitoredItemCreateResult *item = &response->results[i];
+        /* Delete MonitoredItem if the creation failed. A failed service has no
+         * results, so the index waits for the check. */
         if(response->responseHeader.serviceResult != UA_STATUSCODE_GOOD ||
-           item->statusCode != UA_STATUSCODE_GOOD) {
+           response->results[i].statusCode != UA_STATUSCODE_GOOD) {
             MonitoredItem_delete(client, sub, mon);
             continue;
         }
+        UA_MonitoredItemCreateResult *item = &response->results[i];
 
         /* Update the MonitoredItem with the server's response  */
         MonitoredItem_createFinish(client, sub, mon, item);
@@ -1624,6 +1625,23 @@ processNotificationMessage(UA_Client *client, UA_Client_Subscription *sub,
                    "Unknown notification message type");
 }
 
+/* Gives `status` to the status change callback of each local Subscription, then
+ * removes it, so no PublishRequest goes out again. A service call from within an
+ * answer runs the event loop with no end, so it calls none. */
+static void
+__Client_Subscriptions_end(UA_Client *client, UA_StatusCode status) {
+    UA_StatusChangeNotification change;
+    UA_StatusChangeNotification_init(&change);
+    change.status = status;
+    UA_Client_Subscription *sub, *next;
+    LIST_FOREACH_SAFE(sub, &client->subscriptions, listEntry, next) {
+        if(sub->statusChangeCallback)
+            sub->statusChangeCallback(client, sub->subscriptionId, sub->context,
+                                      &change);
+        __Client_Subscription_deleteInternal(client, sub);
+    }
+}
+
 void
 __Client_Subscriptions_processPublishResponse(UA_Client *client, UA_PublishRequest *request,
                                               UA_PublishResponse *response) {
@@ -1647,7 +1665,7 @@ __Client_Subscriptions_processPublishResponse(UA_Client *client, UA_PublishReque
             UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
                          "PublishResponse: Too many PublishRequests when "
                          "outStandingPublishRequests = 1");
-            UA_Client_Subscriptions_deleteSingle(client, response->subscriptionId);
+            __Client_Subscriptions_end(client, UA_STATUSCODE_BADTOOMANYPUBLISHREQUESTS);
         }
         return;
 
@@ -1658,19 +1676,14 @@ __Client_Subscriptions_processPublishResponse(UA_Client *client, UA_PublishReque
                      "PublishResponse: Received BadShutdown status");
         return;
 
-    case UA_STATUSCODE_BADNOSUBSCRIPTION: {
+    case UA_STATUSCODE_BADNOSUBSCRIPTION:
         /* There is no Subscription configured, the server expects no
          * PublishRequests. We demote this to debug-logging, as it can occur
          * during regular shutdown when the Subscriptions are removed. */
         UA_LOG_DEBUG(client->config.logging, UA_LOGCATEGORY_CLIENT,
                      "PublishResponse: Received BadNoSubscription status");
-        /* The session holds no Subscription, so remove each local one, and no
-         * PublishRequest goes out again. */
-        UA_Client_Subscription *sub, *next;
-        LIST_FOREACH_SAFE(sub, &client->subscriptions, listEntry, next)
-            __Client_Subscription_deleteInternal(client, sub);
+        __Client_Subscriptions_end(client, UA_STATUSCODE_BADNOSUBSCRIPTION);
         return;
-    }
 
     default:
         break;
@@ -1836,7 +1849,7 @@ __Client_Subscriptions_backgroundPublish(UA_Client *client) {
         return;
 
     /* The session must have at least one subscription */
-    if(!LIST_FIRST(&client->subscriptions))
+    if(!LIST_FIRST(&client->subscriptions) || client->publishStopped)
         return;
 
     while(client->currentlyOutStandingPublishRequests < client->config.outStandingPublishRequests) {
