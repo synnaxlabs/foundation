@@ -19,8 +19,19 @@ when its PR merges, `mcp__factory__next` clears it and starts `/build` again.
    by the exact path that its task notification gives, other than after a crash or a
    restart (`docs/coordination.md`, "Worktrees"). Never loop over `.claude/worktrees` or
    `git worktree list`: the worktrees of other sessions are there too.
-2. An open issue labeled `owner:$FACTORY_NAME` that is not `blocked` comes first, one
-   with no open PR before one with an open PR: resume it from its last state comment.
+2. Run the waits script. It prints each `blocked` issue whose line `Waits on #<n>.`
+   names only closed issues and PRs. Read each, and when nothing else that it waits on
+   is left, remove `blocked`, and send its link to its owner, or to `laptop.coordinator`
+   for `-`. For your own, do what Rules say for that link. Its exits mean what they
+   mean in step 4. Then an open issue labeled `owner:$FACTORY_NAME` that is not
+   `blocked` comes first, one with no open PR before one with an open PR: resume it
+   from its last state comment. Run "Wait once" in the background for the PR of each
+   other one that has auto-merge on.
+
+   ```sh
+   w=$(git show origin/main:.claude/skills/build/waits.sh) || exit 3
+   sh -c "$w" waits.sh
+   ```
 3. Give back each issue labeled `owner:$FACTORY_NAME` that you do not resume and that
    no open PR closes or has in its branch: comment its state, and remove your `owner:`
    label. Remove `blocked` from one when each issue that it waits on is closed and each
@@ -96,12 +107,9 @@ or a line range.
 
     Never check by hand, `/loop`, or `ScheduleWakeup`. A message or the script's exit
     wakes you.
-    - Exit 0 (merged): comment the final state on the issue. Send the link of each
-      open issue labeled `blocked` that waits on it (`gh issue list --state open
-      --label blocked --search "<issue> in:body"`) to its owner, or to
-      `laptop.coordinator` when it has no `owner:` label. Then call
-      `mcp__factory__next`, and end your turn. On the night lane, take the next
-      `night` issue in this context instead.
+    - Exit 0 (merged): comment the final state on the issue. While you build another
+      issue, go on with it. Else call `mcp__factory__next`, and end your turn. On the
+      night lane, take the next `night` issue in this context instead.
     - Exit 1: read the cause it prints (`gh pr checks <n>`,
       `gh run view <id> --log-failed | tail -60`, or the review). Fix it, run the gate
       on what changed, `gh pr merge <n> --auto`, and wait again.
@@ -160,11 +168,12 @@ take the next issue meanwhile.
 - Ask the person in a comment on the issue or PR, then send `laptop.coordinator` the
   link to that comment at once (`docs/coordination.md`, "Messages"). A comment alone
   reaches no one. When no part of the issue is left to build, add `blocked` and take
-  other work (Take an issue). When the answer or the link of a merged issue comes, and
-  each issue that it waits on is closed and each question on it has an answer, remove
-  `blocked`. If no open PR closes the issue or has its number in its branch, also
-  remove your `owner:` label if it is there, and add `ready`. If you build no other
-  issue, take one (Take an issue).
+  other work (Take an issue). Name each issue and PR that it waits on in one line of its
+  body, `Waits on #<n>, #<m>.`, so that the waits script finds it (step 2). When the
+  answer comes and nothing else that it waits on is left, or a link from step 2 comes,
+  remove `blocked` if it is there. If no open PR closes the issue or has its number in
+  its branch, also remove your `owner:` label if it is there, and add `ready`. If you
+  build no other issue, take one (Take an issue).
 - A key choice (`CLAUDE.md`, "The person decides the design"): send it to
   `laptop.monitor` when you make it, before work builds on it, then go on. Never add
   `blocked` for it.
@@ -183,4 +192,5 @@ take the next issue meanwhile.
   Claim it (step 5) only when step 4 takes it. Your next state comment on your issue
   links each one that you file for it.
 - Before you stop, comment your state on the issue: done, next step, open questions.
-- A change to `free.sh` passes `sh .claude/skills/build/free_test.sh` first.
+- A change to `free.sh` or `waits.sh` passes its test first:
+  `sh .claude/skills/build/free_test.sh` or `sh .claude/skills/build/waits_test.sh`.
