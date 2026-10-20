@@ -142,9 +142,9 @@ fn served(hcl: &str, opcua: SocketAddr, influx: SocketAddr) -> String {
 }
 
 /// `hcl` with its OPC UA connector polled, so that it reads each node at each tick, as
-/// the trace of [`held`] and a count that grows ask. A sink that opens after the first
-/// value of a subscription gets no sample of a node until it changes (#3537), so a
-/// sink that starts late also asks for it.
+/// the trace of [`held`] and a count that grows while the nodes do not change ask.
+/// Until #3537, a sink that opens after the first value of a node that does not change
+/// gets no sample of it, so a sink that starts late also asks for it.
 fn polled(hcl: &str) -> String {
     let rate = "  rate    = \"10Hz\"\n";
     let polled = hcl.replacen(rate, &format!("{rate}  polled  = true\n"), 1);
@@ -872,9 +872,10 @@ fn a_bad_value_is_left_out_and_counted() {
         panic!("one variable");
     };
     first_stored(&plant, &VARIABLES[..1]);
+    // Unequal steps, so that a swap of the two counts fails.
     plant.opcua.change(TICKS, BAD);
-    plant.opcua.change(TICKS, UNCERTAIN);
-    let last = f64::from(u32::try_from(2 * TICKS).expect("a few"));
+    plant.opcua.change(TICKS / 2, UNCERTAIN);
+    let last = f64::from(u32::try_from(TICKS + TICKS / 2).expect("a few"));
     // The status comes before the reads, so that the reads hold each counted change.
     let (counts, steps) = plant.rig.wait("`plc` counts each change", || {
         let status = plant.rig.status();
