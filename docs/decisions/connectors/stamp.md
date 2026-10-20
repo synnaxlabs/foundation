@@ -5,10 +5,10 @@
   each stamp. `write` takes the stamp as an argument, so the doc holds this rule, not
   the type (#3596; `laptop.architect-2`, 2026-10-20T13:33:43Z, item 1:
   https://github.com/synnaxlabs/foundation/pull/3595#issuecomment-6292093472). A
-  second frame at one stamp after a write again gets a refusal under the stamp of the
-  write again, so it panics. `stamp::Writer` keeps the stamp rule in a private value
-  with no hub, so the tests of the rule need no node (`laptop.architect-2`,
-  2026-10-20T13:14:36Z:
+  second frame at one stamp, after a group of the first was written again, can get a
+  refusal under the stamp of that write again, and `write` then panics.
+  `stamp::Writer` keeps the stamp rule in a private value with no hub, so the tests of
+  the rule need no node (`laptop.architect-2`, 2026-10-20T13:14:36Z:
   https://github.com/synnaxlabs/foundation/issues/2527#issuecomment-6291709126). Lost:
   the rule merged into `stamp::Writer` (each case of the property tests then opens a sim
   node). It stamps the frames of a kind that reads by request: one stamp goes into each
