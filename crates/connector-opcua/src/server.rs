@@ -17,13 +17,6 @@ use env::net;
 
 use crate::connection::Manager;
 
-/// The credentials, policies, and modes of [`Server::start_secure`], for
-/// [`Server::serve`].
-pub(crate) type Security<'a> = (
-    &'a crate::client::Credentials<'a>,
-    &'a [crate::secure::Policy],
-    &'a [crate::client::Mode],
-);
 use crate::event;
 use crate::ffi::{self, Status};
 use crate::node::{Key, Node, ns0};
@@ -32,6 +25,17 @@ use crate::value::Value;
 use types::time::Span;
 #[cfg(feature = "sim")]
 use types::time::Stamp;
+
+/// The channel security of a test server of [`Server::start_secure`].
+pub(crate) struct Secure<'a> {
+    /// The certificate and key of the server, and the only certificates that its
+    /// channels trust.
+    pub(crate) credentials: &'a crate::client::Credentials<'a>,
+    /// The policies of its endpoints, in order.
+    pub(crate) policies: &'a [crate::secure::Policy],
+    /// The modes of an endpoint of each policy, in order.
+    pub(crate) modes: &'a [crate::client::Mode],
+}
 
 /// A started test server of open62541 on the loop of a connection manager.
 /// [`Server::close`] deletes it, and a drop leaks it.
@@ -123,9 +127,8 @@ impl Server {
     }
 
     /// Makes and starts the test server as [`Server::start`] does, which has no
-    /// endpoint in `None`, but an endpoint in each of `modes` for each of `policies`,
-    /// in that order, on the certificate and key of `credentials`, and whose channels
-    /// trust only the certificates of `credentials`.
+    /// endpoint in `None`, but an endpoint in each mode for each policy of `secure`,
+    /// in that order, on its credentials.
     ///
     /// # Safety
     ///
@@ -138,16 +141,15 @@ impl Server {
         manager: &Manager,
         host: &CStr,
         sessions: u16,
-        credentials: &crate::client::Credentials<'_>,
-        policies: &[crate::secure::Policy],
-        modes: &[crate::client::Mode],
+        secure: &Secure<'_>,
     ) -> Self {
-        let raw = credentials.raw();
-        let uris: Vec<_> = policies
-            .iter()
+        let raw = secure.credentials.raw();
+        let uris: Vec<_> = (secure.policies.iter())
             .map(|policy| policy.uri().as_ptr())
             .collect();
-        let modes: Vec<_> = modes.iter().map(|&mode| ffi::Mode::from(mode)).collect();
+        let modes: Vec<_> = (secure.modes.iter())
+            .map(|&mode| ffi::Mode::from(mode))
+            .collect();
         // SAFETY: as the caller ensures, and the server copies `raw`, `uris`, and
         // `modes`.
         unsafe { Self::started(manager, host, sessions, &raw const raw, &uris, &modes) }
@@ -711,8 +713,8 @@ impl Server {
     }
 
     /// Starts a server on `manager` with an empty host and room for `sessions`
-    /// sessions, as [`Server::start`] does, or as [`Server::start_secure`] does on the
-    /// credentials, policies, and modes of `security`, and gives it to `add`. Then
+    /// sessions, as [`Server::start`] does, or as [`Server::start_secure`] does on
+    /// `secure`, and gives it to `add`. Then
     /// drives `manager` until `until` completes or the accept of its listener fails,
     /// closes the server as [`Server::close`] does, drops `manager`, and gives the
     /// output of `until`.
@@ -731,23 +733,16 @@ impl Server {
     pub(crate) async fn serve<T>(
         manager: Manager,
         sessions: u16,
-        security: Option<Security<'_>>,
+        secure: Option<&Secure<'_>>,
         add: impl FnOnce(&mut Self),
         until: impl Future<Output = T>,
     ) -> Result<T, net::Error> {
         let manager = ManuallyDrop::new(manager);
-        let server = match security {
+        let server = match secure {
             // SAFETY: each close deletes the server before the manager drops. A panic
             // out of the start leaks the manager, and the server if open62541 made it.
-            Some((credentials, policies, modes)) => unsafe {
-                Self::start_secure(
-                    &manager,
-                    c"",
-                    sessions,
-                    credentials,
-                    policies,
-                    modes,
-                )
+            Some(secure) => unsafe {
+                Self::start_secure(&manager, c"", sessions, secure)
             },
             // SAFETY: as above.
             None => unsafe { Self::start(&manager, c"", sessions) },

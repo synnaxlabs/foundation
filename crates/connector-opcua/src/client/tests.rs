@@ -30,7 +30,7 @@ use crate::ffi::{self, Status};
 use crate::gate::Gate;
 use crate::node::{Key, Name, Node};
 use crate::secure::Policy;
-use crate::server::{Limits, Server};
+use crate::server::{Limits, Secure, Server};
 use crate::unwind::caught;
 use crate::value::{self, Fault, Value};
 
@@ -257,7 +257,12 @@ async fn serve_on<T>(
         // SAFETY: the close below deletes the server before the manager drops.
         Some((credentials, policies)) => unsafe {
             let modes = [Mode::Sign, Mode::SignAndEncrypt];
-            Server::start_secure(&manager, c"", sessions, credentials, policies, &modes)
+            let secure = Secure {
+                credentials,
+                policies,
+                modes: &modes,
+            };
+            Server::start_secure(&manager, c"", sessions, &secure)
         },
         // SAFETY: as above.
         None => unsafe { Server::start(&manager, c"", sessions) },

@@ -50,7 +50,7 @@ use crate::event;
 pub use crate::log::call_refused;
 use crate::node::Node;
 use crate::secure::Policy;
-use crate::server::{Answer, Server};
+use crate::server::{Answer, Secure, Server};
 use crate::value::Value;
 
 /// The sessions and secure channels of [`serve`].
@@ -438,14 +438,12 @@ pub async fn serve(
             server.add_source(node, move || variables.read(index, clock.now(), wall()));
         }
     };
-    let security = (security.as_ref()).map(|(credentials, policy, mode)| {
-        (
-            credentials,
-            std::slice::from_ref(policy),
-            std::slice::from_ref(mode),
-        )
+    let secure = (security.as_ref()).map(|(credentials, policy, mode)| Secure {
+        credentials,
+        policies: std::slice::from_ref(policy),
+        modes: std::slice::from_ref(mode),
     });
-    Server::serve(manager, SESSIONS, security, add, until.wait()).await
+    Server::serve(manager, SESSIONS, secure.as_ref(), add, until.wait()).await
 }
 
 /// Runs the [`serve`] that `serve` gives for a new token until `work` ends, then
