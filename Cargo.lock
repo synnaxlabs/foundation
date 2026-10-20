@@ -1997,6 +1997,7 @@ dependencies = [
  "os",
  "program",
  "sector",
+ "sim",
  "spec",
  "tokio",
  "tracing",

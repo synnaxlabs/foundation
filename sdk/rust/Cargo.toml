@@ -19,6 +19,7 @@ transport = { path = "../../crates/transport" }
 types = { path = "../../crates/types" }
 
 [dev-dependencies]
+sim = { path = "../../crates/sim" }
 tokio = { workspace = true, features = ["rt"] }
 
 [lints]

@@ -65,6 +65,7 @@ async fn hub_on(
         interner,
         tasks,
         node: types::node::Key::from_u128(1),
+        public_key: types::ed25519::PrivateKey([1; 32]).public(),
         time,
         entropy,
         region,

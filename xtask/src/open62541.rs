@@ -468,7 +468,7 @@ const SYMBOLS: [&str; 30] = [
 /// an algorithm and not its result. A PEM reader reads no console only with a callback
 /// of [`PASSWORDS`], which [`passwords`] checks.
 #[rustfmt::skip]
-const AWS_LC: [&str; 145] = [
+const AWS_LC: [&str; 147] = [
     "ASN1_INTEGER_cmp", "BIO_free", "BN_bin2bn",
     "BN_bn2binpad", "BN_free", "BN_new", "BN_set_word", "ECDSA_SIG_free",
     "ECDSA_SIG_get0", "ECDSA_SIG_new", "ECDSA_SIG_set0", "ECDSA_size",
@@ -497,8 +497,9 @@ const AWS_LC: [&str; 145] = [
     "EVP_sha256", "EVP_sha384", "GENERAL_NAME_free", "HMAC", "OBJ_txt2nid",
     "OPENSSL_cleanse", "OPENSSL_free", "OPENSSL_sk_free", "OPENSSL_sk_new_null",
     "OPENSSL_sk_num", "OPENSSL_sk_pop_free_ex", "OPENSSL_sk_push", "OPENSSL_sk_value",
-    "PEM_bytes_read_bio", "PEM_read_bio_PrivateKey", "PEM_read_bio_X509",
-    "PEM_read_bio_X509_CRL", "PEM_read_bio_X509_REQ", "RSA_free", "RSA_new", "RSA_size",
+    "PEM_do_header", "PEM_get_EVP_CIPHER_INFO", "PEM_read_bio",
+    "PEM_read_bio_PrivateKey", "PEM_read_bio_X509", "PEM_read_bio_X509_CRL",
+    "PEM_read_bio_X509_REQ", "RSA_free", "RSA_new", "RSA_size",
     "X509V3_EXT_conf_nid", "X509_CRL_digest", "X509_CRL_free", "X509_CRL_get_REVOKED",
     "X509_CRL_get_issuer", "X509_EXTENSION_free", "X509_NAME_add_entry_by_txt",
     "X509_NAME_cmp", "X509_NAME_dup", "X509_NAME_free", "X509_NAME_new",

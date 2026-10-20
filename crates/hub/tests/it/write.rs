@@ -1041,7 +1041,7 @@ fn refuses_a_write_signed_with_another_key_or_as_a_read() {
             finish(&mut agent).await;
         },
     );
-    let signature = || Err(serve::Error::Access(Refusal::Signature));
+    let signature = || Err(serve::Error::Access(Box::new(Refusal::Signature)));
     assert_eq!(home.served, [signature(), signature(), Ok(Got::Ended)]);
 }
 

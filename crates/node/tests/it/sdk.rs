@@ -220,11 +220,12 @@ fn a_client_with_a_wrong_public_key_gets_the_error_of_the_handshake() {
     };
     let error = Client::connect(&node, subject).unwrap_err();
     let unreachable = transport::Error::Unreachable {
-        peer,
+        peer: Some(peer),
         attempts: vec![(
             transport::Address::Udp(node.addresses[0]),
             transport::Error::Authentication { expected: peer },
-        )],
+        )]
+        .into_boxed_slice(),
     };
     assert_eq!(
         error,
@@ -259,7 +260,6 @@ fn a_client_of_an_address_that_no_node_reads_is_unreachable() {
     let peer = PrivateKey([7; 32]).public();
     let node = Node {
         addresses: vec![address],
-        key: types::node::Key::from_u128(1),
         public_key: peer,
     };
     let subject = Subject {
@@ -268,8 +268,41 @@ fn a_client_of_an_address_that_no_node_reads_is_unreachable() {
     };
     let error = Client::connect(&node, subject).unwrap_err();
     let unreachable = transport::Error::Unreachable {
-        peer,
-        attempts: vec![(transport::Address::Udp(address), transport::Error::TimedOut)],
+        peer: Some(peer),
+        attempts: vec![(transport::Address::Udp(address), transport::Error::TimedOut)]
+            .into_boxed_slice(),
+    };
+    assert_eq!(
+        error,
+        Error::Session(program::Error::Transport(unreachable))
+    );
+}
+
+#[test]
+fn answering_gives_the_node_that_local_gives_and_a_client_connects_to_it() {
+    let mut rig = Rig::new();
+    rig.start();
+    let (node, subject) = admin(&rig);
+    let answering = Node::answering(node.addresses.clone()).unwrap();
+    assert_eq!(
+        (&answering.addresses, answering.public_key),
+        (&node.addresses, node.public_key)
+    );
+    let client = Client::connect(&answering, subject).unwrap();
+    assert_eq!(client.close(), Ok(()));
+    rig.stop();
+}
+
+#[test]
+fn answering_of_an_address_that_no_node_reads_is_unreachable() {
+    #[expect(clippy::disallowed_methods, reason = "a socket that never reads")]
+    let silent = std::net::UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
+    let address = silent.local_addr().unwrap();
+    let error = Node::answering(vec![address]).unwrap_err();
+    let unreachable = transport::Error::Unreachable {
+        peer: None,
+        attempts: vec![(transport::Address::Udp(address), transport::Error::TimedOut)]
+            .into_boxed_slice(),
     };
     assert_eq!(
         error,
