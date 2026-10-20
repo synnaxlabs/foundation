@@ -289,7 +289,10 @@ exclude_re = [
   # Each other error of `symlink_metadata` comes again, with the same text, from the
   # next open of the same path in `pin`.
   'sdk/python/src/profile\.rs:.*replace match guard e\.kind\(\) != io::ErrorKind::NotFound with false in linked$',
-  # With the mutant, the node refuses each writer of one index, and each writer test of
-  # `crates/node/tests/it/sdk.rs` fails at its open.
-  'sdk/rust/src/write\.rs:.*replace != with == in served$',
+  # No outcome comes back, and each test of `crates/node/tests/it/sdk.rs` that checks
+  # the outcomes of a write fails.
+  'sdk/rust/src/write\.rs:.*replace sent -> Result<\(\), program::Error> with Ok\(\(\)\)$',
+  # With `!=`, each frame takes the check of each group, which gives the counts that
+  # one count for all series gives. Only the time differs.
+  'sdk/rust/src/write\.rs:.*replace == with != in Writer::counted$',
 ]

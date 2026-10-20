@@ -399,9 +399,8 @@ impl Writer {
         counts.fill(None);
         for part in parts {
             let lowest = &mut counts[part.group];
-            if lowest.is_none_or(|(place, _)| part.place < place) {
-                *lowest = Some((part.place, part.count));
-            }
+            let part = (part.place, part.count);
+            *lowest = Some(lowest.map_or(part, |lowest| lowest.min(part)));
         }
         let other = |part: &Part| {
             let (place, count) = counts[part.group]?;
