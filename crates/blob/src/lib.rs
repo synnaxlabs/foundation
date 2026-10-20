@@ -36,10 +36,10 @@ pub struct Config {
     pub dir: PathBuf,
     /// Blocks for the chunks a get gives, for checks of chunks on disk, for the reply
     /// heads of [`peer::serve`], and for the headers, the get messages, the chunks,
-    /// and the put heads of [`peer::get`] and [`peer::put`].
+    /// and the put heads of [`peer::get`], [`peer::put`], and [`peer::Push`].
     /// Its largest block bounds a chunk. A get that `serve` answers holds its chunk
-    /// and its reply head at once, and a put of `peer::put` holds its chunk and its
-    /// put head at once. A pool that cannot hold both gives that get or put
+    /// and its reply head at once, and a put holds its chunk and its put head at
+    /// once. A pool that cannot hold both gives that get or put
     /// [`Error::Pool`], as a pool under load does, and the stream ends with code 0.
     pub pool: Rc<Pool>,
     /// The bytes the store leaves free on the disk. A put that would leave fewer gives

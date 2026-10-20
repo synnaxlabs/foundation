@@ -54,7 +54,7 @@ mod send;
 mod stream;
 mod turn;
 
-pub(crate) use peer::{CHUNKS, within};
+pub(crate) use peer::{DEADLINE, within};
 pub(crate) mod used;
 mod version;
 
@@ -1550,8 +1550,13 @@ mod tests {
         changes: BTreeMap<u8, (Pointer, BTreeMap<Name, Definition>)>,
         /// The nodes that answer no blob stream.
         silent: BTreeSet<u8>,
+        /// The codes with which each node closes the session of each of its next blob
+        /// streams, in order.
+        closes: BTreeMap<u8, VecDeque<u32>>,
         /// The blob streams that each node served.
         blobs: BTreeMap<u8, usize>,
+        /// The blob streams that each node served to a clean end.
+        clean: BTreeMap<u8, usize>,
         /// Each spec change of `applies` that returned, in order: its node, the
         /// pointer on that node at the return, and what the change gave.
         applied: Vec<(u8, Pointer, Result<Pointer, Error>)>,
@@ -1804,8 +1809,9 @@ mod tests {
     }
 
     /// Serves each stream of each session that a peer opens to `transport`, as `node`
-    /// does, and holds each blob stream with no answer when node `id` is silent. The
-    /// group refuses no message of a cluster.
+    /// does, and holds each blob stream with no answer when node `id` is silent, or
+    /// closes its session with the next code that node `id` closes with. The group
+    /// refuses no message of a cluster.
     async fn accept(
         mesh: Mesh,
         transport: Rc<Transport>,
@@ -1824,22 +1830,36 @@ mod tests {
             tasks.spawn(async move {
                 while let Ok(mut incoming) = session.accept().await {
                     let (mesh, board) = (mesh.clone(), Arc::clone(&board));
+                    let session = session.clone();
                     streams.spawn(async move {
                         let Ok(Some(header)) = incoming.receiver.recv().await else {
                             return;
                         };
                         let (protocol, _) = wire::header::decode(&header).unwrap();
                         if protocol == Protocol::Blob {
-                            let silent = {
+                            let (silent, close) = {
                                 let mut board = board.lock().unwrap();
                                 let blobs = board.blobs.entry(id).or_default();
                                 *blobs = blobs.checked_add(1).unwrap();
-                                board.silent.contains(&id)
+                                let close = board
+                                    .closes
+                                    .get_mut(&id)
+                                    .and_then(VecDeque::pop_front);
+                                (board.silent.contains(&id), close)
                             };
+                            if let Some(code) = close {
+                                session.close(Code(code));
+                                return;
+                            }
                             if silent {
                                 std::future::pending::<()>().await;
                             }
                             let served = blob::peer::serve(&mesh.store, incoming).await;
+                            if served.is_ok() {
+                                let mut board = board.lock().unwrap();
+                                let clean = board.clean.entry(id).or_default();
+                                *clean = clean.checked_add(1).unwrap();
+                            }
                             // A test arms each fault of the files.
                             if let Err(error) = served {
                                 let armed = matches!(

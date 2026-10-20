@@ -895,3 +895,103 @@ fn serve_frees_each_chunk_before_it_takes_the_next() {
         },
     );
 }
+
+// The peer waits for the second put before it ends anything, so a `Push::put` that
+// waited for more than its `Stored` would never return.
+#[test]
+fn a_push_gives_back_each_put_once_the_peer_stored_its_chunk() {
+    let (a, a_bytes) = chunk(1, 3000);
+    let (b, b_bytes) = chunk(2, 100);
+    let sent = (a_bytes.clone(), b_bytes.clone());
+    run_session(
+        0,
+        DISK,
+        move |_, session| async move {
+            let mut stream = raw(accept(&session).await.unwrap());
+            assert_eq!(stream.take_put().await.1, sent.0);
+            stream.answer(Reply::Stored { digest: a }).await;
+            assert_eq!(stream.take_put().await.1, sent.1);
+            stream.answer(Reply::Stored { digest: b }).await;
+            stream.finish().await;
+        },
+        move |peer| async move {
+            let store = open(&peer.node, 0).await;
+            put(&store, a, &a_bytes).await;
+            put(&store, b, &b_bytes).await;
+            let push = peer::Push::open(&store, &peer.session).await.unwrap();
+            let push = push.put(a).await.unwrap();
+            let push = push.put(b).await.unwrap();
+            assert_eq!(push.finish().await, Ok(()));
+        },
+    );
+}
+
+#[test]
+fn a_push_dropped_between_puts_ends_the_stream_with_code_0() {
+    let (a, bytes) = chunk(1, 3000);
+    let sent = bytes.clone();
+    run_session(
+        0,
+        DISK,
+        move |_, session| async move {
+            let mut stream = raw(accept(&session).await.unwrap());
+            assert_eq!(stream.take_put().await.1, sent);
+            stream.answer(Reply::Stored { digest: a }).await;
+            assert_eq!(stream.reset().await, reset(0));
+        },
+        move |peer| async move {
+            let store = open(&peer.node, 0).await;
+            put(&store, a, &bytes).await;
+            let push = peer::Push::open(&store, &peer.session).await.unwrap();
+            drop(push.put(a).await.unwrap());
+        },
+    );
+}
+
+#[test]
+fn a_reply_after_the_last_put_of_a_push_gives_unexpected_at_its_finish() {
+    let (a, bytes) = chunk(1, 100);
+    let reply = Reply::Stored { digest: a };
+    run_session(
+        0,
+        DISK,
+        move |_, session| async move {
+            let mut stream = raw(accept(&session).await.unwrap());
+            stream.take_put().await;
+            stream.answer(reply).await;
+            stream.answer(reply).await;
+            assert_eq!(stream.reset().await, reset(MALFORMED));
+        },
+        move |peer| async move {
+            let store = open(&peer.node, 0).await;
+            put(&store, a, &bytes).await;
+            let push = peer::Push::open(&store, &peer.session).await.unwrap();
+            let push = push.put(a).await.unwrap();
+            assert_eq!(push.finish().await, Err(Error::Unexpected { reply }));
+        },
+    );
+}
+
+#[test]
+fn a_reply_after_the_last_put_that_does_not_decode_stops_the_finish_with_its_code() {
+    let (a, bytes) = chunk(1, 100);
+    run_session(
+        0,
+        DISK,
+        move |_, session| async move {
+            let mut stream = raw(accept(&session).await.unwrap());
+            stream.take_put().await;
+            stream.answer(Reply::Stored { digest: a }).await;
+            stream.send(&[9]).await;
+            assert_eq!(stream.reset().await, reset(MALFORMED));
+        },
+        move |peer| async move {
+            let store = open(&peer.node, 0).await;
+            put(&store, a, &bytes).await;
+            let push = peer::Push::open(&store, &peer.session).await.unwrap();
+            let push = push.put(a).await.unwrap();
+            let kind = wire::blob::Error::Kind { kind: 9 };
+            assert_eq!(push.finish().await, Err(Error::Wire(kind)));
+        },
+    );
+}

@@ -23,7 +23,9 @@
   still missing in calls of at most `CHUNKS`, each within `peer::DEADLINE`. A call that
   fails or passes the deadline gives the rest of the round to the next peer. Lost:
   holders first; a set of the peers that failed; the get of one listed chunk at a time.
-  It dials as `Mesh::apply` does, with the same redial. A failed call of this node's
+  It dials once more when a call fails on a session that ended, inside the deadline of
+  the call, as a session to a process that restarted ends only at its first use. A
+  failed call of this node's
   store ends the get with `Cause::Blob`. Each other failure of a peer moves to the next
   peer. When no peer gives the chunk, the cause stays
   `Missing`. A failed store call or file call is read again each second. The state is at

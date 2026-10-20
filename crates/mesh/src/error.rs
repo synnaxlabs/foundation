@@ -13,7 +13,7 @@ use types::name::Name;
 use types::node;
 
 use crate::change::Unknown;
-use crate::driver::CHUNKS;
+use crate::driver::DEADLINE;
 use crate::member::Member;
 use crate::region::{self, Unfit};
 use crate::{claim, file, join, log};
@@ -357,7 +357,8 @@ impl fmt::Display for Missed {
 /// Why a put of the listed chunks of a spec change on a voter failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Miss {
-    /// A call of the put did not end within the deadline of 10 s.
+    /// A step of the put passed the deadline of 10 s: the dial, the open of its stream,
+    /// or the `Stored` of one chunk.
     Deadline,
     /// This node has no record of the voter, so no address to dial.
     Unknown,
@@ -370,11 +371,9 @@ pub enum Miss {
 impl fmt::Display for Miss {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Deadline => write!(
-                f,
-                "a call of its put of at most {CHUNKS} chunks passed the deadline of \
-                 10 s"
-            ),
+            Self::Deadline => {
+                write!(f, "a step of its put passed the deadline of {DEADLINE}")
+            }
             Self::Unknown => f.write_str("this node has no record of it"),
             Self::Dial(error) => write!(f, "its dial failed: {error}"),
             Self::Put(error) => write!(f, "its put failed: {error}"),
