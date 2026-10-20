@@ -65,7 +65,8 @@ def frames(names: list[str], samples: int, count: int, dtype=np.float64,
     up. With `queued`, it writes each frame first, then reads them with no wait. Gives
     the round trip, or with `queued` the whole call of `__next__` and the free of its
     frame, and the part of each frame, in nanoseconds. A `dtype` of `uuid.UUID` writes
-    each frame with `write`, so takes one name and one sample. Raises `DataLost` when the node lost a frame."""
+    each frame with `write`, so takes one name and one sample. Raises `DataLost` when
+    the node lost a frame."""
     width = 16 if dtype is uuid.UUID else np.dtype(dtype).itemsize
     size = (len(names) + 1) * SERIES + samples * (len(names) * width + 8)
     count = min(count, ROOM // size - 50)
