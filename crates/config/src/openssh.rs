@@ -256,9 +256,9 @@ impl fmt::Display for Unreadable {
 
 /// Reads the OpenSSH private key file of an Ed25519 key with no passphrase, as
 /// `ssh-keygen -t ed25519 -N ""` and [`key_file`] write it. It reads each such file
-/// that `ssh-key` 0.6.7 reads, also one with a body of any width or with white space,
-/// any bytes on the lines after the end mark, CRLF line ends, or no line end after the
-/// end mark. It refuses some files that OpenSSH reads: a comment that is not UTF-8
+/// that `ssh-key` 0.6.7 reads and that is UTF-8 up to its begin mark, also one with a
+/// body of any width or with white space, any bytes on the lines after the end mark,
+/// CRLF line ends, or no line end after the end mark. It refuses some files that OpenSSH reads: a comment that is not UTF-8
 /// ([`Unreadable::Comment`]), and, as [`Unreadable::Format`], padding of a block or
 /// more, options of the `none` KDF, and a NUL in the body. The comment is not kept.
 ///
