@@ -377,22 +377,24 @@ impl Server {
         assert_eq!(status, Status::GOOD, "open62541 refused the logins");
     }
 
-    /// Gives each endpoint one user token policy, a user name with the policy `None`,
-    /// so a client that sends the password sends it in clear on a channel that does
-    /// not encrypt.
+    /// Gives each endpoint one user token policy, a user name with the security policy
+    /// of the URI `uri`. With the policy `None`, a client that sends the password sends
+    /// it in clear on a channel that does not encrypt.
     ///
     /// # Panics
     ///
-    /// If memory runs out.
+    /// If `uri` has no `#`, or memory runs out.
     #[cfg(test)]
-    pub(crate) fn cleartext(&self) {
-        // SAFETY: the server lives.
-        let status = Status(unsafe { ffi::test::shim_server_cleartext(self.raw()) });
+    pub(crate) fn set_token_policy(&self, uri: &CStr) {
+        // SAFETY: the server lives, and it copies `uri`.
+        let status = Status(unsafe {
+            ffi::test::shim_server_token_policy(self.raw(), uri.as_ptr())
+        });
         assert_eq!(status, Status::GOOD, "open62541 refused the token policies");
     }
 
     /// Refuses each later session with `BadIdentityTokenInvalid`, as a server does that
-    /// gives that status for a wrong password.
+    /// cannot read the user token.
     #[cfg(test)]
     pub(crate) fn invalidate_tokens(&self) {
         // SAFETY: the server lives.

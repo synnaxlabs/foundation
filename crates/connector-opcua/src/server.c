@@ -456,11 +456,17 @@ void shim_server_invalidate_tokens(UA_Server *server) {
     UA_Server_getConfig(server)->accessControl.activateSession = invalid_token;
 }
 
-/* Gives each endpoint of `server` one user token policy, a user name with the policy
- * None, and lets in its password on a channel in the policy None. */
-UA_StatusCode shim_server_cleartext(UA_Server *server) {
+/* Gives each endpoint of `server` one user token policy, a user name with the
+ * security policy of the URI `uri`. */
+UA_StatusCode shim_server_token_policy(UA_Server *server, const char *uri) {
+    /* An ActivateSession takes the policy of the token from the end of its key,
+     * after the last `#`. */
+    const char *name = strrchr(uri, '#');
+    if(!name)
+        return UA_STATUSCODE_BADINVALIDARGUMENT;
+    const char prefix[] = "open62541-username-policy";
+    size_t length = sizeof prefix - 1 + strlen(name);
     UA_ServerConfig *config = UA_Server_getConfig(server);
-    config->allowNonePolicyPassword = true;
     for(size_t i = 0; i < config->endpointsSize; i++) {
         UA_EndpointDescription *endpoint = &config->endpoints[i];
         UA_Array_delete(endpoint->userIdentityTokens, endpoint->userIdentityTokensSize,
@@ -472,13 +478,13 @@ UA_StatusCode shim_server_cleartext(UA_Server *server) {
         endpoint->userIdentityTokensSize = 1;
         UA_UserTokenPolicy *policy = endpoint->userIdentityTokens;
         policy->tokenType = UA_USERTOKENTYPE_USERNAME;
-        /* An ActivateSession takes the policy of the token from the end of its key,
-         * after the last `#`. */
-        policy->policyId = UA_STRING_ALLOC("open62541-username-policy#None");
-        policy->securityPolicyUri =
-            UA_STRING_ALLOC("http://opcfoundation.org/UA/SecurityPolicy#None");
+        policy->policyId.data = (UA_Byte *)UA_malloc(length);
+        policy->securityPolicyUri = UA_STRING_ALLOC(uri);
         if(!policy->policyId.data || !policy->securityPolicyUri.data)
             return UA_STATUSCODE_BADOUTOFMEMORY;
+        policy->policyId.length = length;
+        memcpy(policy->policyId.data, prefix, sizeof prefix - 1);
+        memcpy(policy->policyId.data + sizeof prefix - 1, name, strlen(name));
     }
     return UA_STATUSCODE_GOOD;
 }

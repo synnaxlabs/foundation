@@ -87,10 +87,10 @@ struct State {
     /// The only logins that a server lets in, set before it starts.
     #[cfg(test)]
     users: Option<&'static [(&'static str, &'static [u8])]>,
-    /// Whether the user token policy of a server has the policy `None`, set before it
-    /// starts.
+    /// The URI of the security policy of the user token policy of a server, set before
+    /// it starts.
     #[cfg(test)]
-    cleartext: bool,
+    token: Option<&'static std::ffi::CStr>,
     /// Whether a server refuses each session as [`Server::invalidate_tokens`] says, set
     /// before it starts.
     #[cfg(test)]
@@ -177,7 +177,7 @@ impl Variables {
             #[cfg(test)]
             users: None,
             #[cfg(test)]
-            cleartext: false,
+            token: None,
             #[cfg(test)]
             invalidating: false,
             security: None,
@@ -294,11 +294,11 @@ impl Variables {
         self.state().users = Some(users);
     }
 
-    /// Makes a server that starts later take a password in clear, as
-    /// [`Server::cleartext`] says.
+    /// Gives a server that starts later the user token policy of `uri`, as
+    /// [`Server::set_token_policy`] says.
     #[cfg(test)]
-    pub(crate) fn cleartext(&self) {
-        self.state().cleartext = true;
+    pub(crate) fn set_token_policy(&self, uri: &'static std::ffi::CStr) {
+        self.state().token = Some(uri);
     }
 
     /// Makes a server that starts later refuse each session, as
@@ -330,22 +330,22 @@ impl Variables {
     /// Gives `server` the most nodes of a Read of [`Variables::refuse_reads_past`], the
     /// timeout of [`Variables::time_out_sessions`], the limits of
     /// [`Variables::limit_queues`], the logins of [`Variables::admit`], the token
-    /// policy of [`Variables::cleartext`], and the refusal of
+    /// policy of [`Variables::set_token_policy`], and the refusal of
     /// [`Variables::invalidate_tokens`], and makes it answer the reads of its state.
     #[cfg(test)]
     fn hook(&self, server: &Server) {
-        let (most, session, queues, users, cleartext, invalidating) = {
+        let (most, session, queues, users, token, invalidating) = {
             let state = self.state();
             let State {
                 most,
                 session,
                 queues,
                 users,
-                cleartext,
+                token,
                 invalidating,
                 ..
             } = *state;
-            (most, session, queues, users, cleartext, invalidating)
+            (most, session, queues, users, token, invalidating)
         };
         if let Some(most) = most {
             server.refuse_reads_past(most);
@@ -360,8 +360,8 @@ impl Variables {
         if let Some(users) = users {
             server.admit(users);
         }
-        if cleartext {
-            server.cleartext();
+        if let Some(uri) = token {
+            server.set_token_policy(uri);
         }
         if invalidating {
             server.invalidate_tokens();

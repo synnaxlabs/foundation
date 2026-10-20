@@ -522,8 +522,9 @@ struct Secure {
     user: Option<(&'static str, Option<&'static [u8]>)>,
     /// The sessions that the server lets in.
     login: Login,
-    /// The user token policy of the server has the policy `None`.
-    cleartext: bool,
+    /// The URI of the security policy of the one user token policy of the server,
+    /// else the user token policies of open62541.
+    token: Option<&'static CStr>,
 }
 
 /// The sessions that the server of a scene lets in.
@@ -532,7 +533,8 @@ enum Login {
     Anonymous,
     /// Only the user names and passwords of the list.
     Only(&'static [(&'static str, &'static [u8])]),
-    /// No session: it refuses each with `BadIdentityTokenInvalid`.
+    /// The user token policies of [`LOGINS`], but it refuses each session with
+    /// `BadIdentityTokenInvalid`.
     Invalid,
 }
 
@@ -546,6 +548,10 @@ const TRUST: &str = "plant.opcua_trust";
 const PASSWORD: &str = "plant.opcua_password";
 /// The one login of a server that needs a user.
 const LOGINS: &[(&str, &[u8])] = &[("operator", b"pass\0word")];
+/// The URI of the security policy `None`.
+const NONE: &CStr = c"http://opcfoundation.org/UA/SecurityPolicy#None";
+/// The URI of the security policy `Basic256`, which the client does not have.
+const BASIC256: &CStr = c"http://opcfoundation.org/UA/SecurityPolicy#Basic256";
 
 impl Secure {
     /// A channel in `policy` and the mode `SignAndEncrypt` on the credentials of
@@ -567,7 +573,7 @@ impl Secure {
             ],
             user: None,
             login: Login::Anonymous,
-            cleartext: false,
+            token: None,
         }
     }
 
@@ -596,10 +602,13 @@ impl Secure {
         match self.login {
             Login::Anonymous => {}
             Login::Only(users) => variables.admit(users),
-            Login::Invalid => variables.invalidate_tokens(),
+            Login::Invalid => {
+                variables.admit(LOGINS);
+                variables.invalidate_tokens();
+            }
         }
-        if self.cleartext {
-            variables.cleartext();
+        if let Some(uri) = self.token {
+            variables.set_token_policy(uri);
         }
         if self.plain {
             return;
@@ -3126,7 +3135,7 @@ fn secured_on<'a>(
         certificate: secret::Value::new(certificate.to_vec()),
         key: secret::Value::new(CLIENT.key.to_vec()),
         trust: secret::Value::new(SERVER.certificate.to_vec()),
-        user: security.user.as_ref().zip(password),
+        password,
     }
 }
 
@@ -3313,16 +3322,17 @@ fn rejected(mode: client::Mode) -> String {
     match mode {
         client::Mode::SignAndEncrypt => format!(
             "{UNOFFERED} SignAndEncrypt {POLICIES} that lets in a user name and \
-             password, or it {REFUSED}. For a server with only Sign endpoints, set \
-             `unencrypted = true`; else turn on one of these policies with user names \
-             and passwords on the server"
+             password with a token in the policy None or one of these, or it {REFUSED}. \
+             For a server with only Sign endpoints, set `unencrypted = true`; else turn \
+             on one of these policies with a user name token in the policy None or one \
+             of these on the server"
         ),
         client::Mode::Sign => format!(
-            "{UNOFFERED} Sign {POLICIES} that lets in a user name and password, it \
-             offers only a user name token whose policy is None, which would send the \
-             password in clear, or it {REFUSED}. Turn on one of these policies in the \
-             mode Sign with a user name token whose policy encrypts the password on \
-             the server"
+            "{UNOFFERED} Sign {POLICIES} that lets in a user name and password with a \
+             token in one of these policies, since a token in the policy None would \
+             send the password in clear, or it {REFUSED}. Turn on one of these policies \
+             in the mode Sign with a user name token in one of these policies on the \
+             server"
         ),
     }
 }
@@ -3337,23 +3347,44 @@ fn a_wrong_password_names_the_user_and_the_password() {
     connect_fails(secure, "BadUserAccessDenied", &cause);
 }
 
-/// A server can refuse a wrong password with `BadIdentityTokenInvalid` in place of
-/// `BadUserAccessDenied`.
+/// A server sends `BadIdentityTokenInvalid` for a user token that it cannot read, and
+/// some servers for a wrong password too.
 #[test]
-fn an_invalid_token_names_the_user_and_the_password() {
+fn an_invalid_token_names_both_causes() {
     let secure = Secure {
         login: Login::Invalid,
         ..Secure::with_user(Policy::Basic256Sha256)
     };
-    let cause = format!("the server {REFUSED}");
-    connect_fails(secure, "BadIdentityTokenInvalid", &cause);
+    let cause = "the server could not read the user token (its policy or its \
+                 encryption), or refused the user \"operator\" with the password \
+                 secret(\"plant.opcua_password\"). Check the user token policies of the \
+                 server, `user`, and the password secret(\"plant.opcua_password\")";
+    connect_fails(secure, "BadIdentityTokenInvalid", cause);
 }
 
 /// A server can send `BadIdentityTokenRejected` for a token that it refuses, so with a
-/// user the cause names that and the endpoints, in each mode.
+/// user the cause names that and the endpoints, in each mode. The client sends it too
+/// for a user token in a policy that it does not have.
 #[test]
 fn a_rejected_token_of_a_user_names_both_causes_in_each_mode() {
-    for mode in [client::Mode::SignAndEncrypt, client::Mode::Sign] {
+    for (mode, unencrypted) in [
+        (client::Mode::SignAndEncrypt, false),
+        (client::Mode::Sign, true),
+    ] {
+        let secure = Secure {
+            offered: mode,
+            unencrypted,
+            token: Some(BASIC256),
+            ..Secure::with_user(Policy::Basic256Sha256)
+        };
+        let outcome = secured(secure);
+        assert!(outcome.result.is_ok(), "{mode:?}: {:?}", outcome.result);
+        let connect = format!(
+            "the connect to opc.tcp://10.0.0.1:4840 failed with \
+             BadIdentityTokenRejected: {}",
+            rejected(mode)
+        );
+        assert_eq!(errors(&outcome.statuses), [(DEVICE, connect)], "{mode:?}");
         let security = Security {
             mode,
             user: Some(config::User {
@@ -3412,7 +3443,7 @@ fn never_sends_a_password_in_clear() {
     let secure = Secure {
         offered: client::Mode::Sign,
         unencrypted: true,
-        cleartext: true,
+        token: Some(NONE),
         ..Secure::with_user(Policy::Basic256Sha256)
     };
     let cause = rejected(client::Mode::Sign);
@@ -3423,7 +3454,7 @@ fn never_sends_a_password_in_clear() {
 #[test]
 fn reads_with_a_token_policy_in_none_over_sign_and_encrypt() {
     let outcome = secured(Secure {
-        cleartext: true,
+        token: Some(NONE),
         ..Secure::with_user(Policy::Basic256Sha256)
     });
     assert!(outcome.result.is_ok(), "{:?}", outcome.result);

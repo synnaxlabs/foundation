@@ -1,4 +1,4 @@
-use std::ffi::{c_int, c_void};
+use std::ffi::{c_char, c_int, c_void};
 use std::mem::offset_of;
 
 use super::{
@@ -381,7 +381,10 @@ unsafe extern "C" {
         logins: *const Login,
         count: usize,
     ) -> u32;
-    pub(crate) fn shim_server_cleartext(server: *mut Server) -> u32;
+    pub(crate) fn shim_server_token_policy(
+        server: *mut Server,
+        uri: *const c_char,
+    ) -> u32;
     pub(crate) fn shim_server_invalidate_tokens(server: *mut Server);
     pub(crate) fn shim_server_data_type(
         server: *mut Server,

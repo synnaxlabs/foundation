@@ -308,16 +308,24 @@
   does not cut the password. No password goes in clear: open62541 refuses a user token
   policy in the policy None on a channel that is not `SignAndEncrypt`, and the connector
   never turns that off, so the connect gives `BadIdentityTokenRejected`. `run` and
-  `browse` read `password` with the other sources. `BadUserAccessDenied` and
-  `BadIdentityTokenInvalid` with a `user` give "the server refused the user {user} with
-  the password {source}. Check `user` and the password {source}". A server can also send
-  `BadIdentityTokenRejected` for a token that it refuses, so with a `user` its text
-  names both causes: no endpoint in the mode that lets in a user name and password, in
-  the mode Sign only a user token whose policy is None, or the refusal of the user. The
-  fix names `user` and the password, and in the mode Sign a user name token whose policy
-  encrypts the password; in the mode SignAndEncrypt it asks for user names and passwords
-  on one of the policies (`laptop.architect-2`, 2026-10-20T12:58:13Z:
-  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6291388946). Lost: a
+  `browse` read `password` with the other sources. `BadUserAccessDenied` with a `user`
+  gives "the server refused the user {user} with the password {source}. Check `user` and
+  the password {source}". open62541 sends `BadIdentityTokenInvalid` for a token that it
+  cannot read, and other servers for a wrong password, so with a `user` it gives "the
+  server could not read the user token (its policy or its encryption), or refused the
+  user {user} with the password {source}. Check the user token policies of the server,
+  `user`, and the password {source}". A server can also send `BadIdentityTokenRejected`
+  for a token that it refuses, and the client sends it for a user token in a policy that
+  it does not have, so with a `user` its text names both causes: no endpoint in the mode
+  that lets in a user name and password with a token in a policy that the client takes,
+  or the refusal of the user. In the mode SignAndEncrypt, the client takes a token in
+  the policy None or one of its policies; in the mode Sign, only one of its policies,
+  since a token in the policy None would send the password in clear. The fix names
+  `user`, the password, and a user name token in those policies (`laptop.architect-2`,
+  2026-10-20T12:58:13Z:
+  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6291388946, and the
+  review of the texts:
+  https://github.com/synnaxlabs/foundation/pull/3597#issuecomment-6292345470). Lost: a
   block `user "operator" { password = ... }`, a block for one pair, as a later X.509
   user token would need a second form (plan:
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6230820716, and its
