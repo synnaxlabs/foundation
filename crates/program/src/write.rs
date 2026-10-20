@@ -113,20 +113,22 @@ impl Writer {
     /// writer's key set from [`Config::frames`](crate::Config::frames). `series` gives
     /// each present entry, the count of its series, and its byte length, in increasing
     /// entry order; the entries and lengths keep the rules of [`Layout::new`]. Each
-    /// series of one group holds one count. The entry of place `n` is `n`. A frame holds the index series of each
-    /// group that it holds. It drops a held draft that no write sent. While the pool is
-    /// full, it waits as each block of the session waits: the blocks of a frame come
-    /// back as the node acknowledges it. The writer holds the draft; after a swap of
-    /// two `&mut Draft`, the next [`Writer::write`] of each writer panics.
+    /// series of one group holds one count. The entry of place `n` is `n`. A frame
+    /// holds the index series of each group that it holds. It drops a held draft that
+    /// no write sent. While the pool is full, it waits as each block of the session
+    /// waits: the blocks of a frame come back as the node acknowledges it. The writer
+    /// holds the draft. A swap of two `&mut Draft` is a misuse: the next
+    /// [`Writer::write`] panics, or, when the pool gave the block of the draft again,
+    /// sends the draft of the other writer as its own.
     ///
     /// # Errors
     ///
     /// [`Error::Layout`] when `series` breaks a rule of [`Layout::new`], and
-    /// [`Error::Count`] when two series of one group hold two counts, each with no block
-    /// taken; the writer goes on. [`Error::Pool`] when no block of the pool can hold
-    /// the frame, the error of the close when the session closes first, and the error
-    /// that ended the writer, as [`Writer::write`] gives it. The writer then holds no
-    /// draft.
+    /// [`Error::Count`] when two series of one group hold two counts, each with no
+    /// block taken; the writer goes on. [`Error::Pool`] when no block of the pool can
+    /// hold the frame, the error of the close when the session closes first, and the
+    /// error that ended the writer, as [`Writer::write`] gives it. The writer then
+    /// holds no draft.
     pub async fn draft(
         &mut self,
         form: Form,
@@ -190,8 +192,8 @@ impl Writer {
     ///
     /// # Panics
     ///
-    /// When the writer holds no draft, or holds a draft that [`Writer::draft`] of this
-    /// writer did not give.
+    /// When the writer holds no draft, or holds a draft in a block other than that of
+    /// the last draft that [`Writer::draft`] of this writer gave.
     pub async fn write(&mut self, time: Time) -> Result<&[(usize, Outcome)], Error> {
         let mut frame = self
             .draft

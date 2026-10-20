@@ -520,12 +520,16 @@
   Supersedes the `Writer::index` of
   https://github.com/synnaxlabs/foundation/issues/3266#issuecomment-6255066811. The
   writer keeps the address of the block of the draft that it gave, and a write panics,
-  before it sends, on a draft in another block: after a swap of two `&mut Draft`, the
-  next write of each writer panics. `wire::hub::write::Replies::frames` gives the frame
-  of the last send, so the writer keeps only the outcomes of that frame. Both ruled by
+  before it sends, on a draft in another block. A swap of two `&mut Draft` is a misuse:
+  the next write panics, or, when the pool gave the block of the draft again, sends the
+  draft of the other writer as its own. `wire::hub::write::Replies::frames` gives the
+  frame of the last send, so the writer keeps only the outcomes of that frame. Ruled by
   `laptop.architect` at 2026-10-20T09:26:59Z
-  (https://github.com/synnaxlabs/foundation/pull/3558#issuecomment-6287830271). Lost: a
-  check of the key set, which cannot tell two writers apart. Plan:
+  (https://github.com/synnaxlabs/foundation/pull/3558#issuecomment-6287830271) and, for
+  the block that comes back, at 2026-10-20T09:39:52Z
+  (https://github.com/synnaxlabs/foundation/pull/3558#issuecomment-6288048203). Lost: a
+  check of the key set, which cannot tell two writers apart, and a count of the allocs
+  of each pool in `block`. A draft that no caller can swap waits on #3561. Plan:
   https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6286854444. Lost: a
   draft that takes one count for each group, which makes the caller find the group of
   each place.

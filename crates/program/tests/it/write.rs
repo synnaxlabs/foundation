@@ -1158,6 +1158,32 @@ fn panics_at_each_write_of_a_draft_that_its_writer_did_not_give() {
     });
 }
 
+/// A swap misses the check when the pool gives the block of the draft again: after a
+/// swap, a new draft of the other writer in the block of the first, and a swap back,
+/// the first writer sends the draft of the other as its own frame.
+#[test]
+fn sends_a_swapped_draft_in_a_block_that_the_pool_gave_again() {
+    on_hub(798, |session, _| async move {
+        let mut reader = reader(&session, &["value"]).await;
+        let mut first = session.writer(config(&["value"], 1)).await.expect("opens");
+        let mut second = session.writer(config(&["b"], 1)).await.expect("opens");
+        let series = [(0, 1, 8), (1, 1, 8)];
+        let mine = first.draft(Form::Raw, &series).await.expect("a frame");
+        let other = second.draft(Form::Raw, &series).await.expect("a frame");
+        std::mem::swap(mine, other);
+        let other = second.draft(Form::Raw, &series).await.expect("a frame");
+        let b = other.series_mut(1).expect("present");
+        b.copy_from_slice(&7_i64.to_le_bytes());
+        std::mem::swap(mine, other);
+        assert_eq!(
+            first.write(Time::Node).await.map(<[_]>::to_vec),
+            Ok(one(taken(0, 1)))
+        );
+        let got = reader.next().await.expect("a frame");
+        assert_eq!(samples(&reader, &got)[0], (key(2), vec![7]));
+    });
+}
+
 /// A draft replaces the draft before it, and a write dropped before its first poll
 /// leaves the draft held for the next write.
 #[test]
