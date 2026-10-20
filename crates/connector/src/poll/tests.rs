@@ -66,7 +66,7 @@ fn definitions() -> Vec<(Name, Definition)> {
 }
 
 /// The ends of the time and the `held` of a frame of samples, each in ns after the
-/// stamp of the last request.
+/// stamp of the last request, and stopped at the ends of time.
 type Sample = [i64; 3];
 
 /// A kind that opens a [`Writer`] of `channels`, keeps its types, and writes each of
@@ -112,7 +112,7 @@ impl Kind for Polls {
             last = Some((values, stamp));
         }
         if let Some((values, at)) = last {
-            let after = |nanos| at + Span::from_nanos(nanos);
+            let after = |nanos| Stamp::from_nanos(at.nanos().saturating_add(nanos));
             for &[earliest, latest, held] in &self.samples {
                 let time = Interval {
                     earliest: after(earliest),
@@ -354,6 +354,23 @@ fn stamps_each_sample_at_its_midpoint_or_after_the_last_stamp_with_its_error() {
     );
     assert_eq!(record.time, time);
     assert_eq!(record.counts, (15, 0));
+}
+
+/// The first sample is 3 ns wide, so its error rounds up to 2 ns. The second is from
+/// the first instant to the last, so its error is past the range of a `Span` and
+/// stops at its end.
+#[test]
+fn rounds_up_the_error_of_a_sample_and_stops_it_at_the_end_of_a_span() {
+    let writes = [values(1.5, 7, -3, [true; 3])];
+    let samples = vec![[0, 3, 0], [i64::MIN, i64::MAX, i64::MIN]];
+    let all = writes.iter().copied().map(Vec::from).collect();
+    let record = run_sampled(CHANNELS, all, samples, (9, 0), |_, _, _| async {});
+    assert_eq!(record.result.as_ref().map_err(ToString::to_string), Ok(&()));
+    let first = stamp(&record.time[0], 1);
+    let want = [(first + 1, 2), (first + 2, i64::MAX)]
+        .map(|(stamp, error)| (Stamp::from_nanos(stamp), Span::from_nanos(error)));
+    assert_eq!(record.stamped, want);
+    assert_eq!(record.counts, (9, 0));
 }
 
 #[test]
