@@ -461,8 +461,10 @@ void shim_server_invalidate_tokens(UA_Server *server) {
 UA_StatusCode shim_server_token_policy(UA_Server *server, const char *uri) {
     /* An ActivateSession takes the policy of the token from the end of its key,
      * after the last `#`. */
-    const char *name = strrchr(uri, '#');
-    if(!name)
+    const char *name = uri + strlen(uri);
+    while(name > uri && *name != '#')
+        name--;
+    if(*name != '#')
         return UA_STATUSCODE_BADINVALIDARGUMENT;
     const char prefix[] = "open62541-username-policy";
     size_t length = sizeof prefix - 1 + strlen(name);
