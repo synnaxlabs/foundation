@@ -124,7 +124,7 @@
   lowest place of the group and `other` its lowest place of another count. Each error
   names the places of the caller, with nothing sent, and the writer goes on. A call
   checks the place of each item and the type of each value, and keeps at most one item
-  more than the places: a call of more items at places holds a place twice and gives
+  more than the places: a call of more items than places holds a place twice and gives
   `Unordered`, so the kept frame stays bounded by the places. When a group of the
   frame got `Outcome::Ended`, the call gives `Error::Partial`: `written` holds the
   channels of each group that got `Taken`, `unwritten` the rest, and `outcomes` each

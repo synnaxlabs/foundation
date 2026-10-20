@@ -171,8 +171,9 @@ class Client:
         `on_loss`, with no writer opened; `Stopped` when the node refused the open, with
         a text that names each channel of the open for `unknown`, or with code
         `malformed` for channels of more than one index, which the client refuses;
-        `ConnectionError` when the session failed; `RuntimeError` when the client closed or in a process that
-        the program forked; and `PanicException` when the client's thread panicked.
+        `ConnectionError` when the session failed; `RuntimeError` when the client closed
+        or in a process that the program forked; and `PanicException` when the client's
+        thread panicked.
         """
 
     def open_reader(
