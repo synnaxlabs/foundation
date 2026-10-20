@@ -116,13 +116,12 @@
   share refuses them with `BUSY`: 48 bytes for each place on a 64-bit target, at most
   1,572,912 bytes for an open of 32,768 channels, and fewer bytes of names than the
   message. The refusal drops it in the same step, so at most one is live on each hub
-  thread. The last message also builds the key set of the start, which the budget
-  does not count (Limits): 32 bytes for each place and 8 for each index, from that
-  decode until the stream ends, and 48 more for each place while it builds.
-  The overshoot is bounded: the forward already holds
-  the ends and counts of the same channels, 20 bytes for each, so the room that a
-  decode takes before the share refuses it is a fixed factor of what the share
-  counted. A write open is at most
+  thread. The last message also builds the key set of the start, which the budget does
+  not count (Limits): 32 bytes for each place and 8 for each index, from that decode
+  until the stream ends, and 48 more for each place while it builds. The overshoot is
+  bounded: the forward already holds the ends and counts of the same channels, 20 bytes
+  for each, so the room that a decode takes before the share refuses it is a fixed
+  factor of what the share counted. A write open is at most
   `OPEN_BYTES_MAX` (64 KiB), with at least 2 bytes for each channel, and each channel
   adds at most two places, itself and its index, so its ends and counts are at most
   1,280 KiB, and the budget bounds the places of all write streams of a node at
