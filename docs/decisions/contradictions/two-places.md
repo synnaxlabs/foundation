@@ -9,7 +9,9 @@ connected" for one lease period) from the handoff records in the index's log. Th
 control channel is a published copy that the home writes. The control
 channel sits on its own small index placed with the controlled index, because
 home-written samples on the controlled index would break S6 strict increase against
-the writer's device timestamps. Basis: BQ6, BQ11b, failover delegation.
+the writer's device timestamps. The home appends a handoff entry and its control
+sample in one ring record, so a crash keeps both or neither and no replay is needed
+(#3638). Basis: BQ6, BQ11b, failover delegation.
 
 **X19. Death records vs one writer per index.**
 Conflict: QUALITY DECISIONS has the home write "source lost" to "each affected index's
