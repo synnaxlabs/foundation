@@ -90,7 +90,8 @@
   `ServerProfileArray` first. The opcua conformance suite runs the subscribed path,
   and crate tests run the polled path (`laptop.architect-2`, item 4 of 6279727836).
   The ONE NODE tests whose plant `create_plant` or `create_token_plant` builds, and
-  those of EXIT TIME CHECK, run the polled path. The others, with
-  `a_subscribed_plant_stores_each_change_at_its_read`, run the subscribed path end to
-  end (`laptop.monitor`, kinds d and g of #3507,
+  those of EXIT TIME CHECK, run the polled path. The other ONE NODE tests that run the
+  `opcua` kind, with `a_subscribed_plant_stores_each_change_at_its_read`, run the
+  subscribed path end to end (`laptop.monitor`, kinds d and g of #3507, quoted at
+  2026-10-20T06:49:37Z in
   https://github.com/synnaxlabs/foundation/pull/3507#issuecomment-6285161214).
