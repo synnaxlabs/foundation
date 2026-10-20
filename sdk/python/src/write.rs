@@ -375,12 +375,8 @@ impl Writer {
         }
         let state = self.lock(py).take();
         state.map_or(Ok(()), |state| {
-            py.detach(|| state.writer.close()).map_err(|e| match &e {
-                sdk::Error::Stream(program::Error::Unstored(groups)) => {
-                    crate::exception(py, &e, unstored(&self.places, groups))
-                }
-                _ => error(py, &e),
-            })
+            py.detach(|| state.writer.close())
+                .map_err(|e| closed(py, &self.places, &e))
         })
     }
 
@@ -600,9 +596,12 @@ fn why(end: End) -> &'static str {
     }
 }
 
-/// The text of the end of each group of `groups`, the place of its index and its end,
-/// which ended with a frame that the node took and that may not be on disk.
-pub(crate) fn unstored(places: &[Place], groups: &[(usize, End)]) -> String {
+/// The exception of `error`, which the close of a writer of `places` gave. For
+/// `Unstored`, its text names the index and the end of each group.
+pub(crate) fn closed(py: Python<'_>, places: &[Place], error: &sdk::Error) -> PyErr {
+    let sdk::Error::Stream(program::Error::Unstored(groups)) = error else {
+        return crate::error(py, error);
+    };
     let named: Vec<_> = groups
         .iter()
         .map(|&(index, end)| {
@@ -610,10 +609,11 @@ pub(crate) fn unstored(places: &[Place], groups: &[(usize, End)]) -> String {
         })
         .collect();
     let writes = if named.len() == 1 { "write" } else { "writes" };
-    format!(
+    let text = format!(
         "the {writes} of {} ended: a frame that the node took may not be on disk",
         named.join(", ")
-    )
+    );
+    crate::exception(py, error, text)
 }
 
 /// Whether place `place` of `places` is an index.

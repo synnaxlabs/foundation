@@ -654,21 +654,42 @@ fn raised_gives_the_seqs_of_the_lost_groups_only() {
     });
 }
 
-/// The text of a close names the index and the end of each group that ended with a
-/// frame that may not be on disk.
+/// A close that gives `Unstored` raises `Stopped` with the code of the end of its
+/// first group and a text that names the index and the end of each group. Another
+/// error of a close raises as each call does.
 #[test]
-fn unstored_names_the_index_and_the_end_of_each_group() {
+fn closed_names_the_index_and_the_end_of_each_unstored_group() {
     let places = grouped();
-    assert_eq!(
-        crate::write::unstored(&places, &[(4, End::Removed)]),
-        "the write of plant.time (unknown) ended: a frame that the node took may not \
-         be on disk"
-    );
-    assert_eq!(
-        crate::write::unstored(&places, &[(4, End::Removed), (6, End::Failed)]),
-        "the writes of plant.time (unknown), line.time (failed) ended: a frame that \
-         the node took may not be on disk"
-    );
+    let cases = [
+        (
+            vec![(4, End::Removed)],
+            "unknown",
+            "the write of plant.time (unknown) ended: a frame that the node took may \
+             not be on disk",
+        ),
+        (
+            vec![(6, End::Failed), (4, End::Removed)],
+            "failed",
+            "the writes of line.time (failed), plant.time (unknown) ended: a frame \
+             that the node took may not be on disk",
+        ),
+    ];
+    Python::initialize();
+    Python::attach(|py| {
+        for (groups, code, text) in cases {
+            let unstored = sdk::Error::Stream(program::Error::Unstored(groups));
+            let raised = crate::write::closed(py, &places, &unstored);
+            assert_eq!(raised.get_type(py).name().unwrap().to_string(), "Stopped");
+            let value = raised.value(py);
+            assert_eq!(value.to_string(), text);
+            let given: String = value.getattr("code").unwrap().extract().unwrap();
+            assert_eq!(given, code);
+        }
+        let raised = crate::write::closed(py, &places, &sdk::Error::Closed);
+        let name = raised.get_type(py).name().unwrap().to_string();
+        assert_eq!(name, "RuntimeError");
+        assert_eq!(raised.value(py).to_string(), sdk::Error::Closed.to_string());
+    });
 }
 
 /// Maps a refusal of the session to `Refused`, a `ConnectionError`, and a refusal of a
