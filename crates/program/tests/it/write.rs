@@ -1519,36 +1519,42 @@ fn gives_the_error_of_the_renewal_to_an_open_writer() {
 /// the write as `MALFORMED`.
 #[test]
 fn stops_a_write_whose_places_are_not_valid() {
+    use wire::hub::client::Error::{Finished, Places, Repeated};
     let twice = vec![place(1, STAMP, "time", 0), place(1, STAMP, "again", 0)];
-    let whole = vec![place(1, STAMP, "time", 0), place(2, I64, "value", 0)];
-    let other = vec![place(1, STAMP, "time", 0), place(2, I64, "other", 0)];
-    let over = vec![
-        place(1, STAMP, "time", 0),
-        place(2, I64, "value", 0),
-        place(3, I64, "other", 0),
-    ];
+    let on_time = |names: &[&str]| {
+        let values = names
+            .iter()
+            .zip(2..)
+            .map(|(name, at)| place(at, I64, name, 0));
+        std::iter::once(place(1, STAMP, "time", 0))
+            .chain(values)
+            .collect::<Vec<_>>()
+    };
+    let whole = on_time(&["value"]);
+    let other = on_time(&["other"]);
+    let over = on_time(&["value", "other"]);
+    let wide = on_time(&["value", "other", "third", "fourth"]);
     let message = Error::Message;
+    let one: &[&str] = &["value"];
+    let two: &[&str] = &["value", "other"];
     let cases = [
+        (727, twice, 2, one, message(Repeated { key: key(1) })),
+        (728, whole, 1, one, message(Finished)),
         (
-            727,
-            twice,
+            729,
+            other,
             2,
-            message(wire::hub::client::Error::Repeated { key: key(1) }),
+            one,
+            Error::Unplaced("value".parse().unwrap()),
         ),
-        (728, whole, 1, message(wire::hub::client::Error::Finished)),
-        (729, other, 2, Error::Unplaced("value".parse().unwrap())),
-        (
-            730,
-            over,
-            3,
-            message(wire::hub::client::Error::Places { count: 3, cap: 2 }),
-        ),
+        (730, over, 3, one, message(Places { count: 3, cap: 2 })),
+        (731, wide, 5, two, message(Places { count: 5, cap: 4 })),
     ];
     assert_eq!(
-        cases[2].3.to_string(),
+        cases[2].4.to_string(),
         "the node gave no place for the channel value of the open"
     );
-    for (seed, places, sent, error) in cases {
+    for (seed, places, sent, names, error) in cases {
         by_hand(
             seed,
             move |session, node| async move {
@@ -1566,7 +1572,7 @@ fn stops_a_write_whose_places_are_not_valid() {
             },
             move |session, node| {
                 Box::pin(async move {
-                    let got = session.writer(config(&["value"], 1)).await.map(drop);
+                    let got = session.writer(config(names, 1)).await.map(drop);
                     assert_eq!(got, Err(error));
                     node.clock().sleep(QUIET).await;
                 })
