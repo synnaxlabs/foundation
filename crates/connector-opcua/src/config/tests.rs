@@ -443,8 +443,8 @@ fn refuses_each_key_and_block_it_does_not_take() {
                 "document.unknown-attribute",
                 60,
                 "`security` is not an attribute of the connector",
-                "Use `address`, `rate`, `polled`, `certificate`, `key`, `trust`, or \
-                 `unencrypted`, or remove it",
+                "Use `address`, `rate`, `polled`, `certificate`, `key`, `trust`, \
+                 `unencrypted`, `user`, or `password`, or remove it",
             ),
             refused(
                 "document.unknown-block",
@@ -490,88 +490,161 @@ fn plus(attributes: &[(u32, &str, Value)]) -> Document {
 const CERTIFICATE: &str = "/etc/opcua/node.der";
 const KEY: &str = "/etc/opcua/node-key.der";
 const TRUST: &str = "/etc/opcua/plc.der";
+const PASSWORD: &str = "/etc/opcua/password";
 
-/// What `parse` gives for the subset of `certificate`, `key`, `trust`, and
-/// `unencrypted = true` whose bits 0 to 3 `has` holds.
-fn expected(has: impl Fn(u8) -> bool) -> Result<Option<Security>, Vec<Diagnostic>> {
-    if !has(0) {
-        let refused = |at, key: &str| {
-            refused(
-                "document.missing-attribute",
-                at,
-                "the connector has no `certificate`",
-                &format!(
-                    "Add a `certificate` with the certificate of the node, or \
-                     remove `{key}`"
-                ),
-            )
-        };
-        let missing: Vec<_> =
-            [(1, 30, "key"), (2, 40, "trust"), (3, 50, "unencrypted")]
-                .into_iter()
-                .filter(|(bit, _, _)| has(*bit))
-                .map(|(_, at, key)| refused(at, key))
-                .collect();
-        if missing.is_empty() {
-            Ok(None)
-        } else {
-            Err(missing)
-        }
-    } else if has(1) && has(2) {
-        Ok(Some(Security {
-            certificate: source(CERTIFICATE),
-            key: source(KEY),
-            trust: source(TRUST),
-            mode: if has(3) {
-                client::Mode::Sign
-            } else {
-                client::Mode::SignAndEncrypt
-            },
-        }))
-    } else {
-        let mut missing = Vec::new();
-        if !has(1) {
-            missing.push(refused(
-                "document.missing-attribute",
-                20,
-                "the connector has no `key`",
-                "Add a `key` with the private key of the certificate, or remove \
-                 `certificate`",
-            ));
-        }
-        if !has(2) {
-            missing.push(refused(
-                "document.missing-attribute",
-                20,
-                "the connector has no `trust`",
-                "Add a `trust` with the certificate of the server or of its CA, or \
-                 remove `certificate`",
-            ));
-        }
-        Err(missing)
-    }
+/// The `document.missing-attribute` for `key` at `at`, with its fix.
+fn missing(at: u32, key: &str, fix: &str) -> Diagnostic {
+    refused(
+        "document.missing-attribute",
+        at,
+        &format!("the connector has no `{key}`"),
+        fix,
+    )
 }
 
-/// Each of the 16 subsets of `certificate`, `key`, `trust`, and `unencrypted = true`
-/// gives its security, or one diagnostic for each attribute that is missing or has no
-/// `certificate`.
+/// The diagnostics that `parse` gives for the subset of `certificate`, `key`, `trust`,
+/// `unencrypted = true`, `user`, and `password` whose bits 0 to 5 `has` holds.
+fn diagnostics(has: &impl Fn(u8) -> bool) -> Vec<Diagnostic> {
+    let mut missing = Vec::new();
+    if !has(0) {
+        let needs = [
+            (1, 30, "key"),
+            (2, 40, "trust"),
+            (3, 50, "unencrypted"),
+            (4, 60, "user"),
+            (5, 70, "password"),
+        ];
+        for (bit, at, key) in needs {
+            if has(bit) {
+                missing.push(self::missing(
+                    at,
+                    "certificate",
+                    &format!(
+                        "Add a `certificate` with the certificate of the node, or \
+                         remove `{key}`"
+                    ),
+                ));
+            }
+        }
+    }
+    if has(0) && !has(1) {
+        missing.push(self::missing(
+            20,
+            "key",
+            "Add a `key` with the private key of the certificate, or remove \
+             `certificate`",
+        ));
+    }
+    if has(0) && !has(2) {
+        missing.push(self::missing(
+            20,
+            "trust",
+            "Add a `trust` with the certificate of the server or of its CA, or \
+             remove `certificate`",
+        ));
+    }
+    if has(4) && !has(5) {
+        missing.push(self::missing(
+            60,
+            "password",
+            "Add a `password` with the password of the user, or remove `user`",
+        ));
+    }
+    if has(5) && !has(4) {
+        missing.push(self::missing(
+            70,
+            "user",
+            "Add a `user` with the user name of the session, or remove `password`",
+        ));
+    }
+    missing
+}
+
+/// What `parse` gives for the subset of `certificate`, `key`, `trust`, `unencrypted =
+/// true`, `user`, and `password` whose bits 0 to 5 `has` holds.
+fn expected(has: impl Fn(u8) -> bool) -> Result<Option<Security>, Vec<Diagnostic>> {
+    let missing = diagnostics(&has);
+    if !missing.is_empty() {
+        return Err(missing);
+    }
+    if !has(0) {
+        return Ok(None);
+    }
+    Ok(Some(Security {
+        certificate: source(CERTIFICATE),
+        key: source(KEY),
+        trust: source(TRUST),
+        mode: if has(3) {
+            client::Mode::Sign
+        } else {
+            client::Mode::SignAndEncrypt
+        },
+        user: (has(4) && has(5)).then(|| User {
+            name: "operator".into(),
+            password: source(PASSWORD),
+        }),
+    }))
+}
+
+/// Each of the 64 subsets of `certificate`, `key`, `trust`, `unencrypted = true`,
+/// `user`, and `password` gives its security, or one diagnostic for each attribute that
+/// is missing or lacks the attribute that it needs.
 #[test]
 fn reads_the_security_of_each_subset_of_its_attributes() {
-    for subset in 0..16_u8 {
+    for subset in 0..64_u8 {
         let has = |bit: u8| subset & (1 << bit) != 0;
         let all = [
             (20, "certificate", file(21, CERTIFICATE)),
             (30, "key", file(31, KEY)),
             (40, "trust", file(41, TRUST)),
             (50, "unencrypted", Value::Bool(true)),
+            (60, "user", string("operator")),
+            (70, "password", file(71, PASSWORD)),
         ];
-        let attributes: Vec<_> = (0..4)
+        let attributes: Vec<_> = (0..6)
             .filter(|bit| has(*bit))
             .map(|bit| all[usize::from(bit)].clone())
             .collect();
         let parsed = parse(&plus(&attributes)).map(|config| config.security);
         let expected = expected(has);
-        assert_eq!(parsed, expected, "subset {subset:04b}");
+        assert_eq!(parsed, expected, "subset {subset:06b}");
+    }
+}
+
+/// The attributes of a secure channel with `user`, each at its offset as in
+/// [`reads_the_security_of_each_subset_of_its_attributes`].
+fn with_user(user: Value) -> Document {
+    plus(&[
+        (20, "certificate", file(21, CERTIFICATE)),
+        (30, "key", file(31, KEY)),
+        (40, "trust", file(41, TRUST)),
+        (60, "user", user),
+        (70, "password", file(71, PASSWORD)),
+    ])
+}
+
+#[test]
+fn reads_a_user_that_is_a_reference() {
+    let name: Name = "operator".parse().expect("a name");
+    let config = with_user(Value::Reference(name));
+    let user = parse(&config).map(|config| config.security.and_then(|s| s.user));
+    let name = user.map(|user| user.map(|user| user.name));
+    assert_eq!(name, Ok(Some("operator".into())));
+}
+
+#[test]
+fn refuses_a_user_that_is_not_a_string_or_is_empty() {
+    let fix = "Write the user name of the session, such as `user = \"operator\"`";
+    let cases = [
+        (Value::Integer(7), "`user` is a string, not an integer"),
+        (string(""), "`user` is empty"),
+    ];
+    for (user, message) in cases {
+        assert_eq!(
+            parse(&with_user(user)),
+            Err(vec![refused("opcua.bad-user", 61, message, fix)]),
+            "{message}"
+        );
     }
 }
 
