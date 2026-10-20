@@ -92,32 +92,42 @@
   5. `DataLost.seqs` is a `dict` from each channel name of the lost groups of the
      frame, the index included, to the `range` of its lost seqs, the shape that the
      reader of PR 7b gives. The text names each channel and its count.
-  6. `Stopped` and `Rejected` are two classes, as their code sets differ. `Stopped`
-     from a call has two scopes, which its text names. When the node stopped the
-     stream, the writer has ended, and each later call raises it again. When the write
-     of a group ended (`sdk::Error::Partial`), only that group ended: each later frame
-     that holds it raises again, and the frames of the other groups go on, so a writer
-     of one index has ended. `PartialWrite`, a subclass of `Stopped`, is the end of a
-     group when the node took another group of the frame. The writer goes on after
-     `Rejected`, the refusal of the frame of one or more groups (`waiting`, `reserved`,
-     `expired`, `order`, `codec`, `full`, or `large`). When the node did not take each
-     group of a frame, a call raises for the first rule that holds: an end, then a
-     refusal, then a loss, which does what `on_loss` says. `PartialWrite` and
-     `Rejected` have `written` and `unwritten`, the channels of the frame, the index of
-     each group included, in the groups that the node took and did not take, in place
-     order, each named once, also at a repeat of a channel. To write a frame again
-     after `Rejected`, a program writes only the channels of `unwritten`, as the node
-     took those of `written`. The text of each names each group that the node did not
-     take, by its index, with its cause: the end, the refusal, or the count of lost samples. So a
-     loss in a frame that raises for an end or a refusal is not silent. Changed with
-     item 1 (same links): `Stopped` was `Refused`. Changed for many indexes by
-     `laptop.architect-2` at 2026-10-20T13:37:38Z
+  6. `Stopped` and `Rejected` are two classes, as their code sets differ. A plain
+     `Stopped` from a call is the end of the writer: the node stopped the stream, and
+     each later call raises it again. `GroupEnded`, a subclass of `Stopped`, is the
+     end of the write of one or more groups (`sdk::Error::Partial`, or an outcome
+     `Ended`): a call raises it for each frame in which the write of a group ended,
+     also when the node took no other group, and also in a writer of one index. Its
+     `ended` names each channel of the writer in an ended group, the index included.
+     The writer goes on: each later frame that holds a channel of `ended` raises it
+     again, so a writer of one index writes nothing more. `close` keeps its `Stopped`
+     for `Unstored`. The writer goes on after `Rejected`, the refusal of the frame of
+     one or more groups (`waiting`, `reserved`, `expired`, `order`, `codec`, `full`,
+     or `large`). When the node did not take each group of a frame, a call raises for
+     the first rule that holds: an end, then a refusal, then a loss, which does what
+     `on_loss` says. `GroupEnded` and `Rejected` have `written` and `unwritten`, the
+     channels of the frame, the index of each group included, in the groups that the
+     node took and did not take. `written`, `unwritten`, and `ended` are in place
+     order, each channel named once, also at a repeat of a channel. To write a frame
+     again after `Rejected`, a program writes only the channels of `unwritten`, as the
+     node took those of `written`; after `GroupEnded`, only those of `unwritten` that
+     are not in `ended`. The text of each names each group that the node did not
+     take, by its index, with its cause: the end, the refusal, or the count of lost
+     samples. So a loss in a frame that raises for an end or a refusal is not silent.
+     Changed with item 1 (same links): `Stopped` was `Refused`. Changed for many
+     indexes by `laptop.architect-2` at 2026-10-20T13:37:38Z
      (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6292172439).
+     `GroupEnded` and `ended`, in place of `PartialWrite`, decided by
+     `laptop.architect-2` at 2026-10-20T16:11:34Z
+     (https://github.com/synnaxlabs/foundation/pull/3613#issuecomment-6295462458).
      Lost: a return of the outcome of each group with no raise, because an unchecked
      return drops a refusal with no sign; an `ExceptionGroup` of the error of each
-     group, because `except Rejected` then misses it; `PartialWrite` as an `Exception`
-     of its own, because `except Stopped` then misses the end of a group; and
-     `PartialWrite` when no group was taken, because its name is then false.
+     group, because `except Rejected` then misses it; an `Exception` of its own for
+     the end of a group, because `except Stopped` then misses it; `PartialWrite`, the
+     end of a group only when the node took another group, because the class of an end
+     then hangs on the rest of the frame, and a plain `Stopped` has two scopes that
+     only its text tells apart; a scope attribute on `Stopped`, because `except` cannot
+     select on it; and the text alone, because a program then parses it.
   7. `write_series` copies each array into the kept buffer with the GIL held, because
      another Python thread can change an array while the GIL is free. Before the copy
      of each array, it raises `ValueError` when the bytes copied so far and the bytes
