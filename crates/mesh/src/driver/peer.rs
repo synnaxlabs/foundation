@@ -101,8 +101,9 @@ impl Mesh {
     // `Stored` of each chunk. A step that fails on a session that ended dials once
     // more and goes on from its chunk. A session that stored a chunk earns one more
     // redial. So does one session that lost to a dial of the peer, at the start and
-    // after each session that stored a chunk. No chunk opens no stream. The card of
-    // `to` is read once.
+    // after each session that stored a chunk. So a peer that ends each session with
+    // code 0 and stores nothing ends the put after at most two redials. No chunk
+    // opens no stream. The card of `to` is read once.
     async fn put_on(&self, to: node::Key, digests: &[Digest]) -> Result<(), Miss> {
         let (public_key, addresses) =
             self.group.borrow().contact(to).ok_or(Miss::Unknown)?;
