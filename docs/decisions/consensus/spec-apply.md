@@ -53,18 +53,18 @@
   plan https://github.com/synnaxlabs/foundation/issues/3405#issuecomment-6288441342,
   which supersedes the calls of 16 chunks and their deadline). A miss gives the cause
   of the last attempt.
-  A holder is the node when it is a voter, or a voter whose put ended `Ok` while
-  a half that holds it lacked a majority; another failed step, also a failed
-  read of the node's store for a put, leaves a voter no holder. So the holders are at
-  most the sum of the majorities of the halves, at most 128, which `HOLDERS_MAX` holds
-  (SPEC CHANGE). `Error::Stopped` comes as for `Mesh::set_home`, also while the puts
-  wait. Once the holders are a majority of each half, the node drops the puts still open
-  and proposes. When the holders are not a majority of each half once each put ended, or
-  at the apply, the call gives `Error::Quorum { held, voters, missed }` for the first
-  half that lacks one, the incoming half first, and proposes nothing before the apply.
-  `missed` gives each voter whose put failed, in key order, with its name and why:
-  `Miss::Deadline`, `Unknown` (no record of the voter), `Dial`, or `Put`. It is empty
-  for a refusal at the apply. Decided by `laptop.architect`, 2026-10-19T17:02:16Z
+  A holder is the node when it is a voter, or a voter whose put ended `Ok` while a half
+  that holds it lacked a majority; another failed step, also a failed read of the node's
+  store for a put, leaves a voter no holder. So the holders are at most the sum of the
+  majorities of the halves, at most 128, which `HOLDERS_MAX` holds (SPEC CHANGE).
+  `Error::Stopped` comes as for `Mesh::set_home`, also while the puts wait. Once the
+  holders are a majority of each half, the node drops the puts still open and proposes.
+  When the holders are not a majority of each half once each put ended, or at the apply,
+  the call gives `Error::Quorum { held, voters, missed }` for the first half that lacks
+  one, the incoming half first, and proposes nothing before the apply. `missed` gives
+  each voter whose put failed, in key order, with its name and why: `Miss::Deadline`,
+  `Unknown` (no record of the voter), `Dial`, or `Put`. It is empty for a refusal at the
+  apply. Decided by `laptop.architect`, 2026-10-19T17:02:16Z
   (https://github.com/synnaxlabs/foundation/issues/1231#issuecomment-6272668202), which
   supersedes the count before the put of item 2 of
   https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643 and the one
