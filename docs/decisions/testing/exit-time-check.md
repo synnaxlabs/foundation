@@ -1,19 +1,19 @@
 - **EXIT TIME CHECK (2026-10-18)** Exit test 1 of ONE NODE and the tests of ONE NODE of
-  a wrong endpoint (`a_wrong_endpoint_shows_in_status_and_heals`) and of a Bad value
-  (`a_bad_value_is_left_out_and_counted`) check the time of each sample that InfluxDB
-  holds (in exit test 1 and the test of a wrong endpoint, to the last step of the value)
-  against the time at which the server answered its read. The offset is the stored time
-  less the served time. The window `W_k` of read `k` is the served time of read `k+1`
-  less that of read `k-1`, of each read of the variable, Good or Bad; for read 0, from
-  the start of the node. Each sample holds `|offset| <= W_k / 2 + BOUND` (the hold): the
-  stamp is the midpoint of its read (STAMP), and the read lies inside its window. Each
-  sample of a read after read 0 whose window is at most `2 * BOUND` holds
-  `|offset| <= BOUND`, the 1 s target of the MVP (the target). A wider window shows a
-  read too slow for the target, and no stamp rule meets it with one request. Read 0
-  takes only the hold, since its window holds the start of the node. In each of the
-  three tests, sample `k` stored has the value of read `k`, and read `k` is Good. The
-  three tests run the `opcua` kind with `polled = true`, which writes a sample of each
-  read (`laptop.monitor`, kinds d and g of #3507, quoted at 2026-10-20T06:49:37Z in
+  a wrong endpoint (`a_wrong_endpoint_shows_in_status_and_heals`) and of a polled Bad
+  value (`a_polled_bad_value_is_left_out_and_counted`) check the time of each sample
+  that InfluxDB holds (in exit test 1 and the test of a wrong endpoint, to the last step
+  of the value) against the time at which the server answered its read. The offset is
+  the stored time less the served time. The window `W_k` of read `k` is the served time
+  of read `k+1` less that of read `k-1`, of each read of the variable, Good or Bad; for
+  read 0, from the start of the node. Each sample holds `|offset| <= W_k / 2 + BOUND`
+  (the hold): the stamp is the midpoint of its read (STAMP), and the read lies inside
+  its window. Each sample of a read after read 0 whose window is at most `2 * BOUND`
+  holds `|offset| <= BOUND`, the 1 s target of the MVP (the target). A wider window
+  shows a read too slow for the target, and no stamp rule meets it with one request.
+  Read 0 takes only the hold, since its window holds the start of the node. In each of
+  the three tests, sample `k` stored has the value of read `k`, and read `k` is Good.
+  The three tests run the `opcua` kind with `polled = true`, which writes a sample of
+  each read (`laptop.monitor`, kinds d and g of #3507, quoted at 2026-10-20T06:49:37Z in
   https://github.com/synnaxlabs/foundation/pull/3507#issuecomment-6285161214). A
   failure gives the offset and window of each checked sample. After #2627, the hold
   takes the error that the node writes for the sample in place of `W_k / 2`. A clock
