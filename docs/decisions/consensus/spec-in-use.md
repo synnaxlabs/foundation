@@ -13,18 +13,17 @@
   problems or a tree that does not read leaves the last spec in use (SPEC CHANGE). After
   a read that misses chunks, the task gets them at once, from `Config::store` and then
   from the peers: each listed chunk that the store lacks in one round, and each other
-  chunk that the tree needs, one at a time. It reads again only when it has them. A get
-  that finds no chunk asks again each second (`RETRY`, on the `env` clock). A get asks
-  the voters in key order, without this node, from the voter that gave the last chunk of
-  the pointer, and around. Each peer gets the chunks still missing in calls of at most
-  `CHUNKS`, each within `peer::DEADLINE`. A call that fails or passes the deadline gives
-  the rest of the round to the next peer. Lost: holders first (lost at each restart, and
-  the start at the last peer that gave a chunk finds a holder after one get); a set of
-  the peers that failed (a second state that the start at the last peer that gave a
-  chunk makes needless); the get of one listed chunk at a time (a round trip and a
-  stream for each chunk). It dials as `Mesh::apply` does, with the same redial.
-  A failed call of this node's store ends the get with `Cause::Blob`. Each other failure
-  of a peer moves to the next peer. When no peer gives the chunk, the cause stays
+  chunk that the tree needs, one at a time. It reads again once a get gave one of them.
+  A get that finds no chunk asks again each second (`RETRY`, on the `env` clock). A get
+  asks the voters in key order, without this node, from the voter that gave the last
+  chunk, also of an earlier pointer, and around. A get that a newer pointer drops keeps
+  the voter it was asking, and the next get starts after it. Each peer gets the chunks
+  still missing in calls of at most `CHUNKS`, each within `peer::DEADLINE`. A call that
+  fails or passes the deadline gives the rest of the round to the next peer. Lost:
+  holders first; a set of the peers that failed; the get of one listed chunk at a time.
+  It dials as `Mesh::apply` does, with the same redial. A failed call of this node's
+  store ends the get with `Cause::Blob`. Each other failure of a peer moves to the next
+  peer. When no peer gives the chunk, the cause stays
   `Missing`. A failed store call or file call is read again each second. The state is at
   most two trees: the chunks of the spec in use, which `spec::region::definitions` gives
   (REGION CHECK; `laptop.architect-2`, 2026-10-08T16:16:05Z,
@@ -88,4 +87,9 @@
   supersedes the "Also lost" line of the plan
   (https://github.com/synnaxlabs/foundation/issues/1231#issuecomment-6272590081) for the
   listed chunks, and the text of item 1 of
-  https://github.com/synnaxlabs/foundation/issues/1231#issuecomment-6274236848.
+  https://github.com/synnaxlabs/foundation/issues/1231#issuecomment-6274236848. The
+  start after the voter of a dropped get, the read once a get gave a chunk, and the Lost
+  line, `laptop.architect`, 2026-10-20T06:46:57Z
+  (https://github.com/synnaxlabs/foundation/pull/3495#issuecomment-6285124027), which
+  supersedes the start "from the voter that gave the last chunk of the pointer" of
+  6282311269.
