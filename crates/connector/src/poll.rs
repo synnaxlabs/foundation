@@ -199,10 +199,10 @@ impl Writer {
 
     /// Gives the stamp of a frame of samples whose true mesh time is within `time`,
     /// with its ends in either order, and whose values hold until at least `held`, with
-    /// the error of that stamp. The stamp is the midpoint of `time`, or 1 ns after the
-    /// last stamp that this writer gave, written or not, when that is later. The error
-    /// is half the width of `time`, rounded up, plus how far the stamp is past the
-    /// later of the midpoint and `held`, and stops at `i64::MAX` ns.
+    /// the error of that stamp. The stamp is the midpoint of `time`, rounded down, or
+    /// 1 ns after the last stamp that this writer gave, written or not, when that is
+    /// later. The error is half the width of `time`, rounded up, plus how far the stamp
+    /// is past the later of the midpoint and `held`, and stops at `i64::MAX` ns.
     ///
     /// # Panics
     ///
@@ -211,12 +211,12 @@ impl Writer {
         self.stamped.sample(time, held)
     }
 
-    /// Writes one frame at `stamp`, the last stamp that [`Self::request`] or
-    /// [`Self::sample`] gave, with the value of each channel that `values` gives, in
-    /// order, and leaves out each `None`. It takes each value once, before the write.
-    /// Writes no frame when it keeps none. A group that the home refuses as
-    /// `Backwards` is written again once, after the stamp that the refusal gives. A
-    /// frame for which the pool has no block now loses its samples.
+    /// Writes one frame at `stamp` with the value of each channel that `values` gives,
+    /// in order, and leaves out each `None`. `stamp` is the last stamp that
+    /// [`Writer::request`] or [`Writer::sample`] gave. It takes each value once,
+    /// before the write. Writes no frame when it keeps none. A group that the home
+    /// refuses as `Backwards` is written again once, after the stamp that the refusal
+    /// gives. A frame for which the pool has no block now loses its samples.
     ///
     /// # Errors
     ///
@@ -227,8 +227,9 @@ impl Writer {
     ///
     /// When `values` gives more or fewer values than the channels, a value is not of
     /// the sample type of its channel (each value of a channel of no fixed width), or
-    /// the home refuses a group as `Backwards` again, or with a stamp under the last
-    /// stamp that this writer gave, which a frame at that stamp never gets.
+    /// the home refuses a group as `Backwards` again, or the home refuses a group as
+    /// `Backwards` with a stamp under the last stamp that this writer gave, which a
+    /// write at that last stamp never gets.
     pub fn write(
         &mut self,
         values: impl IntoIterator<Item = Option<Value>>,

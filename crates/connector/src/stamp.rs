@@ -14,9 +14,10 @@ mod tests;
 
 pub use fit::{Fit, Fitted};
 
-/// The stamps of the frames of one writer. Each is the midpoint of the request that
-/// read its samples or of the mesh time of its sample, or the nanosecond after the
-/// stamp before it when that is later, so no two are equal and none goes back.
+/// The stamps of the frames of one writer. Each is the time that `next` gets, the
+/// midpoint of the interval that `sample` gets, or 1 ns after the stamp that a refusal
+/// gives (`after`), or 1 ns after the last stamp when that is later, so no two are
+/// equal and none goes back.
 #[derive(Debug, Default)]
 struct Stamps {
     last: Option<Stamp>,
@@ -178,8 +179,10 @@ impl Writer {
     /// # Panics
     ///
     /// When the home refuses a group as `Expired` or `Codec`, or a group written again
-    /// as `Backwards`. A writer with no lease never gets `Expired`, and `codec`
-    /// refuses only raw bytes that are not samples of their type, which no fill writes.
+    /// as `Backwards`, or the home refuses a group as `Backwards` with a stamp under
+    /// the last stamp that this writer gave, which a write at that last stamp never
+    /// gets. A writer with no lease never gets `Expired`, and `codec` refuses only raw
+    /// bytes that are not samples of their type, which no fill writes.
     pub(crate) fn write(
         &mut self,
         stamp: Stamp,
