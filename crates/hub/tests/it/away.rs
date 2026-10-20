@@ -509,6 +509,33 @@ fn stops_a_forward_whose_message_of_places_passes_the_share_as_busy() {
     stops_a_forward_whose_places_pass_the_share(24, free, 65, 48 + fixed());
 }
 
+/// Once the member sends the places to the program, it gives back their whole hold,
+/// the message of 65 bytes too, and holds only the 40 bytes of the ends.
+#[test]
+fn frees_the_places_of_a_forward_once_it_sends_them() {
+    let served = away(
+        26,
+        |mut home| async move {
+            home.start().await;
+            assert_eq!(home.stream.recv().await, reset_with(0));
+        },
+        |mut agent, _| async move {
+            let started = write(&agent).await;
+            let mut busy = agent.unfinished(BODY_BYTES_MAX - 39, &[]).await;
+            assert_eq!(busy.recv().await, reset_with(BUSY));
+            drop(started);
+            super::read::finish(&mut agent).await;
+        },
+    );
+    let share = serve::Error::Share {
+        subject: name(SUBJECT),
+        length: BODY_BYTES_MAX - 39,
+        held: 40,
+    };
+    let held = serve::Error::Stream(transport::Error::Reset { code: Code(0) });
+    assert_eq!(served, [Err(share), Err(held), Ok(Got::Ended)]);
+}
+
 /// Renews the hello of `agent` with one that echoes `challenge`, keeps its nonce in
 /// `nonces`, and gives the next challenge once the member admitted it.
 async fn renew(
