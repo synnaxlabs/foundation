@@ -2545,6 +2545,34 @@ fn counts_each_overflow_of_the_queue_of_an_item_as_missed() {
     assert_eq!(last(&outcome.statuses, IN), 15);
 }
 
+/// As [`counts_each_overflow_of_the_queue_of_an_item_as_missed`], with Bad or Uncertain
+/// changes: each value that arrives counts in `bad` or `uncertain`, also one with the
+/// overflow bit.
+#[test]
+fn counts_each_bad_or_uncertain_value_of_an_overflow() {
+    for (quality, key) in [
+        (Quality(0x8000_0000), BAD),
+        (Quality(0x4000_0000), UNCERTAIN),
+    ] {
+        let outcome = watch(Setup::three(), move |scene| async move {
+            scene.variables.limit_queues(2, 500.0);
+            scene.stop().await;
+            scene.serve();
+            for at in (1_030..2_000).step_by(50) {
+                scene.after(ms(at), move |scene| async move {
+                    scene.variables.change(quality);
+                });
+            }
+            scene.supervise(ms(2_050)).await
+        });
+        assert!(outcome.result.is_ok(), "{key}: {:?}", outcome.result);
+        assert_eq!(errors(&outcome.statuses), [], "{key}");
+        assert_eq!(keys(&outcome.frames), vec![vec![1, 2, 3, 4]], "{key}");
+        assert_eq!(last(&outcome.statuses, MISSED), 6, "{key}");
+        assert_eq!(last(&outcome.statuses, key), 12, "{key}");
+    }
+}
+
 /// A node whose `CreateMonitoredItems` call alone is past one message of the server
 /// ends the run with a config error, as a Read past it does with `polled = true`.
 #[test]
