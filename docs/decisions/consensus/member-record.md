@@ -414,10 +414,14 @@
   time) of the byte form, with no padding. The byte form is the private key (32
   bytes), the region prefix behind a length byte, and the voters behind a count of 8
   little-endian bytes, each as its node key (16 bytes), its public key (32 bytes), and
-  the byte form of its `Addresses`. `Ticket::decode` gives `ticket::Unreadable`, which
-  names no part of the text, for another first part, padded or standard Base64, a cut
-  or a byte past the end, no voter, and a voter key that is not a valid public key.
-  The text is a secret: it is never in region state, and Foundation never writes it to
-  a file. Lost: a byte form in `mesh` and the text in `ops`, so that two crates know
-  the version of one format. Plan:
+  the byte form of its `Addresses`. `Ticket::text` gives the text, and `FromStr` reads
+  it, with any ASCII whitespace at its ends, such as a line end. A read gives
+  `ticket::Unreadable`, which names no part of the text, for another first part,
+  padded or standard Base64, a cut or a byte past the end, no voter, and a voter key
+  that is not a valid public key. The text is a secret: it is never in region state,
+  and Foundation never writes it to a file. Lost: a byte form in `mesh` and the text
+  in `ops`, so that two crates know the version of one format; and a `Display` of
+  `Ticket`, so that no format of a struct prints the secret. Plan:
   https://github.com/synnaxlabs/foundation/issues/1157#issuecomment-6293270267.
+  Approved by `laptop.architect` (2026-10-20:
+  https://github.com/synnaxlabs/foundation/issues/1157#issuecomment-6293328111).

@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use env::tasks::Tasks;
@@ -491,11 +492,11 @@ fn each_call_of_a_mesh_has_the_signature_that_a_caller_holds() {
 // The text that an operator carries goes out of the binary and comes back in it.
 #[test]
 fn a_ticket_has_one_text_form() {
-    let _: fn(&Ticket) -> String = Ticket::encode;
-    let _: fn(&str) -> Result<Ticket, ticket::Unreadable> = Ticket::decode;
+    let _: fn(&Ticket) -> String = Ticket::text;
+    let _: fn(&str) -> Result<Ticket, ticket::Unreadable> = Ticket::from_str;
     assert_error(&ticket::Unreadable);
     assert_eq!(
-        Ticket::decode("foundation-ticket-1-").err(),
+        "foundation-ticket-1-".parse::<Ticket>().err(),
         Some(ticket::Unreadable)
     );
 }

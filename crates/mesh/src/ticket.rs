@@ -1,6 +1,7 @@
 //! Join tickets: the Ed25519 key pairs that admit nodes to a region.
 
 use std::fmt;
+use std::str::FromStr;
 
 use base64ct::{Base64UrlUnpadded, Encoding as _};
 use types::ed25519::{BadSignature, Pair, PrivateKey, PublicKey};
@@ -125,7 +126,7 @@ impl Ticket {
     /// key, and its addresses, behind a count of 8 little-endian bytes. The text is a
     /// secret: the private key is in it.
     #[must_use]
-    pub fn encode(&self) -> String {
+    pub fn text(&self) -> String {
         let mut bytes = self.private_key.0.to_vec();
         put_prefix(&self.region, &mut bytes);
         put_count(self.voters.len(), &mut bytes);
@@ -136,14 +137,19 @@ impl Ticket {
         }
         format!("{TEXT}{}", Base64UrlUnpadded::encode_string(&bytes))
     }
+}
 
-    /// The ticket of `text`, which [`Ticket::encode`] gives.
+impl FromStr for Ticket {
+    type Err = Unreadable;
+
+    /// The ticket of `text`, which [`Ticket::text`] gives, with any ASCII whitespace
+    /// at its start and its end, such as the line end of a file.
     ///
     /// # Errors
     ///
-    /// [`Unreadable`] when `text` is not that form.
-    pub fn decode(text: &str) -> Result<Self, Unreadable> {
-        let text = text.strip_prefix(TEXT).ok_or(Unreadable)?;
+    /// [`Unreadable`] when `text` is not that form, also for a count of 0 voters.
+    fn from_str(text: &str) -> Result<Self, Unreadable> {
+        let text = text.trim_ascii().strip_prefix(TEXT).ok_or(Unreadable)?;
         let bytes = Base64UrlUnpadded::decode_vec(text).ok().ok_or(Unreadable)?;
         let mut bytes = bytes.as_slice();
         let private_key = PrivateKey(take(&mut bytes).ok_or(Unreadable)?);
@@ -160,7 +166,7 @@ impl Ticket {
     }
 }
 
-// Takes one voter of the byte form of [`Ticket::encode`].
+// Takes one voter of the byte form of [`Ticket::text`].
 fn take_voter(bytes: &mut &[u8]) -> Option<Voter> {
     Some(Voter {
         key: take_key(bytes)?,
@@ -169,8 +175,7 @@ fn take_voter(bytes: &mut &[u8]) -> Option<Voter> {
     })
 }
 
-/// A text that is no ticket. It names no part of the text, since the text is a
-/// secret.
+/// A text that is no ticket. It names no part of the text: the text is a secret.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Unreadable;
 
@@ -413,7 +418,7 @@ mod tests {
 
     #[test]
     fn the_text_is_the_first_part_and_the_base64_of_the_byte_form() {
-        assert_eq!(ticket(7).encode(), text(&bytes_of_ticket_7()));
+        assert_eq!(ticket(7).text(), text(&bytes_of_ticket_7()));
     }
 
     #[test]
@@ -421,17 +426,17 @@ mod tests {
         let ticket = Ticket::new(private(7), Prefix::ROOT, vec![voter()]);
         let mut bytes = bytes_of_ticket_7();
         bytes.splice(32..38, [0]);
-        assert_eq!(ticket.encode(), text(&bytes));
-        let decoded = Ticket::decode(&ticket.encode()).unwrap();
+        assert_eq!(ticket.text(), text(&bytes));
+        let decoded = Ticket::from_str(&ticket.text()).unwrap();
         assert_eq!(decoded.region(), &Prefix::ROOT);
     }
 
     #[test]
     fn each_cut_of_the_text_is_unreadable() {
-        let text = ticket(7).encode();
+        let text = ticket(7).text();
         for end in 0..text.len() {
             assert_eq!(
-                Ticket::decode(text.get(..end).unwrap()).err(),
+                Ticket::from_str(text.get(..end).unwrap()).err(),
                 Some(Unreadable),
                 "{end}"
             );
@@ -439,10 +444,25 @@ mod tests {
     }
 
     #[test]
+    fn whitespace_at_the_ends_of_the_text_is_no_part_of_it() {
+        let text = ticket(7).text();
+        for (start, end) in [("", "\n"), ("", "\r\n"), (" \t", " \n"), ("\n", "")] {
+            let read = Ticket::from_str(&format!("{start}{text}{end}")).unwrap();
+            assert_eq!(read.text(), text, "{start:?} {end:?}");
+        }
+        let (left, right) = text.split_at(40);
+        let inside = format!("{left}\n{right}");
+        let unicode = format!("{text}\u{a0}");
+        for text in [inside, unicode] {
+            assert_eq!(Ticket::from_str(&text).err(), Some(Unreadable), "{text:?}");
+        }
+    }
+
+    #[test]
     fn a_byte_past_the_end_is_unreadable() {
         let mut bytes = bytes_of_ticket_7();
         bytes.push(0);
-        assert_eq!(Ticket::decode(&text(&bytes)).err(), Some(Unreadable));
+        assert_eq!(Ticket::from_str(&text(&bytes)).err(), Some(Unreadable));
     }
 
     #[test]
@@ -450,7 +470,7 @@ mod tests {
         let mut bytes = vec![7; 32];
         bytes.extend(b"\x05plant");
         bytes.extend(0u64.to_le_bytes());
-        assert_eq!(Ticket::decode(&text(&bytes)).err(), Some(Unreadable));
+        assert_eq!(Ticket::from_str(&text(&bytes)).err(), Some(Unreadable));
     }
 
     #[test]
@@ -462,10 +482,10 @@ mod tests {
             "foundation-ticket-2-",
             "Foundation-ticket-1-",
             "foundation_ticket_1_",
-            " foundation-ticket-1-",
+            "\u{a0}foundation-ticket-1-",
         ] {
             let text = format!("{first}{base64}");
-            assert_eq!(Ticket::decode(&text).err(), Some(Unreadable), "{first}");
+            assert_eq!(Ticket::from_str(&text).err(), Some(Unreadable), "{first}");
         }
     }
 
@@ -478,7 +498,7 @@ mod tests {
             base64ct::Base64Unpadded::encode_string(&[0xfb; 33])
         );
         for text in [padded, standard] {
-            assert_eq!(Ticket::decode(&text).err(), Some(Unreadable), "{text}");
+            assert_eq!(Ticket::from_str(&text).err(), Some(Unreadable), "{text}");
         }
     }
 
@@ -486,7 +506,7 @@ mod tests {
     fn a_voter_key_of_small_order_is_unreadable() {
         let mut bytes = bytes_of_ticket_7();
         bytes[62..94].copy_from_slice(&[0; 32]);
-        assert_eq!(Ticket::decode(&text(&bytes)).err(), Some(Unreadable));
+        assert_eq!(Ticket::from_str(&text(&bytes)).err(), Some(Unreadable));
     }
 
     #[test]
@@ -734,26 +754,26 @@ mod tests {
 
     proptest! {
         #[test]
-        fn decode_keeps_the_key_pair_the_region_and_the_voters(
+        fn the_text_keeps_the_key_pair_the_region_and_the_voters(
             private_key in any::<[u8; 32]>(),
             region in regions(),
             voters in voters(),
         ) {
             let ticket = Ticket::new(PrivateKey(private_key), region, voters);
-            let text = ticket.encode();
-            let decoded = Ticket::decode(&text).unwrap();
+            let text = ticket.text();
+            let decoded = Ticket::from_str(&text).unwrap();
             prop_assert_eq!(decoded.public_key(), ticket.public_key());
             prop_assert_eq!(decoded.region(), ticket.region());
             prop_assert_eq!(decoded.voters(), ticket.voters());
-            prop_assert_eq!(decoded.encode(), text);
+            prop_assert_eq!(decoded.text(), text);
         }
 
         #[test]
-        fn decode_of_any_text_after_the_first_part_never_panics(
+        fn a_read_of_any_text_after_the_first_part_never_panics(
             bytes in prop::collection::vec(any::<u8>(), 0..160),
         ) {
-            if let Ok(ticket) = Ticket::decode(&text(&bytes)) {
-                prop_assert_eq!(ticket.encode(), text(&bytes));
+            if let Ok(ticket) = Ticket::from_str(&text(&bytes)) {
+                prop_assert_eq!(ticket.text(), text(&bytes));
             }
         }
 

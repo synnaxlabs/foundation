@@ -119,12 +119,12 @@ pub fn round_trip_spec_name(name: &[u8]) -> Option<Vec<u8>> {
     Some(used::file(pointer).into_os_string().into_encoded_bytes())
 }
 
-/// The text that the join ticket in `text` encodes to, or `None` when `text` is not
-/// the text of a ticket.
+/// The text of the join ticket that `text` reads as, or `None` when `text` is not the
+/// text of a ticket.
 #[must_use]
 pub fn round_trip_ticket(text: &[u8]) -> Option<Vec<u8>> {
-    let ticket = crate::ticket::Ticket::decode(std::str::from_utf8(text).ok()?).ok()?;
-    Some(ticket.encode().into_bytes())
+    let ticket: crate::ticket::Ticket = std::str::from_utf8(text).ok()?.parse().ok()?;
+    Some(ticket.text().into_bytes())
 }
 
 // The path and the bytes of each file that `dir` frames.
@@ -2114,9 +2114,10 @@ mod tests {
             "voter_forged",
             "addresses_over_32",
             "trailing",
+            "line_end",
         );
         assert_eq!(count_files("mesh_ticket"), inputs.len());
-        let root = Ticket::new(private(7), Prefix::ROOT, vec![voter()]).encode();
+        let root = Ticket::new(private(7), Prefix::ROOT, vec![voter()]).text();
         let relay = Address::Relay {
             node: public(3),
             at: "[2001:db8::1]:4100".parse().unwrap(),
@@ -2135,9 +2136,9 @@ mod tests {
         ];
         let voters = Ticket::new(private(7), "plant".parse().unwrap(), voters);
         let valid = [
-            ("ticket", ticket(7).encode()),
+            ("ticket", ticket(7).text()),
             ("root", root),
-            ("voters", voters.encode()),
+            ("voters", voters.text()),
         ];
         for (name, want) in valid {
             let want = want.into_bytes();
@@ -2145,6 +2146,10 @@ mod tests {
             let round_trip = round_trip_ticket(&want);
             assert_eq!(round_trip.as_deref(), Some(&want[..]), "{name}");
         }
+        let line_end = format!("{}\n", ticket(7).text()).into_bytes();
+        assert_eq!(inputs["line_end"], line_end);
+        let read = round_trip_ticket(&line_end);
+        assert_eq!(read, Some(ticket(7).text().into_bytes()));
         for (name, want) in refused_tickets() {
             assert_eq!(inputs[name], want, "{name}");
             assert_eq!(round_trip_ticket(&want), None, "{name}");
@@ -2159,7 +2164,7 @@ mod tests {
         };
         // The private key, the prefix `plant`, a count of 1, the key and public key of
         // voter 1, a count of 1, and the address `10.0.0.1:4000`.
-        let plant = ticket(7).encode();
+        let plant = ticket(7).text();
         let base64 = plant.strip_prefix("foundation-ticket-1-").unwrap();
         let bytes = base64ct::Base64UrlUnpadded::decode_vec(base64).unwrap();
         let with = |at: Range<usize>, put: &[u8]| {

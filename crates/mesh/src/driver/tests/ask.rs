@@ -177,7 +177,7 @@ fn a_ticket_that_a_voter_makes_admits_a_node_that_asks_by_it() {
             .insert(follower, options);
         cluster.run(seconds(5));
         let (_, made) = cluster.board().made.pop().unwrap();
-        let ticket = Ticket::decode(&made.unwrap().encode()).unwrap();
+        let ticket: Ticket = made.unwrap().text().parse().unwrap();
         let asked = ask_each(&mut cluster.sim, vec![ticket]);
         cluster.run(seconds(10));
         let asked: Vec<_> = asked.lock().unwrap().drain(..).map(|(a, _)| a).collect();

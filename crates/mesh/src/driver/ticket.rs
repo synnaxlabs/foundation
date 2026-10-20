@@ -11,11 +11,12 @@ use crate::ticket::{Options, Ticket, Voter};
 impl Mesh {
     /// Makes a join ticket for the region, records it with `options`, and gives its
     /// secret. The key pair comes from [`Config::entropy`](super::Config::entropy).
-    /// The ticket lists each voter of this node's view of the region, in node key
-    /// order, with the addresses of its card. A follower forwards the change to the
-    /// leader. It returns when an entry that records the ticket has committed and this
-    /// node applied it, and proposes again as [`Mesh::set_home`] does. An entry of an
-    /// earlier try of this call that recorded the ticket counts as the record.
+    /// The ticket lists each voter of the newest configuration in the log of this node,
+    /// of both halves of a joint one, in node key order, with the addresses of its
+    /// card. A follower forwards the change to the leader. It returns when an entry
+    /// that records the ticket has committed and this node applied it, and proposes
+    /// again as [`Mesh::set_home`] does. An entry of an earlier try of this call that
+    /// recorded the ticket counts as the record.
     ///
     /// # Errors
     ///
