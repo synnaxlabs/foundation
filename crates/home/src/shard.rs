@@ -508,13 +508,13 @@ impl Shard {
     /// the series and their padding, as [`Frame::body`] holds them, raw or encoded. Its
     /// draft fits [`Shard::pool`], and the entries of its groups fit
     /// [`buffer::Buffer::block_max`] each and one record in all when encoded. A shard
-    /// at rest applies such a frame when the only other blocks of its pool are the
-    /// newest frames of the indexes of `set`, and these hold no more than the index
-    /// frames of one frame of this many bytes. Its pool then holds at once the draft of
-    /// an encoded frame of more than one group, the index frame and header of each
-    /// group, and the blocks that one append holds other than its entries
-    /// ([`buffer::Buffer::append_footprint`]). This also holds for a frame with fewer
-    /// entries of `set`. 0 when no frame of `set` fits.
+    /// at rest whose ring has room for the record applies such a frame when the only
+    /// other blocks of its pool are the newest frames of the indexes of `set`, and
+    /// these hold no more than the index frames of one frame of this many bytes. Its
+    /// pool then holds at once the draft of an encoded frame of more than one group,
+    /// the index frame and header of each group, and the blocks that one append holds
+    /// other than its entries ([`buffer::Buffer::append_footprint`]). This also holds
+    /// for a frame with fewer entries of `set`. 0 when no frame of `set` fits.
     #[must_use]
     pub fn write_body_max(&self, set: &KeySet) -> usize {
         let pool = self.buffer.pool();

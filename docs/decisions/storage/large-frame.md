@@ -42,13 +42,13 @@
   overhead of its frame; of one record for the entries of all groups; and of
   `Pool::budget` less the footprints, by `block::footprint`, of the blocks that the pool
   holds at once: the draft of an encoded frame of more than one group, the index frame
-  and header of each group, and the newest frames of the indexes of `set`, which the
+  and header of each group, the newest frames of the indexes of `set`, which the
   shard keeps at rest, as the index frames of one frame at the bound, and the blocks
   that one append holds other than its entries (`Buffer::append_footprint`). Newest
   frames of other indexes, or of `set` over that, can leave no room for a frame at the
-  bound: it is then lost (live) or refused with `Full` (backfill). Each term goes
-  through `codec::len_within`. The batch term is decided by `laptop.architect`
-  (2026-10-20T11:30:31Z):
+  bound: it is then lost (live) or refused with `Full` (backfill). Each term of a group,
+  of the record, and of the pool goes through `codec::len_within`. The batch term is
+  decided by `laptop.architect` (2026-10-20T11:30:31Z):
   https://github.com/synnaxlabs/foundation/pull/3578#issuecomment-6289857046. The pool
   term is decided by `laptop.architect` (2026-10-20T11:45:27Z):
   https://github.com/synnaxlabs/foundation/pull/3578#issuecomment-6290103893, and its
