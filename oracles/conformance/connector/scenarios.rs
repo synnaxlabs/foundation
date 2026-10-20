@@ -5,10 +5,14 @@
 //! device, with the kind's simulator.
 
 use std::cell::RefCell;
+use std::env::VarError;
 use std::future::poll_fn;
 use std::net::SocketAddr;
+use std::ops::RangeInclusive;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::{Pin, pin};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
 use ::sim::node::Node;
@@ -20,6 +24,7 @@ use connector::testing::{Rig, Run};
 use document::Document;
 use document::diagnostic::{Code, Diagnostic};
 use env::clock::Clock;
+use env::rng::Rng;
 use env::tasks::Tasks;
 use types::name::Name;
 use types::time::Span;
@@ -171,6 +176,11 @@ macro_rules! suite {
         }
 
         #[test]
+        fn heals_after_random_faults() {
+            $crate::scenarios::heals_after_random_faults(&$suite);
+        }
+
+        #[test]
         #[should_panic(
             expected = "the scenario ran past 90s of plant time, where the ring of the \
                         rig's home can lose a status (#160)"
@@ -214,6 +224,18 @@ const RING: Span = Span::from_nanos(90_000_000_000);
 const STOP: Span = Span::from_nanos(5_000_000_000);
 /// The name of each connector of the scenarios.
 const CONNECTOR: &str = "plant.device";
+/// The runs of [`heals_after_random_faults`], each on its own seed, on each merge.
+const RUNS: u64 = 1000;
+/// The variable that gives the seeds of [`heals_after_random_faults`] in place of
+/// [`RUNS`]: one seed in hex, such as `0x2a`, or a range `<start>..<end>` in hex, the
+/// end excluded, such as `0x0..0xf4240`.
+const REPLAY: &str = "CONFORMANCE_SEED";
+/// The span in which [`heals_after_random_faults`] puts its faults.
+const FAULTS: Span = Span::from_nanos(15_000_000_000);
+/// The most faults of one run of [`heals_after_random_faults`].
+const FAULTS_MAX: u64 = 8;
+/// The longest error text of a status.
+const TEXT_MAX: usize = 1024;
 
 /// The plant side of a scenario.
 pub(crate) struct Scene {
@@ -226,10 +248,20 @@ pub(crate) struct Scene {
     address: SocketAddr,
     /// Cancelled once the script returns, for [`Plant::until`].
     until: Token,
-    /// Cancelled to ask for a crash of the device node.
-    crash: Token,
-    /// Cancelled once the device node crashed.
-    crashed: Token,
+    /// What the script asks of the sim, each with the token that is cancelled once
+    /// the sim did it.
+    asks: Asks,
+}
+
+type Asks = Arc<Mutex<Vec<(Ask, Token)>>>;
+
+/// What a script asks of the sim, which [`run`] does between two steps.
+#[derive(Clone, Copy, Debug)]
+enum Ask {
+    /// Sets the link from the plant to the device, and the link back.
+    Links(link::Config, link::Config),
+    /// Crashes the device node with [`Crash::Power`].
+    Crash,
 }
 
 /// A simulator that [`Scene::serve`] started.
@@ -284,8 +316,22 @@ impl Scene {
     /// Crashes the device node with [`Crash::Power`], so no segment of its streams
     /// reaches the plant.
     async fn crash(&self) {
-        self.crash.cancel();
-        self.crashed.wait().await;
+        self.ask(Ask::Crash).await;
+    }
+
+    /// Sets the link from the plant to the device to `to`, and the link back to
+    /// `back`.
+    async fn links(&self, to: link::Config, back: link::Config) {
+        self.ask(Ask::Links(to, back)).await;
+    }
+
+    /// Waits until the sim did `ask`, at the end of the current step.
+    async fn ask(&self, ask: Ask) {
+        let done = Token::new();
+        let asks = self.asks.lock();
+        asks.expect("no panic holds the lock")
+            .push((ask, done.clone()));
+        done.wait().await;
     }
 
     pub(crate) async fn supervise(&self, config: Document) -> Run {
@@ -400,9 +446,9 @@ fn shard(name: &str) -> env::shards::Config {
 }
 
 /// Runs `script` on the plant node of a new sim, after `prepare` sets the links of
-/// the sim. Crashes the device node at each ask of the script, between two runs. Once
-/// the script returns, the run of the sim must end: a task or a stream that the
-/// script left keeps it from its end.
+/// the sim. Does each ask of the script between two steps. Once the script returns,
+/// the run of the sim must end: a task or a stream that the script left keeps it
+/// from its end.
 pub(crate) fn run<S, F>(
     suite: &'static Suite,
     prepare: fn(&mut Sim, &Node, &Node),
@@ -411,8 +457,21 @@ pub(crate) fn run<S, F>(
     S: FnOnce(Rc<Scene>) -> F + Send + 'static,
     F: Future<Output = ()> + 'static,
 {
+    run_seeded(SEED, suite, prepare, script);
+}
+
+/// Runs `script` as [`run`] does, on a sim of `seed`.
+fn run_seeded<S, F>(
+    seed: u64,
+    suite: &'static Suite,
+    prepare: fn(&mut Sim, &Node, &Node),
+    script: S,
+) where
+    S: FnOnce(Rc<Scene>) -> F + Send + 'static,
+    F: Future<Output = ()> + 'static,
+{
     let mut sim = Sim::new(::sim::Config {
-        seed: SEED,
+        seed,
         ..::sim::Config::default()
     });
     let (plant, host) = (
@@ -420,11 +479,8 @@ pub(crate) fn run<S, F>(
         sim.node(::sim::node::Config::default()),
     );
     prepare(&mut sim, &plant, &host);
-    let (crash, crashed, done) = (Token::new(), Token::new(), Token::new());
-    let (node, inputs) = (
-        plant.clone(),
-        (host.clone(), crash.clone(), crashed.clone()),
-    );
+    let (asks, done) = (Asks::default(), Token::new());
+    let (node, inputs) = (plant.clone(), (host.clone(), Arc::clone(&asks)));
     let end = done.clone();
     let started = plant
         .shards()
@@ -437,7 +493,7 @@ pub(crate) fn run<S, F>(
                 tasks: tasks.clone(),
             };
             let rig = Rig::open(env, node.net(), (suite.kinds)()).await;
-            let (host, crash, crashed) = inputs;
+            let (host, asks) = inputs;
             let address = SocketAddr::new(host.addresses()[0], PORT);
             let scene = Rc::new(Scene {
                 suite,
@@ -447,8 +503,7 @@ pub(crate) fn run<S, F>(
                 device: host,
                 address,
                 until: Token::new(),
-                crash,
-                crashed,
+                asks,
             });
             script(Rc::clone(&scene)).await;
             scene.until.cancel();
@@ -464,9 +519,16 @@ pub(crate) fn run<S, F>(
         );
         sim.run_for(STEP).expect("the run goes on");
         ran = Span::from_nanos(ran.nanos() + STEP.nanos());
-        if crash.cancelled() && !crashed.cancelled() {
-            sim.crash(&host, Crash::Power);
-            crashed.cancel();
+        let asked = std::mem::take(&mut *asks.lock().expect("no panic holds the lock"));
+        for (ask, done) in asked {
+            match ask {
+                Ask::Links(to, back) => {
+                    sim.link(&plant, &host, to);
+                    sim.link(&host, &plant, back);
+                }
+                Ask::Crash => sim.crash(&host, Crash::Power),
+            }
+            done.cancel();
         }
     }
     sim.run().expect("each task of the run ends");
@@ -568,12 +630,7 @@ async fn lost<'a>(
     // Each reading of the run, as `Run::until` gives none but the last.
     let seen = |reading: &Reading| {
         let mut last = last.borrow_mut();
-        let down = |(name, count): (&Name, &u64)| {
-            reading.counts.get(name).is_none_or(|now| now < count)
-        };
-        let went = last.counts.iter().find(|&count| down(count));
-        assert!(went.is_none(), "{went:?} went down: {reading:?}");
-        assert!(reading.restarts >= last.restarts, "{reading:?}");
+        no_count_down(&last, reading);
         if let Backoff::Run = scene.suite.backoff {
             let class = reading.error.as_ref().map(|(class, _)| *class);
             let given = (reading.state, reading.restarts);
@@ -609,6 +666,16 @@ async fn lost<'a>(
     }
     run.stop().await.expect("the run ends with no error");
     scene.stop(served).await;
+}
+
+/// Panics when a count or the restarts of `reading` went down from `last`.
+fn no_count_down(last: &Reading, reading: &Reading) {
+    let down = |(name, count): (&Name, &u64)| {
+        reading.counts.get(name).is_none_or(|now| now < count)
+    };
+    let went = last.counts.iter().find(|&count| down(count));
+    assert!(went.is_none(), "{went:?} went down: {reading:?}");
+    assert!(reading.restarts >= last.restarts, "{reading:?}");
 }
 
 /// `Run::stop` of `run` gives `Ok` within 5 s, and the plant then holds no stream.
@@ -714,6 +781,183 @@ pub(crate) fn stops_at_a_write_channel_that_no_spec_defines(suite: &'static Suit
     });
 }
 
+/// One fault of [`heals_after_random_faults`].
+#[derive(Clone, Copy, Debug)]
+enum Fault {
+    /// Sets the link from the plant to the device, and the link back.
+    Links(link::Config, link::Config),
+    /// Stops the simulator, each connection closed, when it serves.
+    Stop,
+    /// Crashes the device node.
+    Crash,
+    /// Starts the simulator when it does not serve.
+    Serve,
+}
+
+/// The faults of the run of `seed`, 1 to [`FAULTS_MAX`], each at its time from the
+/// start of [`FAULTS`], in time order.
+fn faults(seed: u64) -> Vec<(Span, Fault)> {
+    let mut rng = Rng::from_seed(seed);
+    let count = 1 + rng.below(FAULTS_MAX);
+    let mut faults: Vec<_> = (0..count)
+        .map(|_| {
+            let at = below(&mut rng, FAULTS);
+            let fault = match rng.below(4) {
+                0 => Fault::Links(faulty(&mut rng), faulty(&mut rng)),
+                1 => Fault::Stop,
+                2 => Fault::Crash,
+                _ => Fault::Serve,
+            };
+            (at, fault)
+        })
+        .collect();
+    faults.sort_by_key(|&(at, _)| at);
+    faults
+}
+
+/// A link with a delay below 2 s, a jitter below 500 ms, and a loss of 0, 0.25, 0.5,
+/// 0.75, or 1. No duplication: the sim never duplicates a TCP segment.
+fn faulty(rng: &mut Rng) -> link::Config {
+    let quarters = u32::try_from(rng.below(5)).expect("at most 4");
+    link::Config {
+        delay: below(rng, Span::from_nanos(2_000_000_000)),
+        jitter: below(rng, Span::from_nanos(500_000_000)),
+        loss: f64::from(quarters) / 4.0,
+        ..link::Config::default()
+    }
+}
+
+/// A span from 0 to below `span`.
+fn below(rng: &mut Rng, span: Span) -> Span {
+    let nanos = u64::try_from(span.nanos()).expect("a span above 0");
+    let drawn = i64::try_from(rng.below(nanos)).expect("below the span");
+    Span::from_nanos(drawn)
+}
+
+/// For each seed of [`seeds`]: the connector runs, then meets the faults of
+/// [`faults`] of that seed. While they come: never class Config, each error text at
+/// most [`TEXT_MAX`] bytes, and no count and no restart count goes down. After the
+/// last fault, both links are as at the start and the simulator serves: the
+/// connector heals. A failed run panics as [`replayed`] says.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the seeds to run are an input of the test run, not of a node"
+)]
+pub(crate) fn heals_after_random_faults(suite: &'static Suite) {
+    replayed(seeds(std::env::var(REPLAY)), |seed| {
+        run_seeded(seed, suite, direct, move |scene| faulted(scene, seed));
+    });
+}
+
+/// The seeds that `value`, the value of [`REPLAY`], gives, or the [`RUNS`] seeds
+/// from 0 when it is not set.
+///
+/// # Panics
+///
+/// When `value` is not UTF-8, or is not a seed or a nonempty range of seeds in hex.
+fn seeds(value: Result<String, VarError>) -> RangeInclusive<u64> {
+    let value = match value {
+        Ok(value) => value,
+        Err(VarError::NotPresent) => return 0..=RUNS - 1,
+        Err(VarError::NotUnicode(value)) => panic!("{REPLAY} is not UTF-8: {value:?}"),
+    };
+    let hex = |text: &str| {
+        let digits = text.strip_prefix("0x").unwrap_or(text);
+        u64::from_str_radix(digits, 16).ok()
+    };
+    let range = match value.split_once("..") {
+        Some((start, end)) => hex(start).zip(hex(end)).and_then(|(start, end)| {
+            let last = end.checked_sub(1).filter(|&last| start <= last);
+            last.map(|last| start..=last)
+        }),
+        None => hex(&value).map(|seed| seed..=seed),
+    };
+    range.unwrap_or_else(|| {
+        panic!("{REPLAY} is a seed or a nonempty range of seeds in hex, not {value:?}")
+    })
+}
+
+/// Calls `run` with each seed of `seeds` in order. When a call panics, panics with
+/// its seed, its text, and the command that runs that seed alone.
+fn replayed(seeds: RangeInclusive<u64>, run: impl Fn(u64)) {
+    for seed in seeds {
+        let Err(panic) = catch_unwind(AssertUnwindSafe(|| run(seed))) else {
+            continue;
+        };
+        let text = panic.downcast_ref::<String>().map(String::as_str);
+        let text = text.or_else(|| panic.downcast_ref::<&str>().copied());
+        panic!(
+            "the run of seed {seed:#x} fails: {}\nreplay: {REPLAY}={seed:#x} cargo \
+             test -p {} --all-features --test conformance \
+             heals_after_random_faults",
+            text.unwrap_or("a panic with no text"),
+            env!("CARGO_PKG_NAME"),
+        );
+    }
+}
+
+/// The script of one run of [`heals_after_random_faults`].
+async fn faulted(scene: Rc<Scene>, seed: u64) {
+    let config = scene.setup().await;
+    let mut served = Some(scene.serve());
+    let mut run = scene.supervise(config).await;
+    let last = RefCell::new(scene.running(&mut run, START, 0).await);
+    let check = |reading: &Reading| {
+        let mut last = last.borrow_mut();
+        no_count_down(&last, reading);
+        let error = reading.error.as_ref();
+        assert!(!matches!(error, Some((Class::Config, _))), "{reading:?}");
+        let long = error.is_some_and(|(_, text)| text.len() > TEXT_MAX);
+        assert!(!long, "an error text over {TEXT_MAX} bytes: {reading:?}");
+        *last = reading.clone();
+    };
+    let clock: Clock = scene.node.clock();
+    let start = clock.now();
+    let slot = &mut served;
+    let faults = async {
+        for (at, fault) in faults(seed) {
+            clock.sleep_until(start + at).await;
+            match fault {
+                Fault::Links(to, back) => scene.links(to, back).await,
+                Fault::Stop => {
+                    if let Some(served) = slot.take() {
+                        scene.stop(served).await;
+                    }
+                }
+                Fault::Crash => {
+                    *slot = None;
+                    scene.crash().await;
+                }
+                Fault::Serve => {
+                    *slot = slot.take().or_else(|| Some(scene.serve()));
+                }
+            }
+        }
+        let healthy = link::Config::default();
+        scene.links(healthy, healthy).await;
+        *slot = slot.take().or_else(|| Some(scene.serve()));
+    };
+    let watch = async {
+        loop {
+            check(&run.next().await);
+        }
+    };
+    // Checks each reading until the faults end; `watch` never ends.
+    before(pin!(faults), watch).await;
+    let from = scene.progress(&last.borrow());
+    let healed = |reading: &Reading| {
+        check(reading);
+        reading.state == State::Running
+            && reading.error.is_none()
+            && scene.progress(reading) > from
+    };
+    run.until(HEAL, healed).await;
+    run.stop().await.expect("the run ends with no error");
+    if let Some(served) = served {
+        scene.stop(served).await;
+    }
+}
+
 /// A scenario that runs 1 s past [`RING`] fails.
 pub(crate) fn fails_past_the_ring(suite: &'static Suite) {
     run(suite, direct, |scene| async move {
@@ -728,4 +972,119 @@ pub(crate) fn fails_50_ms_past_the_ring(suite: &'static Suite) {
         let past = Span::from_nanos(RING.nanos() + 50_000_000);
         scene.node.clock().sleep(past).await;
     });
+}
+
+#[cfg(test)]
+mod tests {
+    //! These call the private `seeds` and `replayed`: their caller reads
+    //! `CONFORMANCE_SEED`, which a test cannot set with no `unsafe`, and no kind fails
+    //! a seed with no hook.
+
+    use std::cell::RefCell;
+    use std::env::VarError;
+    use std::ffi::OsString;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use super::{replayed, seeds};
+
+    const PACKAGE: &str = env!("CARGO_PKG_NAME");
+
+    #[test]
+    fn seeds_are_runs_or_the_hex_of_replay() {
+        assert_eq!(seeds(Err(VarError::NotPresent)), 0..=999);
+        assert_eq!(seeds(Ok("0x2a".into())), 42..=42);
+        assert_eq!(seeds(Ok("2a".into())), 42..=42);
+        assert_eq!(seeds(Ok("0xffffffffffffffff".into())), u64::MAX..=u64::MAX);
+        assert_eq!(seeds(Ok("0x0..0xf4240".into())), 0..=999_999);
+        assert_eq!(seeds(Ok("0x5..0x6".into())), 5..=5);
+    }
+
+    #[cfg(unix)]
+    fn not_utf_8() -> OsString {
+        use std::os::unix::ffi::OsStringExt;
+        OsString::from_vec(vec![0xff])
+    }
+
+    #[cfg(windows)]
+    fn not_utf_8() -> OsString {
+        use std::os::windows::ffi::OsStringExt;
+        OsString::from_wide(&[0xd800])
+    }
+
+    #[test]
+    #[cfg_attr(
+        unix,
+        should_panic(expected = "CONFORMANCE_SEED is not UTF-8: \"\\xFF\"")
+    )]
+    #[cfg_attr(
+        windows,
+        should_panic(expected = "CONFORMANCE_SEED is not UTF-8: \"\\u{d800}\"")
+    )]
+    fn seeds_panic_on_a_value_that_is_not_utf_8() {
+        seeds(Err(VarError::NotUnicode(not_utf_8())));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "CONFORMANCE_SEED is a seed or a nonempty range of seeds in hex, \
+                    not \"0x2g\""
+    )]
+    fn seeds_panic_on_a_value_that_is_not_hex() {
+        seeds(Ok("0x2g".into()));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "CONFORMANCE_SEED is a seed or a nonempty range of seeds in hex, \
+                    not \"0x3e8..0x0\""
+    )]
+    fn seeds_panic_on_a_reversed_range() {
+        seeds(Ok("0x3e8..0x0".into()));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "CONFORMANCE_SEED is a seed or a nonempty range of seeds in hex, \
+                    not \"0x5..0x5\""
+    )]
+    fn seeds_panic_on_an_empty_range() {
+        seeds(Ok("0x5..0x5".into()));
+    }
+
+    /// The seeds that `replayed` runs over 0x29 to 0x2b with `run`, and its panic text.
+    fn replay(run: impl Fn(u64)) -> (Vec<u64>, String) {
+        let ran = RefCell::new(Vec::new());
+        let failed = catch_unwind(AssertUnwindSafe(|| {
+            replayed(0x29..=0x2b, |seed| {
+                ran.borrow_mut().push(seed);
+                run(seed);
+            });
+        }));
+        let panic = failed.expect_err("a run fails");
+        let text = panic.downcast_ref::<String>().expect("a text");
+        (ran.into_inner(), text.clone())
+    }
+
+    #[test]
+    fn a_failed_run_panics_with_its_replay() {
+        let (ran, text) = replay(|seed| assert!(seed != 0x2a, "a fault at {seed:#x}"));
+        let expected = format!(
+            "the run of seed 0x2a fails: a fault at 0x2a\nreplay: \
+             CONFORMANCE_SEED=0x2a cargo test -p {PACKAGE} --all-features --test \
+             conformance heals_after_random_faults",
+        );
+        assert_eq!(text, expected);
+        assert_eq!(ran, [0x29, 0x2a], "no run after the failed one");
+    }
+
+    #[test]
+    fn a_failed_run_with_a_static_text_panics_with_it() {
+        let (_, text) = replay(|seed| assert!(seed != 0x29, "a fault"));
+        let expected = format!(
+            "the run of seed 0x29 fails: a fault\nreplay: CONFORMANCE_SEED=0x29 cargo \
+             test -p {PACKAGE} --all-features --test conformance \
+             heals_after_random_faults",
+        );
+        assert_eq!(text, expected);
+    }
 }
