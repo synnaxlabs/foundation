@@ -1,7 +1,7 @@
 //! Keeps the spec that this node uses: reads the spec of each new committed pointer,
 //! and names the pointer in use in a file.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::poll_fn;
@@ -44,6 +44,9 @@ pub(super) struct Used {
     // The peer that gave the last chunk that a get got, of this pointer or an earlier
     // one, where the next get starts.
     gave: Option<node::Key>,
+    // The peer that the last get was asking when a newer pointer dropped it. The next
+    // get starts after it.
+    dropped: Option<node::Key>,
     // The task of `keep`, while it waits for a pointer to read.
     task: Option<Waker>,
 }
@@ -187,7 +190,10 @@ impl Used {
         self.task = None;
         let job = match &newest.step {
             Step::Get(digests) => {
-                let from = voters.partition_point(|(key, _)| Some(*key) < self.gave);
+                let from = match self.dropped {
+                    Some(dropped) => voters.partition_point(|(key, _)| *key <= dropped),
+                    None => voters.partition_point(|(key, _)| Some(*key) < self.gave),
+                };
                 voters.rotate_left(from);
                 Job::Get(digests.clone(), voters)
             }
@@ -243,7 +249,7 @@ impl Used {
                 cause
             }
             (Done::Got(Ok(Some(gave))), Some(newest)) => {
-                self.gave = Some(gave);
+                (self.gave, self.dropped) = (Some(gave), None);
                 newest.step = Step::Read;
                 return false;
             }
@@ -314,6 +320,7 @@ pub(super) async fn open(opening: Opening<'_>) -> Result<Used, Error> {
                 chunks,
                 newest: None,
                 gave: None,
+                dropped: None,
                 task: None,
             });
         }
@@ -344,6 +351,7 @@ pub(super) async fn open(opening: Opening<'_>) -> Result<Used, Error> {
             chunks,
             newest: None,
             gave: None,
+            dropped: None,
             task: None,
         }),
         Err(cause) => Ok(behind(pointer, Done::Failed { cause, got, lacked })),
@@ -392,6 +400,7 @@ fn behind(pointer: Pointer, failed: Done) -> Used {
         chunks: Chunks::default(),
         newest: Some(newest),
         gave: None,
+        dropped: None,
         task: None,
     };
     used.settle(pointer, failed);
@@ -406,10 +415,12 @@ async fn run(
     clock: &Clock,
     prefix: &Prefix,
     pointer: Pointer,
+    asking: &Cell<Option<node::Key>>,
 ) -> Gave {
     match job {
         Job::Get(digests, peers) => {
-            Gave::Got(peer::get(store, transport, clock, &digests, &peers).await)
+            let got = peer::get(store, transport, clock, &digests, &peers, asking);
+            Gave::Got(got.await)
         }
         Job::Read { listed, chunks } => {
             let (mut got, mut lacked) = (Vec::new(), Vec::new());
@@ -458,7 +469,9 @@ pub(super) async fn keep(
         let Some((pointer, job, prefix, retried)) = next.await else {
             return;
         };
-        let mut gave = pin!(run(job, &store, &transport, &clock, &prefix, pointer));
+        let asking = Cell::new(None);
+        let run = run(job, &store, &transport, &clock, &prefix, pointer, &asking);
+        let mut gave = pin!(run);
         // The store part of a job stops when the group stops or drops, and that of a
         // retry also when a newer pointer replaces its own, so that a call never waits
         // for it. The file part of a read never stops.
@@ -478,6 +491,9 @@ pub(super) async fn keep(
             Poll::Pending
         });
         let Some(gave) = gave.await else {
+            if let (Some(group), Some(key)) = (group.upgrade(), asking.get()) {
+                group.borrow_mut().used.dropped = Some(key);
+            }
             continue;
         };
         let done = hold(gave, &files, &held, pointer).await;

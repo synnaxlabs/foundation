@@ -230,6 +230,43 @@ fn lacking(seed: u64) -> (Cluster, BTreeMap<Name, Definition>) {
     (cluster, definitions)
 }
 
+// Voter 1 is silent and voter 3 lacks the chunks of the first change. Voter 2 then
+// applies a change each 8 s, which replaces each pointer before `DEADLINE` ends.
+// Voter 3 starts each get at voter 2, which gave the last chunk.
+#[test]
+fn a_change_each_8_s_with_a_silent_first_voter_keeps_no_voter_behind() {
+    let mut behind = Vec::new();
+    for seed in 0..32 {
+        let (mut cluster, first) = lacking(seed);
+        cluster.board.lock().unwrap().silent = [1].into();
+        cluster.start_voter(3);
+        cluster.run(seconds(1));
+        let mut definitions = first.clone();
+        let mut base = pointer(1, &first);
+        let mut used = Vec::new();
+        for version in 2..10 {
+            let label = format!("plant.z{version}");
+            definitions.extend(create_subjects(&[label.as_str()], 1));
+            cluster.change(2, base, &definitions);
+            base = pointer(version, &definitions);
+            cluster.run(seconds(8));
+            let board = cluster.board.lock().unwrap();
+            let seen = board.specs.get(&3).and_then(|seen| seen.pointer);
+            used.push(seen.map(|pointer| pointer.version));
+        }
+        let applied = cluster.board().applied;
+        assert_eq!(
+            applied.iter().filter(|a| a.2.is_ok()).count(),
+            9,
+            "seed {seed}"
+        );
+        if used.iter().all(|version| *version < Some(1)) {
+            behind.push((seed, used));
+        }
+    }
+    assert_eq!(behind, Vec::new());
+}
+
 // Voter 3 is down at the change of 40 subjects, and at its start its store holds the
 // tree of 20 of them. The read of one of those fails once, so the first read ends
 // with `Cause::Blob`. The retry still gets each listed chunk that the store lacks in

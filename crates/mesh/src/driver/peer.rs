@@ -1,5 +1,6 @@
 //! The calls of `blob::peer` on the members of a group.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::poll_fn;
 use std::pin::{Pin, pin};
@@ -116,7 +117,8 @@ pub(super) type Contact = (PublicKey, Vec<Address>);
 /// peer gets the chunks still missing in calls of at most [`CHUNKS`], each within
 /// [`DEADLINE`]. A chunk that a peer does not give goes to the next peer, and a call
 /// that fails or passes the deadline gives the rest to the next peer. Returns the key
-/// of the last peer that gave a chunk, or `None` when no peer gave one.
+/// of the last peer that gave a chunk, or `None` when no peer gave one. `asking`
+/// holds the key of the peer that it asks, so that a caller that drops it knows.
 ///
 /// # Errors
 ///
@@ -128,10 +130,12 @@ pub(super) async fn get(
     clock: &Clock,
     digests: &[Digest],
     peers: &[(node::Key, Contact)],
+    asking: &Cell<Option<node::Key>>,
 ) -> Result<Option<node::Key>, blob::Error> {
     let mut missing = digests.to_vec();
     let mut gave = None;
     for (key, contact) in peers {
+        asking.set(Some(*key));
         let mut left = Vec::new();
         let mut calls = missing.chunks(CHUNKS);
         for chunks in calls.by_ref() {
