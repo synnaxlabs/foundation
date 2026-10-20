@@ -45,10 +45,16 @@
   public key that it proves: one `transport::Client::dial_any`, with no hello
   (`laptop.architect-2`, 2026-10-19T23:24:32Z, item 1 of
   https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279566176), and a
-  close with `Code(0)`, which goes out before it returns when the socket has room for
-  it; the node ends a session whose close is lost at its idle timeout
-  (`laptop.architect-2`, 2026-10-20T02:16:54Z,
-  https://github.com/synnaxlabs/foundation/pull/3470#issuecomment-6281777929).
+  close with `Code(0)`. It returns after the transport drains each close (up to 3 s),
+  as `Client::close` does. While a close drains, a packet of the node that comes makes
+  the close go out again, so the node ends a session whose close is lost when a repeat
+  reaches it, and at its idle timeout only when no close reaches it before the drain
+  ends (#3510; this supersedes the idle timeout of `laptop.architect-2`,
+  2026-10-20T02:16:54Z,
+  https://github.com/synnaxlabs/foundation/pull/3470#issuecomment-6281777929;
+  `laptop.architect-2`, 2026-10-20T05:26:15Z,
+  https://github.com/synnaxlabs/foundation/pull/3518#issuecomment-6284078739; text:
+  https://github.com/synnaxlabs/foundation/pull/3518#issuecomment-6284843984).
   `sdk::private_key()` gives a new key from the randomness of the OS
   (`laptop.architect-2`, 2026-10-19T23:47:10Z,
   https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279865842).
