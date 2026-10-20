@@ -14,6 +14,8 @@ It prints, in microseconds:
 - the round trip and the part of `write` and of `write_series` of one place in each
   of two indexes, p50 and p99;
 - `write` with channel names as keys against places as keys, p50 of the part;
+- the round trip of a call whose frame the node did not take whole: an order refusal
+  of `write` and of `write_series`, and a `write` of a group that ended, p50 and p99;
 - the part of a call before `sdk::write::Writer::write`: the key lookup, the
   conversion, the copy, and the list of parts, p50 and p99. The writer times it
   (`Writer._part`) on calls that reach the send with warm buffers. It skips series
@@ -109,10 +111,9 @@ def channel(n: int) -> str:
     return f"w.c{n:03}"
 
 
-def connect(node: Node, channels: int = CHANNELS) -> foundation.Client:
-    """Plans and applies `channels` channels of `f64`, one of `bool`, and one of `uuid`
-    on index `w.time`, and `v.a` of `f64` on index `v.time`, on `node`, and gives a
-    client of it once the hub of the node knows them."""
+def definitions(channels: int) -> str:
+    """The HCL of `channels` channels of `f64`, one of `bool`, and one of `uuid` on
+    index `w.time`."""
     hcl = 'channel "w.time" { kind = "index" }\n'
     hcl += 'channel "w.flag" {\n  data_type = "bool"\n  index = "w.time"\n}\n'
     hcl += 'channel "w.key" {\n  data_type = "uuid"\n  index = "w.time"\n}\n'
@@ -120,9 +121,11 @@ def connect(node: Node, channels: int = CHANNELS) -> foundation.Client:
         hcl += f'channel "{channel(n)}" {{\n  data_type = "f64"\n'
         hcl += '  index = "w.time"\n}\n'
     hcl += 'placement "w.home" {\n  select = "w.*"\n  home = "edge"\n}\n'
-    hcl += 'channel "v.time" { kind = "index" }\n'
-    hcl += 'channel "v.a" {\n  data_type = "f64"\n  index = "v.time"\n}\n'
-    hcl += 'placement "v.home" {\n  select = "v.*"\n  home = "edge"\n}\n'
+    return hcl
+
+
+def applied(node: Node, hcl: str) -> None:
+    """Plans and applies `hcl` on `node`."""
     with open(os.path.join(node.dir.name, "w.hcl"), "w") as file:
         file.write(hcl)
     for args in (["plan", "w.hcl", "--out", "w.plan"], ["apply", "w.plan"]):
@@ -133,6 +136,15 @@ def connect(node: Node, channels: int = CHANNELS) -> foundation.Client:
             capture_output=True,
             timeout=PATIENCE,
         )
+
+
+def connect(node: Node, channels: int = CHANNELS) -> foundation.Client:
+    """Applies the `definitions` of `channels` channels and `v.a` of `f64` on index
+    `v.time` on `node`, and gives a client of it once the hub of the node knows them."""
+    hcl = 'channel "v.time" { kind = "index" }\n'
+    hcl += 'channel "v.a" {\n  data_type = "f64"\n  index = "v.time"\n}\n'
+    hcl += 'placement "v.home" {\n  select = "v.*"\n  home = "edge"\n}\n'
+    applied(node, definitions(channels) + hcl)
     client = node.connect()
     deadline = time.monotonic() + PATIENCE
     while True:
@@ -206,6 +218,59 @@ def indexes(client: foundation.Client) -> None:
                 f"write_series, 2 indexes, {samples} samples: round trip p50 "
                 f"{p50(times):.1f}, p99 {p99(times):.1f}; before the send {part}"
             )
+
+
+def raising(call, error: type[Exception]):
+    """A call of `call` that must raise `error`."""
+
+    def raised() -> None:
+        try:
+            call()
+        except error:
+            return
+        raise AssertionError(f"no {error.__name__}")
+
+    return raised
+
+
+def untaken(client: foundation.Client, node: Node) -> None:
+    """Prints the round trip of a call whose frame the node did not take whole: its
+    stamps are before the last of `w.time`, or its group ended. It removes `v.a`, so it
+    runs last."""
+    old = time.time_ns()
+    floats = np.random.default_rng(3320).random(100)
+    stamps = np.arange(old, old + 100, dtype=np.int64)
+    with client.open_writer(channel(0), on_loss="ignore") as writer:
+        writer.write({channel(0): 1.5, "w.time": Stamps().one()})
+        cases = (
+            ("write", lambda: writer.write({channel(0): 1.5, "w.time": old})),
+            (
+                "write_series, 100 samples",
+                lambda: writer.write_series({channel(0): floats, "w.time": stamps}),
+            ),
+        )
+        for name, call in cases:
+            times = timed(raising(call, foundation.Rejected), SENDS)
+            print(
+                f"{name}, refused: round trip p50 {p50(times):.1f}, "
+                f"p99 {p99(times):.1f}"
+            )
+    with client.open_writer("v.a", on_loss="ignore") as writer:
+        writer.write(2.5)
+        applied(node, definitions(CHANNELS))
+        deadline = time.monotonic() + PATIENCE
+        while True:
+            try:
+                client.open_writer("v.a").close()
+            except foundation.Stopped as error:
+                if error.code == "unknown":
+                    break
+                raise
+            if time.monotonic() > deadline:
+                raise AssertionError("v.a was not removed")
+            time.sleep(0.01)
+        times = timed(raising(lambda: writer.write(2.5), foundation.GroupEnded), SENDS)
+        print(f"write, ended: round trip p50 {p50(times):.1f}, p99 {p99(times):.1f}")
 
 
 def keys(client: foundation.Client) -> None:
@@ -285,6 +350,7 @@ def main() -> None:
         indexes(client)
         keys(client)
         parts(client)
+        untaken(client, node)
         client.close()
     finally:
         node.stop()
