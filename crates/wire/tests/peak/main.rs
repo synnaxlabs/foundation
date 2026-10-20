@@ -1,8 +1,8 @@
 //! The peak heap of a `Start` at `PLACES_MAX` with names of 255 bytes, which CLIENT
 //! HELLO bounds at 26 MB at the program, for each split of the run, and of the
-//! `write::Frames` of a write stream at `PLACES_MAX`, and of a run of short names against
-//! what `Opening::held` gives. This binary has no test harness: the count covers each
-//! thread, and a harness allocates on its own thread at any time.
+//! `write::Frames` of a write stream at `PLACES_MAX`, and of a run of short names
+//! against what `Opening::held` gives. This binary has no test harness: the count
+//! covers each thread, and a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -44,6 +44,7 @@ fn main() {
     assert_eq!(bytes, 20 * count, "20 bytes for each place of a write");
     held_over_a_run();
     held_over_a_refused_message();
+    held_by_a_start();
 }
 
 /// Places of a name of one byte, the index at place 0.
@@ -129,6 +130,43 @@ fn held_over_a_refused_message() {
     assert!(
         peak <= most,
         "a refused message peaks at {peak}, over {most}"
+    );
+}
+
+/// The start of a run in two messages keeps what the decoder holds and its key set,
+/// which `held` does not count: 32 bytes for each place and a few headers. Its last
+/// decode peaks at no more than that and 48 bytes for each place.
+fn held_by_a_start() {
+    const COUNT: usize = 2600;
+    let places = tiny(COUNT);
+    let messages = [
+        encode_one(&places[..COUNT - 1]),
+        encode_one(&places[COUNT - 1..]),
+    ];
+    let before = ALLOCATOR.held();
+    let mut opening = client::write::Opening::default();
+    let count = u32::try_from(COUNT).expect("fits");
+    opening
+        .decode(Some(&first(count)))
+        .expect("the places decode");
+    opening
+        .decode(Some(&messages[0]))
+        .expect("a message of the run");
+    ALLOCATOR.reset_peak();
+    let start = opening
+        .decode(Some(&messages[1]))
+        .expect("the last message")
+        .expect("the start");
+    let peak = ALLOCATOR.peak() - before;
+    let kept = ALLOCATOR.held() - before;
+    let held = usize::try_from(opening.held()).expect("fits");
+    drop(start);
+    let set = held + 32 * COUNT + 128;
+    assert!(kept <= set, "a start keeps {kept} bytes, over {set}");
+    let most = set + 48 * COUNT;
+    assert!(
+        peak <= most,
+        "the last message peaks at {peak}, over {most}"
     );
 }
 
