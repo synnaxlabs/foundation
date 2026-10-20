@@ -13,7 +13,7 @@ use numpy::{
 };
 use program::write::End;
 use pyo3::exceptions::{
-    PyException, PyKeyError, PyOverflowError, PyRuntimeError, PyTypeError, PyValueError,
+    PyKeyError, PyOverflowError, PyRuntimeError, PyTypeError, PyValueError,
 };
 use pyo3::prelude::*;
 use pyo3::sync::MutexExt;
@@ -517,14 +517,11 @@ pub(crate) fn answer(
         value.setattr("unwritten", PyTuple::new(py, unwritten)?)?;
         value.setattr("lost", crate::seqs(py, gone())?)?;
         if loss == Loss::Warn && gone().next().is_some() {
-            // A logging handler that raises must not hide the error of the frame. A
-            // `BaseException` such as `KeyboardInterrupt` still goes up, with it.
+            // The error of a logging handler goes up, with the error of the frame
+            // as its context, so the program can still reach the lists.
             if let Err(failed) = loss.act(py, LOST, gone(), py.None().bind(py)) {
-                if !failed.is_instance_of::<PyException>(py) {
-                    failed.set_context(py, Some(raised));
-                    return Err(failed);
-                }
-                raised.set_context(py, Some(failed));
+                failed.set_context(py, Some(raised));
+                return Err(failed);
             }
         }
         Err(raised)

@@ -766,9 +766,8 @@ handler = Failing()
 /// A frame with a refusal and a loss raises `Rejected` with the seqs of the lost group
 /// in `lost` for each loss, and with `warn` also logs the warning of the loss. A frame
 /// with an end and a loss raises `GroupEnded` with `lost`, and one with no loss gives
-/// an empty `lost` and logs nothing. A logging handler that raises an `Exception`
-/// leaves `Rejected` or `GroupEnded` raised, with the error of the handler as its
-/// `__context__`; a `KeyboardInterrupt` goes up, with `Rejected` as its `__context__`.
+/// an empty `lost` and logs nothing. The error of a logging handler that raises goes
+/// up, with `Rejected` or `GroupEnded` as its `__context__`.
 #[test]
 fn answer_gives_the_seqs_of_the_lost_groups_in_lost_for_each_loss() {
     let places = grouped();
@@ -818,13 +817,13 @@ fn answer_gives_the_seqs_of_the_lost_groups_in_lost_for_each_loss() {
     let cell = || vec!["cell.a".to_owned(), "cell.time".to_owned()];
     assert_eq!(
         failing(&places, &refused, &[1, 2, 3], "RuntimeError"),
-        ("Rejected".to_owned(), "RuntimeError".to_owned(), cell())
+        ("RuntimeError".to_owned(), "Rejected".to_owned(), cell())
     );
     assert_eq!(
         failing(&places, &ended, &[0, 2], "RuntimeError"),
         (
-            "GroupEnded".to_owned(),
             "RuntimeError".to_owned(),
+            "GroupEnded".to_owned(),
             Vec::new()
         )
     );
