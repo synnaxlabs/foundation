@@ -29,4 +29,34 @@
   exists, for the places of a read selector); and a decode of the whole run, which
   leaves the join of its messages and their count to the home; and a check of
   `Forward::places` against the channels in `Run::new`, an error path of its own for a
-  case that the place check ends.
+  case that the place check or the end of the stream ends (#3104 PR 3b, from
+  https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6279360925, item
+  2).
+
+  At the home (#3104 PR 3b), `Link::serve` takes the member of the hub's region that
+  holds the node's key at the call, and `serve::run` tells a forward from a reader
+  `Open` by `Forward::decode`. A forward from a node that is not a member panics: the
+  route checks the member in the same turn. The home admits the hello with that member
+  as its carrier and with no nonce check, as `access::proof` states. From then on, the
+  stream races the end of the hello, which stops it with `EXPIRED`. The stream polls
+  first, so a renewal moves the end in the poll that admits it. The home reads the
+  `Write` and its body as a program's write, verifies the open, holds its decoded names
+  and 4 bytes for each channel of the open (MEMORY BOUNDS), and takes the places. The
+  end of the stream before the last place finishes the stream and opens nothing. The
+  group is the channels of the open at the places, and the write goes on as a program's
+  write, with the member as the `via` of its handoff. A message of kind 4 is a renewal
+  only during the wait for the home and between frames, where `write::Frames::finish`
+  gives `Ok`. A message inside a frame has no kind byte, so a first byte of 4 there is
+  data. A refusal of the proof stops the stream with its code. PR 4 gives `REFUSED`,
+  `VIA`, and `CHANGED` to the program as `wire::hub::write::End::Refused` (code 3), and
+  `EXPIRED` as `End::Failed`. Plan:
+  https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6280544339 with
+  https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6280551038.
+  `End::Refused`: `laptop.architect` at 2026-10-19T14:00:04Z
+  (https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6269021946, answer
+  3). The surface, the text of the panic, and the renewal only between frames:
+  `laptop.architect` at 2026-10-20T00:41:09Z
+  (https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6280579045). PR 4
+  states the renewal rule as a rule of the forwarding node. Lost: a forward as a client
+  session from the node to the home for each program connection, which needs no
+  dispatch, but the home would check a nonce that the program never saw.

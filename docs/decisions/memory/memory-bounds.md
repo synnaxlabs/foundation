@@ -95,7 +95,9 @@
   come before a draft (`laptop.architect`, 2026-10-19T19:14:38Z:
   https://github.com/synnaxlabs/foundation/pull/3369#issuecomment-6275215145), from
   the decode of its open until the stream ends. Its decoded names, 16 bytes and the
-  length of each, count from that decode until the stream sends its places. A write open
+  length of each, count from that decode until the stream sends its places. A forward
+  holds the places of its group with its names, 4 bytes for each channel of its open,
+  before it reads a place (#3104 PR 3b, HUB FORWARD). A write open
   is at most `OPEN_BYTES_MAX` (64 KiB), with at least 2 bytes for each channel, so its
   ends and counts are at most 640 KiB, and the budget bounds the places of all write
   streams of a node at 1,677,721. The cost: the writers of a subject hold their ends and
