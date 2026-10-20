@@ -389,12 +389,12 @@
   to near its end, so its whole clear costs about the bytes that it sends. Each release
   update reads each call of the exchange and each move of `pos` back in the encode, and
   checks that only `UA_MessageContext_finish` sets `final`, and that each call of
-  `sendWithConnection` outside `src/server/` sets `length` to the end of the last byte
-  that its send wrote (`ua_securechannel.c` lines 154, 372, and 479,
-  `client/ua_client_connect.c` line 565). Lost: a patch at each copy in the copy (the
-  user token of the config, the plaintext of the encrypted token, the key of the
-  policies), which each new release needs again, with a hand mutant of each line, and
-  which misses the copies that a later release adds. Lost: a local patch that writes
+  `sendWithConnection` sets `length` to the end of the last byte that its send wrote
+  (`ua_securechannel.c` lines 154, 372, and 479, `client/ua_client_connect.c` line 565,
+  `server/ua_server_binary.c` lines 292 and 1039). Lost: a patch at each copy in the
+  copy (the user token of the config, the plaintext of the encrypted token, the key of
+  the policies), which each new release needs again, with a hand mutant of each line,
+  and which misses the copies that a later release adds. Lost: a local patch that writes
   zeros over `[oldpos, pos)` before the move back. Each release needs it again with a
   hand mutant (LOCAL PATCHES), and it misses a later site that moves `pos` back before
   an exchange, which the read of byte 3 covers (#3593; `laptop.architect-2`, 2026-10-20
@@ -404,8 +404,8 @@
   https://github.com/synnaxlabs/foundation/pull/3622#issuecomment-6295683844; the
   invariant and the clear by byte 3, 2026-10-20 16:45 UTC,
   https://github.com/synnaxlabs/foundation/pull/3622#issuecomment-6296154748; the check
-  of the sent `length`, 2026-10-20 17:10 UTC,
-  https://github.com/synnaxlabs/foundation/pull/3622#issuecomment-6296630627). No
+  of the sent `length`, 2026-10-20 17:11 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3622#issuecomment-6296658333). No
   pointer crosses between the libc allocator and these: the objects of the copy,
   `shim.c`, and `server.c` call no libc function that gives or takes a heap pointer. Our
   change makes `UA_CertificateUtils_getThumbprint` of
