@@ -103,9 +103,12 @@
   frames in each round trip to the home (answer 4 of
   https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6269021946). One
   task counts the replies of a forward before it reads the program, in each poll, so
-  the window keeps no waker. A join of many homes keeps that order (#3565). When
-  the forward is cut, the member resets the program's write with the code of the home,
-  and with `FAILED` in place of `MALFORMED`. It also gives `FAILED` for a reply that
+  the window keeps no waker. A join of many homes keeps that order (#3565;
+  `laptop.architect`, 2026-10-20T17:23:34Z:
+  https://github.com/synnaxlabs/foundation/pull/3628#issuecomment-6296895024, item 3).
+  When the forward is cut, the member resets the program's write with the code of the
+  home, and with `FAILED` in place of `MALFORMED`.
+  It also gives `FAILED` for a reply that
   `Replies` refuses, a finish of the home before the program's, a finish with an outcome
   due, and an error of the session to the home. For the first three, it stops the home
   with `MALFORMED`, which the home gets only while it does not have each message of
