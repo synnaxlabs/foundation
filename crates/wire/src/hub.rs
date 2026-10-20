@@ -579,7 +579,8 @@ pub enum Error {
         /// The seq plus the count of the head before it, or the open position.
         end: u64,
     },
-    /// A message of a run has more keys, ends, counts, or places than remain in the run.
+    /// A message of a run has more keys, ends, counts, or places than remain in the
+    /// run.
     Run {
         /// The keys, ends, counts, or places of the message.
         items: usize,
