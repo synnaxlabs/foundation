@@ -1,16 +1,15 @@
 //! The hello that a session admitted, its renewals, and its end.
 
 use std::cell::{Cell, RefCell};
-use std::collections::hash_map::Entry;
 use std::future::poll_fn;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
 use access::proof::{self, Admitted};
 use types::ed25519::PublicKey;
-use types::hash;
 use types::name::Name;
 use types::time::Stamp;
+use types::wait;
 use wire::hub::client::Signed;
 
 use super::Error;
@@ -26,7 +25,7 @@ pub(crate) struct Admission {
     /// The count of hellos admitted.
     count: Cell<u64>,
     /// The waker of each [`Renewal`] that waits, by its key.
-    waiting: RefCell<hash::Map<u64, Waker>>,
+    waiting: RefCell<wait::Set>,
     /// The key of the next [`Renewal`].
     key: Cell<u64>,
 }
@@ -70,12 +69,8 @@ impl Admission {
         }
         self.count.set(self.count.get() + 1);
         // A wake can drop a task whose renewal borrows the map.
-        let woken: Vec<Waker> = self
-            .waiting
-            .borrow_mut()
-            .drain()
-            .map(|(_, waker)| waker)
-            .collect();
+        let mut woken = Vec::new();
+        self.waiting.borrow_mut().drain(&mut woken);
         for waker in woken {
             waker.wake();
         }
@@ -230,14 +225,11 @@ impl Renewal<'_> {
 
     /// Keeps the waker of `cx` until the session admits the next hello.
     pub(crate) fn register(&self, cx: &Context<'_>) {
-        let replaced = match self.admission.waiting.borrow_mut().entry(self.key) {
-            Entry::Occupied(held) if held.get().will_wake(cx.waker()) => None,
-            Entry::Occupied(mut held) => Some(held.insert(cx.waker().clone())),
-            Entry::Vacant(vacant) => {
-                vacant.insert(cx.waker().clone());
-                None
-            }
-        };
+        let replaced = self
+            .admission
+            .waiting
+            .borrow_mut()
+            .insert(self.key, cx.waker());
         // The last drop of a waker can drop a task that borrows the map.
         drop(replaced);
     }
@@ -245,7 +237,7 @@ impl Renewal<'_> {
 
 impl Drop for Renewal<'_> {
     fn drop(&mut self) {
-        let held = self.admission.waiting.borrow_mut().remove(&self.key);
+        let held = self.admission.waiting.borrow_mut().remove(self.key);
         // As in `register`.
         drop(held);
     }
@@ -268,8 +260,8 @@ mod tests {
         for _ in 0..3 {
             admission.renewal().register(&cx);
         }
-        assert_eq!(admission.waiting.borrow().len(), 1);
+        assert_eq!(format!("{:?}", admission.waiting.borrow()), "{0}");
         drop(first);
-        assert!(admission.waiting.borrow().is_empty());
+        assert_eq!(format!("{:?}", admission.waiting.borrow()), "{}");
     }
 }
