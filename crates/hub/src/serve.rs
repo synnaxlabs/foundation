@@ -313,20 +313,22 @@ pub(crate) async fn run(
     let class = incoming.class;
     let (mut receiver, mut sender) = halves(incoming)?;
     // No async level between this and the reader's serve, which polls once a frame,
-    // and a forward in a box of its own, so that the reader's poll holds none of it.
+    // and a forward behind a trait object, so that the reader's poll inlines none of
+    // it.
     let served = match receiver.recv().await {
         Ok(Some(message)) => match Forward::decode(&message) {
             Ok(forward) => {
                 drop(message);
                 let via = holder.expect("invariant: a forward comes from a member");
-                let forward = client::forward::serve(
-                    state,
-                    via,
-                    forward,
-                    &mut receiver,
-                    &mut sender,
-                );
-                Box::pin(forward).await
+                let forward: Pin<Box<dyn Future<Output = _>>> =
+                    Box::pin(client::forward::serve(
+                        state,
+                        via,
+                        forward,
+                        &mut receiver,
+                        &mut sender,
+                    ));
+                forward.await
             }
             Err(wire::hub::Error::Kind { .. }) => {
                 serve(state, class, message, &mut receiver, &mut sender).await
