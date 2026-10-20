@@ -424,10 +424,10 @@
   failed `plan`, `apply`, `status`, `browse`, or `import` (IMPORT OP) is a tool result
   with `isError` and the text `{"errors": [...]}`, while an unknown tool and a malformed
   request or argument stay a JSON-RPC error. Each operation of `foundation --help` but
-  `start` and `mcp` is a tool, with the output schema of its `--json`. `version`,
-  `docs`, `status`, and `browse` have `readOnlyHint`; `plan`, `apply`, and `import`
-  (IMPORT OP) have `destructiveHint`, since the `out` of `plan` and the write of
-  `import` (IMPORT OP) replace a file that is there, so a client that asks the person
+  `start`, `profile`, and `mcp` is a tool, with the output schema of its `--json`.
+  `version`, `docs`, `status`, and `browse` have `readOnlyHint`; `plan`, `apply`, and
+  `import` (IMPORT OP) have `destructiveHint`, since the `out` of `plan` and the write
+  of `import` (IMPORT OP) replace a file that is there, so a client that asks the person
   before a destructive tool asks for each (`laptop.architect-2`, 2026-10-18T07:39:38Z:
   https://github.com/synnaxlabs/foundation/pull/3154#issuecomment-6247231298). It
   supersedes the OPS OUTPUT text of
