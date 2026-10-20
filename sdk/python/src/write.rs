@@ -102,19 +102,18 @@ impl Writer {
     }
 
     /// Calls `fill` with no lock held on the kept buffers, or on empty ones while
-    /// another call fills them, and gives the buffers and what `fill` gives. When
-    /// `fill` raises, keeps the buffers for the next call. Raises `RuntimeError` in a
-    /// process that the program forked, without the lock that the fork can copy as
-    /// held, and after a close.
-    fn fill<T>(
+    /// another call fills them, and gives the buffers. When `fill` raises, keeps the
+    /// buffers for the next call. Raises `RuntimeError` in a process that the program
+    /// forked, without the lock that the fork can copy as held, and after a close.
+    fn fill(
         &self,
         py: Python<'_>,
-        fill: impl FnOnce(&mut Buffers) -> PyResult<T>,
-    ) -> PyResult<(Buffers, T)> {
+        fill: impl FnOnce(&mut Buffers) -> PyResult<()>,
+    ) -> PyResult<Buffers> {
         owned(self.process)?;
         let mut buffers = mem::take(&mut opened(&mut self.lock(py))?.kept);
         match fill(&mut buffers) {
-            Ok(filled) => Ok((buffers, filled)),
+            Ok(()) => Ok(buffers),
             Err(e) => {
                 if let Some(state) = self.lock(py).as_mut() {
                     state.kept = buffers;
@@ -273,7 +272,7 @@ impl Writer {
     fn write(&self, py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<()> {
         #[cfg(feature = "sim")]
         let began = crate::sim::Part::start();
-        let (buffers, ()) = self.fill(py, |buffers| {
+        let buffers = self.fill(py, |buffers| {
             buffers.values.clear();
             if let Ok(values) = values.cast::<PyDict>() {
                 // A copy, as a value can change the dict.
@@ -323,7 +322,7 @@ impl Writer {
     fn write_series(&self, py: Python<'_>, series: &Bound<'_, PyDict>) -> PyResult<()> {
         #[cfg(feature = "sim")]
         let began = crate::sim::Part::start();
-        let (buffers, ()) = self.fill(py, |buffers| {
+        let buffers = self.fill(py, |buffers| {
             buffers.bytes.clear();
             buffers.series.clear();
             // A copy, as on Python 3.11 an allocation in the loop, such as the
