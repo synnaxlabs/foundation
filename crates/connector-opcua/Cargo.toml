@@ -95,3 +95,7 @@ test = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "count"
+harness = false
