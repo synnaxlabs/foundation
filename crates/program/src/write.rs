@@ -143,26 +143,19 @@ impl Writer {
         lens.clear();
         lens.extend(series.iter().map(|&(entry, _, len)| (entry, len)));
         let layout = Layout::new(set, lens).map_err(Error::Layout)?;
-        counts.fill(None);
-        for &(place, count, _) in series {
-            let group = &mut counts[to_usize(set.entries()[place].group)];
-            match *group {
-                None => *group = Some((place, count)),
-                Some((first, first_count)) if first_count != count => {
-                    return Err(Error::Count {
-                        place: first,
-                        count: first_count,
-                        other: place,
-                        other_count: count,
-                    });
-                }
-                Some(_) => {}
-            }
+        let first = series.first().map_or(0, |&(_, count, _)| count);
+        let even = series.iter().all(|&(_, count, _)| count == first);
+        if !even {
+            counted(set, counts, series)?;
         }
         let shared = &session.0;
         let mut draft = shared.retry(|| layout.draft(&shared.frames, form)).await?;
-        // A group holds a count when it holds a series, so in group order.
-        draft.set_counts(0, counts.iter().flatten().map(|&(_, count)| count));
+        if even {
+            draft.set_counts(0, iter::repeat(first));
+        } else {
+            // A group holds a count when it holds a series, so in group order.
+            draft.set_counts(0, counts.iter().flatten().map(|&(_, count)| count));
+        }
         Ok(self.draft.insert(draft))
     }
 
@@ -441,4 +434,33 @@ async fn start(
 
 fn to_usize(value: u32) -> usize {
     usize::try_from(value).expect("invariant: a u32 fits a usize")
+}
+
+/// Fills `counts` with the first place and count of each group of `series`.
+///
+/// # Errors
+///
+/// [`Error::Count`] for the first series whose count is not that of its group.
+fn counted(
+    set: &KeySet,
+    counts: &mut [Option<(usize, u32)>],
+    series: &[(usize, u32, usize)],
+) -> Result<(), Error> {
+    counts.fill(None);
+    for &(place, count, _) in series {
+        let group = &mut counts[to_usize(set.entries()[place].group)];
+        match *group {
+            None => *group = Some((place, count)),
+            Some((first, first_count)) if first_count != count => {
+                return Err(Error::Count {
+                    place: first,
+                    count: first_count,
+                    other: place,
+                    other_count: count,
+                });
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
 }
