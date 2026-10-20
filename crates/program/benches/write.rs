@@ -13,6 +13,8 @@
 //!   bytes, over one segment of the carrier.
 //! - `1x64`: an index and 63 data channels, one sample of each.
 //! - `64x(1x2)`: 64 groups, each an index and one data channel, one sample of each.
+//! - `64x(1|2x2)`: as `64x(1x2)`, with two samples in each odd group, so the draft
+//!   checks the count of each group.
 //!
 //! A second table gives the p99 of the single calls of each line, ns per frame: the
 //! draft and the send, and the whole call. Judge a change by `net`, and compare two
@@ -77,26 +79,31 @@ struct Shape {
     groups: usize,
     /// The samples of each series.
     samples: u32,
+    /// Each odd group holds one sample more.
+    uneven: bool,
 }
 
-const LINES: [Shape; 4] = [
+const LINES: [Shape; 5] = [
     Shape {
         names: ["1x2 draft", "1x2 send", "1x2 outcome", "1x2 stored"],
         series: 2,
         groups: 1,
         samples: 1,
+        uneven: false,
     },
     Shape {
         names: ["100x2 draft", "100x2 send", "100x2 outcome", "100x2 stored"],
         series: 2,
         groups: 1,
         samples: 100,
+        uneven: false,
     },
     Shape {
         names: ["1x64 draft", "1x64 send", "1x64 outcome", "1x64 stored"],
         series: 64,
         groups: 1,
         samples: 1,
+        uneven: false,
     },
     Shape {
         names: [
@@ -108,6 +115,19 @@ const LINES: [Shape; 4] = [
         series: 128,
         groups: 64,
         samples: 1,
+        uneven: false,
+    },
+    Shape {
+        names: [
+            "64x(1|2x2) draft",
+            "64x(1|2x2) send",
+            "64x(1|2x2) outcome",
+            "64x(1|2x2) stored",
+        ],
+        series: 128,
+        groups: 64,
+        samples: 1,
+        uneven: true,
     },
 ];
 
@@ -134,14 +154,26 @@ impl Shape {
             .collect()
     }
 
-    /// The bytes of each series of a frame.
-    fn len(&self) -> usize {
-        8 * usize::try_from(self.samples).expect("few")
+    /// The samples of each series of `group`.
+    fn samples(&self, group: usize) -> u32 {
+        self.samples + u32::from(self.uneven && group % 2 == 1)
+    }
+
+    /// The place, count, and bytes of each series of a frame.
+    fn layout(&self) -> Vec<(usize, u32, usize)> {
+        let size = self.series / self.groups;
+        (0..self.series)
+            .map(|entry| {
+                let count = self.samples(entry / size);
+                (entry, count, 8 * usize::try_from(count).expect("few"))
+            })
+            .collect()
     }
 
     /// The bytes of the head, the ends, the counts, and the body of a frame.
     fn total(&self) -> usize {
-        7 + 8 * self.series + 4 * self.groups + self.series * self.len()
+        let body: usize = self.layout().iter().map(|&(_, _, len)| len).sum();
+        7 + 8 * self.series + 4 * self.groups + body
     }
 }
 
@@ -164,9 +196,7 @@ fn main() {
                         .collect(),
                 };
                 let mut writer = session.writer(config).await.expect("opens");
-                let layout: Vec<(usize, u32, usize)> = (0..shape.series)
-                    .map(|entry| (entry, shape.samples, shape.len()))
-                    .collect();
+                let layout = shape.layout();
                 let [draft, sends, outcome, stored] = shape.names;
                 let mut parts =
                     [draft, sends, outcome, stored].map(|n| Line::new(n, FRAMES));
@@ -247,24 +277,25 @@ async fn answer(session: transport::Session, node: sim::node::Node) {
         })
         .await;
         start(&mut write, &places, places.len()).await;
-        let mut seq = 0;
+        let total = shape.total();
+        let mut seqs = vec![0; shape.groups];
         for frame in 1..=(WARMUP + ROUNDS) * FRAMES {
             let mut got = 0;
-            while got < shape.total() {
+            while got < total {
                 let message = write.receiver.recv().await.expect("receives");
                 got += message.expect("a message of the frame").len();
             }
             let frame = u64::try_from(frame).expect("a frame");
             let groups = 0..u32::try_from(shape.groups).expect("few");
-            let taken = groups.clone().map(|group| Reply::Outcome {
-                frame,
-                group,
-                outcome: Outcome::Taken {
-                    range: Range {
-                        seq,
-                        count: shape.samples,
-                    },
-                },
+            let taken = groups.clone().zip(&mut seqs).map(|(group, seq)| {
+                let count = shape.samples(usize::try_from(group).expect("few"));
+                let range = Range { seq: *seq, count };
+                *seq += u64::from(count);
+                Reply::Outcome {
+                    frame,
+                    group,
+                    outcome: Outcome::Taken { range },
+                }
             });
             let stored = groups.map(|group| Reply::Stored {
                 group,
@@ -275,7 +306,6 @@ async fn answer(session: transport::Session, node: sim::node::Node) {
                 reply.encode(&mut bytes);
                 send(write.sender.as_mut().expect("two-way"), &bytes).await;
             }
-            seq += u64::from(shape.samples);
         }
         writes.push(write);
     }

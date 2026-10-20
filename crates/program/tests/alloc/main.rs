@@ -117,7 +117,7 @@ fn takes_a_frame_with_no_allocation() {
 
 /// Each warm call of `write` on two groups takes a draft, sends its frame at the first
 /// poll, and gives the outcome of each group at the first poll after the node replied,
-/// and none of it makes an allocation.
+/// and none of it makes an allocation. The groups of each odd frame hold two counts.
 fn writes_a_frame_with_no_allocation() {
     let places = [
         place(1, Type::Scalar(Scalar::Stamp), "time", 0),
@@ -138,7 +138,7 @@ fn writes_a_frame_with_no_allocation() {
                     let message = write.receiver.recv().await.expect("receives");
                     message.expect("a message of the frame");
                 }
-                taken(write.sender.as_mut().expect("two-way"), seq).await;
+                taken(write.sender.as_mut().expect("two-way"), seq, other(seq)).await;
             }
             node.clock().sleep(SENT).await;
         },
@@ -155,10 +155,11 @@ fn writes_a_frame_with_no_allocation() {
                 let mut context = Context::from_waker(Waker::noop());
                 for seq in 0..WARM + COUNTED {
                     let (ready, drafted) = ALLOCATOR.count(|| {
-                        let draft = pin!(writer.draft(
-                            Form::Raw,
-                            &[(0, 1, 8), (1, 1, 8), (2, 1, 8), (3, 1, 8)]
-                        ));
+                        let count = other(seq);
+                        let len = 8 * usize::try_from(count).expect("fits");
+                        let series =
+                            [(0, 1, 8), (1, 1, 8), (2, count, len), (3, count, len)];
+                        let draft = pin!(writer.draft(Form::Raw, &series));
                         matches!(draft.poll(&mut context), Poll::Ready(Ok(_)))
                     });
                     assert!(ready, "frame {seq} has a block");
@@ -169,12 +170,12 @@ fn writes_a_frame_with_no_allocation() {
                     node.clock().sleep(SENT).await;
                     let (outcome, taking) =
                         ALLOCATOR.count(|| write.as_mut().poll(&mut context));
-                    let taken = Outcome::Taken {
-                        range: Range { seq, count: 1 },
+                    let taken = |count| Outcome::Taken {
+                        range: Range { seq, count },
                     };
                     assert_eq!(
                         outcome,
-                        Poll::Ready(Ok(&[(0, taken), (2, taken)][..])),
+                        Poll::Ready(Ok(&[(0, taken(1)), (2, taken(other(seq)))][..])),
                         "frame {seq}"
                     );
                     if seq >= WARM {
@@ -190,11 +191,16 @@ fn writes_a_frame_with_no_allocation() {
     );
 }
 
-/// Sends `Taken` of frame `seq` for groups 0 and 1.
-async fn taken(sender: &mut Sender, seq: u64) {
-    for group in 0..2 {
+/// The count of group 1 of frame `seq`: 1, or 2 in an odd frame.
+fn other(seq: u64) -> u32 {
+    if seq % 2 == 1 { 2 } else { 1 }
+}
+
+/// Sends `Taken` of frame `seq` for group 0 with 1 sample and group 1 with `count`.
+async fn taken(sender: &mut Sender, seq: u64, count: u32) {
+    for (group, count) in [(0, 1), (1, count)] {
         let outcome = Outcome::Taken {
-            range: Range { seq, count: 1 },
+            range: Range { seq, count },
         };
         let frame = seq + 1;
         let reply = Reply::Outcome {
