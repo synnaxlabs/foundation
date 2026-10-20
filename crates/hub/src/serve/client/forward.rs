@@ -19,8 +19,8 @@ use crate::serve::Error;
 use crate::serve::admission::Admission;
 
 /// Serves the forward from `via`, whose public key is `peer`, that `forward` starts:
-/// admits the program's hello that `via` carries, and serves the write of the group of `forward` as a program's
-/// write, until the hello ends or `via` finishes the stream.
+/// admits the program's hello that `via` carries, and serves the write of the group of
+/// `forward` as a program's write, until the hello ends or `via` finishes the stream.
 pub(in crate::serve) async fn serve(
     state: &Rc<RefCell<State>>,
     via: node::Key,
