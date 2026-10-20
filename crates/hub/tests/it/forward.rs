@@ -149,6 +149,24 @@ where
     forwarded_on(seed, sessions, Mesh::Synced, during, after, member)
 }
 
+/// Runs the mesh clock of `test` with [`Mesh::Synced`] and sets [`rules`]. Gives
+/// `tasks` under [`Test::pause`], for the serve tasks.
+async fn ready(
+    test: &mut Test,
+    tasks: &env::tasks::Tasks,
+    mesh: Mesh,
+) -> env::tasks::Tasks {
+    if matches!(mesh, Mesh::Synced) {
+        test.sync().await;
+    }
+    test.hub.set_rules(rules());
+    env::tasks::Tasks::new(super::Counted {
+        tasks: tasks.clone(),
+        ended: Rc::new(Cell::new(0)),
+        pause: Rc::clone(&test.pause),
+    })
+}
+
 /// Whether the home has mesh time when it serves a forward.
 enum Mesh {
     Synced,
@@ -185,15 +203,7 @@ where
             Some(region),
         )
         .await;
-        if matches!(mesh, Mesh::Synced) {
-            test.sync().await;
-        }
-        test.hub.set_rules(rules());
-        let paused = env::tasks::Tasks::new(super::Counted {
-            tasks: tasks.clone(),
-            ended: Rc::new(Cell::new(0)),
-            pause: Rc::clone(&test.pause),
-        });
+        let paused = ready(&mut test, &tasks, mesh).await;
         let accepted = Rc::new(Cell::new(0));
         let mut ends = Vec::new();
         for _ in 0..sessions {
