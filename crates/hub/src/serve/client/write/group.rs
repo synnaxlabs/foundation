@@ -43,7 +43,7 @@ pub(super) struct Written {
     pub(super) outcome: Outcome,
     /// Whether the group took the frame and took none since the last
     /// [`cover`](Group::cover), so it starts to wait for a commit.
-    pub(super) first: bool,
+    pub(super) waits: bool,
 }
 
 /// The write of one group of a stream at its home, and the `Stored` of the frames that
@@ -134,7 +134,7 @@ impl Group {
                 Written {
                     ended: Some(self.end(end, block)),
                     outcome: Outcome::Ended(end),
-                    first: false,
+                    waits: false,
                 }
             }
         }
@@ -226,11 +226,11 @@ impl Group {
     /// Counts a taken frame for the next commit, and gives `outcome`.
     fn counted(&mut self, count: u64, outcome: Outcome) -> Written {
         if let Outcome::Taken { .. } = outcome {
-            let first = self.taken.replace(count).is_none();
+            let waits = self.taken.replace(count).is_none();
             return Written {
                 ended: None,
                 outcome,
-                first,
+                waits,
             };
         }
         Written::of(self.untaken(outcome))
@@ -252,7 +252,7 @@ impl Written {
         Self {
             ended: None,
             outcome,
-            first: false,
+            waits: false,
         }
     }
 }

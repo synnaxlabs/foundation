@@ -201,14 +201,18 @@ async fn relay(
                     Ok(draft) => frames.draft(draft),
                     Err(error) => {
                         frames.skip();
-                        flush(sender, writes.refuse(&error)).await?;
+                        for (block, reply) in writes.refuse(&error) {
+                            send(sender, block, reply).await?;
+                        }
                         Step::More
                     }
                 }
             }
         };
         if let Step::Frame { draft, time } = step {
-            flush(sender, writes.write(state, draft, time)).await?;
+            for (block, reply) in writes.write(state, draft, time) {
+                send(sender, block, reply).await?;
+            }
         }
     }
 }
@@ -309,6 +313,7 @@ impl Writes {
 
     /// Gives the outcome of each group of the frame whose draft found no block with
     /// `error`, each with its block, to send in order.
+    #[must_use = "the replies are lost unless sent"]
     fn refuse(&mut self, error: &block::Error) -> Drain<'_, (Unique, Reply)> {
         let frame = self.heads;
         match &mut self.spread {
@@ -331,9 +336,9 @@ impl Writes {
 
     /// Writes each group of `draft`, the frame whose head came last, and gives the
     /// outcome of each, in group order, after the `Ended` of a group that ends at it,
-    /// each with its block, to send in order. A frame of a stream of one group goes to its group as it is; else
-    /// each group gets a copy of its series. Sync, so the relay's future holds no
-    /// nested one.
+    /// each with its block, to send in order. A frame of a stream of one group goes to
+    /// its group as it is; else each group gets a copy of its series.
+    #[must_use = "the replies are lost unless sent"]
     fn write(
         &mut self,
         state: &RefCell<State>,
@@ -347,6 +352,7 @@ impl Writes {
             replies,
             ..
         } = self;
+        let began = waiting.len();
         match spread {
             Spread::One { group, block } => {
                 let block = block.take().expect(TAKEN);
@@ -366,7 +372,10 @@ impl Writes {
                 }
             }
         }
-        self.call(state);
+        // While no commit is due, no group waits: a call is due only when one began.
+        if self.waiting.len() > began {
+            self.call(state);
+        }
         self.replies.drain(..)
     }
 
@@ -384,19 +393,21 @@ impl Writes {
         }
     }
 
-    /// Adds to `replies` the reply of each group that the due commit covered, which
-    /// ended with `committed`, then calls the next commit.
+    /// Calls the next commit, and gives the reply of each group that the due commit
+    /// covered, which ended with `committed`, each with its block, to send in order.
+    #[must_use = "the replies are lost unless sent"]
     fn committed(
         &mut self,
         state: &RefCell<State>,
         committed: &Result<(), env::files::Error>,
-    ) {
+    ) -> Drain<'_, (Unique, Reply)> {
         let groups = self.spread.groups();
         for group in self.covered.drain(..) {
             let group = &mut groups[to_usize(group)];
             self.replies.extend(group.committed(committed));
         }
         self.call(state);
+        self.replies.drain(..)
     }
 
     /// Waits for `received`, and sends the replies of each commit that ends meanwhile.
@@ -418,8 +429,9 @@ impl Writes {
                 Ok(received) => return Ok(received?),
                 Err(committed) => {
                     self.due = None;
-                    self.committed(state, &committed);
-                    flush(sender, self.replies.drain(..)).await?;
+                    for (block, reply) in self.committed(state, &committed) {
+                        send(sender, block, reply).await?;
+                    }
                 }
             }
         }
@@ -438,8 +450,9 @@ impl Writes {
         }
         while let Some(due) = self.due.take() {
             let committed = due.await;
-            self.committed(state, &committed);
-            flush(sender, self.replies.drain(..)).await?;
+            for (block, reply) in self.committed(state, &committed) {
+                send(sender, block, reply).await?;
+            }
         }
         sender.finish()?;
         Ok(())
@@ -476,24 +489,13 @@ fn put(
     let Written {
         ended,
         outcome,
-        first,
+        waits,
     } = group.write(state, frame, time, heads);
-    if first {
+    if waits {
         waiting.push(group.number());
     }
     replies.extend(ended);
     replies.push((block, reply(heads, group.number(), outcome)));
-}
-
-/// Sends each of `replies`, in order.
-async fn flush(
-    sender: &mut Sender,
-    replies: Drain<'_, (Unique, Reply)>,
-) -> Result<(), Error> {
-    for (block, reply) in replies {
-        send(sender, block, reply).await?;
-    }
-    Ok(())
 }
 
 /// Sends `reply` in the last bytes of `block`.
