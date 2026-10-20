@@ -34,9 +34,19 @@ pub(crate) const fn header_len(series: usize) -> usize {
     COUNT + DESCRIPTOR * series
 }
 
-/// Bytes of the parts of the entry that [`entry`] makes of `frame`.
-pub(crate) fn len(frame: &Frame) -> usize {
-    header_len(frame.ends().count()) + frame.body().len()
+/// Parts of each entry that [`entry`] makes: the header, then the body of the frame.
+pub(crate) const PARTS: usize = 2;
+
+/// Bytes of the parts of the entry that [`entry`] makes of an index frame of `set` with
+/// `series`, each an entry and its encoded length, in entry order.
+///
+/// # Panics
+///
+/// If `series` makes no frame of `set`.
+pub(crate) fn len(set: &KeySet, series: &[(usize, usize)]) -> usize {
+    let layout = Layout::new(set, series);
+    let layout = layout.expect("invariant: the series of a group make a frame");
+    header_len(series.len()) + layout.body_len()
 }
 
 /// The buffer entry that stores `frame`, an encoded index frame of one group of `set`
@@ -98,7 +108,7 @@ fn body(
     pool: &block::Pool,
     frame: &Frame,
     set: &KeySet,
-) -> Result<[Block; 2], block::Error> {
+) -> Result<[Block; PARTS], block::Error> {
     assert_eq!(frame.form(), Form::Encoded, "the frame is not encoded");
     assert_eq!(
         frame.key_set(),
