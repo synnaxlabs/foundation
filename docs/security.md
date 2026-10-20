@@ -575,6 +575,7 @@ seconds on each PR, and `fuzz.yaml` runs each target for 600 seconds each night.
 | `mesh_log` | The decode of one mesh log record by `mesh::testing::round_trip_log_record`: the header, its version, and the hard state and entries of the body, after `seal_log_record` writes the length and both checks | Encodes to the same bytes |
 | `mesh_log_dir` | `mesh::log::sequence` and `mesh::log::scan` on the files of a log directory, by `mesh::testing::scan_log_dir`, after `seal_log_dir` writes the checks of each record | An open of the files that an open leaves reads the same hard state and entries, and the files are a fixed point after two opens |
 | `mesh_spec_name` | `mesh::driver::used::pointer` on a file name of the directory of the spec in use, by `mesh::testing::round_trip_spec_name` | A name it reads is the name of its pointer |
+| `mesh_ticket` | `mesh::ticket::Ticket::decode` on the text that an operator carries to a joining node, with `Addresses::decode` in it, by `mesh::testing::round_trip_ticket` | Encodes to the same text |
 | `codec_series` | `codec::validate`, `codec::decode`, `codec::Decoder` | All give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `codec_string` | `codec::Encoder`, `codec::validate`, `codec::decode` on a `String` series | Each refuses at the first sample that `str::from_utf8` refuses, and at no other |

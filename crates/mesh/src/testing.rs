@@ -119,6 +119,14 @@ pub fn round_trip_spec_name(name: &[u8]) -> Option<Vec<u8>> {
     Some(used::file(pointer).into_os_string().into_encoded_bytes())
 }
 
+/// The text that the join ticket in `text` encodes to, or `None` when `text` is not
+/// the text of a ticket.
+#[must_use]
+pub fn round_trip_ticket(text: &[u8]) -> Option<Vec<u8>> {
+    let ticket = crate::ticket::Ticket::decode(std::str::from_utf8(text).ok()?).ok()?;
+    Some(ticket.encode().into_bytes())
+}
+
 // The path and the bytes of each file that `dir` frames.
 fn unframe(dir: &[u8]) -> Vec<(PathBuf, Vec<u8>)> {
     let get = |range| dir.get(range).expect("invariant: a frame is in `dir`");
@@ -170,6 +178,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
 
+    use base64ct::Encoding as _;
     use raft::{Answer, Body, Data, Grant, Link, Proof, Signature, Term, Voters};
     use spec::Pointer;
 
@@ -180,14 +189,19 @@ mod tests {
 
     use crate::bytes::{put_change, put_count, put_name, put_position};
     use crate::card;
+    use crate::card::addresses::Addresses;
     use crate::change::{self, CHUNKS_MAX, Malformed, Undecoded};
-    use crate::common::{at, index, key, member, name, public, ticket, unchecked};
+    use crate::common::{
+        at, index, key, member, name, private, public, ticket, unchecked, voter,
+    };
     use crate::member::Member;
     use crate::message::{FOUNDING_BYTES_MAX, VOTERS_MAX};
     use crate::refusal::Refusal;
     use crate::region::{self, Request, Unfit};
+    use crate::ticket::{Ticket, Voter};
     use spec::definition::Definition;
-    use types::name::Name;
+    use transport::Address;
+    use types::name::{Name, Prefix};
 
     #[test]
     fn a_change_gives_its_bytes_and_other_bytes_give_none() {
@@ -2079,5 +2093,103 @@ mod tests {
             assert_eq!(inputs[name], want, "{name}");
             assert_eq!(round_trip_founding(&want), None, "{name}");
         }
+    }
+
+    #[test]
+    fn each_ticket_input_is_what_its_name_says() {
+        let inputs = inputs!("mesh_ticket":
+            "ticket",
+            "root",
+            "voters",
+            "first_part_wrong",
+            "padded",
+            "standard",
+            "not_utf8",
+            "key_cut",
+            "prefix_cut",
+            "prefix_not_a_name",
+            "count_cut",
+            "no_voter",
+            "voter_cut",
+            "voter_forged",
+            "addresses_over_32",
+            "trailing",
+        );
+        assert_eq!(count_files("mesh_ticket"), inputs.len());
+        let root = Ticket::new(private(7), Prefix::ROOT, vec![voter()]).encode();
+        let relay = Address::Relay {
+            node: public(3),
+            at: "[2001:db8::1]:4100".parse().unwrap(),
+        };
+        let voters = vec![
+            Voter {
+                key: key(2),
+                public_key: public(2),
+                addresses: Addresses::new(vec![relay]).unwrap(),
+            },
+            Voter {
+                key: key(3),
+                public_key: public(3),
+                addresses: Addresses::new(Vec::new()).unwrap(),
+            },
+        ];
+        let voters = Ticket::new(private(7), "plant".parse().unwrap(), voters);
+        let valid = [
+            ("ticket", ticket(7).encode()),
+            ("root", root),
+            ("voters", voters.encode()),
+        ];
+        for (name, want) in valid {
+            let want = want.into_bytes();
+            assert_eq!(inputs[name], want, "{name}");
+            let round_trip = round_trip_ticket(&want);
+            assert_eq!(round_trip.as_deref(), Some(&want[..]), "{name}");
+        }
+        for (name, want) in refused_tickets() {
+            assert_eq!(inputs[name], want, "{name}");
+            assert_eq!(round_trip_ticket(&want), None, "{name}");
+        }
+    }
+
+    // The text of each input of `mesh_ticket` that is no ticket, by name.
+    fn refused_tickets() -> Vec<(&'static str, Vec<u8>)> {
+        let text = |bytes: &[u8]| {
+            let base64 = base64ct::Base64UrlUnpadded::encode_string(bytes);
+            format!("foundation-ticket-1-{base64}").into_bytes()
+        };
+        // The private key, the prefix `plant`, a count of 1, the key and public key of
+        // voter 1, a count of 1, and the address `10.0.0.1:4000`.
+        let plant = ticket(7).encode();
+        let base64 = plant.strip_prefix("foundation-ticket-1-").unwrap();
+        let bytes = base64ct::Base64UrlUnpadded::decode_vec(base64).unwrap();
+        let with = |at: Range<usize>, put: &[u8]| {
+            let mut bytes = bytes.clone();
+            bytes.splice(at, put.iter().copied());
+            text(&bytes)
+        };
+        let standard = base64ct::Base64Unpadded::encode_string(&[0xfb; 33]);
+        let mut over = 33u64.to_le_bytes().to_vec();
+        over.extend((0..33).flat_map(|_| [0, 4, 10, 0, 0, 1, 0xa0, 0x0f]));
+        vec![
+            (
+                "first_part_wrong",
+                format!("foundation-ticket-2-{base64}").into_bytes(),
+            ),
+            ("padded", [&text(&bytes)[..], b"=="].concat()),
+            (
+                "standard",
+                format!("foundation-ticket-1-{standard}").into_bytes(),
+            ),
+            ("not_utf8", [&text(&bytes)[..], &[0xff]].concat()),
+            ("key_cut", text(&bytes[..31])),
+            ("prefix_cut", text(&bytes[..37])),
+            ("prefix_not_a_name", with(33..38, b"pl nt")),
+            ("count_cut", text(&bytes[..45])),
+            ("no_voter", with(38..110, &0u64.to_le_bytes())),
+            ("voter_cut", text(&bytes[..109])),
+            ("voter_forged", with(62..94, &[0; 32])),
+            ("addresses_over_32", with(94..110, &over)),
+            ("trailing", text(&[&bytes[..], &[0]].concat())),
+        ]
     }
 }
