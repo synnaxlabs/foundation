@@ -39,7 +39,7 @@ from write import (  # noqa: E402
     p50,
     p99,
 )
-from test_client import Node  # noqa: E402
+from test_client import PATIENCE, Node  # noqa: E402
 
 import foundation  # noqa: E402
 
@@ -65,8 +65,9 @@ def frames(names: list[str], samples: int, count: int, dtype=np.float64,
     up. With `queued`, it writes each frame first, then reads them with no wait. Gives
     the round trip, or with `queued` the whole call of `__next__` and the free of its
     frame, and the part of each frame, in nanoseconds. A `dtype` of `uuid.UUID` writes
-    each frame with `write`, so takes one name and one sample. Raises `DataLost` when
-    the node lost a frame."""
+    each frame with `write`, so takes one name and one sample. Writes a frame again that
+    the node rejects, for up to `PATIENCE` s. Raises `DataLost` when the node lost a
+    frame."""
     width = 16 if dtype is uuid.UUID else np.dtype(dtype).itemsize
     size = (len(names) + 1) * SERIES + samples * (len(names) * width + 8)
     count = min(count, ROOM // size - 50)
@@ -76,10 +77,19 @@ def frames(names: list[str], samples: int, count: int, dtype=np.float64,
     stamps = Stamps()
 
     def send(writer: foundation.Writer) -> None:
-        if dtype is uuid.UUID:
-            writer.write({names[0]: uuid.UUID(int=3321)})
-        else:
-            writer.write_series(series | {"w.time": stamps.take(samples)})
+        deadline = time.monotonic() + PATIENCE
+        while True:
+            try:
+                if dtype is uuid.UUID:
+                    writer.write({names[0]: uuid.UUID(int=3321)})
+                else:
+                    writer.write_series(series | {"w.time": stamps.take(samples)})
+                return
+            except foundation.Rejected:
+                # Queued frames can fill the node's pool until the node frees them.
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.001)
 
     trips, parts = [], []
     node = Node(DISK)
