@@ -285,7 +285,8 @@ const TEXT_MAX: usize = 1024;
 const UNDEFINED: &str = "conformance.undefined";
 /// The text that each secret of [`Suite::secrets`] holds, which no status shows.
 const MARKER: &str = "c0nformance-marker-5e7c41";
-/// How long [`keeps_each_secret_from_the_status`] watches after each error.
+/// How long [`keeps_each_secret_from_the_status`] watches each run once it shows an
+/// error, and the run of the write form.
 const GLANCE: Span = Span::from_nanos(5_000_000_000);
 
 /// The plant side of a scenario.
