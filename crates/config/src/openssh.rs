@@ -38,32 +38,26 @@ const OTHER_ALGORITHMS: [&str; 17] = [
 const LINE_BREAKS: [char; 7] =
     ['\n', '\x0b', '\x0c', '\r', '\u{85}', '\u{2028}', '\u{2029}'];
 
-/// What holds a public key, which names it in a message and gives the fix.
+/// What holds a public key: its noun in a message, and the fixes of its caller.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum Holder {
-    /// A subject, whose key its user makes.
-    Subject,
-    /// A node of a profile, whose line `foundation profile` prints.
-    Node,
+pub(crate) struct Holder {
+    /// The holder in a message, such as "a subject".
+    pub noun: &'static str,
+    /// The fix of a key that is not the line of a `.pub` file of an Ed25519 key.
+    pub fix: &'static str,
+    /// The fix of a key of another algorithm.
+    pub algorithm_fix: &'static str,
 }
 
 /// Reads the public key of `holder`: the line of an OpenSSH `.pub` file of an Ed25519
 /// key. A message quotes no part of the text after the first word, since that part can
 /// be a secret.
 pub(crate) fn key(value: &Value, holder: Holder) -> Result<PublicKey, Diagnostic> {
-    let (noun, fix, algorithm_fix) = match holder {
-        Holder::Subject => (
-            "a subject",
-            "Use the one line of a `.pub` file, such as `ssh-ed25519 AAAA... \
-             alice@laptop`",
-            "Make an Ed25519 key with `ssh-keygen -t ed25519`, and use the line of its \
-             `.pub` file",
-        ),
-        Holder::Node => {
-            let fix = "Use the line that `foundation profile` prints";
-            ("a node", fix, fix)
-        }
-    };
+    let Holder {
+        noun,
+        fix,
+        algorithm_fix,
+    } = holder;
     let Kind::String(text) = &value.kind else {
         let message = format!("a public key is a string, not {}", value.kind.noun());
         return Err(Diagnostic::new(
@@ -206,8 +200,9 @@ impl fmt::Display for Unreadable {
 }
 
 /// Reads the OpenSSH private key file of an Ed25519 key with no passphrase, as
-/// `ssh-keygen -t ed25519 -N ""` and [`key_file`] write it. The comment is
-/// not kept.
+/// `ssh-keygen -t ed25519 -N ""` and [`key_file`] write it, with each form of line
+/// that OpenSSH reads: any width, CRLF, blank lines at the end, or no line end after
+/// the last line. The comment is not kept.
 ///
 /// # Errors
 ///
@@ -244,13 +239,23 @@ pub fn private_key(text: &str) -> Result<PrivateKey, Unreadable> {
     Ok(key)
 }
 
-/// `text` with each line end as `\n`, one after the last line, and no blank line at
-/// the end, as `ssh-key` takes it. OpenSSH also reads the other forms.
+/// `text` as `ssh-key` takes it: the body in lines of 70 characters, each line end as
+/// `\n`, one after the last line, and no blank line at the end. `ssh-key` 0.6.7 reads
+/// only lines of 70, as `ssh-keygen` writes them, and OpenSSH reads any width.
 fn lines(text: &str) -> String {
-    text.trim_end()
-        .lines()
-        .flat_map(|line| [line, "\n"])
-        .collect()
+    let lines: Vec<&str> = text.trim_end().lines().collect();
+    let [begin, body @ .., end] = lines.as_slice() else {
+        return text.to_owned();
+    };
+    let body: Vec<char> = body.concat().chars().collect();
+    let mut file = format!("{begin}\n");
+    for line in body.chunks(70) {
+        file.extend(line);
+        file.push('\n');
+    }
+    file.push_str(end);
+    file.push('\n');
+    file
 }
 
 /// The OpenSSH private key file of `key` with no passphrase and with `comment`, as

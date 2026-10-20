@@ -115,6 +115,13 @@ fn named_connector(
     diagnostic
 }
 
+const SUBJECT: Holder = Holder {
+    noun: "a subject",
+    fix: "Use the one line of a `.pub` file, such as `ssh-ed25519 AAAA... alice@laptop`",
+    algorithm_fix: "Make an Ed25519 key with `ssh-keygen -t ed25519`, and use the line of \
+                    its `.pub` file",
+};
+
 /// Reads one public key or a list of them as a subject.
 fn subject(value: &Value) -> Result<Subject, Diagnostic> {
     let items = match &value.kind {
@@ -123,7 +130,7 @@ fn subject(value: &Value) -> Result<Subject, Diagnostic> {
     };
     let keys = items
         .iter()
-        .map(|item| openssh::key(item, Holder::Subject))
+        .map(|item| openssh::key(item, SUBJECT))
         .collect::<Result<_, _>>()?;
     Subject::new(keys).map_err(|error| {
         let (message, fix) = (error.to_string(), error.fix().into());

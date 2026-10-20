@@ -21,6 +21,12 @@ const BAD_STRICT: Code = Code::new("config.bad-strict");
 const DUPLICATE_NODE: Code = Code::new("config.duplicate-node");
 const PRIVATE_KEY_WITHOUT_SUBJECT: Code =
     Code::new("config.private-key-without-subject");
+const PRINTED: &str = "Use the line that `foundation profile` prints";
+const NODE_KEY: Holder = Holder {
+    noun: "a node",
+    fix: PRINTED,
+    algorithm_fix: PRINTED,
+};
 
 const BODY: Body = Body {
     summary: "The subject that a program on a client host acts as, and the public \
@@ -229,7 +235,7 @@ fn node_block(
         of,
         at,
         "public_key",
-        |value| openssh::key(value, Holder::Node),
+        |value| openssh::key(value, NODE_KEY),
         fix.into(),
     );
     match (address, public_key) {

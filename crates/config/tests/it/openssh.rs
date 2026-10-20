@@ -138,6 +138,41 @@ fn reads_a_key_file_with_each_line_end_that_openssh_reads() {
 }
 
 #[test]
+fn reads_a_key_file_with_mixed_line_ends_and_space_at_the_end() {
+    let mixed: String = KEYGEN
+        .lines()
+        .enumerate()
+        .flat_map(|(i, line)| [line, if i % 2 == 0 { "\r\n" } else { "\n" }])
+        .collect();
+    let crlf_blanks = format!("{}\r\n\r\n  \r\n", KEYGEN.replace('\n', "\r\n"));
+    let trailing_tab = format!("{KEYGEN}\t\n");
+    for text in [mixed, crlf_blanks, trailing_tab] {
+        let key = openssh::private_key(&text).unwrap();
+        assert_eq!(openssh::line(key.public()), KEYGEN_PUB, "{text:?}");
+    }
+}
+
+/// Go's `ssh.MarshalPrivateKey` wraps the body at 64 columns, and OpenSSH reads a body
+/// at any width.
+#[test]
+fn reads_a_key_file_whose_body_has_any_width() {
+    let body: String = KEYGEN
+        .lines()
+        .filter(|line| !line.starts_with("-----"))
+        .collect();
+    for width in [64, 76, body.len()] {
+        let mut text = String::from("-----BEGIN OPENSSH PRIVATE KEY-----\n");
+        for line in body.as_bytes().chunks(width) {
+            text.push_str(std::str::from_utf8(line).unwrap());
+            text.push('\n');
+        }
+        text.push_str("-----END OPENSSH PRIVATE KEY-----\n");
+        let key = openssh::private_key(&text).unwrap();
+        assert_eq!(openssh::line(key.public()), KEYGEN_PUB, "{text:?}");
+    }
+}
+
+#[test]
 fn refuses_an_ecdsa_key_by_its_family() {
     assert_eq!(
         unreadable(ECDSA),
