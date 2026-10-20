@@ -102,7 +102,9 @@
      holds each kind to the cut of 1024 bytes that the supervisor makes. Until #3553,
      a seed whose links fill the backlog of the device fails with the panic of the sim
      at a full backlog, not for a defect of the connector. #3554 adds the nightly
-     range and the replay of a failed seed in CI.
+     range after #3553, and the replay of a failed seed in CI. The numbers of this
+     scenario: approved by `laptop.architect-2`, 2026-10-20T08:40:04Z
+     (https://github.com/synnaxlabs/foundation/pull/3548#issuecomment-6286993255).
 
   Scenario 7 (no secret in a status) comes in #2642. The
   numbers are tunable by the architect of `connector`. Plan of `laptop.architect-2` at
