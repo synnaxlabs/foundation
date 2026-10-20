@@ -6,6 +6,7 @@
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
+use bytes::Bytes;
 use connector::http::sim::Scheme;
 use connector::kind::Table;
 use connector_influx::Kind;
@@ -13,7 +14,8 @@ use connector_influx::sim::{Store, serve};
 use document::diagnostic::{Code, Diagnostic};
 use document::value::{self, Value};
 use document::{Attribute, Block, Document, Map};
-use env::net::tcp;
+use env::net::{Listener, tcp};
+use http::{Request, Response, StatusCode};
 use hub::writer::Writer;
 use spec::channel::{Channel, Data};
 use spec::data_type::DataType;
@@ -36,6 +38,8 @@ const SUITE: Suite = Suite {
     progress: "confirmed",
     backoff: Backoff::Run,
     refused,
+    secrets: &["token"],
+    echo: Some(|inputs| Box::pin(echo(inputs))),
 };
 
 scenarios::suite!(SUITE);
@@ -118,6 +122,34 @@ fn write(writer: &mut Writer) {
 
 /// Serves the database `plant` with no token until `until`.
 async fn simulate(inputs: Serve) {
+    let listener = listen(&inputs);
+    let store = Arc::new(Mutex::new(Store::default()));
+    let (tasks, until) = (inputs.tasks, inputs.until);
+    let database = "plant".into();
+    let served = serve(listener, tasks, until, Scheme::Plain, store, database, None);
+    served.await.expect("the listener holds");
+}
+
+/// Answers each request until `until` with 400 and a text of each header of the
+/// request, one `<name>: <value>` line each.
+async fn echo(inputs: Serve) {
+    let listener = listen(&inputs);
+    let answer = |request: Request<Bytes>| {
+        let headers = request.headers().iter().map(|(name, value)| {
+            format!("{name}: {}\n", String::from_utf8_lossy(value.as_bytes()))
+        });
+        let mut response = Response::new(Bytes::from(headers.collect::<String>()));
+        *response.status_mut() = StatusCode::BAD_REQUEST;
+        response
+    };
+    let (tasks, until) = (inputs.tasks, inputs.until);
+    let served =
+        connector::http::sim::serve(listener, tasks, until, Scheme::Plain, answer);
+    served.await.expect("the listener holds");
+}
+
+/// Listens on the address of `inputs`.
+fn listen(inputs: &Serve) -> Listener {
     let listen = tcp::Listen {
         local: inputs.address,
         backlog: 4,
@@ -128,12 +160,7 @@ async fn simulate(inputs: Serve) {
             delayed: false,
         },
     };
-    let listener = inputs.node.net().listen(&listen).expect("the port is free");
-    let store = Arc::new(Mutex::new(Store::default()));
-    let (tasks, until) = (inputs.tasks, inputs.until);
-    let database = "plant".into();
-    let served = serve(listener, tasks, until, Scheme::Plain, store, database, None);
-    served.await.expect("the listener holds");
+    inputs.node.net().listen(&listen).expect("the port is free")
 }
 
 /// Configs with an address with no scheme, and with no database.

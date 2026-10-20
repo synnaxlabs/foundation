@@ -6,6 +6,7 @@
 
 use std::cell::RefCell;
 use std::env::VarError;
+use std::fmt::Debug;
 use std::future::poll_fn;
 use std::net::SocketAddr;
 use std::ops::RangeInclusive;
@@ -19,17 +20,19 @@ use ::sim::node::Node;
 use ::sim::{Crash, Sim, link};
 use connector::cancel::Token;
 use connector::kind::Error;
+use connector::reader::SELECT;
 use connector::status::{Class, Reading, State};
-use connector::testing::{Rig, Run};
-use document::Document;
+use connector::testing::{Rig, Run, create_secret};
 use document::diagnostic::{Code, Diagnostic};
+use document::value::{self, Call, Value};
+use document::{Attribute, Document, Map};
 use env::clock::Clock;
 use env::rng::Rng;
 use env::tasks::Tasks;
 use types::name::Name;
 use types::time::Span;
 
-pub(crate) use inputs::{Backoff, Plant, Serve, Suite};
+pub(crate) use inputs::{Backoff, Plant, Serve, Simulator, Suite};
 
 /// The inputs that the suite of one kind gives the scenarios.
 #[expect(
@@ -58,15 +61,27 @@ mod inputs {
         pub setup:
             for<'a> fn(Plant<'a>) -> Pin<Box<dyn Future<Output = Document> + 'a>>,
         /// Runs the kind's simulator on `address` of the device node until `until`,
-        /// then closes each connection and returns.
-        pub serve: fn(Serve) -> Pin<Box<dyn Future<Output = ()>>>,
+        /// then closes each connection and returns. The simulator of a kind that
+        /// subscribes changes its data at least every 100 ms while it serves, so the
+        /// progress count grows.
+        pub serve: Simulator,
         /// The count that grows while data moves.
         pub progress: &'static str,
         /// Where the kind waits between two tries of a device that fails.
         pub backoff: Backoff,
         /// Configs that the kind's check refuses, each with its exact diagnostics.
         pub refused: fn() -> Vec<(Document, Vec<Diagnostic>)>,
+        /// The attributes of the config of [`Suite::setup`] that each take a secret.
+        /// Empty for a kind that takes none.
+        pub secrets: &'static [&'static str],
+        /// A simulator that answers each request with an error whose text holds each
+        /// header and value of the request, as a gateway in debug mode does. `None`
+        /// for a kind whose device answers with a code and no text of its own.
+        pub echo: Option<Simulator>,
     }
+
+    /// A simulator, as [`Suite::serve`] says.
+    pub(crate) type Simulator = fn(Serve) -> Pin<Box<dyn Future<Output = ()>>>;
 
     impl Suite {
         /// The name of the one kind of [`Suite::kinds`].
@@ -176,8 +191,18 @@ macro_rules! suite {
         }
 
         #[test]
+        fn stops_at_a_read_channel_that_no_spec_defines() {
+            $crate::scenarios::stops_at_a_read_channel_that_no_spec_defines(&$suite);
+        }
+
+        #[test]
         fn heals_after_random_faults() {
             $crate::scenarios::heals_after_random_faults(&$suite);
+        }
+
+        #[test]
+        fn keeps_each_secret_from_the_status() {
+            $crate::scenarios::keeps_each_secret_from_the_status(&$suite);
         }
 
         #[test]
@@ -236,6 +261,17 @@ const FAULTS: Span = Span::from_nanos(15_000_000_000);
 const FAULTS_MAX: u64 = 8;
 /// The longest error text of a status.
 const TEXT_MAX: usize = 1024;
+/// A name that no spec of the scenarios defines.
+const UNDEFINED: &str = "conformance.undefined";
+/// The secret that each attribute of [`Suite::secrets`] reads in
+/// [`keeps_each_secret_from_the_status`].
+const SECRET: &str = "conformance.marker";
+/// The value of [`SECRET`], which no status shows.
+const MARKER: &str = "c0nformance-marker-5e7c41";
+/// How long [`keeps_each_secret_from_the_status`] watches most of its steps.
+const WATCH: Span = Span::from_nanos(10_000_000_000);
+/// How long [`keeps_each_secret_from_the_status`] watches its short steps.
+const GLANCE: Span = Span::from_nanos(5_000_000_000);
 
 /// The plant side of a scenario.
 pub(crate) struct Scene {
@@ -286,9 +322,14 @@ impl Scene {
 
     /// Starts the kind's simulator on a new shard of the device node.
     pub(crate) fn serve(&self) -> Served {
+        self.start(self.suite.serve)
+    }
+
+    /// Starts `serve` on a new shard of the device node.
+    fn start(&self, serve: Simulator) -> Served {
         let (until, ended) = (Token::new(), Token::new());
         let (node, address) = (self.device.clone(), self.address);
-        let (stop, end, serve) = (until.clone(), ended.clone(), self.suite.serve);
+        let (stop, end) = (until.clone(), ended.clone());
         let started =
             self.device
                 .shards()
@@ -410,6 +451,24 @@ impl Scene {
                 reading
             }
         }
+    }
+
+    /// Watches the status of `run` for `within`, and panics at a status that shows
+    /// [`MARKER`].
+    async fn watch(&self, run: &mut Run, within: Span) {
+        let clock: Clock = self.node.clock();
+        let mut late = pin!(clock.sleep(within));
+        while let Some(reading) = before(late.as_mut(), run.next()).await {
+            unmarked(&reading);
+        }
+    }
+
+    /// Supervises `config` for [`GLANCE`], and panics when a status or the end of
+    /// the run shows [`MARKER`].
+    async fn glance(&self, config: Document) {
+        let mut run = self.supervise(config).await;
+        self.watch(&mut run, GLANCE).await;
+        ended_unmarked(&run.stop().await);
     }
 
     /// Gives what `future` gives, and panics when it takes longer than `within`.
@@ -749,8 +808,7 @@ pub(crate) fn refuses_each_config_with_its_diagnostics(suite: &'static Suite) {
 
 /// For a kind whose check gives writes, a write channel that no spec defines gives
 /// Stopped, class Config, no restart, and the text of `connector.unknown-channel`. A
-/// kind whose check gives no writes passes with no check, until the read form of
-/// #2642.
+/// kind whose check gives no writes passes with no check.
 pub(crate) fn stops_at_a_write_channel_that_no_spec_defines(suite: &'static Suite) {
     run(suite, direct, move |scene| async move {
         let config = scene.setup().await;
@@ -761,24 +819,93 @@ pub(crate) fn stops_at_a_write_channel_that_no_spec_defines(suite: &'static Suit
         };
         scene.rig.remove(std::slice::from_ref(missing));
         let served = scene.serve();
-        let mut run = scene.supervise(config).await;
-        let stopped = |reading: &Reading| reading.state == State::Stopped;
-        let reading = run.until(START, stopped).await;
         let unknown = Diagnostic::new(
             Code::new("connector.unknown-channel"),
             None,
             format!("no channel is named {missing}"),
             "Define the channel in the spec".into(),
         );
-        let text = Error::Config(vec![unknown.clone()]).to_string();
-        let given = (reading.restarts, reading.error.clone());
-        assert_eq!(given, (0, Some((Class::Config, text))), "{reading:?}");
-        match run.stop().await {
-            Err(Error::Config(given)) => assert_eq!(given, [unknown], "the run"),
-            other => panic!("a config error, not {other:?}"),
-        }
+        stops_with(&scene, config, unknown).await;
         scene.stop(served).await;
     });
+}
+
+/// For a kind whose check gives a reader, a reader that selects only a name that no
+/// spec defines gives Stopped, class Config, no restart, and the text of
+/// `connector.no-channel`. A kind whose check gives no reader passes with no check.
+pub(crate) fn stops_at_a_read_channel_that_no_spec_defines(suite: &'static Suite) {
+    run(suite, direct, move |scene| async move {
+        let config = scene.setup().await;
+        let checked = (suite.kinds)().check(suite.kind(), None, &config);
+        if checked
+            .expect("the config of the setup checks")
+            .reader
+            .is_none()
+        {
+            return;
+        }
+        let served = scene.serve();
+        let none = Diagnostic::new(
+            Code::new("connector.no-channel"),
+            None,
+            "the selector matches no channel".into(),
+            "Select a channel that the spec defines".into(),
+        );
+        stops_with(&scene, undefined(config), none).await;
+        scene.stop(served).await;
+    });
+}
+
+/// A run of `config` gives Stopped, class Config, no restart, and the text of
+/// `diagnostic`, and ends with it.
+async fn stops_with(scene: &Scene, config: Document, diagnostic: Diagnostic) {
+    let mut run = scene.supervise(config).await;
+    let stopped = |reading: &Reading| reading.state == State::Stopped;
+    let reading = run.until(START, stopped).await;
+    let text = Error::Config(vec![diagnostic.clone()]).to_string();
+    let given = (reading.restarts, reading.error.clone());
+    assert_eq!(given, (0, Some((Class::Config, text))), "{reading:?}");
+    match run.stop().await {
+        Err(Error::Config(given)) => assert_eq!(given, [diagnostic], "the run"),
+        other => panic!("a config error, not {other:?}"),
+    }
+}
+
+/// `config` with a reader that selects only [`UNDEFINED`].
+fn undefined(config: Document) -> Document {
+    let select = value::Kind::String(UNDEFINED.into());
+    with(config, SELECT.name, select)
+}
+
+/// `config` with each attribute of [`Suite::secrets`] read from [`SECRET`].
+fn marked(suite: &Suite, config: Document) -> Document {
+    suite.secrets.iter().fold(config, |config, key| {
+        let name = Value {
+            kind: value::Kind::String(SECRET.into()),
+            span: None,
+        };
+        let secret = value::Kind::Call(Call {
+            function: "secret".into(),
+            function_span: None,
+            arguments: vec![name],
+        });
+        with(config, key, secret)
+    })
+}
+
+/// `config` with the attribute `key` set to `kind`, in place of one that it had.
+fn with(config: Document, key: &str, kind: value::Kind) -> Document {
+    let others = config.attributes.iter().filter(|other| &*other.key != key);
+    let mut attributes: Vec<_> = others.cloned().collect();
+    attributes.push(Attribute {
+        key: key.into(),
+        key_span: None,
+        value: Value { kind, span: None },
+    });
+    Document {
+        attributes: Map::new(attributes).expect("unique keys"),
+        blocks: config.blocks,
+    }
 }
 
 /// One fault of [`heals_after_random_faults`].
@@ -955,6 +1082,71 @@ async fn faulted(scene: Rc<Scene>, seed: u64) {
     run.stop().await.expect("the run ends with no error");
     if let Some(served) = served {
         scene.stop(served).await;
+    }
+}
+
+/// For a kind with [`Suite::secrets`], whose config reads each of them from
+/// [`SECRET`], no status, no end of a run, and no check shows [`MARKER`], its value.
+/// One run meets in turn: no device for 10 s, the simulator for 5 s, and its stop
+/// for 10 s. A second run meets the echo of [`Suite::echo`]: an error within 10 s,
+/// and 5 s more. Then each config of [`Suite::refused`], and the read and write
+/// forms of scenario 5, each for 5 s. A kind with no secret passes with no check.
+pub(crate) fn keeps_each_secret_from_the_status(suite: &'static Suite) {
+    if suite.secrets.is_empty() {
+        return;
+    }
+    run(suite, direct, move |scene| async move {
+        let secret = SECRET.parse().expect("a valid name");
+        create_secret(&scene.node.files(), &secret, MARKER.as_bytes()).await;
+        let config = marked(suite, scene.setup().await);
+        let kinds = (suite.kinds)();
+        let checked = kinds.check(suite.kind(), None, &config);
+        let checked = checked.expect("the config with secrets checks");
+        let mut run = scene.supervise(config.clone()).await;
+        scene.watch(&mut run, WATCH).await;
+        let served = scene.serve();
+        scene.watch(&mut run, GLANCE).await;
+        scene.stop(served).await;
+        scene.watch(&mut run, WATCH).await;
+        ended_unmarked(&run.stop().await);
+        if let Some(echo) = suite.echo {
+            let served = scene.start(echo);
+            let mut run = scene.supervise(config.clone()).await;
+            let failed = |reading: &Reading| {
+                unmarked(reading);
+                reading.error.is_some()
+            };
+            run.until(START, failed).await;
+            scene.watch(&mut run, GLANCE).await;
+            ended_unmarked(&run.stop().await);
+            scene.stop(served).await;
+        }
+        for (refused, _) in (suite.refused)() {
+            let refused = marked(suite, refused);
+            unmarked(&kinds.check(suite.kind(), None, &refused));
+            ended_unmarked(&scene.supervise(refused).await.stop().await);
+        }
+        if checked.reader.is_some() {
+            scene.glance(undefined(config.clone())).await;
+        }
+        if let Some(missing) = checked.writes.first() {
+            scene.rig.remove(std::slice::from_ref(missing));
+            scene.glance(config).await;
+        }
+    });
+}
+
+/// Panics when the Debug text of `shown` holds [`MARKER`].
+fn unmarked(shown: &impl Debug) {
+    let text = format!("{shown:?}");
+    assert!(!text.contains(MARKER), "the secret shows: {text}");
+}
+
+/// Panics when `end`, or the text of its error, holds [`MARKER`].
+fn ended_unmarked(end: &Result<(), Error>) {
+    unmarked(end);
+    if let Err(error) = end {
+        unmarked(&error.to_string());
     }
 }
 

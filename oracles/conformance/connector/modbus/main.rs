@@ -38,6 +38,8 @@ const SUITE: Suite = Suite {
     progress: "in",
     backoff: Backoff::Restart,
     refused,
+    secrets: &[],
+    echo: None,
 };
 
 scenarios::suite!(SUITE);
