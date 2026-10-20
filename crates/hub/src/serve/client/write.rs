@@ -29,7 +29,7 @@ use self::group::{Frame, Group, Parts, Written};
 use super::{Reserved, body};
 use crate::State;
 use crate::serve::admission::Admission;
-use crate::serve::{Error, alloc, unless};
+use crate::serve::{Error, alloc, boxed, unless};
 use crate::writer::{self, Found, Homed, Split, Writer};
 
 /// The stream that carried the open of a write to this node.
@@ -67,8 +67,10 @@ pub(super) async fn serve(
         None => return Ok(()),
         Some(Opened::Here(set, writes, ends)) => (set, writes, ends),
         Some(Opened::Away { home, open }) => {
-            return away::serve(state, admission, home, write, open, receiver, sender)
-                .await;
+            // In its own box, so the poll of a local write holds none of its code.
+            let away =
+                || away::serve(state, admission, home, write, open, receiver, sender);
+            return boxed(away).await;
         }
     };
     let writes = relay(state, set, writes, None, receiver, sender).await?;
