@@ -80,13 +80,13 @@ connector "influx" {
 
 A `channel` block makes a channel. An index channel holds the time of each sample,
 and each data channel points at its index. A `connector` block runs on the node that
-`node` names. The `opcua` connector subscribes to each node of its reads: the server
-samples each node at the `rate`, and the node stores a sample of a node at its first
+`node` names. The `opcua` connector subscribes to the OPC UA node of each `read`: the
+server samples each one at the `rate`, and the connector stores a sample at its first
 value and at each change. The server sees only the value at each of its samples, so a
-change that a later change replaces before the next sample is not stored. Set the `rate`
-faster than the values change. A reader that opens later gets no sample of a node until
-it changes. With `polled = true`, the connector reads each node at each tick of the
-`rate` in place of a subscription.
+change that a later change replaces before the next sample is not stored. To store each
+change, set the `rate` faster than the values change. A reader that opens later gets no
+sample of a channel until its value changes. With `polled = true`, the connector reads
+each OPC UA node at each tick of the `rate` in place of a subscription.
 
 ## 3. Start the node
 
