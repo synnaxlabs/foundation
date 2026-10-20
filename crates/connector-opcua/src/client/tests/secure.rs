@@ -52,8 +52,8 @@ struct Read {
 }
 
 /// The policy URI and the mode of the channel of `client`, read from C: no call of
-/// `Client` and no server log gives them, and a read alone also passes over None,
-/// which the server offers too.
+/// `Client` and no server log gives them, and a read alone passes over each policy
+/// and mode that the server offers.
 fn channel(client: &Client) -> (String, ffi::Mode) {
     let mut mode = ffi::Mode(0);
     // SAFETY: the client lives, and `mode` is a place to write.
@@ -764,6 +764,40 @@ fn a_refusal_names_the_part_that_fails() {
         ),
     ] {
         assert_eq!(refusal.to_string(), text);
+    }
+}
+
+#[test]
+fn the_debug_of_credentials_holds_no_key() {
+    let credentials = Credentials {
+        certificate: CLIENT.certificate,
+        key: CLIENT.key,
+        trust: SERVER.certificate,
+    };
+    assert_eq!(format!("{credentials:?}"), "<credentials>");
+}
+
+#[test]
+fn a_refusal_gives_the_credential_that_it_names() {
+    for credential in [Credential::Certificate, Credential::Key, Credential::Trust] {
+        let line = Refusal::Line {
+            credential,
+            number: 1,
+        };
+        assert_eq!(line.credential(), credential);
+    }
+    for (refusal, credential) in [
+        (Refusal::Certificate, Credential::Certificate),
+        (Refusal::Time, Credential::Certificate),
+        (Refusal::Uri, Credential::Certificate),
+        (Refusal::Key, Credential::Key),
+        (Refusal::Mismatch, Credential::Key),
+        (Refusal::Empty, Credential::Trust),
+        (Refusal::Invalid { number: 2 }, Credential::Trust),
+        (Refusal::Damaged { after: 1 }, Credential::Trust),
+        (Refusal::Trailing { number: 3 }, Credential::Trust),
+    ] {
+        assert_eq!(refusal.credential(), credential, "{refusal:?}");
     }
 }
 

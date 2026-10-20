@@ -160,11 +160,13 @@ impl Session {
         todo!("#68")
     }
 
-    /// Closes the session with `code` now. Data not yet delivered drops, streams on
-    /// it end, and the peer sees [`Error::PeerClosed`], or [`Error::Broken`] or
-    /// [`Error::TimedOut`] when the close is lost. It does not wait. Closing an ended
-    /// session does nothing. Every caller that [`Transport::dial`] gave this session
-    /// shares it, so closing it ends their streams too.
+    /// Closes the session with `code` now. Data not yet delivered drops, streams on it
+    /// end, and the peer sees [`Error::PeerClosed`], or [`Error::Broken`] or
+    /// [`Error::TimedOut`] when the close is lost. While the close drains, a packet from
+    /// the peer's address makes the close go out again: one close for all packets that
+    /// come before the next send, so a burst gets one. It does not wait. Closing an
+    /// ended session does nothing. Every caller that [`Transport::dial`] gave this
+    /// session shares it, so closing it ends their streams too.
     ///
     /// [`Transport::dial`]: crate::Transport::dial
     ///
