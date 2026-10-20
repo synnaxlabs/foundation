@@ -204,6 +204,21 @@ impl Refusal {
         })
     }
 
+    /// The credential that the refusal names: `Certificate`, `Time`, and `Uri` name
+    /// the certificate, `Key` and `Mismatch` the key, `Line` its own field, and each
+    /// other variant the trust.
+    pub(crate) fn credential(self) -> Credential {
+        match self {
+            Self::Certificate | Self::Time | Self::Uri => Credential::Certificate,
+            Self::Key | Self::Mismatch => Credential::Key,
+            Self::Empty
+            | Self::Invalid { .. }
+            | Self::Damaged { .. }
+            | Self::Trailing { .. } => Credential::Trust,
+            Self::Line { credential, .. } => credential,
+        }
+    }
+
     /// Gives the `Line` refusal of `credential` at the line of `raw`.
     fn line(credential: Credential, raw: &ffi::Refusal) -> Self {
         Self::Line {
@@ -251,7 +266,7 @@ impl fmt::Display for Refusal {
     }
 }
 
-/// The field of the [`Credentials`] that a [`Refusal::Line`] names.
+/// A field of the [`Credentials`], which a [`Refusal`] names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Credential {
     Certificate,

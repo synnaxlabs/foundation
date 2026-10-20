@@ -5,7 +5,7 @@ use std::ffi::CStr;
 use std::{fmt, future};
 
 use connector::kind::{self, Channels, Context, Error};
-use connector::{browse, pace, poll, status};
+use connector::{browse, pace, poll, secret, status};
 use document::diagnostic::{Code, Diagnostic};
 use document::schema::Body;
 use document::{Block, Document};
@@ -18,8 +18,8 @@ use types::time::Span;
 use types::time::Stamp;
 
 use crate::browse::Server;
-use crate::client::{self, Client, Large};
-use crate::config::{self, Config, Read};
+use crate::client::{self, Client, Credential, Credentials, Large, Refusal};
+use crate::config::{self, Config, Read, Security};
 use crate::event;
 use crate::ffi::Status;
 use crate::node::Node;
@@ -31,6 +31,7 @@ mod tests;
 
 const SAMPLE_TYPE: Code = Code::new("opcua.sample-type");
 const LARGE_READ: Code = Code::new("opcua.large-read");
+const CREDENTIALS: Code = Code::new("opcua.credentials");
 
 /// The note of a run with no `read` block.
 const NO_READ: &str = "the connector has no `read` block, so it reads nothing. \
@@ -55,8 +56,11 @@ impl kind::Kind for Kind {
     type Config = Config;
     const SCHEMA: Body = config::BODY;
 
-    /// Reads `address`, `rate`, and zero or more `read` blocks, each with the channel
-    /// as its label and a `node_id`, and no other key or block.
+    /// Reads `address`, `rate`, the sources `certificate`, `key`, and `trust` of a
+    /// secure channel with the bool `unencrypted`, and zero or more `read` blocks, each
+    /// with the channel as its label and a `node_id`, and no other key or block. A
+    /// `certificate` needs `key` and `trust`, and each of the other three needs
+    /// `certificate`.
     fn parse(&self, config: &Document) -> Result<Config, Vec<Diagnostic>> {
         config::parse(config)
     }
@@ -76,20 +80,22 @@ impl kind::Kind for Kind {
         })
     }
 
-    /// Connects to the server, and reads each node once per tick of the rate until
+    /// Reads the secrets of the secure channel, when the config has one, and connects
+    /// to the server over that channel in `SignAndEncrypt`, or in `Sign` with
+    /// `unencrypted = true`. Then it reads each node once per tick of the rate until
     /// the cancel. Each tick writes a frame of the values that are Good and of the
     /// sample type of their channel (Boolean for `bool`, `SByte` to `UInt64` for `i8`
     /// to `u64`, Float for `f32`, and Double for `f64`), stamped at the midpoint of the
     /// read. It leaves out each other value: an Uncertain one adds 1 to the count
     /// `uncertain`, another one that is not Good adds 1 to `bad`, and one of another
-    /// type adds 1 to `mistyped`. The note names the first node of another type of
-    /// the latest tick that has one, and a tick with none clears it. A tick that
-    /// leaves out each value writes no frame. When 10 s pass with no read, the run
-    /// reads the state of the server to check the connection. After a cancel or an
-    /// error, the run closes its session: it sends `CloseSession`, waits at most 1 s
-    /// for the answer, then closes the connection. So a run ends within 1 s of a
-    /// cancel. Call [`Context::clear_error`] once the run reaches the device: until
-    /// then, the status shows the error of the last run.
+    /// type adds 1 to `mistyped`. The note names the first node of another type of the
+    /// latest tick that has one, and a tick with none clears it. A tick that leaves out
+    /// each value writes no frame. When 10 s pass with no read, the run reads the state
+    /// of the server to check the connection. After a cancel or an error, the run
+    /// closes its session: it sends `CloseSession`, waits at most 1 s for the answer,
+    /// then closes the connection. So a run ends within 1 s of a cancel. Call
+    /// [`Context::clear_error`] once the run reaches the device: until then, the status
+    /// shows the error of the last run.
     ///
     /// With no `read` block, the run connects, clears the error, and shows the note
     /// that the connector reads nothing and that `browse` and `import` add reads. Then
@@ -98,14 +104,17 @@ impl kind::Kind for Kind {
     ///
     /// # Errors
     ///
-    /// The error of [`Context::writer`] and of each failed write. [`Error::Config`]
-    /// with `connector.index` for each channel that is an index; that error comes
-    /// alone. Else [`Error::Config`] with `opcua.sample-type` for each channel whose
-    /// sample type is not `bool`, `i8` to `u64`, `f32`, or `f64`, and with
-    /// `opcua.large-read` when the Read of one node alone is past one message of the
-    /// server. [`Error::Device`] when the connect, a read, or one check fails: a check
-    /// fails on a bad service result or on no answer in 5 s. Also [`Error::Device`],
-    /// at once, when the client loses its channel or its session between two ticks.
+    /// The errors of [`Context::secret`] for each source of the secure channel, and
+    /// [`Error::Config`] with `opcua.credentials` and the source when the client
+    /// refuses a credential. The error of [`Context::writer`] and of each failed write.
+    /// [`Error::Config`] with `connector.index` for each channel that is an index; that
+    /// error comes alone. Else [`Error::Config`] with `opcua.sample-type` for each
+    /// channel whose sample type is not `bool`, `i8` to `u64`, `f32`, or `f64`, and
+    /// with `opcua.large-read` when the Read of one node alone is past one message of
+    /// the server. [`Error::Device`] when the connect, a read, or one check fails: a
+    /// check fails on a bad service result or on no answer in 5 s. Also
+    /// [`Error::Device`], at once, when the client loses its channel or its session
+    /// between two ticks.
     fn run(&self, ctx: Context<Config>) -> impl Future<Output = Result<(), Error>> {
         run(ctx)
     }
@@ -134,20 +143,20 @@ impl kind::Kind for Kind {
         config::tag(block)
     }
 
-    /// Reads only `address`, as `parse` does, connects as `run` does, and walks `query`
-    /// over the tree of the server from its Objects folder. An entry is a forward
-    /// hierarchical reference to an Object, a View, or a Variable, with the browse name
-    /// as its name and the node ID as its tag. An Object or a View is a folder. A
-    /// Variable is a point, of the sample type of a built-in type from Boolean to
-    /// Double, or of no type when its data type has no built-in base. It is unreadable
-    /// when the server does not let the user read it, when its value rank is that of an
-    /// array, or when its type is another built-in type. A node whose ID is a GUID,
-    /// opaque, a name that is empty or not UTF-8, or of another server is unreadable.
-    /// Its tag is the text of its ID, with `%` and each byte that is not UTF-8 as
-    /// `%XX`, and `s%=` in place of the `s=` of a name, so `parse` refuses it. In one
-    /// folder, a second reference to a node gives no entry, and a name that an earlier
-    /// entry has gets ` (<tag>)` after it. A cursor of an earlier browse skips the
-    /// references before its page again, so it assumes that the server keeps their
+    /// Reads only `address` and the secure channel, as `parse` does, connects as `run`
+    /// does, and walks `query` over the tree of the server from its Objects folder. An
+    /// entry is a forward hierarchical reference to an Object, a View, or a Variable,
+    /// with the browse name as its name and the node ID as its tag. An Object or a View
+    /// is a folder. A Variable is a point, of the sample type of a built-in type from
+    /// Boolean to Double, or of no type when its data type has no built-in base. It is
+    /// unreadable when the server does not let the user read it, when its value rank is
+    /// that of an array, or when its type is another built-in type. A node whose ID is
+    /// a GUID, opaque, a name that is empty or not UTF-8, or of another server is
+    /// unreadable. Its tag is the text of its ID, with `%` and each byte that is not
+    /// UTF-8 as `%XX`, and `s%=` in place of the `s=` of a name, so `parse` refuses it.
+    /// In one folder, a second reference to a node gives no entry, and a name that an
+    /// earlier entry has gets ` (<tag>)` after it. A cursor of an earlier browse skips
+    /// the references before its page again, so it assumes that the server keeps their
     /// order. Other than points at a count past 100 000 and those of the walk of a data
     /// type, it holds at most as many continuation points as the server holds for a
     /// session (`MaxBrowseContinuationPoints`, or 64 when the server gives 0, no value,
@@ -160,7 +169,8 @@ impl kind::Kind for Kind {
     ///
     /// # Errors
     ///
-    /// [`Error::Config`] with the diagnostic of `parse` for `address`, and with
+    /// The errors of `run` for the secure channel. [`Error::Config`] with the
+    /// diagnostics of `parse` for `address` and the secure channel, and with
     /// `opcua.bad-cursor` for a cursor that is not a count, or that skips more than 100
     /// 000 references. [`Error::Retry`] when the node has no mesh time, as
     /// [`browse::Context::time`] gives it. [`Error::Device`] when the connect, a
@@ -184,6 +194,10 @@ async fn walk(
 ) -> Result<browse::Found, Error> {
     let address =
         config::endpoint(ctx.config()).map_err(|error| Error::Config(vec![error]))?;
+    let security = config::security(ctx.config()).map_err(Error::Config)?;
+    let secured =
+        Secured::read(security.as_ref(), async |source| ctx.secret(source).await)
+            .await?;
     let time = event::Time::mesh(ctx.clock().clone(), ctx.time().await?);
     let found = session(
         time,
@@ -191,6 +205,7 @@ async fn walk(
         ctx.net().clone(),
         &mut ctx.rng(),
         &address,
+        secured.as_ref(),
         future::pending(),
         async |client| browse::walk(&mut Server::new(client), query, ctx.clock()).await,
     )
@@ -199,8 +214,11 @@ async fn walk(
 }
 
 async fn run(ctx: Context<Config>) -> Result<(), Error> {
+    let security = ctx.config().security.as_ref();
+    let secured =
+        Secured::read(security, async |source| ctx.secret(source).await).await?;
     if ctx.config().reads.is_empty() {
-        return idle(&ctx).await;
+        return idle(&ctx, secured.as_ref()).await;
     }
     let Some(mut frames) = Frames::open(&ctx).await? else {
         return Ok(());
@@ -212,6 +230,7 @@ async fn run(ctx: Context<Config>) -> Result<(), Error> {
         ctx.net().clone(),
         &mut ctx.rng(),
         &ctx.config().address,
+        secured.as_ref(),
         ctx.cancel().wait(),
         async |client| read(&ctx, client, &mut frames).await,
     )
@@ -221,7 +240,10 @@ async fn run(ctx: Context<Config>) -> Result<(), Error> {
 
 /// Connects, notes [`NO_READ`], and keeps the session until the cancel. A writer
 /// refuses no channel, so this run opens none.
-async fn idle(ctx: &Context<Config>) -> Result<(), Error> {
+async fn idle(
+    ctx: &Context<Config>,
+    secured: Option<&Secured<'_>>,
+) -> Result<(), Error> {
     // The status channels opened, so the node has mesh time and this gives at once.
     let mesh = ctx.time().await;
     let ran = session(
@@ -230,6 +252,7 @@ async fn idle(ctx: &Context<Config>) -> Result<(), Error> {
         ctx.net().clone(),
         &mut ctx.rng(),
         &ctx.config().address,
+        secured,
         ctx.cancel().wait(),
         async |client| {
             ctx.clear_error();
@@ -242,27 +265,101 @@ async fn idle(ctx: &Context<Config>) -> Result<(), Error> {
     ran.unwrap_or(Ok(()))
 }
 
-/// Connects to `address` with `time`, `span`, `net`, and `rng`, as [`Client::connect`]
-/// does, gives the client to `work`, and then closes the session. `None` when `until`
-/// ends before the connect.
+/// The credentials of a secure channel, read from the sources of the config.
+struct Secured<'a> {
+    security: &'a Security,
+    certificate: secret::Value,
+    key: secret::Value,
+    trust: secret::Value,
+}
+
+impl<'a> Secured<'a> {
+    /// Reads each source of `security` with `read`, which is the `secret` of a
+    /// context. `None` with no `security`.
+    async fn read(
+        security: Option<&'a Security>,
+        read: impl AsyncFn(&secret::Source) -> Result<secret::Value, Error>,
+    ) -> Result<Option<Self>, Error> {
+        let Some(security) = security else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            security,
+            certificate: read(&security.certificate).await?,
+            key: read(&security.key).await?,
+            trust: read(&security.trust).await?,
+        }))
+    }
+
+    fn credentials(&self) -> Credentials<'_> {
+        Credentials {
+            certificate: self.certificate.expose(),
+            key: self.key.expose(),
+            trust: self.trust.expose(),
+        }
+    }
+
+    /// The [`Error::Config`] of `refusal`, with the source of the credential that it
+    /// names.
+    fn refused(&self, refusal: Refusal) -> Error {
+        let (source, fix) = match refusal.credential() {
+            Credential::Certificate => (
+                &self.security.certificate,
+                "Give a DER or PEM certificate with an RSA key, the URI of the node in \
+                 its subject alternative name, and a validity window that holds the \
+                 mesh time",
+            ),
+            Credential::Key => (
+                &self.security.key,
+                "Give the DER or PEM private key of `certificate`, with no password",
+            ),
+            Credential::Trust => (
+                &self.security.trust,
+                "Give the DER or PEM certificate of the server, or of the CA that \
+                 issued it",
+            ),
+        };
+        let message = format!("{source}: {refusal}");
+        Error::Config(vec![Diagnostic::new(
+            CREDENTIALS,
+            None,
+            message,
+            fix.into(),
+        )])
+    }
+}
+
+/// Connects to `address` with `time`, `span`, `net`, `rng`, and the credentials of
+/// `secured`, as [`Client::connect`] does, gives the client to `work`, and then closes
+/// the session. `None` when `until` ends before the connect.
 ///
 /// # Errors
 ///
-/// [`Error::Device`] with the address when the connect fails.
+/// [`Error::Device`] with the address when the connect fails. [`Error::Config`] with
+/// `opcua.credentials` and the source when the client refuses a credential.
+#[expect(clippy::too_many_arguments, reason = "each is an input of the connect")]
 async fn session<T>(
     time: event::Time,
     span: tracing::Span,
     net: Net,
     rng: &mut Rng,
     address: &CStr,
+    secured: Option<&Secured<'_>>,
     until: impl Future<Output = ()>,
     work: impl AsyncFnOnce(&mut Client) -> T,
 ) -> Result<Option<T>, Error> {
-    let connected = Client::connect(time, span, net, rng, address, None, until).await;
+    let credentials =
+        secured.map(|secured| (secured.credentials(), secured.security.mode));
+    let security =
+        (credentials.as_ref()).map(|(credentials, mode)| (credentials, *mode));
+    let connected =
+        Client::connect(time, span, net, rng, address, security, until).await;
     let connected = connected.map_err(|error| match error {
         client::Error::Failed(status) => failed(address, Call::Connect, status),
         client::Error::Refused(refusal) => {
-            panic!("invariant: a client with no credentials refuses none: {refusal}")
+            let secured =
+                secured.expect("invariant: a client with no credentials refuses none");
+            secured.refused(refusal)
         }
     })?;
     let Some(mut client) = connected else {

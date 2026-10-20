@@ -34,6 +34,7 @@ use super::*;
 use crate::client::GRACE;
 use crate::client::tests::common::{env, rig};
 use crate::gate::Gate;
+use crate::secure::{CLIENT, HIGH_PEM, LASTING, OTHER, Policy, SERVER, START};
 use crate::sim::{Served, Variables, serve};
 
 const A: &str = "ns=3;s=SpikeData";
@@ -60,6 +61,9 @@ const MISTYPED: &str = "mistyped";
 
 /// The class of a device error in the status.
 const DEVICE: u64 = 2;
+
+/// The class of an error that a later run can heal.
+const RETRY: u64 = 3;
 
 fn ms(n: i64) -> Span {
     Span::from_nanos(n * 1_000_000)
@@ -480,11 +484,114 @@ where
     S: FnOnce(Rc<Scene>) -> F + Send + 'static,
     F: Future<Output = Result<(), Error>> + 'static,
 {
-    let run = logged(move |node, tasks| async move {
+    run_on(rate, setup, None, script)
+}
+
+/// The secure channel of a scene.
+#[derive(Clone, Copy)]
+struct Secure {
+    /// The wall time of the node at its start.
+    wall: Stamp,
+    /// The one policy of the server, on [`SERVER`], which trusts only [`CLIENT`].
+    policy: Policy,
+    unencrypted: bool,
+    /// The secrets [`CERTIFICATE`], [`KEY`], and [`TRUST`] of the connector, each
+    /// written before the run when it is `Some`.
+    credentials: [Option<&'static [u8]>; 3],
+}
+
+/// The secret of the certificate of [`PLC`].
+const CERTIFICATE: &str = "plant.opcua_certificate";
+/// The secret of the key of [`PLC`].
+const KEY: &str = "plant.opcua_key";
+/// The secret of the trust of [`PLC`].
+const TRUST: &str = "plant.opcua_trust";
+
+impl Secure {
+    /// A channel in `policy` on the credentials of [`CLIENT`], which trusts
+    /// [`SERVER`], a day after [`START`].
+    fn of(policy: Policy) -> Self {
+        Self {
+            wall: START + Span::from_nanos(86_400 * Span::SECOND.nanos()),
+            policy,
+            unencrypted: false,
+            credentials: [
+                Some(CLIENT.certificate),
+                Some(CLIENT.key),
+                Some(SERVER.certificate),
+            ],
+        }
+    }
+
+    /// Adds the attributes of the channel to `config`, writes the secrets on the files
+    /// of `node`, and secures the server of `variables`.
+    async fn apply(
+        self,
+        node: &node::Node,
+        config: &mut Document,
+        variables: &Variables,
+    ) {
+        let mut attributes: Vec<_> = config.attributes.iter().cloned().collect();
+        for (key, name) in
+            [("certificate", CERTIFICATE), ("key", KEY), ("trust", TRUST)]
+        {
+            attributes.push(attribute(key, secret(name)));
+        }
+        if self.unencrypted {
+            attributes.push(attribute("unencrypted", value::Kind::Bool(true)));
+        }
+        config.attributes = Map::new(attributes).expect("unique keys");
+        let held = [CERTIFICATE, KEY, TRUST].into_iter().zip(self.credentials);
+        for (text, bytes) in held {
+            if let Some(bytes) = bytes {
+                testing::create_secret(&node.files(), &name(text), bytes).await;
+            }
+        }
+        let served = Credentials {
+            certificate: SERVER.certificate,
+            key: SERVER.key,
+            trust: CLIENT.certificate,
+        };
+        variables.secure(served, self.policy);
+    }
+}
+
+/// `secret("<name>")`.
+fn secret(name: &str) -> value::Kind {
+    value::Kind::Call(value::Call {
+        function: "secret".into(),
+        function_span: None,
+        arguments: vec![Value {
+            kind: value::Kind::String(name.into()),
+            span: None,
+        }],
+    })
+}
+
+/// [`run_at`] over the channel of `secure`, or with no security when it is `None`.
+fn run_on<S, F>(
+    rate: &'static str,
+    setup: Setup,
+    secure: Option<Secure>,
+    script: S,
+) -> Record
+where
+    S: FnOnce(Rc<Scene>) -> F + Send + 'static,
+    F: Future<Output = Result<(), Error>> + 'static,
+{
+    let mut node = node::Config::default();
+    if let Some(secure) = secure {
+        node.wall = secure.wall;
+    }
+    let run = logged(node, move |node, tasks| async move {
         let rig = rig(&node, tasks.clone()).await;
         let hub = rig.hub();
         let address = format!("opc.tcp://{}:4840", node.addresses()[0]);
-        let config = config(&address, rate, &setup.reads);
+        let mut config = config(&address, rate, &setup.reads);
+        let variables = setup.variables();
+        if let Some(secure) = secure {
+            secure.apply(&node, &mut config, &variables).await;
+        }
         let status = rig.define_status("opcua", &name(PLC), &config);
         let channels = setup.channels.iter();
         let channels: Vec<_> = channels
@@ -505,7 +612,7 @@ where
         let statuses = record(hub, &status, &tasks, by_segment).await;
         let scene = Rc::new(Scene {
             config,
-            variables: setup.variables(),
+            variables,
             rig,
             server: RefCell::new(None),
             gate: Gate::default(),
@@ -536,9 +643,10 @@ where
     }
 }
 
-/// Runs `body` on a shard of a new node of a new sim, as [`Sim::run_on`] does, and
-/// gives what it returned and the lines of target `open62541`.
+/// Runs `body` on a shard of a new node of `node` in a new sim, as [`Sim::run_on`]
+/// does, and gives what it returned and the lines of target `open62541`.
 fn logged<T, F>(
+    node: node::Config,
     body: impl FnOnce(node::Node, Tasks) -> F + Send + 'static,
 ) -> (T, Vec<String>)
 where
@@ -546,7 +654,7 @@ where
     F: Future<Output = T> + 'static,
 {
     let mut sim = Sim::new(::sim::Config::default());
-    let node = sim.node(node::Config::default());
+    let node = sim.node(node);
     let (capture, log) = testing::Capture::new("open62541");
     let out = Arc::new(Mutex::new(None));
     let (slot, own) = (Arc::clone(&out), node.clone());
@@ -1876,4 +1984,179 @@ fn refuses_to_discover() {
         "Write the connector block by hand".into(),
     );
     assert_eq!(diagnostics, [expected]);
+}
+
+/// [`PLC`] supervised for 1.05 s over `secure`.
+fn secured(secure: Secure) -> Record {
+    run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
+        scene.supervise(ms(1_050)).await
+    })
+}
+
+/// The [`CREDENTIALS`] error of `text` on the secret `secret`, with `fix`.
+fn credentials(secret: &str, text: &str, fix: &str) -> Diagnostic {
+    let message = format!("secret(\"{secret}\"): {text}");
+    Diagnostic::new(CREDENTIALS, None, message, fix.into())
+}
+
+const CERTIFICATE_FIX: &str = "Give a DER or PEM certificate with an RSA key, the URI \
+                               of the node in its subject alternative name, and a \
+                               validity window that holds the mesh time";
+const KEY_FIX: &str =
+    "Give the DER or PEM private key of `certificate`, with no password";
+const TRUST_FIX: &str =
+    "Give the DER or PEM certificate of the server, or of the CA that issued it";
+
+#[test]
+fn reads_over_a_secure_channel_of_each_policy_in_each_mode() {
+    for policy in Policy::ALL {
+        for unencrypted in [false, true] {
+            let outcome = secured(Secure {
+                unencrypted,
+                ..Secure::of(policy)
+            });
+            let at = format!("{policy:?}, unencrypted {unencrypted}");
+            assert!(outcome.result.is_ok(), "{at}: {:?}", outcome.result);
+            assert_eq!(errors(&outcome.statuses), [], "{at}");
+            assert_eq!(outcome.frames.len(), 11, "{at}");
+            assert_eq!(values(&outcome.frames, 2), served(&outcome, A), "{at}");
+        }
+    }
+}
+
+/// A server that trusts only [`CLIENT`] accepts no channel of another certificate on
+/// its key, so the run asks for a secure channel, not one with the mode `None`.
+#[test]
+fn a_server_that_does_not_trust_the_certificate_ends_the_run_with_a_device_error() {
+    let mut secure = Secure::of(Policy::Basic256Sha256);
+    secure.credentials[0] = Some(LASTING.certificate);
+    let outcome = secured(secure);
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    let connect =
+        "the connect to opc.tcp://10.0.0.1:4840 failed with BadSecurityChecksFailed";
+    assert_eq!(errors(&outcome.statuses), [(DEVICE, connect.to_owned())]);
+    assert_eq!(outcome.frames, []);
+}
+
+#[test]
+fn refuses_a_key_with_a_byte_past_0x7f_in_a_pem_line_with_its_secret() {
+    let mut secure = Secure::of(Policy::Basic256Sha256);
+    secure.credentials[1] = Some(HIGH_PEM.key);
+    let text = "line 2 of the key, in a PEM block, holds a byte of 0x80 to 0xFF, which \
+                PEM does not allow";
+    assert_eq!(
+        diagnostics(secured(secure).result),
+        [credentials(KEY, text, KEY_FIX)]
+    );
+}
+
+#[test]
+fn refuses_the_key_of_another_certificate_with_the_secret_of_the_key() {
+    let mut secure = Secure::of(Policy::Basic256Sha256);
+    secure.credentials[1] = Some(OTHER.key);
+    let text = "the key is not the key of the certificate";
+    assert_eq!(
+        diagnostics(secured(secure).result),
+        [credentials(KEY, text, KEY_FIX)]
+    );
+}
+
+/// The default wall time of a sim node is in 2026, past the window of [`CLIENT`].
+#[test]
+fn refuses_a_certificate_outside_its_window_at_the_mesh_time() {
+    let secure = Secure {
+        wall: node::Config::default().wall,
+        ..Secure::of(Policy::Basic256Sha256)
+    };
+    let text = "the time is outside the validity window of the certificate";
+    assert_eq!(
+        diagnostics(secured(secure).result),
+        [credentials(CERTIFICATE, text, CERTIFICATE_FIX)]
+    );
+}
+
+#[test]
+fn refuses_a_trust_with_no_certificate_with_the_secret_of_the_trust() {
+    let mut secure = Secure::of(Policy::Basic256Sha256);
+    secure.credentials[2] = Some(b"no certificate");
+    let text = "the trust holds no certificate in DER or PEM";
+    assert_eq!(
+        diagnostics(secured(secure).result),
+        [credentials(TRUST, text, TRUST_FIX)]
+    );
+}
+
+/// A run with no secret of the key ends with the error of the store, and the run
+/// after the secret is written reads.
+#[test]
+fn a_missing_secret_ends_the_run_until_it_is_written() {
+    let mut secure = Secure::of(Policy::Basic256Sha256);
+    secure.credentials[1] = None;
+    let outcome = run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
+        scene.after(ms(1_050), |scene| async move {
+            testing::create_secret(&scene.node.files(), &name(KEY), CLIENT.key).await;
+        });
+        scene.supervise(ms(5_050)).await
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    let unread = "the secret secret(\"plant.opcua_key\"): the file \
+                  /data/secrets/plant.opcua_key is not there. Write the value to it, \
+                  unreadable by other users: chmod o-r /data/secrets/plant.opcua_key";
+    assert_eq!(errors(&outcome.statuses), [(RETRY, unread.to_owned())]);
+    assert!(!outcome.frames.is_empty());
+    assert_eq!(values(&outcome.frames, 2), served(&outcome, A));
+}
+
+/// A browse of the kind connects over the secure channel of the config.
+#[test]
+fn browses_over_a_secure_channel() {
+    let found = Arc::new(Mutex::new(None));
+    let slot = Arc::clone(&found);
+    let secure = Secure::of(Policy::Aes256Sha256RsaPss);
+    let outcome = run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
+        let query = browse::Query {
+            start: browse::Path::root(),
+            scope: browse::Scope::Level(None),
+            values: browse::Values::Skipped,
+        };
+        let supervisor = scene.rig.supervisor();
+        let browse = supervisor.browse("opcua", &scene.config, &query).await;
+        *slot.lock().expect("no panic under the lock") = Some(browse);
+        Ok(())
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    let found = found.lock().expect("no panic under the lock").take();
+    let found = found.expect("the browse ran").expect("the browse ends");
+    let tags: Vec<_> = found
+        .entries
+        .iter()
+        .map(|entry| entry.tag.as_str())
+        .collect();
+    assert_eq!(tags, ["i=2253", "ns=1;s=Plant", A, B, C]);
+}
+
+/// A browse refuses the key of another certificate as a run does.
+#[test]
+fn a_browse_refuses_the_key_of_another_certificate() {
+    let found = Arc::new(Mutex::new(None));
+    let slot = Arc::clone(&found);
+    let mut secure = Secure::of(Policy::Basic256Sha256);
+    secure.credentials[1] = Some(OTHER.key);
+    run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
+        let query = browse::Query {
+            start: browse::Path::root(),
+            scope: browse::Scope::Level(None),
+            values: browse::Values::Skipped,
+        };
+        let supervisor = scene.rig.supervisor();
+        let browse = supervisor.browse("opcua", &scene.config, &query).await;
+        *slot.lock().expect("no panic under the lock") = Some(browse.map(|_| ()));
+        Ok(())
+    });
+    let found = found.lock().expect("no panic under the lock").take();
+    let text = "the key is not the key of the certificate";
+    assert_eq!(
+        diagnostics(found.expect("the browse ran")),
+        [credentials(KEY, text, KEY_FIX)]
+    );
 }

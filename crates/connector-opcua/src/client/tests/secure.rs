@@ -768,6 +768,40 @@ fn a_refusal_names_the_part_that_fails() {
 }
 
 #[test]
+fn the_debug_of_credentials_holds_no_key() {
+    let credentials = Credentials {
+        certificate: CLIENT.certificate,
+        key: CLIENT.key,
+        trust: SERVER.certificate,
+    };
+    assert_eq!(format!("{credentials:?}"), "<credentials>");
+}
+
+#[test]
+fn a_refusal_gives_the_credential_that_it_names() {
+    for credential in [Credential::Certificate, Credential::Key, Credential::Trust] {
+        let line = Refusal::Line {
+            credential,
+            number: 1,
+        };
+        assert_eq!(line.credential(), credential);
+    }
+    for (refusal, credential) in [
+        (Refusal::Certificate, Credential::Certificate),
+        (Refusal::Time, Credential::Certificate),
+        (Refusal::Uri, Credential::Certificate),
+        (Refusal::Key, Credential::Key),
+        (Refusal::Mismatch, Credential::Key),
+        (Refusal::Empty, Credential::Trust),
+        (Refusal::Invalid { number: 2 }, Credential::Trust),
+        (Refusal::Damaged { after: 1 }, Credential::Trust),
+        (Refusal::Trailing { number: 3 }, Credential::Trust),
+    ] {
+        assert_eq!(refusal.credential(), credential, "{refusal:?}");
+    }
+}
+
+#[test]
 fn a_certificate_that_does_not_parse_ends_the_connect_before_the_dial() {
     let own = Identity {
         certificate: b"no certificate",
