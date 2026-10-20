@@ -108,19 +108,27 @@ fn the_drop_of_the_mesh_ends_the_wait_for_the_dial_of_a_learner() {
     }
 }
 
-// No voter answers node 4, so each dial would wait until it times out.
+// Voter 1 never starts, so the first dial of node 4 waits until it times out.
 #[test]
-fn a_learner_stops_its_wait_when_it_names_the_next_voter() {
-    solo(|node, tasks| async move {
-        let config = dialed_at(&node, &tasks, 4, 0, &MEMBERS, &IDS).await;
-        let transport = Rc::clone(&config.transport);
-        let _mesh = Mesh::open(config).await.unwrap();
-        let clock = node.clock();
-        clock.sleep(seconds(3)).await;
-        let one = Rc::strong_count(&transport);
-        clock.sleep(seconds(30)).await;
-        assert_eq!(Rc::strong_count(&transport), one);
-    });
+fn a_learner_dials_the_next_voter_while_a_dial_of_a_silent_voter_waits() {
+    for seed in 0..4 {
+        let mut cluster = Cluster::of(seed, &MEMBERS);
+        {
+            let mut board = cluster.board.lock().unwrap();
+            board.learners = [4].into();
+            board.hidden = Some(4);
+        }
+        cluster.script(home_to);
+        for id in 2..=4 {
+            cluster.start_voter(id);
+        }
+        cluster.run(seconds(15));
+        let board = cluster.board();
+        let &[leader] = board.led.as_slice() else {
+            panic!("run {seed}: led {:?}", board.led);
+        };
+        assert_eq!(last(&board.homes, 4), Some(key(leader)), "run {seed}");
+    }
 }
 
 // Each voter restarts, so node 4 holds a session to the new leader that the leader
