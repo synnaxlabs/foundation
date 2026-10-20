@@ -104,8 +104,8 @@ impl Node {
     /// The node that answers first at `addresses`, dialed in this order with a stagger,
     /// with the public key that it proves. Blocks until each address fails, or until a
     /// node answers and the transport drains the close of each session (up to 3 s). A
-    /// close goes out again for each packet of the node that comes before its drain
-    /// ends. Trust on first use: nothing proves that it is the node the caller means,
+    /// packet of the node that comes before its drain ends makes the close go out
+    /// again. Trust on first use: nothing proves that it is the node the caller means,
     /// so the caller pins the result and gives it to each later [`Client::connect`]. It
     /// sends no hello, so it needs no subject.
     ///
@@ -157,8 +157,7 @@ fn on_os(tasks: Tasks) -> transport::client::Config {
 
 /// The public key of the node that answers first at `addresses`, on a transport of
 /// `config`. Closes the session with code 0 and waits until the close drains, so
-/// that the close goes out again for each packet of the node that comes before its
-/// end.
+/// that a packet of the node that comes before its end makes the close go out again.
 async fn answered(
     addresses: &[transport::Address],
     config: transport::client::Config,

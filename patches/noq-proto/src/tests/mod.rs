@@ -1634,9 +1634,8 @@ fn close_from_migrated_address() {
     assert_eq!(path.remote(), client_addr);
 }
 
-/// A closed server sends its close again for a packet on the path of the connection,
-/// but not for one from a new address of the client, as a closed connection migrates no
-/// path.
+/// A closed server sends no close for a packet from a new address of the client, as a
+/// closed connection migrates no path.
 #[test]
 fn closed_server_sends_no_close_to_a_migrated_client() {
     let _guard = subscribe();
