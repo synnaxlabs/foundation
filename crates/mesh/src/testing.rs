@@ -1981,6 +1981,55 @@ mod tests {
             ),
             ("home_cut", cut),
         ]
+        .into_iter()
+        .chain(refused_parts())
+        .collect()
+    }
+
+    /// The bytes of each refused input of `mesh_founding` with one bad prefix, member,
+    /// or voter list, by name.
+    #[expect(clippy::arithmetic_side_effects, reason = "a test may panic")]
+    fn refused_parts() -> Vec<(&'static str, Vec<u8>)> {
+        let [prefix, count, one, two, voters, definitions, homes] = founding_parts();
+        let bytes = founding().encode();
+        let rest = [&definitions[..], &homes].concat();
+        let keys = |ids: &[u8]| {
+            let mut out = Vec::new();
+            put_count(ids.len(), &mut out);
+            for &id in ids {
+                crate::bytes::put_key(key(id), &mut out);
+            }
+            [&prefix[..], &count, &one, &two, &out, &rest].concat()
+        };
+        let members = founding().members;
+        let cards = [&members[0], &members[1]].map(|member| {
+            let mut out = Vec::new();
+            member.card.encode(&mut out);
+            out.len()
+        });
+        let mut forged = one.clone();
+        forged[cards[0] - 1] ^= 1;
+        // After the card and the admission of 64 bytes of member 2, which is
+        // ephemeral: the presence byte, 8 bytes, and the count of status entries.
+        let mut ephemeral = two.clone();
+        ephemeral[cards[1] + 64] = 2;
+        let mut statuses = two.clone();
+        let at = cards[1] + 64 + 9;
+        statuses[at..at + 8].copy_from_slice(&65_u64.to_le_bytes());
+        let with = |one: &[u8], two: &[u8]| {
+            [&prefix[..], &count, one, two, &voters, &rest].concat()
+        };
+        vec![
+            (
+                "prefix_invalid",
+                [&[1, 0xff][..], &bytes[prefix.len()..]].concat(),
+            ),
+            ("member_forged", with(&forged, &two)),
+            ("ephemeral_invalid", with(&one, &ephemeral)),
+            ("status_over_64", with(&one, &statuses)),
+            ("voters_out_of_order", keys(&[2, 1])),
+            ("voters_twice", keys(&[1, 1])),
+        ]
     }
 
     #[test]
@@ -1989,10 +2038,16 @@ mod tests {
             "root",
             "plant",
             "none",
+            "prefix_invalid",
             "trailing",
             "members_out_of_order",
             "members_twice",
             "member_cut",
+            "member_forged",
+            "ephemeral_invalid",
+            "status_over_64",
+            "voters_out_of_order",
+            "voters_twice",
             "voters_cut",
             "definitions_out_of_order",
             "definition_past_end",
