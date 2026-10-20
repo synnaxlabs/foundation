@@ -30,6 +30,9 @@ use crate::value::{self, Cause, Fault, SCALARS, Value};
 mod tests;
 mod watch;
 
+#[cfg(feature = "sim")]
+pub use watch::drives;
+
 const SAMPLE_TYPE: Code = Code::new("opcua.sample-type");
 const LARGE_READ: Code = Code::new("opcua.large-read");
 

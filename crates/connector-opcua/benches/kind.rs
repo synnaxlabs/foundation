@@ -4,7 +4,8 @@
 //! type than its channel, the check of the values of one read and
 //! the write of its frame alone, into channels of one type or of each type in turn
 //! and with no Bad value or one,
-//! the polls of its run start, and its parse. Run with
+//! the take and the write of a drive of the changes of a subscription, of each node
+//! or of one of 256, the polls of its run start, and its parse. Run with
 //! `cargo bench -p connector-opcua --bench kind`.
 
 #![expect(clippy::disallowed_methods, reason = "a benchmark reads a real clock")]
@@ -37,6 +38,9 @@ const WRITES: [(usize, &[Scalar], [usize; 2]); 7] = [
     (256, &[Scalar::Bool], [0, 0]),
     (256, SCALARS, [0, 0]),
 ];
+/// The node counts and the changes of each drive of a subscription, into f64
+/// channels. One change of 256 nodes is the frame of one moved channel.
+const DRIVES: [(usize, usize); 3] = [(1, 1), (256, 256), (256, 1)];
 /// The ticks or writes before the timed ones. Tick 1 connects. The test home grows the
 /// `Vec`s of its groups in its first two commits, then reuses each group. 20 covers two
 /// commits on both lines: a write each 1 ms, and a tick each 100 ms.
@@ -78,6 +82,7 @@ fn main() {
         );
     }
     writes();
+    drives();
     println!("ns per run start over {RUNS} runs, and per parse over {PARSES} parses");
     println!("{:<10} {:>10} {:>10}", "nodes", "start p50", "parse p50");
     for nodes in STARTS {
@@ -129,6 +134,33 @@ fn writes() {
         };
         println!(
             "{nodes:<10} {name:<6} {bad:>4} {:>7} {:>7} {:>7}",
+            at(10),
+            at(50),
+            at(90)
+        );
+    }
+}
+
+/// Prints the times of each drive of `DRIVES`.
+#[expect(clippy::print_stdout, reason = "a benchmark prints its results")]
+fn drives() {
+    println!("ns per drive of the changes of a subscription over {TICKS} drives");
+    println!(
+        "{:<10} {:>7} {:>7} {:>7} {:>7}",
+        "nodes", "changes", "p10", "p50", "p90"
+    );
+    for (nodes, moved) in DRIVES {
+        let count = WARMUP + TICKS / WRITE_RUNS;
+        let mut drives: Vec<_> = (0..WRITE_RUNS)
+            .flat_map(|_| {
+                kind::drives(nodes, &[Scalar::F64], count, moved, time)
+                    .split_off(WARMUP)
+            })
+            .collect();
+        drives.sort_unstable();
+        let at = |percent: usize| drives[drives.len() * percent / 100];
+        println!(
+            "{nodes:<10} {moved:>7} {:>7} {:>7} {:>7}",
             at(10),
             at(50),
             at(90)

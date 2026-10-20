@@ -47,6 +47,13 @@ enum Of {
         bad: Box<dyn Fn(usize) -> usize + Send + Sync>,
         measures: Arc<Mutex<Vec<u64>>>,
     },
+    /// Each of `count` drives of a change of each of its first `moved` reads, with no
+    /// server.
+    Drives {
+        count: usize,
+        moved: usize,
+        measures: Arc<Mutex<Vec<u64>>>,
+    },
 }
 
 /// The `opcua` kind, with `measure` around each poll of its run or each write.
@@ -93,6 +100,16 @@ impl<M: Fn(&mut dyn FnMut()) -> u64 + Send + Sync + 'static> kind::Kind
                 let writes = connector_opcua::bench::kind::writes;
                 let written = writes(&ctx, *count, bad, &self.measure).await?;
                 *measures.lock().expect("no panic under the lock") = written;
+                Ok(())
+            }
+            Of::Drives {
+                count,
+                moved,
+                measures,
+            } => {
+                let drive = connector_opcua::bench::kind::drives;
+                let measured = drive(&ctx, *count, *moved, &self.measure).await?;
+                *measures.lock().expect("no panic under the lock") = measured;
                 Ok(())
             }
         }
@@ -197,6 +214,53 @@ pub(crate) fn writes(
             measures: Arc::clone(&measures),
         },
     };
+    let readings = offline(kind, nodes, scalars);
+    let measures = measures.lock().expect("no panic under the lock");
+    (measures.clone(), readings)
+}
+
+/// Takes and writes `count` drives of a connector that subscribes to `nodes`
+/// variables, with no server, each a change of each of the first `moved`, and gives what
+/// `measure` gives for the take and the write of each drive. Read `i` goes into a
+/// channel of the type `scalars[i % scalars.len()]`. `measure` calls the work that it
+/// gets once.
+///
+/// # Panics
+///
+/// If the run ends with an error.
+pub(crate) fn drives(
+    nodes: usize,
+    scalars: &'static [Scalar],
+    count: usize,
+    moved: usize,
+    measure: impl Fn(&mut dyn FnMut()) -> u64 + Send + Sync + 'static,
+) -> Vec<u64> {
+    let measures = Arc::<Mutex<Vec<u64>>>::default();
+    let kind = Measured {
+        measure,
+        of: Of::Drives {
+            count,
+            moved,
+            measures: Arc::clone(&measures),
+        },
+    };
+    offline(kind, nodes, scalars);
+    let measures = measures.lock().expect("no panic under the lock");
+    measures.clone()
+}
+
+/// Runs `kind` as the connector of `nodes` reads of the channels of `scalars` in
+/// turn, with no server, and gives each status of the connector that the home
+/// applied, in order.
+///
+/// # Panics
+///
+/// If the run ends with an error.
+fn offline(
+    kind: impl kind::Kind,
+    nodes: usize,
+    scalars: &'static [Scalar],
+) -> Vec<Reading> {
     let mut sim = sim::Sim::new(sim::Config::default());
     let node = sim.node(sim::node::Config::default());
     let run = sim.run_on(&node, move |node, tasks| async move {
@@ -212,8 +276,7 @@ pub(crate) fn writes(
     });
     let (result, readings) = run.expect("the run ends");
     assert!(result.is_ok(), "the run ends ok: {result:?}");
-    let measures = measures.lock().expect("no panic under the lock");
-    (measures.clone(), readings)
+    readings
 }
 
 /// A rig on `node` with `kind` as `opcua`, which defines the channels of

@@ -87,6 +87,64 @@ pub(super) async fn run(
     Ok(())
 }
 
+/// Takes and writes `count` drives of the reads of `ctx` with no server, each a change
+/// of each of the first `moved` reads with the value 1 in the sample type of its channel (`true` for
+/// `bool`), both timestamps 0.5 ms before the drive, and each drive 1 ms of its clock
+/// after the last, through a fit of a server clock that reads mesh time exactly. Gives
+/// what `measure` gives for the take and the write of each drive. `measure` calls the
+/// work that it gets once. For benchmarks.
+///
+/// # Errors
+///
+/// As [`Kind::run`](connector::kind::Kind::run), with no connect or subscribe.
+///
+/// # Panics
+///
+/// As [`writes`](super::writes).
+#[cfg(feature = "sim")]
+pub async fn drives(
+    ctx: &Context<Config>,
+    count: usize,
+    moved: usize,
+    mut measure: impl FnMut(&mut dyn FnMut()) -> u64,
+) -> Result<Vec<u64>, Error> {
+    let mut frames = Frames::open(ctx)
+        .await?
+        .expect("invariant: a benchmark run is not cancelled before its writer opens");
+    let reads = &ctx.config().reads;
+    let mesh = frames.writer.time();
+    let mut fit = Fit::default();
+    let now = mesh.now();
+    _ = fit.between(device(now).expect("a mesh time in the map"), now, now);
+    let mut changes: Vec<Change> = (frames.types.iter().take(moved).enumerate())
+        .map(|(index, &scalar)| Change {
+            index,
+            value: Ok(Value::one(scalar)),
+            source: None,
+            server: None,
+            overflow: false,
+        })
+        .collect();
+    let mut drive = Drive::new(reads.len());
+    let mut measures = Vec::with_capacity(count);
+    for _ in 0..count {
+        ctx.clock().sleep(Span::from_nanos(1_000_000)).await;
+        let arrived = mesh.now();
+        let at = Some(arrived - Span::from_nanos(500_000));
+        for change in &mut changes {
+            (change.source, change.server) = (at, at);
+        }
+        let mut written = Ok(());
+        measures.push(measure(&mut || {
+            written = drive
+                .take(&changes, &mut fit, arrived, reads)
+                .and_then(|_| drive.write(&mut frames, &fit));
+        }));
+        written?;
+    }
+    Ok(measures)
+}
+
 /// The fit of the server clock to the mesh time of the writer.
 struct Clock {
     fit: Fit,
