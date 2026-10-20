@@ -160,7 +160,9 @@ mod tests {
     fn names_hold_at_most_64_names_and_read_back() {
         let most: BTreeSet<_> = entries(64).into_keys().collect();
         let names = Names::new(most.clone()).unwrap();
-        assert_eq!(names, Names(most));
+        let mut keys = entries(64).into_values();
+        let status = names.clone().keyed(|_| keys.next().unwrap());
+        assert_eq!(status.as_map(), &entries(64));
         let mut bytes = Vec::new();
         names.encode(&mut bytes);
         assert_eq!(Names::decode(&mut bytes.as_slice()), Some(names));
