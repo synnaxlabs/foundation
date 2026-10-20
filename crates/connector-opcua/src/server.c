@@ -239,7 +239,15 @@ static void count_message(void *context, UA_LogLevel level, UA_LogCategory categ
     counter->next->log(counter->next->context, level, category, msg, args);
 }
 
-static void count_clear(UA_Logger *logger) { UA_free(logger->context); }
+static void count_clear(UA_Logger *logger) {
+    shim_counter *counter = (shim_counter *)logger->context;
+    const UA_Logger *next = counter->next;
+    UA_free(counter);
+    /* Each count wraps the count before it. The logger under the first is the logger
+     * of the event loop, which the server does not own. */
+    if(next->clear == count_clear)
+        next->clear((UA_Logger *)(uintptr_t)next);
+}
 
 /* Counts each Browse, CreateMonitoredItems, and Publish request that `server`
  * processes from now, and the most continuation points that one of its sessions holds,
