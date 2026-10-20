@@ -70,6 +70,101 @@ pub(crate) const CLIENT_PEM: Identity = Identity {
     key: include_bytes!("secure/client-key.pem"),
 };
 
+/// [`CLIENT_PEM`] with a byte of 0xA0 before the `\n` of the second line of its
+/// certificate and of its key.
+pub(crate) const HIGH_PEM: Identity = Identity {
+    certificate: &HIGH_CERTIFICATE,
+    key: &HIGH_KEY,
+};
+
+const HIGH_CERTIFICATE: [u8; CLIENT_PEM.certificate.len() + 1] =
+    with_high_byte(CLIENT_PEM.certificate);
+
+const HIGH_KEY: [u8; CLIENT_PEM.key.len() + 1] = with_high_byte(CLIENT_PEM.key);
+
+/// `pem` with a byte of 0xA0 before the `\n` of its second line.
+///
+/// # Panics
+///
+/// When `LENGTH` is not one past the length of `pem`.
+const fn with_high_byte<const LENGTH: usize>(pem: &[u8]) -> [u8; LENGTH] {
+    let mut out = [0; LENGTH];
+    let (mut from, mut to, mut lines) = (0, 0, 0);
+    while from < pem.len() {
+        if pem[from] == b'\n' {
+            lines += 1;
+            if lines == 2 {
+                out[to] = 0xA0;
+                to += 1;
+            }
+        }
+        out[to] = pem[from];
+        (from, to) = (from + 1, to + 1);
+    }
+    assert!(to == LENGTH, "the PEM has two lines");
+    out
+}
+
+/// [`CLIENT`] with its key in a PKCS #8 whose attributes hold [`PAD`] bytes, past
+/// the 100 KiB that a DER read through a BIO takes.
+pub(crate) const LONG_KEY: Identity = Identity {
+    certificate: CLIENT.certificate,
+    key: &LONG_KEY_DER,
+};
+
+const PAD: usize = (100 << 10) + 1;
+
+const LONG_KEY_DER: [u8; CLIENT.key.len() + PAD + 37] = long_key(CLIENT.key);
+
+/// The PKCS #8 of the RSA PKCS #1 key `key`, with attributes of one OCTET STRING of
+/// [`PAD`] zero bytes.
+///
+/// # Panics
+///
+/// When `LENGTH` is not the length of the PKCS #8, or `key` is not 256 to 65 535
+/// bytes long.
+const fn long_key<const LENGTH: usize>(key: &[u8]) -> [u8; LENGTH] {
+    // The version 0, then the algorithm rsaEncryption with NULL parameters.
+    const HEAD: [u8; 18] = [
+        0x02, 0x01, 0x00, 0x30, 0x0D, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D,
+        0x01, 0x01, 0x01, 0x05, 0x00,
+    ];
+    assert!(key.len() >= 256 && key.len() <= 0xFFFF, "a two-byte length");
+    let mut out = [0; LENGTH];
+    let mut at = header(&mut out, 0, 0x30, LENGTH - 5);
+    at = copy(&mut out, at, &HEAD);
+    at = header(&mut out, at, 0x04, key.len());
+    at = copy(&mut out, at, key);
+    at = header(&mut out, at, 0xA0, PAD + 5);
+    at = header(&mut out, at, 0x04, PAD);
+    assert!(at + PAD == LENGTH, "the length of the PKCS #8");
+    out
+}
+
+/// Writes at `at` the DER header of `tag` with the `length` of 256 to 2^24 - 1 bytes,
+/// and gives the index after it.
+const fn header(out: &mut [u8], at: usize, tag: u8, length: usize) -> usize {
+    let bytes = if length > 0xFFFF { 3 } else { 2 };
+    out[at] = tag;
+    out[at + 1] = 0x80 | bytes as u8;
+    let mut index = 0;
+    while index < bytes {
+        out[at + 2 + index] = (length >> (8 * (bytes - 1 - index))) as u8;
+        index += 1;
+    }
+    at + 2 + bytes
+}
+
+/// Copies `bytes` to `out` at `at`, and gives the index after them.
+const fn copy(out: &mut [u8], at: usize, bytes: &[u8]) -> usize {
+    let mut index = 0;
+    while index < bytes.len() {
+        out[at + index] = bytes[index];
+        index += 1;
+    }
+    at + bytes.len()
+}
+
 /// A client with the URI of [`CLIENT`] on a P-256 key.
 pub(crate) const EC: Identity = Identity {
     certificate: include_bytes!("secure/ec.der"),

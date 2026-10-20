@@ -10,9 +10,9 @@ use crate::event;
 use crate::ffi::{self, Status};
 use crate::secure::{
     ANONYMOUS, BROKEN_TRUST, CLIENT, CLIENT_ONLY_SERVER, CLIENT_PEM, EC, EMPTY_URI,
-    END, HEADED_TRUST, Identity, LASTING, LINE_TRUST, LONG_BLOCK_TRUST,
-    ONE_BLOCK_TRUST, OTHER, Policy, REJECTED_SERVER, SERVER, START, TRUST, TWO_URIS,
-    UNNAMED,
+    END, HEADED_TRUST, HIGH_PEM, Identity, LASTING, LINE_TRUST, LONG_BLOCK_TRUST,
+    LONG_KEY, ONE_BLOCK_TRUST, OTHER, Policy, REJECTED_SERVER, SERVER, START, TRUST,
+    TWO_URIS, UNNAMED,
 };
 use crate::server::Limits;
 use crate::value::{Fault, Value};
@@ -233,6 +233,19 @@ fn a_client_with_a_pem_certificate_and_key_reads() {
         0,
         (SERVED, START),
         (CLIENT_PEM, SERVER.certificate, START),
+        &Policy::ALL,
+        Mode::Sign,
+    );
+    let read = read.expect("the client connects");
+    assert_eq!(read.answer, Ok(read.value));
+}
+
+#[test]
+fn a_der_key_past_100_kib_reads() {
+    let (read, _) = connect(
+        0,
+        (SERVED, START),
+        (LONG_KEY, SERVER.certificate, START),
         &Policy::ALL,
         Mode::Sign,
     );
@@ -669,15 +682,6 @@ fn a_certificate_that_does_not_parse_ends_the_connect_before_the_dial() {
     assert_eq!(refused(own), Err(Error::Refused(Refusal::Certificate)));
 }
 
-/// `pem` with a byte of 0xA0 before the `\n` of its second line, which lives to the
-/// end of the test.
-fn with_high_byte(pem: &[u8]) -> &'static [u8] {
-    let mut lines = pem.split_inclusive(|&byte| byte == b'\n');
-    let first = lines.next().expect("the PEM has a first line").len();
-    let end = first + lines.next().expect("the PEM has a second line").len() - 1;
-    [&pem[..end], b"\xA0", &pem[end..]].concat().leak()
-}
-
 /// The `Line` refusal of line 2 of `credential`.
 fn second_line(credential: Credential) -> Result<(), Error> {
     Err(Error::Refused(Refusal::Line {
@@ -689,7 +693,7 @@ fn second_line(credential: Credential) -> Result<(), Error> {
 #[test]
 fn a_pem_certificate_with_a_high_byte_ends_the_connect_before_the_dial() {
     let own = Identity {
-        certificate: with_high_byte(CLIENT_PEM.certificate),
+        certificate: HIGH_PEM.certificate,
         ..CLIENT_PEM
     };
     assert_eq!(refused(own), second_line(Credential::Certificate));
@@ -698,7 +702,7 @@ fn a_pem_certificate_with_a_high_byte_ends_the_connect_before_the_dial() {
 #[test]
 fn a_pem_key_with_a_high_byte_ends_the_connect_before_the_dial() {
     let own = Identity {
-        key: with_high_byte(CLIENT_PEM.key),
+        key: HIGH_PEM.key,
         ..CLIENT_PEM
     };
     assert_eq!(refused(own), second_line(Credential::Key));
@@ -1086,18 +1090,14 @@ fn a_received_chunk_holds_the_smaller_of_two_payloads() {
 
 #[test]
 fn the_certificate_line_is_checked_before_the_key_line() {
-    let own = Identity {
-        certificate: with_high_byte(CLIENT_PEM.certificate),
-        key: with_high_byte(CLIENT_PEM.key),
-    };
-    assert_eq!(refused(own), second_line(Credential::Certificate));
+    assert_eq!(refused(HIGH_PEM), second_line(Credential::Certificate));
 }
 
 #[test]
 fn the_key_line_is_checked_before_the_certificate() {
     let own = Identity {
         certificate: b"no certificate",
-        key: with_high_byte(CLIENT_PEM.key),
+        key: HIGH_PEM.key,
     };
     assert_eq!(refused(own), second_line(Credential::Key));
 }
