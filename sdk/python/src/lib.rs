@@ -157,8 +157,8 @@ struct Given {
 }
 
 impl Given {
-    /// The address, the node's public key, and the subject, each from the arguments, else
-    /// from `local`, the node that runs on the data directory `data`, if any.
+    /// The address, the node's public key, and the subject, each from the arguments,
+    /// else from `local`, the node that runs on the data directory `data`, if any.
     fn sourced(
         self,
         data: &Path,

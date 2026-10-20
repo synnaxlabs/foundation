@@ -15,10 +15,10 @@ use crate::{Address, Error, quic};
 /// How long the newest attempt runs before the next one starts.
 const STAGGER: Span = Span::from_nanos(250 * Span::MILLISECOND.nanos());
 
-/// Dials `peer`, or any node for `None`, at each of `addresses`: UDP first, then TCP, then relays, in the
-/// given order within a kind. It starts the next address [`STAGGER`] after the
-/// newest, or at once when the newest fails, and gives the first session that
-/// connects. Dropping the others closes their dials.
+/// Dials `peer`, or any node for `None`, at each of `addresses`: UDP first, then TCP,
+/// then relays, in the given order within a kind. It starts the next address
+/// [`STAGGER`] after the newest, or at once when the newest fails, and gives the first
+/// session that connects. Dropping the others closes their dials.
 ///
 /// # Errors
 ///
