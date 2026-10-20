@@ -20,13 +20,14 @@
      at once, and stops or closes its own. The lower node holds the higher peer's
      session (not in the table, not given to `accept`; its streams wait) while its own
      dial runs, or until the peer acknowledges a ping sent after the higher session
-     arrived. Its own completes or answers: it closes the held one. Its own fails or
-     ends: the held one wins, and goes to the waiters and to `accept`. The loser closes
-     with `Code(0)`. A restarted peer answers a ping on an old session with a
-     stateless reset (`cid::Issuer`), so the old session ends within one round trip.
-     Keys that are equal get no rule: no caller dials the node's own key, and two
-     nodes with one key are a misconfiguration. A session that has already ended as
-     it arrives changes nothing: it goes to `accept`, and the open one stays.
+     arrived. Its own completes and then answers a ping, or its open one answers: it
+     closes the held one. Its own fails or ends: the held one wins, and goes to the
+     waiters and to `accept`. The loser closes with `Code(0)`. A restarted peer
+     answers a ping on an old session with a stateless reset (`cid::Issuer`), so the
+     old session ends within one round trip. Keys that are equal get no rule: no
+     caller dials the node's own key, and two nodes with one key are a
+     misconfiguration. A session that has already ended as it arrives changes
+     nothing: it goes to `accept`, and the open one stays.
   5. Clients. A client session never enters the table, and `dial` never gives one. Two
      sessions from one client both stay open.
   6. Shards. The table is per `Transport`, so per shard. Until #77, a node runs one
@@ -49,3 +50,7 @@
   sentence of rule 4 on a session that has already ended as it arrives added by
   `laptop.architect-2`, 2026-10-11T07:28:01Z,
   https://github.com/synnaxlabs/foundation/pull/2363#issuecomment-6106676170.
+  In rule 4, a dial that completes closes the held session only once the peer answers
+  a ping on it, as the peer can still be in the handshake: `laptop.architect-2`,
+  2026-10-09T09:20:18Z,
+  https://github.com/synnaxlabs/foundation/issues/2132#issuecomment-6078089782.
