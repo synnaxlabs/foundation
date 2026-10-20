@@ -43,7 +43,9 @@
   `influx` runs 19.7 s (box1, at 2026-10-17). A later suite measures its own fill. The
   longest of scenarios 1 to 5 of `modbus` runs 6.1 s (box1, at 2026-10-18). The
   longest run of scenario 6 takes 50.2 s for `modbus` and `opcua` (seed 0x138), and
-  45.9 s for `influx` (seed 0x370) (box1, at 2026-10-20). The trigger is the
+  45.9 s for `influx` (seed 0x370) (box1, at 2026-10-20). Over seeds 0 to 99999 of
+  `modbus` and 0 to 49999 of `influx` and `opcua`, it takes 76.1 s (`modbus`, seed
+  0x11802) (box1, at 2026-10-20). The trigger is the
   merge of #3050, which trims the ring and adds the two tests that fail now
   (https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6241900155). #3050
   removes `RING`, its check in `run`, and the `suite!` tests `fails_past_the_ring` and
@@ -94,16 +96,20 @@
      they come: no panic, never class Config, each error text at most 1024 bytes, and
      no count and no restart count goes down. After the last fault, both links are as
      at the start and the simulator serves: heals. `CONFORMANCE_SEED` gives other
-     seeds in hex: one seed, or a range such as `0x0..0xf4240` for a nightly run. A
-     failed run panics with its replay command, which sets `CONFORMANCE_SEED` to its
-     seed. The plan's duplication is not drawn: the sim never duplicates a TCP
-     segment, so it reaches no kind of this suite. No run of the three kinds gives an
-     error text near the bound (112 bytes at most, box1, at 2026-10-20): the check
-     holds each kind to the cut of 1024 bytes that the supervisor makes. Until #3553,
-     a seed whose links fill the backlog of the device fails with the panic of the sim
-     at a full backlog, not for a defect of the connector. #3554 adds the nightly
-     range after #3553, and the replay of a failed seed in CI. The numbers of this
-     scenario: approved by `laptop.architect-2`, 2026-10-20T08:40:04Z
+     seeds in hex: one seed, or a range `<start>..<end>`, the end excluded, such as
+     `0x0..0xf4240` for a nightly run. A failed run panics with its replay command,
+     which sets `CONFORMANCE_SEED` to its seed.
+
+     The plan's duplication is not drawn: a TCP stack hides a duplicate segment from
+     the application, so no kind of this suite can see one. It comes back with the
+     first suite of a kind that is not TCP (#3075). `connector::status` cuts each text
+     to 1024 bytes, so the check of the bound guards that cut, and no kind can fail it
+     alone. No run of the three kinds gives an error text near the bound (112 bytes at
+     most, box1, at 2026-10-20). Until #3553, a seed whose links fill the backlog of
+     the device fails with the panic of the sim at a full backlog, not for a defect of
+     the connector. #3554 adds the nightly range after #3553, and the replay of a
+     failed seed in CI. The numbers of this scenario, and the duplication that it does
+     not draw: approved by `laptop.architect-2`, 2026-10-20T08:40:04Z
      (https://github.com/synnaxlabs/foundation/pull/3548#issuecomment-6286993255).
 
   Scenario 7 (no secret in a status) comes in #2642. The

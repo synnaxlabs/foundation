@@ -25,8 +25,8 @@ cargo test -p connector-influx --all-features --test conformance
 
 A failed run of `heals_after_random_faults` prints the command that replays it, such as
 `CONFORMANCE_SEED=0x2a cargo test -p connector-modbus --all-features --test conformance
-heals_after_random_faults`. A range, such as `CONFORMANCE_SEED=0x0..0xf4240`, runs more
-seeds than the 1000 of each merge.
+heals_after_random_faults`. A range `<start>..<end>` in hex, the end excluded, such as
+`CONFORMANCE_SEED=0x0..0xf4240`, runs more seeds than the 1000 of each merge.
 
 ## Rules
 

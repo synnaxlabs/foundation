@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::env::VarError;
 use std::future::poll_fn;
 use std::net::SocketAddr;
-use std::ops::Range;
+use std::ops::RangeInclusive;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::{Pin, pin};
 use std::rc::Rc;
@@ -227,7 +227,8 @@ const CONNECTOR: &str = "plant.device";
 /// The runs of [`heals_after_random_faults`], each on its own seed, on each merge.
 const RUNS: u64 = 1000;
 /// The variable that gives the seeds of [`heals_after_random_faults`] in place of
-/// [`RUNS`]: one seed in hex, such as `0x2a`, or a range, such as `0x0..0xf4240`.
+/// [`RUNS`]: one seed in hex, such as `0x2a`, or a range `<start>..<end>` in hex, the
+/// end excluded, such as `0x0..0xf4240`.
 const REPLAY: &str = "CONFORMANCE_SEED";
 /// The span in which [`heals_after_random_faults`] puts its faults.
 const FAULTS: Span = Span::from_nanos(15_000_000_000);
@@ -843,41 +844,42 @@ fn below(rng: &mut Rng, span: Span) -> Span {
     reason = "the seeds to run are an input of the test run, not of a node"
 )]
 pub(crate) fn heals_after_random_faults(suite: &'static Suite) {
-    let value = match std::env::var(REPLAY) {
-        Ok(value) => Some(value),
-        Err(VarError::NotPresent) => None,
-        Err(VarError::NotUnicode(value)) => panic!("{REPLAY} is not UTF-8: {value:?}"),
-    };
-    replayed(seeds(value.as_deref()), |seed| {
+    replayed(seeds(std::env::var(REPLAY)), |seed| {
         run_seeded(seed, suite, direct, move |scene| faulted(scene, seed));
     });
 }
 
-/// The seeds that `value` of [`REPLAY`] gives, or 0 to [`RUNS`] when it is not set.
+/// The seeds that `value`, the value of [`REPLAY`], gives, or 0 to [`RUNS`] when it
+/// is not set.
 ///
 /// # Panics
 ///
-/// When `value` is not a seed or a range of seeds in hex.
-fn seeds(value: Option<&str>) -> Range<u64> {
-    let Some(value) = value else {
-        return 0..RUNS;
+/// When `value` is not UTF-8, or is not a seed or a nonempty range of seeds in hex.
+fn seeds(value: Result<String, VarError>) -> RangeInclusive<u64> {
+    let value = match value {
+        Ok(value) => value,
+        Err(VarError::NotPresent) => return 0..=RUNS - 1,
+        Err(VarError::NotUnicode(value)) => panic!("{REPLAY} is not UTF-8: {value:?}"),
     };
     let hex = |text: &str| {
         let digits = text.strip_prefix("0x").unwrap_or(text);
         u64::from_str_radix(digits, 16).ok()
     };
     let range = match value.split_once("..") {
-        Some((start, end)) => hex(start).zip(hex(end)).map(|(start, end)| start..end),
-        None => hex(value).and_then(|seed| Some(seed..seed.checked_add(1)?)),
+        Some((start, end)) => hex(start).zip(hex(end)).and_then(|(start, end)| {
+            let last = end.checked_sub(1).filter(|&last| start <= last);
+            last.map(|last| start..=last)
+        }),
+        None => hex(&value).map(|seed| seed..=seed),
     };
     range.unwrap_or_else(|| {
-        panic!("{REPLAY} is a seed or a range of seeds in hex, not {value:?}")
+        panic!("{REPLAY} is a seed or a nonempty range of seeds in hex, not {value:?}")
     })
 }
 
 /// Calls `run` with each seed of `seeds` in order. When a call panics, panics with
 /// its seed, its text, and the command that runs that seed alone.
-fn replayed(seeds: Range<u64>, run: impl Fn(u64)) {
+fn replayed(seeds: RangeInclusive<u64>, run: impl Fn(u64)) {
     for seed in seeds {
         let Err(panic) = catch_unwind(AssertUnwindSafe(|| run(seed))) else {
             continue;
@@ -972,45 +974,99 @@ pub(crate) fn fails_50_ms_past_the_ring(suite: &'static Suite) {
     });
 }
 
+#[cfg(test)]
 mod tests {
+    //! These call the private `seeds` and `replayed`: their caller reads
+    //! `CONFORMANCE_SEED`, which a test cannot set with no `unsafe`, and no kind fails
+    //! a seed with no hook.
+
     use std::cell::RefCell;
+    use std::env::VarError;
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     use super::{replayed, seeds};
 
+    const PACKAGE: &str = env!("CARGO_PKG_NAME");
+
     #[test]
     fn seeds_are_runs_or_the_hex_of_replay() {
-        assert_eq!(seeds(None), 0..1000);
-        assert_eq!(seeds(Some("0x2a")), 42..43);
-        assert_eq!(seeds(Some("2a")), 42..43);
-        assert_eq!(seeds(Some("0x0..0xf4240")), 0..1_000_000);
+        assert_eq!(seeds(Err(VarError::NotPresent)), 0..=999);
+        assert_eq!(seeds(Ok("0x2a".into())), 42..=42);
+        assert_eq!(seeds(Ok("2a".into())), 42..=42);
+        assert_eq!(seeds(Ok("0xffffffffffffffff".into())), u64::MAX..=u64::MAX);
+        assert_eq!(seeds(Ok("0x0..0xf4240".into())), 0..=999_999);
+        assert_eq!(seeds(Ok("0x5..0x6".into())), 5..=5);
+    }
+
+    #[test]
+    #[should_panic(expected = "CONFORMANCE_SEED is not UTF-8: \"\\xFF\"")]
+    fn seeds_panic_on_a_value_that_is_not_utf_8() {
+        seeds(Err(VarError::NotUnicode(OsString::from_vec(vec![0xff]))));
     }
 
     #[test]
     #[should_panic(
-        expected = "CONFORMANCE_SEED is a seed or a range of seeds in hex, not \"0x2g\""
+        expected = "CONFORMANCE_SEED is a seed or a nonempty range of seeds in hex, \
+                    not \"0x2g\""
     )]
     fn seeds_panic_on_a_value_that_is_not_hex() {
-        seeds(Some("0x2g"));
+        seeds(Ok("0x2g".into()));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "CONFORMANCE_SEED is a seed or a nonempty range of seeds in hex, \
+                    not \"0x3e8..0x0\""
+    )]
+    fn seeds_panic_on_a_reversed_range() {
+        seeds(Ok("0x3e8..0x0".into()));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "CONFORMANCE_SEED is a seed or a nonempty range of seeds in hex, \
+                    not \"0x5..0x5\""
+    )]
+    fn seeds_panic_on_an_empty_range() {
+        seeds(Ok("0x5..0x5".into()));
+    }
+
+    /// The seeds that `replayed` runs over 0x29 to 0x2b with `run`, and its panic text.
+    fn replay(run: impl Fn(u64)) -> (Vec<u64>, String) {
+        let ran = RefCell::new(Vec::new());
+        let failed = catch_unwind(AssertUnwindSafe(|| {
+            replayed(0x29..=0x2b, |seed| {
+                ran.borrow_mut().push(seed);
+                run(seed);
+            });
+        }));
+        let panic = failed.expect_err("a run fails");
+        let text = panic.downcast_ref::<String>().expect("a text");
+        (ran.into_inner(), text.clone())
     }
 
     #[test]
     fn a_failed_run_panics_with_its_replay() {
-        let ran = RefCell::new(Vec::new());
-        let failed = catch_unwind(AssertUnwindSafe(|| {
-            replayed(0x29..0x2c, |seed| {
-                ran.borrow_mut().push(seed);
-                assert!(seed != 0x2a, "a fault");
-            });
-        }));
-        let panic = failed.expect_err("the run of 0x2a fails");
-        let text = panic.downcast_ref::<String>().expect("a text");
+        let (ran, text) = replay(|seed| assert!(seed != 0x2a, "a fault at {seed:#x}"));
         let expected = format!(
-            "the run of seed 0x2a fails: a fault\nreplay: CONFORMANCE_SEED=0x2a cargo \
-             test -p {} --all-features --test conformance heals_after_random_faults",
-            env!("CARGO_PKG_NAME"),
+            "the run of seed 0x2a fails: a fault at 0x2a\nreplay: \
+             CONFORMANCE_SEED=0x2a cargo test -p {PACKAGE} --all-features --test \
+             conformance heals_after_random_faults",
         );
-        assert_eq!(*text, expected);
-        assert_eq!(*ran.borrow(), [0x29, 0x2a], "no run after the failed one");
+        assert_eq!(text, expected);
+        assert_eq!(ran, [0x29, 0x2a], "no run after the failed one");
+    }
+
+    #[test]
+    fn a_failed_run_with_a_static_text_panics_with_it() {
+        let (_, text) = replay(|seed| assert!(seed != 0x29, "a fault"));
+        let expected = format!(
+            "the run of seed 0x29 fails: a fault\nreplay: CONFORMANCE_SEED=0x29 cargo \
+             test -p {PACKAGE} --all-features --test conformance \
+             heals_after_random_faults",
+        );
+        assert_eq!(text, expected);
     }
 }
