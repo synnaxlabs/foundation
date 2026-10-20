@@ -60,8 +60,10 @@
   chunk that does not fit in a tree, which gives `Error::Tree` with
   `tree::Error::Corrupt`, or a failure of the store): the set is in force. The node
   logs a warning at the first put after the joint entry that fails, and at most once a
-  minute while the put runs again, with the error of the put, which names each voter
-  whose put failed (`laptop.monitor`, 2026-10-20T15:40:27Z,
+  minute while the put runs again, with the error of the put in the field `error`:
+  `Error::Quorum` names each voter whose put failed, and `Error::Tree` with
+  `tree::Error::Missing` names the chunk that this node lacks (`laptop.monitor`,
+  2026-10-20T15:40:27Z,
   https://github.com/synnaxlabs/foundation/pull/3599#issuecomment-6294796432). Simple
   version: `raft` leaves the joint phase on its own, so between that leave and the end
   of the second put only a majority of the old voters can hold the chunks of a `Spec`

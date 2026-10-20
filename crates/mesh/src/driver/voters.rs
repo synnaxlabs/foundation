@@ -24,13 +24,15 @@ impl Mesh {
     /// VOTERS), whose entry binds the card key of each voter that it adds. The call
     /// puts the tree on the set before the proposal, and again after the joint entry
     /// applies when the pointer moved in between, for as long as it takes a majority
-    /// of the set to hold it. It logs a warning at the first of those puts that
-    /// fails, and at most once a minute after, which names each voter whose put
-    /// failed.
+    /// of the set to hold it. It logs a warning at the first put after the joint
+    /// entry that fails, and at most once a minute after, with the error of that put
+    /// in the field `error`: [`Error::Quorum`] names each voter whose put failed, and
+    /// [`Error::Tree`] with [`tree::Error::Missing`] names the chunk that this node
+    /// lacks.
     ///
     /// # Errors
     ///
-    /// Nothing is proposed, and the voters stay as they were:
+    /// Nothing is in force, and the voters stay as they were:
     ///
     /// - [`Error::Voters`] when the set holds more voters than one set can hold.
     /// - [`Error::NotMember`] when a node of the set is not a member in the applied
@@ -44,6 +46,11 @@ impl Mesh {
     /// - [`Error::Pool`] from an earlier write of the log that finds no block, until
     ///   that write ends.
     /// - [`Error::Stopped`], [`Error::Tree`], and [`Error::Blob`] before the proposal.
+    ///
+    /// The joint entry may be in the log, and the set may come in force:
+    ///
+    /// - [`Error::Stopped`] when the group stops while the call waits for the write
+    ///   or the apply of the joint entry.
     ///
     /// The set is in force, and a majority of it may not hold the tree in force:
     ///
@@ -127,8 +134,9 @@ impl Mesh {
             let now = self.clock.now();
             if quiet.is_none_or(|until| now >= until) {
                 tracing::warn!(
+                    %error,
                     "the new voters are in force, and the put of the spec tree in \
-                     force on them runs again: {error}"
+                     force on them runs again"
                 );
                 quiet = now.checked_add(WARN);
             }

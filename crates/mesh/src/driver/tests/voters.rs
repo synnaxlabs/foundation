@@ -1,11 +1,18 @@
 //! Tests of the put of the tree in force on the new voters of a change of voters, on a
 //! cluster of three nodes.
+//!
+//! A lone test reads the voters through the private `Mesh::group`: `Mesh` gives no
+//! read of its voters, and a change that shows them waits out the deadline of a put.
+
+use std::fmt::Write as _;
 
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Event, Metadata, Subscriber};
 
-use super::apply::{assert_used, base, create_largest, create_subjects, late, pointer};
+use super::apply::{
+    assert_used, base, create_indexes, create_largest, create_subjects, late, pointer,
+};
 use super::unapplied::changes;
 use super::*;
 
@@ -31,8 +38,8 @@ fn outcomes(board: &Board) -> Vec<(u8, Result<(), Error>)> {
         .collect()
 }
 
-/// The level and the message of each event of `mesh` that a node logs, in order.
-/// Clones share them.
+/// The level, the message, and each other field as ` <name>=<value>` of each event of
+/// `mesh` that a node logs, in order. Clones share them.
 #[derive(Clone, Default)]
 struct Log(Arc<Mutex<Vec<String>>>);
 
@@ -56,13 +63,14 @@ impl Subscriber for Log {
     fn record_follows_from(&self, _: &Id, _: &Id) {}
 
     fn event(&self, event: &Event<'_>) {
-        let mut message = Message(String::new());
-        event.record(&mut message);
+        let mut line = Line::default();
+        event.record(&mut line);
         let level = event.metadata().level();
+        let Line { message, fields } = line;
         self.0
             .lock()
             .unwrap()
-            .push(format!("{level} {}", message.0));
+            .push(format!("{level} {message}{fields}"));
     }
 
     fn enter(&self, _: &Id) {}
@@ -70,12 +78,18 @@ impl Subscriber for Log {
     fn exit(&self, _: &Id) {}
 }
 
-struct Message(String);
+#[derive(Default)]
+struct Line {
+    message: String,
+    fields: String,
+}
 
-impl Visit for Message {
+impl Visit for Line {
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
         if field.name() == "message" {
-            self.0 = format!("{value:?}");
+            self.message = format!("{value:?}");
+        } else {
+            write!(self.fields, " {}={value:?}", field.name()).unwrap();
         }
     }
 }
@@ -128,19 +142,22 @@ fn a_change_of_voters_whose_puts_fail_gives_quorum_and_proposes_nothing() {
     assert_used(&board, &[1], moved, &next);
 }
 
-// Over links of 300 ms, the first put of the 26 chunks on each learner, in two calls,
-// takes about 17 s. 5 s into it, voter 1 applies a second change, whose one holder
-// is voter 1. At 12 s the learners stop answering new blob streams, so the put of the
-// tree of the second change, after the joint entry, gets no `Stored`, and the call
-// tries again each second. Voter 1 warns at the first failed put, and not again within
-// a minute. At 50 s the learners answer again, and the call ends.
-#[test]
-fn a_pointer_that_moves_before_the_joint_entry_is_put_until_a_majority_holds_it() {
+/// The one-way delay of each link of `silent_after_the_joint_entry`.
+const LINK: Span = Span::from_nanos(300 * Span::MILLISECOND.nanos());
+
+/// Over links of `LINK`, the first put of the 26 chunks on each learner, in two calls,
+/// takes about 17 s. 5 s into it, voter 1 applies a second change, whose one holder is
+/// voter 1. At 12 s the learners stop answering new blob streams, so the put of the
+/// tree of the second change, after the joint entry, gets no `Stored`, and the call
+/// tries again each second. Gives the cluster with the log of voter 1, at 12 s, and
+/// the pointer and the definitions of the second change.
+fn silent_after_the_joint_entry(
+    log: &Log,
+) -> (Cluster, Pointer, BTreeMap<Name, Definition>) {
     let mut cluster = Cluster::new(0);
     cluster.board.lock().unwrap().learners = [2, 3].into();
-    let log = Log::default();
     cluster.logs.insert(1, tracing::Dispatch::new(log.clone()));
-    cluster.delay(Span::from_nanos(300 * Span::MILLISECOND.nanos()));
+    cluster.delay(LINK);
     cluster.start();
     cluster.run(seconds(10));
     let definitions = create_largest(25);
@@ -154,27 +171,39 @@ fn a_pointer_that_moves_before_the_joint_entry_is_put_until_a_majority_holds_it(
     cluster.change(1, first, &next);
     cluster.run(seconds(7));
     let moved = pointer(2, &next);
-    {
-        let mut board = cluster.board.lock().unwrap();
-        assert_eq!(board.applied, [(1, moved, Ok(moved))]);
-        board.silent = [2, 3].into();
-    }
+    let mut board = cluster.board.lock().unwrap();
+    assert_eq!(board.applied, [(1, moved, Ok(moved))]);
+    board.silent = [2, 3].into();
+    drop(board);
+    (cluster, moved, next)
+}
+
+/// The line of the warning of a put after the joint entry on which no learner answers.
+fn warning() -> String {
+    let quorum = Error::Quorum {
+        held: 1,
+        voters: 3,
+        missed: vec![late(2), late(3)],
+    };
+    format!(
+        "WARN the new voters are in force, and the put of the spec tree in force on \
+         them runs again error={quorum}"
+    )
+}
+
+// Voter 1 warns at the first failed put, and not again before the learners answer at
+// 50 s. Then the call ends.
+#[test]
+fn a_pointer_that_moves_before_the_joint_entry_is_put_until_a_majority_holds_it() {
+    let log = Log::default();
+    let (mut cluster, moved, next) = silent_after_the_joint_entry(&log);
     cluster.run(seconds(38));
     {
         let mut board = cluster.board.lock().unwrap();
         assert_eq!(board.configured, []);
         board.silent = BTreeSet::new();
     }
-    let quorum = Error::Quorum {
-        held: 1,
-        voters: 3,
-        missed: vec![late(2), late(3)],
-    };
-    let warning = format!(
-        "WARN the new voters are in force, and the put of the spec tree in force on \
-         them runs again: {quorum}"
-    );
-    assert_eq!(log.lines(), [warning]);
+    assert_eq!(log.lines(), [warning()]);
     cluster.run(seconds(20));
     let board = cluster.board();
     assert_eq!(outcomes(&board), [(1, Ok(()))]);
@@ -183,6 +212,57 @@ fn a_pointer_that_moves_before_the_joint_entry_is_put_until_a_majority_holds_it(
         assert!(board.blobs[&id] >= 3, "node {id}: {}", board.blobs[&id]);
     }
     assert_used(&board, &IDS, moved, &next);
+}
+
+// A try ends each 11 s: the deadline of the put, then `RETRY`. So the first warning
+// comes about 10 s into the silence, the second at the first failed try at least a
+// minute after it, and the third after the run.
+#[test]
+fn a_put_after_the_joint_entry_that_fails_for_a_minute_warns_again() {
+    let log = Log::default();
+    let (mut cluster, _, _) = silent_after_the_joint_entry(&log);
+    cluster.run(seconds(100));
+    assert_eq!(cluster.board.lock().unwrap().configured, []);
+    assert_eq!(log.lines(), [warning(), warning()]);
+}
+
+// A second change, with voter 1 as its one holder, gives `INDEX` a home and keeps the
+// tree. It applies before the joint entry, so the call puts the tree once on each
+// learner.
+#[test]
+fn a_change_that_moves_only_homes_before_the_joint_entry_puts_the_tree_once() {
+    let definitions = create_indexes(1);
+    let mut cluster = lone(&definitions);
+    drop(cluster.board());
+    let first = pointer(1, &definitions);
+    let homes = BTreeMap::from([(INDEX, key(1))]);
+    cluster.configure(1, IDS.into());
+    cluster.apply_held(1, first, &definitions, [1].into(), homes);
+    cluster.run(seconds(10));
+    let board = cluster.board();
+    let moved = pointer(2, &definitions);
+    assert_eq!(moved.root, first.root);
+    assert_eq!(board.applied, [(1, moved, Ok(moved))]);
+    assert_eq!(outcomes(&board), [(1, Ok(()))]);
+    assert_eq!(board.blobs, [(2, 1), (3, 1)].into());
+}
+
+// Once the set is in force, voter 2 follows voter 1.
+#[test]
+fn a_proposal_by_a_follower_gives_not_leader_and_puts_nothing() {
+    let definitions = create_subjects(&["plant.a"], 1);
+    let mut cluster = lone(&definitions);
+    drop(cluster.board());
+    cluster.configure(1, IDS.into());
+    cluster.run(seconds(10));
+    assert_eq!(cluster.board().blobs, [(2, 1), (3, 1)].into());
+    cluster.configure(2, [1, 2].into());
+    cluster.run(seconds(10));
+    let board = cluster.board();
+    let leader = Some(key(1));
+    let not_leader = Error::Raft(raft::Error::NotLeader { leader });
+    assert_eq!(outcomes(&board), [(2, Err(not_leader))]);
+    assert_eq!(board.blobs, BTreeMap::new());
 }
 
 // A `Spec` entry with the lone voter as holder moves the pointer to a tree that the
@@ -399,11 +479,12 @@ fn a_proposal_by_a_voter_that_does_not_lead_gives_not_leader_and_puts_nothing() 
 }
 
 // A `Spec` entry before the joint entry moves the pointer to a tree that the store
-// of the lone voter lacks, so the call tries again after the joint entry. Then the
-// group stops.
+// of the lone voter lacks, so the call tries again after the joint entry, and warns
+// once. Then the group stops.
 #[test]
 fn a_stop_while_the_moved_tree_is_missing_gives_stopped() {
-    solo(|node, tasks| async move {
+    let log = Log::default();
+    solo_logged(&log, |node, tasks| async move {
         let mesh = open(&node, &tasks, 1, &[1, 2], &[1]).await.unwrap();
         lead(&mesh, &node.clock(), home_to(1)).await;
         let mut voters = pin!(moved_unheld(&mesh, unheld_root()));
@@ -413,4 +494,26 @@ fn a_stop_while_the_moved_tree_is_missing_gives_stopped() {
         let ended = within(&node.clock(), seconds(30), voters).await;
         assert_eq!(ended, Some(Err(stopped)));
     });
+    let missing = Error::Tree(tree::Error::Missing(unheld_root()));
+    let warning = format!(
+        "WARN the new voters are in force, and the put of the spec tree in force on \
+         them runs again error={missing}"
+    );
+    assert_eq!(log.lines(), [warning]);
+}
+
+/// As [`solo`], with `log` as the log of the shard of `body`.
+fn solo_logged<F: Future<Output = ()> + 'static>(
+    log: &Log,
+    body: impl FnOnce(sim::node::Node, Tasks) -> F + Send + 'static,
+) {
+    let mut sim = Sim::new(crate::common::simulation(0));
+    let node = sim.node(sim::node::Config::default());
+    let shards = node.shards().logged(tracing::Dispatch::new(log.clone()));
+    let config = env::shards::Config {
+        name: "solo".into(),
+        core: None,
+    };
+    drop(shards.start(config, |tasks| body(node, tasks)).unwrap());
+    sim.run().unwrap();
 }

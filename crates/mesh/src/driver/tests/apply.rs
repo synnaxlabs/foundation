@@ -1470,7 +1470,7 @@ fn specs(entries: &[Entry]) -> Vec<Change> {
 
 /// An index channel of key `7 + at` at the tree key `plant.i<at>`, for each `at` below
 /// `count`.
-fn create_indexes(count: u128) -> BTreeMap<Name, Definition> {
+pub(super) fn create_indexes(count: u128) -> BTreeMap<Name, Definition> {
     let index = |at: u128| {
         let channel = Channel {
             key: channel::Key::from_u128(at.checked_add(7).unwrap()),
