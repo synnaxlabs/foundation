@@ -176,7 +176,7 @@ pub fn line(key: PublicKey) -> String {
         })
 }
 
-/// Why a text is not the OpenSSH private key file of an Ed25519 key with no
+/// Why a file is not the OpenSSH private key file of an Ed25519 key with no
 /// passphrase. `Display` gives the message, which quotes none of the text: a lower-case
 /// clause with no final period. [`Unreadable::code`] and [`Unreadable::fix`] give the
 /// other parts.
@@ -255,15 +255,15 @@ impl fmt::Display for Unreadable {
 /// Reads the OpenSSH private key file of an Ed25519 key with no passphrase, as
 /// `ssh-keygen -t ed25519 -N ""` and [`key_file`] write it. It reads each such file
 /// that `ssh-key` 0.6.7 reads, also one with a body of any width or with white space,
-/// any bytes after the end mark, CRLF line ends, or no line end after the end mark. It
-/// refuses some files that OpenSSH reads: a comment that is not UTF-8
+/// any bytes on the lines after the end mark, CRLF line ends, or no line end after the
+/// end mark. It refuses some files that OpenSSH reads: a comment that is not UTF-8
 /// ([`Unreadable::Comment`]), and, as [`Unreadable::Format`], padding of a block or
 /// more, options of the `none` KDF, and a NUL in the body. The comment is not kept.
 ///
 /// # Errors
 ///
-/// [`Unreadable`] says why `file` is not such a file. A byte up to the end mark that
-/// is not UTF-8 gives [`Unreadable::Format`].
+/// [`Unreadable`] says why `file` is not such a file. A byte up to the line end of the
+/// end mark that is not UTF-8 gives [`Unreadable::Format`].
 pub fn private_key(file: &[u8]) -> Result<PrivateKey, Unreadable> {
     let Ok(text) = std::str::from_utf8(marked(file)) else {
         return Err(Unreadable::Format);

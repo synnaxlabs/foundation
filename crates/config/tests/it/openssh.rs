@@ -154,7 +154,7 @@ fn reads_any_bytes_after_the_end_mark_and_refuses_others_before_it() {
         (error, error.to_string()),
         (
             Unreadable::Format,
-            "the file is not an OpenSSH private key".into()
+            "the file is not an OpenSSH private key as `ssh-keygen` writes it".into()
         )
     );
 }

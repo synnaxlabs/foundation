@@ -947,9 +947,9 @@ class ProfileTest(unittest.TestCase):
         keygen("-q", "-t", "ed25519", "-N", "", "-f", key)
         os.replace(f"{key}.pub", key)
         refused(
-            "config.key-format: the file is not an OpenSSH private key. Use the "
-            'private key file that `ssh-keygen -t ed25519 -N ""` writes, not its '
-            "`.pub` file"
+            "config.key-format: the file is not an OpenSSH private key as "
+            "`ssh-keygen` writes it. Use the private key file that "
+            '`ssh-keygen -t ed25519 -N ""` writes, not its `.pub` file'
         )
         os.remove(key)
         keygen("-q", "-t", "ecdsa", "-N", "", "-f", key)
@@ -1092,9 +1092,9 @@ class ProfileTest(unittest.TestCase):
             foundation.connect(self.node.address)
         self.assertEqual(
             str(raised.exception),
-            f"{key}: config.key-format: the file is not an OpenSSH private key. Use "
-            'the private key file that `ssh-keygen -t ed25519 -N ""` writes, not its '
-            "`.pub` file",
+            f"{key}: config.key-format: the file is not an OpenSSH private key as "
+            "`ssh-keygen` writes it. Use the private key file that "
+            '`ssh-keygen -t ed25519 -N ""` writes, not its `.pub` file',
         )
 
     def test_a_home_that_is_a_file_is_refused(self) -> None:
