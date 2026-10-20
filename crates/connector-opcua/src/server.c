@@ -323,6 +323,17 @@ size_t shim_client_blocks(UA_Client *client, size_t *bytes) {
     return count;
 }
 
+/* Frees each block of `arena`, and leaves it with none. */
+void shim_arena_free(PublishArena *arena) {
+    PublishBlock *block = arena->blocks;
+    while(block) {
+        PublishBlock *next = block->next;
+        UA_free(block);
+        block = next;
+    }
+    arena->blocks = NULL;
+}
+
 /* Takes nelem * elsize bytes of the Publish decode memory of `client`. */
 void *shim_client_calloc(UA_Client *client, size_t nelem, size_t elsize) {
     return __Client_PublishArena_calloc(&client->publishArena, nelem, elsize);

@@ -85,8 +85,8 @@ fn the_drop_frees_the_client() {
 }
 
 /// A `Variant` (23, as `ffi` is private) of 7 `ExtensionObject` values, then the
-/// zeros that #435 needs. The decode under the bump `calloc` adds 4: its value, its
-/// memory, and its encoding in C and in Rust.
+/// zeros that #435 needs. The decode under the arena `calloc` adds 4: its value, its
+/// block, and its encoding in C and in Rust.
 fn the_fuzz_round_trip_allocates_for_each_step() {
     let mut data = vec![23, 0, 0x96, 7, 0, 0, 0];
     data.resize(data.len() + 7 * 4, 0);
@@ -95,11 +95,13 @@ fn the_fuzz_round_trip_allocates_for_each_step() {
 }
 
 /// A `Boolean` (0) with no byte fails before C allocates, so only the memory of the
-/// value is allocated, and the value and memory of the decode under the bump `calloc`.
+/// value is allocated, and the value of the decode under the arena `calloc`, which
+/// takes no block.
 fn a_failed_decode_stops_the_round_trip() {
     let ((), count) = ALLOCATOR.count(|| connector_opcua::fuzz::decode(&[0, 0]));
-    assert_eq!(count, 3, "a failed decode");
-    // A `Variant` of a `Boolean` with no byte: C allocates the `Boolean` first.
+    assert_eq!(count, 2, "a failed decode");
+    // A `Variant` of a `Boolean` with no byte: C allocates the `Boolean` first, and the
+    // arena its block.
     let ((), count) = ALLOCATOR.count(|| connector_opcua::fuzz::decode(&[23, 0, 0x01]));
     assert_eq!(count, 4, "a failed decode after C allocates");
 }

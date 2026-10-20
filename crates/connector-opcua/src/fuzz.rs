@@ -74,9 +74,9 @@ fn read(clock: Clock, data: &[u8]) -> (Status, Status) {
 /// `Good`, it encodes the value, decodes those bytes with as many zeros after them as
 /// their length (#435), and encodes again. A `DataValue` gives the same read of its
 /// value, or the same fault, and the same time (`value::time`), or the same status,
-/// from both decodes. A decode under a calloc that takes memory it never frees, as a
-/// Publish answer decodes, gives the same status, length, and encoding. An input of
-/// fewer than 2 bytes decodes nothing.
+/// from both decodes. A decode under the calloc of the decode of a Publish answer
+/// gives the same status, length, and encoding. An input of fewer than 2 bytes
+/// decodes nothing.
 ///
 /// # Panics
 ///
@@ -86,13 +86,13 @@ pub fn decode(data: &[u8]) {
         return;
     };
     let name = data_type.name();
-    let bumped = bumped(data_type, input).map_err(Status::name);
+    let arena = arena(data_type, input).map_err(Status::name);
     let (value, decoded) = match Value::decode(data_type, input) {
         Ok(decoded) => decoded,
         Err(status) => {
             let status = Err(status.name());
             assert_eq!(
-                bumped.map(drop),
+                arena.map(drop),
                 status,
                 "{name}: the calloc changes the decode"
             );
@@ -141,7 +141,7 @@ pub fn decode(data: &[u8]) {
         );
     }
     assert_eq!(
-        bumped,
+        arena,
         Ok((once, decoded)),
         "{name}: the calloc changes the decode"
     );
@@ -206,54 +206,25 @@ fn pick(data: &[u8]) -> Option<(&'static DataType, &[u8])> {
     Some((&ffi::types()[at], input))
 }
 
-/// Zeroed memory of 16-byte blocks that a decode takes in order.
-struct Bump {
-    memory: Vec<u128>,
-    used: usize,
-}
-
-/// The [`ffi::Calloc`] of a [`Bump`], NULL when it is full.
-unsafe extern "C" fn bump_calloc(
-    context: *mut c_void,
-    count: usize,
-    size: usize,
-) -> *mut c_void {
-    // SAFETY: the context of each decode is a live `Bump`.
-    let bump = unsafe { &mut *context.cast::<Bump>() };
-    let blocks = count.saturating_mul(size).div_ceil(16);
-    match bump
-        .memory
-        .get_mut(bump.used..bump.used.saturating_add(blocks))
-    {
-        Some(taken) => {
-            bump.used += blocks;
-            taken.as_mut_ptr().cast()
-        }
-        None => std::ptr::null_mut(),
-    }
-}
-
-/// Decodes a value of `data_type` from the start of `bytes` under the calloc of a
-/// [`Bump`] of 256 bytes for each byte of `bytes` and 4 KiB, which nothing frees, and
-/// gives its encoding and the number of bytes read.
-fn bumped(
+/// Decodes a value of `data_type` from the start of `bytes` under the calloc of the
+/// decode of a Publish answer, and gives its encoding and the number of bytes read.
+fn arena(
     data_type: &'static DataType,
     bytes: &[u8],
 ) -> Result<(Vec<u8>, usize), Status> {
     let mut memory = vec![0_u64; data_type.size().div_ceil(8)];
-    let mut bump = Bump {
-        memory: vec![0; 16 * bytes.len() + 256],
-        used: 0,
+    let mut arena = ffi::test::Arena {
+        blocks: std::ptr::null_mut(),
     };
     let input = Bytes {
         length: bytes.len(),
         data: bytes.as_ptr().cast_mut(),
     };
     let mut options = DecodeOptions::default();
-    options.context = (&raw mut bump).cast();
-    options.calloc = Some(bump_calloc);
+    options.context = (&raw mut arena).cast();
+    options.calloc = Some(ffi::test::__Client_PublishArena_calloc);
     // SAFETY: the memory holds `memSize` bytes with 8-byte alignment, the decoder only
-    // reads the input, and the calloc gives memory that lives to the end of the call.
+    // reads the input, and the arena lives to the free below.
     let code = unsafe {
         ffi::UA_decodeBinary(
             &raw const input,
@@ -262,12 +233,16 @@ fn bumped(
             &raw mut options,
         )
     };
-    if code != 0 {
-        return Err(Status(code));
-    }
-    // SAFETY: the decode gave a value of `data_type`, in memory that lives.
-    let encoded = unsafe { encode(memory.as_ptr().cast(), data_type) }?;
-    Ok((encoded, options.decoded))
+    let encoded = if code == 0 {
+        // SAFETY: the decode gave a value of `data_type`, in memory that lives.
+        unsafe { encode(memory.as_ptr().cast(), data_type) }
+            .map(|e| (e, options.decoded))
+    } else {
+        Err(Status(code))
+    };
+    // SAFETY: nothing reads the decoded value after this.
+    unsafe { ffi::test::shim_arena_free(&raw mut arena) };
+    encoded
 }
 
 /// A decoded value, cleared when dropped.
@@ -539,9 +514,9 @@ mod tests {
         decode(&data);
     }
 
-    /// Under a calloc, an `ExtensionObject` of a type that the decoder does not know
-    /// keeps its string type id in the first block of the calloc, as nothing frees a
-    /// copy.
+    /// Under the calloc of the decode of a Publish answer, an `ExtensionObject` of a
+    /// type that the decoder does not know keeps its string type id at the start of
+    /// the memory of the first block that the decode takes, as nothing frees a copy.
     #[test]
     fn an_unknown_type_id_lives_in_the_memory_of_the_calloc() {
         let object = &ffi::types()[21];
@@ -555,16 +530,15 @@ mod tests {
             length: bytes.len(),
             data: bytes.as_mut_ptr(),
         };
-        let mut memory = Bump {
-            memory: vec![0; 64],
-            used: 0,
+        let mut arena = ffi::test::Arena {
+            blocks: std::ptr::null_mut(),
         };
         let mut options = DecodeOptions::default();
-        options.context = (&raw mut memory).cast();
-        options.calloc = Some(bump_calloc);
+        options.context = (&raw mut arena).cast();
+        options.calloc = Some(ffi::test::__Client_PublishArena_calloc);
         let mut value = [0_usize; 6];
         // SAFETY: the value holds the 48 bytes of an `ExtensionObject`, aligned to 8,
-        // and the calloc gives memory that lives to the end of the test.
+        // and the arena lives to the free below.
         let code = unsafe {
             ffi::UA_decodeBinary(
                 &raw const input,
@@ -573,12 +547,24 @@ mod tests {
                 &raw mut options,
             )
         };
-        let first = memory.memory.as_ptr().addr();
+        // The id takes the first block, and the body a second one at the head of the
+        // list. `next` is the first field of a block, and its 24-byte header takes 32.
+        // SAFETY: the decode left two blocks.
+        let first = unsafe { *arena.blocks.cast::<usize>() } + 32;
+        // SAFETY: nothing reads the decoded value after this.
+        unsafe { ffi::test::shim_arena_free(&raw mut arena) };
         // `content.encoded.typeId.identifier.string`: its length, then its data.
         assert_eq!(
             (Status(code), value[2], value[3].wrapping_sub(first)),
             (Status::GOOD, name.len(), 0)
         );
+    }
+
+    /// A `Variant` of 127 values and no bytes after the length passes the length check
+    /// of the decoder, which then gives `BadDecodingError` under each calloc.
+    #[test]
+    fn a_long_array_with_no_bytes_decodes_the_same_under_each_calloc() {
+        decode(&[0x17, 0x00, 0x97, 0x7f, 0x00, 0x00, 0x00]);
     }
 
     #[test]
