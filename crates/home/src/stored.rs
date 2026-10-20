@@ -29,6 +29,16 @@ mod at {
     pub(super) const END: usize = 22;
 }
 
+/// Bytes of the header of a stored body of `series` series.
+pub(crate) const fn header_len(series: usize) -> usize {
+    COUNT + DESCRIPTOR * series
+}
+
+/// Bytes of the parts of the entry that [`entry`] makes of `frame`.
+pub(crate) fn len(frame: &Frame) -> usize {
+    header_len(frame.ends().count()) + frame.body().len()
+}
+
 /// The buffer entry that stores `frame`, an encoded index frame of one group of `set`
 /// whose newest stamp is `last`, at mesh time `stored_at`. Its parts are a header
 /// block from `pool`, then [`Frame::body`]. Copies no series byte.
@@ -98,7 +108,7 @@ fn body(
     let entries = set.entries();
     let group = frame.ends().next().map(|(entry, _)| entries[entry].group);
     let count = frame.ends().count();
-    let mut head = pool.alloc(COUNT + DESCRIPTOR * count)?;
+    let mut head = pool.alloc(header_len(count))?;
     let (start, descriptors) = head.split_at_mut(COUNT);
     start.copy_from_slice(&to_u32(count).to_le_bytes());
     let (descriptors, _) = descriptors.as_chunks_mut::<DESCRIPTOR>();

@@ -573,11 +573,12 @@ impl Shard {
     ///
     /// [`Error::Resend`] for a frame labeled resend. [`Error::Full`] for a backfill
     /// frame when the ring or the pool has no room, and [`Error::Large`] for a frame
-    /// whose bodies no record holds or whose entry passes
-    /// [`buffer::Buffer::block_max`]; no seq moves for either. A handoff with no room
-    /// decides before the size: the groups with samples of a live frame are lost, and
-    /// a backfill frame gets [`Error::Full`]. [`Error::Disk`] after a failed commit,
-    /// before any other error but [`Error::Resend`].
+    /// whose bodies no record holds, whose entry passes
+    /// [`buffer::Buffer::block_max`], or whose index frame no block of the pool holds;
+    /// no seq moves for either. The size decides before the room, also of a handoff:
+    /// a live frame that fits but finds no room has its groups with samples lost.
+    /// [`Error::Disk`] after a failed commit, before any other error but
+    /// [`Error::Resend`].
     ///
     /// # Panics
     ///
@@ -623,6 +624,9 @@ impl Shard {
         // Made also when a handoff found no room: freezing gives a lost live frame to
         // latest readers.
         let ready = made.is_ok() && recorded;
+        // With room, the append checks the size.
+        let large =
+            made.is_ok() && !recorded && too_large(&self.buffer, &scratch.checks);
         if !ready {
             entries.clear();
         }
@@ -630,7 +634,8 @@ impl Shard {
         let appended = room(self.buffer.append(entries.drain(..)));
         let room = match (recorded, appended, made, path) {
             (_, Err(error), ..) => Err(error),
-            (true, Ok(_), Err(block::Error::TooLarge { .. }), _) => Err(Error::Large),
+            (_, Ok(_), Err(block::Error::TooLarge { .. }), _) => Err(Error::Large),
+            _ if large => Err(Error::Large),
             (true, Ok(true), Ok(()), _) => Ok(true),
             (.., Path::Backfill) => Err(Error::Full),
             (.., Path::Live) => Ok(false),
@@ -1070,6 +1075,24 @@ fn freeze(
         }
     }
     Ok(())
+}
+
+/// Whether the stored entries of the frozen frames of `checks` pass a limit of one
+/// record of `buffer`, as [`Buffer::append`] checks a batch of entries with tag 0.
+fn too_large(
+    buffer: &Buffer,
+    checks: &[(u32, Result<Accepted, Refusal>, Option<Frame>)],
+) -> bool {
+    let (mut count, mut bytes) = (0, 0);
+    for frame in checks.iter().filter_map(|(.., frozen)| frozen.as_ref()) {
+        let len = stored::len(frame);
+        if len > buffer.block_max() {
+            return true;
+        }
+        count += 1;
+        bytes += len;
+    }
+    buffer.layout().check(count, 2 * count, bytes).is_err()
 }
 
 /// Appends the unrecorded handoff of the index at each of `places`, each alone, on the
@@ -2448,7 +2471,7 @@ mod tests {
     }
 
     #[test]
-    fn loses_a_large_live_frame_whose_handoff_finds_no_room() {
+    fn refuses_a_large_live_frame_whose_handoff_finds_no_room() {
         run(40, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(1 << 16).await;
@@ -2467,14 +2490,12 @@ mod tests {
             assert_eq!(written, Err(Error::Large));
             let b = shard.open_writer(writer("b", 2, &set)).expect("synced");
             assert!(shard.indexes[0].handoff().is_some(), "no room at the open");
-            // The handoff is appended before the bodies, so the size is never checked.
             let written = shard.write(b, LIVE, over_record(&test.pool, &set, 10));
-            assert_eq!(written, Ok(&[lost(0, 0, 1200)][..]));
+            assert_eq!(written, Err(Error::Large));
             let over_block = over_block(&set, 1300, &[(2, &[stamp])]);
-            assert_eq!(
-                shard.write(b, LIVE, over_block),
-                Ok(&[lost(0, 1200, 240_000), lost(2, 11, 1)][..])
-            );
+            assert_eq!(shard.write(b, LIVE, over_block), Err(Error::Large));
+            let small = frame(&test.pool, &set, &[(0, &[1300]), (1, &[1])]);
+            assert_eq!(shard.write(b, LIVE, small), Ok(&[lost(0, 0, 1)][..]));
         });
     }
 
@@ -2929,13 +2950,17 @@ mod tests {
             let writers = create_pool(4 * POOL);
             let small = |stamp: i64| frame(&writers, &set, &[(0, &[stamp]), (1, &[1])]);
             // On each path: a frame of one sample, a frame that the order check
-            // refuses, and a frame over the block.
+            // refuses, a frame over the block, and a frame over the record.
             let mut write = |state: &str| {
                 for (label, first, refused) in
                     [(LIVE, 600_000, 100), (BACKFILL, 100, 500_000)]
                 {
-                    let frames =
-                        [small(first), small(refused), over_block(&set, first, &[])];
+                    let frames = [
+                        small(first),
+                        small(refused),
+                        over_block(&set, first, &[]),
+                        over_record(&writers, &set, first),
+                    ];
                     for (at, draft) in frames.into_iter().enumerate() {
                         let written = shard.write(b, label, draft);
                         assert_eq!(
@@ -2965,7 +2990,7 @@ mod tests {
             let blocks = test.fill();
             let b = shard.open_writer(writer("b", 3, &set)).expect("synced");
             let written = shard.write(b, BACKFILL, over_block(&set, 100, &[]));
-            assert_eq!(written, Err(Error::Full));
+            assert_eq!(written, Err(Error::Large));
             drop(blocks);
             let written = shard.write(b, BACKFILL, over_block(&set, 100, &[]));
             assert_eq!(written, Err(Error::Large));
