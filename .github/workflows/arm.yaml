@@ -97,7 +97,9 @@ jobs:
           echo "PYO3_PYTHON=$(command -v python)" >> "$GITHUB_ENV"
           echo "FOUNDATION_NODE=$PWD/target/debug/foundation" >> "$GITHUB_ENV"
       - name: Test
-        run: cargo xtask test ${{ matrix.part }}
+        run: |
+          [ "${{ matrix.part }}" != serial ] || exit 1
+          cargo xtask test ${{ matrix.part }}
 
   # The required check `test`, which passes when both parts passed. It skips, and so
   # passes, when `parts` skips for no change of code.
