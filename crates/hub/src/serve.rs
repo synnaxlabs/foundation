@@ -20,8 +20,10 @@ use types::channel::{self, Slot};
 use types::frame::key_set::KeySet;
 use types::frame::{self, Frame, Placed};
 use types::name::Name;
+use types::node;
 use wire::header::MALFORMED;
 use wire::hub::client::{BODY_BYTES_MAX, Refusal};
+use wire::hub::forward::Forward;
 use wire::hub::{
     BUSY, FAILED, FromReader, Head, Home, Mode, NOT_HOME, UNKNOWN, ends, keys,
 };
@@ -39,6 +41,7 @@ pub use client::{Reply, Request};
 /// open of a write until it decodes, and the ends and counts of each write stream, 20
 /// bytes for each channel of its open and one for its index, from the decode of the
 /// open until the stream ends, and its decoded names, 16 bytes and the length of each,
+/// and the places of a forward, 4 bytes for each channel of its open, with its names,
 /// from that decode until it sends its places. A body that does not fit stops with
 /// `BUSY` before the hub reads a byte of it, and ends or names that do not fit stop
 /// with `BUSY` before the writer opens. The bodies of one subject hold at most
@@ -294,19 +297,49 @@ impl From<transport::Error> for Error {
     }
 }
 
-/// Serves the session on `incoming`, and stops the stream with the code of the error
-/// that ends it.
+/// Serves the stream `incoming` from the node `holder`, a member of the hub's region:
+/// a forward or a reader session, by its first message. Stops the stream with the code
+/// of the error that ends it.
+///
+/// # Panics
+///
+/// When `holder` is `None` and the first message is a forward.
 pub(crate) async fn run(
     state: &Rc<RefCell<State>>,
+    holder: Option<node::Key>,
     incoming: Incoming,
 ) -> Result<(), Error> {
     let class = incoming.class;
     let (mut receiver, mut sender) = halves(incoming)?;
-    let served = serve(state, class, &mut receiver, &mut sender).await;
+    let served = first(state, holder, class, &mut receiver, &mut sender).await;
     if let Err(error) = &served {
         stop(receiver, sender, error);
     }
     served
+}
+
+/// Serves a forward or a reader session, by the first message.
+async fn first(
+    state: &Rc<RefCell<State>>,
+    holder: Option<node::Key>,
+    class: Class,
+    receiver: &mut Receiver,
+    sender: &mut Sender,
+) -> Result<(), Error> {
+    let Some(message) = receiver.recv().await? else {
+        sender.finish()?;
+        return Ok(());
+    };
+    match Forward::decode(&message) {
+        Ok(forward) => {
+            let via = holder.expect("invariant: a forward comes from a member");
+            client::forward::serve(state, via, forward, receiver, sender).await
+        }
+        Err(wire::hub::Error::Kind { .. }) => {
+            serve(state, class, &message, receiver, sender).await
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// The two halves of `incoming`. Stops a one-way stream.
@@ -329,9 +362,11 @@ fn stop(receiver: Receiver, sender: Sender, error: &Error) {
     }
 }
 
+/// Serves the reader session that `message` opens.
 async fn serve(
     state: &Rc<RefCell<State>>,
     class: Class,
+    message: &[u8],
     receiver: &mut Receiver,
     sender: &mut Sender,
 ) -> Result<(), Error> {
@@ -341,7 +376,7 @@ async fn serve(
         complete,
         mut layout,
         live,
-    }) = open(state, class, &mut home, receiver).await?
+    }) = open(state, class, &mut home, message, receiver).await?
     else {
         sender.finish()?;
         return Ok(());
@@ -420,20 +455,18 @@ struct Opened {
     live: u64,
 }
 
-/// Reads the open and its keys, checks each key as it arrives, waits until the mesh
-/// names this node the home of the index, and carries the index and opens the session
-/// in the order of the keys. A removal of a channel that it checked ends it. Gives
-/// `None` when the peer finishes first.
+/// Decodes the open in `message`, reads its keys, checks each key as it arrives, waits
+/// until the mesh names this node the home of the index, and carries the index and
+/// opens the session in the order of the keys. A removal of a channel that it checked
+/// ends it. Gives `None` when the peer finishes first.
 async fn open(
     state: &Rc<RefCell<State>>,
     class: Class,
     home: &mut Home,
+    message: &[u8],
     receiver: &mut Receiver,
 ) -> Result<Option<Opened>, Error> {
-    let Some(message) = receiver.recv().await? else {
-        return Ok(None);
-    };
-    let FromReader::Open(open) = home.decode(&message)? else {
+    let FromReader::Open(open) = home.decode(message)? else {
         unreachable!("invariant: the first message that Home gives is an open");
     };
     let wanted = match open.mode {

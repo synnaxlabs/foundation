@@ -483,6 +483,13 @@ impl State {
         }
     }
 
+    /// The member of the region whose card holds `key`, or `None` with no region or
+    /// no such member.
+    fn holder(&self, key: types::ed25519::PublicKey) -> Option<types::node::Key> {
+        let regional = self.region.as_ref()?;
+        regional.region.mesh.holder(key)
+    }
+
     /// Applies the spec that the region's mesh uses now. Does nothing with no region.
     fn catch_up(&mut self) {
         if let Some(regional) = &mut self.region {
