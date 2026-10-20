@@ -42,26 +42,24 @@
   its exact bytes (`laptop.architect`, 2026-10-08T10:15:03Z,
   https://github.com/synnaxlabs/foundation/pull/1854#issuecomment-6057658762).
 
-  The tags take the MESH LOG form, so each SDK reads one form, and no tag is a prefix
-  of another (`laptop.architect`, 2026-10-08T07:39:12Z,
+  The tags take the MESH LOG form, so each SDK reads one form, and no tag is a prefix of
+  another (`laptop.architect`, 2026-10-08T07:39:12Z,
   https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6055096691). A
   request is checked with the key of the hello over its connection key, so a request
   signed with another key or for another connection gives `Error::Signature`, and no
   connection check exists. `peer` is the public key of the node that carried the hello:
   this node when the program connected to it, else the node whose transport session
-  forwarded it. A hello
-  is live at a node while the latest mesh time is before `Admitted::ends`: the earlier
-  of `expires` and `proof::CAP` (15 minutes) past the latest mesh time at its admission.
-  Lost: `access` decodes the signed bytes of the hello itself (design B), because
-  `access` then owns a decoder of outside input and the hello's wire form, which HUB
-  WIRE gives to `wire`; a free `verify` of any `&Hello`, which accepts a key that the
-  program picked when a caller skips `admit`; and `Error::Connection`, which the
-  signature makes needless. `admit` does not check `nonce`: the node that `via` names
-  checks that it is the challenge that it sent (#1748; `laptop.architect`,
-  2026-10-08T08:10:33Z,
-  https://github.com/synnaxlabs/foundation/pull/1834#issuecomment-6055629911). A
-  hosted proof waits on #1832. Decided by `laptop.architect` at
-  2026-10-08T07:35:46Z
+  forwarded it. A hello is live at a node while the latest mesh time is before
+  `Admitted::ends`: the earlier of `expires` and `proof::CAP` (15 minutes) past the
+  latest mesh time at its admission. Lost: `access` decodes the signed bytes of the
+  hello itself (design B), because `access` then owns a decoder of outside input and the
+  hello's wire form, which HUB WIRE gives to `wire`; a free `verify` of any `&Hello`,
+  which accepts a key that the program picked when a caller skips `admit`; and
+  `Error::Connection`, which the signature makes needless. `admit` does not check
+  `nonce`: the node that `via` names checks that it is the challenge that it sent
+  (#1748; `laptop.architect`, 2026-10-08T08:10:33Z,
+  https://github.com/synnaxlabs/foundation/pull/1834#issuecomment-6055629911). A hosted
+  proof waits on #1832. Decided by `laptop.architect` at 2026-10-08T07:35:46Z
   (https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6055033237).
   Changed by #2066: the cap counts from the latest mesh time, not the earliest. With the
   earliest edge, no hello passed both checks once the error passed 2.5 minutes or was
