@@ -143,11 +143,11 @@ const fn when(name: &'static str, others: &'static [&'static str]) -> Attribute 
     }
 }
 
-const UNLESS: Block = Block {
-    keyword: "unless",
+const NAMES: Block = Block {
+    keyword: "names",
     label: None,
     forms: &[Body {
-        summary: "Unless.",
+        summary: "Names.",
         attributes: &[
             unless("one", &["a"]),
             unless("two", &["a", "b"]),
@@ -163,7 +163,7 @@ const UNLESS: Block = Block {
 
 #[test]
 fn unless_and_when_join_the_names_they_take() {
-    let text = markdown(&[UNLESS], &Table::new());
+    let text = markdown(&[NAMES], &Table::new());
     for line in [
         "- `one`: a value. Required unless the body holds `a`. It.\n",
         "- `two`: a value. Required unless the body holds `a` and `b`. It.\n",

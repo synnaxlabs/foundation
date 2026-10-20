@@ -277,6 +277,9 @@ mod tests {
     const UNNAMED: Body =
         holding("Unnamed.", &[attribute("u", Presence::Unless(&[]))], &[]);
 
+    const NOTHING: Body =
+        holding("Nothing.", &[attribute("w", Presence::When(&[]))], &[]);
+
     const WHEN: Body = holding(
         "When.",
         &[
@@ -453,6 +456,13 @@ mod tests {
     fn fails_an_unless_that_names_nothing() {
         let example = document(&[], Vec::new());
         assert_examples([((), &UNNAMED, example)], |(), _| Vec::new());
+    }
+
+    #[test]
+    #[should_panic(expected = "Nothing.: w")]
+    fn fails_a_when_that_names_nothing() {
+        let example = document(&[], Vec::new());
+        assert_examples([((), &NOTHING, example)], |(), _| Vec::new());
     }
 
     #[test]
