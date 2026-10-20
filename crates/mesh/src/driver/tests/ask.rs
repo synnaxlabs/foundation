@@ -4,7 +4,6 @@
 use super::serve::MALFORMED;
 use super::*;
 use crate::join::{self, Miss};
-use crate::status;
 use crate::ticket::{Ticket, Voter};
 
 /// The node that asks to join. It is the fifth node of each run, so each cluster
@@ -59,7 +58,7 @@ fn config_of(
     join::Config {
         ticket,
         card: common::member(JOINER).card,
-        status: status::Names::default(),
+        status: common::names([]),
         clock: node.clock(),
         pool: create_pool(),
         transport,

@@ -124,7 +124,7 @@ pub(crate) fn status<const N: usize>(entries: [(Name, channel::Key); N]) -> Stat
 /// its own, also more than 64.
 pub(crate) fn join_bytes(request: Request, names: &[&str]) -> Vec<u8> {
     let request = Box::new(Request {
-        status: status::Names::default(),
+        status: self::names([]),
         ..request
     });
     let mut bytes = crate::message::Message::Join { request }.encode();

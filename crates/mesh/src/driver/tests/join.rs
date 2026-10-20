@@ -96,7 +96,7 @@ fn a_join_of_a_bound_key_under_another_public_key_is_contested() {
             ticket: public(8),
             card: card.clone().into(),
             admission: common::ticket(8).admission(&card),
-            status: crate::status::Names::default(),
+            status: common::names([]),
         };
         let contested = mesh.admit(public(5), request).await;
         assert_eq!(contested, Ok(Err(Refusal::Contested)));

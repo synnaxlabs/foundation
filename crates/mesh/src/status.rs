@@ -66,11 +66,11 @@ impl Status {
 }
 
 /// The names of a node's status channels, under the node's name: at most 64.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Names(BTreeSet<Name>);
 
 impl Names {
-    /// `names`.
+    /// The names in `names`.
     ///
     /// # Errors
     ///
@@ -81,12 +81,6 @@ impl Names {
             return Err(Many { count });
         }
         Ok(Self(names))
-    }
-
-    /// The names, in order.
-    #[must_use]
-    pub fn as_set(&self) -> &BTreeSet<Name> {
-        &self.0
     }
 
     /// The status with the key that `key` gives each name, in name order.
@@ -166,7 +160,7 @@ mod tests {
     fn names_hold_at_most_64_names_and_read_back() {
         let most: BTreeSet<_> = entries(64).into_keys().collect();
         let names = Names::new(most.clone()).unwrap();
-        assert_eq!(names.as_set(), &most);
+        assert_eq!(names, Names(most));
         let mut bytes = Vec::new();
         names.encode(&mut bytes);
         assert_eq!(Names::decode(&mut bytes.as_slice()), Some(names));

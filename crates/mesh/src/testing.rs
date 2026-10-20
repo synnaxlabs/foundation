@@ -953,7 +953,7 @@ mod tests {
             ticket: public(1),
             card: unchecked(&card),
             admission: ticket(1).admission(&card),
-            status: crate::status::Names::default(),
+            status: crate::common::names([]),
         };
         crate::common::join_bytes(request, names)
     }
