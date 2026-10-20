@@ -1004,3 +1004,49 @@ fn a_sampling_of_zero_panics() {
     .0;
     assert_eq!(panic, Some("invariant: a sampling interval is positive"));
 }
+
+/// A Publish answer that fails to decode ends the changes with its status, after the
+/// changes of the answers before it: past the first answer, a relay gives the value of
+/// a change a type id that no type has.
+#[test]
+fn a_publish_answer_that_fails_to_decode_ends_the_changes() {
+    let got = run(0, async |node| {
+        serve(&node, 4, async |mut peer| {
+            let level = add_level(&peer);
+            let url = format!("opc.tcp://{}:{RELAY}", node.addresses()[0]);
+            let answers = Cell::new(0);
+            let rewrite = |message: &mut Vec<u8>| {
+                let found =
+                    message.windows(DATA_CHANGE.len()).any(|w| w == DATA_CHANGE);
+                if is(message, PUBLISH_RESPONSE) && found {
+                    answers.set(answers.get() + 1);
+                    if answers.get() == 2 {
+                        let value = at(message, &[0x0F, 0x0B]) + 1;
+                        message[value] = 0x3F;
+                    }
+                }
+            };
+            relayed(&node, &Relay::default(), rewrite, async {
+                let mut client = peer.connect(&url).await.expect("the client connects");
+                let revised = client.subscribe(&[numbered(0)], LEVEL, Span::ZERO).await;
+                assert!(revised.is_ok(), "{revised:?}");
+                let first = client.changes(future::pending()).await.map(untimed);
+                level.set(1.0);
+                let second = client.changes(future::pending()).await.map(untimed);
+                let third = client.changes(future::pending()).await.map(untimed);
+                client.close().await;
+                (
+                    first,
+                    second.map_err(Status::name),
+                    third.map_err(Status::name),
+                )
+            })
+            .await
+        })
+        .await
+    })
+    .0;
+    assert_eq!(got.0, Ok(vec![changed_to(0.0, false)]));
+    assert_eq!(got.1, Err("BadDecodingError"));
+    assert_eq!(got.2, Err("BadDecodingError"));
+}
