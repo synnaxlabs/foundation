@@ -45,16 +45,17 @@
   the stream, the `Stored` of each chunk, and the end. So a slow voter that stores a
   chunk within each 10 s stays a holder, and a silent one misses 10 s after its last
   `Stored`. A step that fails on a session that ended dials once more and goes on from
-  its chunk, as a session to a peer that restarted ends only at its first use; a session
-  that stored a chunk earns one more redial. No listed chunk dials no voter
-  (`laptop.architect`, RULING-PENDING:
-  https://github.com/synnaxlabs/foundation/issues/3405, on the plan
-  https://github.com/synnaxlabs/foundation/issues/3405#issuecomment-6288441342, which
-  supersedes the calls of 16 chunks and their deadline). A miss gives the cause of the
-  last attempt.
-  A holder is the node when it is a voter, or a voter whose calls each ended `Ok` while
-  a half that holds it lacked a majority; another failed dial or call, also a failed
-  read of the node's store for a call, leaves a voter no holder. So the holders are at
+  its chunk, as a session to a peer that restarted ends only at its first use. A session
+  that stored a chunk earns one more redial, and a session that ends with no chunk
+  stored ends the put after one redial. No listed chunk dials no voter
+  (`laptop.architect`, 2026-10-20T10:05:20Z:
+  https://github.com/synnaxlabs/foundation/issues/3405#issuecomment-6288473151, on the
+  plan https://github.com/synnaxlabs/foundation/issues/3405#issuecomment-6288441342,
+  which supersedes the calls of 16 chunks and their deadline). A miss gives the cause
+  of the last attempt.
+  A holder is the node when it is a voter, or a voter whose put ended `Ok` while
+  a half that holds it lacked a majority; another failed step, also a failed
+  read of the node's store for a put, leaves a voter no holder. So the holders are at
   most the sum of the majorities of the halves, at most 128, which `HOLDERS_MAX` holds
   (SPEC CHANGE). `Error::Stopped` comes as for `Mesh::set_home`, also while the puts
   wait. Once the holders are a majority of each half, the node drops the puts still open

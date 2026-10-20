@@ -826,9 +826,10 @@ fn an_apply_over_links_of_300_ms_commits_as_each_chunk_ends_within_the_deadline(
     assert_used(&board, &IDS, moved, &definitions);
 }
 
-// Voter 3 is down. Voter 2 stores the first chunks over links of 300 ms, and then its
-// links are cut at 15 s, so its put misses 10 s after its last `Stored`, which came at
-// most one chunk before the cut.
+// Voter 3 is down. Voter 2 stores chunks for 15 s over links of 300 ms, about one a
+// second, and then its links are cut. Its last `Stored` was sent before the cut and
+// comes within 300 ms of it, so its put misses between 10 s and 10.5 s after the cut.
+// A deadline of the whole call would miss at 10 s after its start.
 #[test]
 fn a_voter_that_goes_silent_in_its_put_misses_the_deadline_after_its_last_stored() {
     let mut cluster = Cluster::new(0);
@@ -840,9 +841,9 @@ fn a_voter_that_goes_silent_in_its_put_misses_the_deadline_after_its_last_stored
     cluster.run(seconds(15));
     cluster.link(1, 2, 1.0);
     cluster.link(2, 1, 1.0);
-    cluster.run(seconds(8));
+    cluster.run(peer::DEADLINE);
     assert_eq!(cluster.board().applied, []);
-    cluster.run(seconds(3));
+    cluster.run(Span::from_nanos(500 * Span::MILLISECOND.nanos()));
     let quorum = Error::Quorum {
         held: 1,
         voters: 3,

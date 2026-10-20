@@ -48,8 +48,8 @@
   as `serve` sends a get, and waits for its `Stored`. It runs on `peer::Push`, whose
   `open`, `put(self, Digest)`, and `finish` give each step to a caller that bounds each
   one; `put` gives the `Push` back only when its chunk is stored, so none exists after
-  an error. `blob` stays free of time (`laptop.architect`, RULING-PENDING:
-  https://github.com/synnaxlabs/foundation/issues/3405#issuecomment-6288441342).
+  an error. `blob` stays free of time (`laptop.architect`, 2026-10-20T10:05:20Z:
+  https://github.com/synnaxlabs/foundation/issues/3405#issuecomment-6288473151).
   A stop or reset with a code that
   is not 0 is the peer's refusal (`Error::Refused`), and code 0 a failed stream. A drop
   of either future ends the stream with code 0. Each holds at most one chunk of its own,
