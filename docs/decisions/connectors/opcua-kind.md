@@ -298,7 +298,10 @@
   version: https://github.com/synnaxlabs/foundation/pull/3545#issuecomment-6286349076).
   User (#2934, item 5 of the plan): `opcua` takes `user`, a string, and `password`, a
   secret source. Each needs the other, and both need `certificate`, each as a
-  `document.missing-attribute`. `opcua.bad-user` is for a `user` that is not a string
+  `document.missing-attribute`. The fix at `user` or `password` with no `certificate`
+  says why: a password never goes in clear, so it needs `certificate` with its `key`
+  and `trust` (`laptop.monitor`, the key choices (3) and (b) accepted with this
+  condition, 2026-10-20T13:15Z). `opcua.bad-user` is for a `user` that is not a string
   or is empty. The session sends a `UserNameIdentityToken` with the bytes of the name
   and the password, so a NUL byte does not cut the password. No password goes in clear:
   open62541 refuses a user token policy in the policy None on a channel that is not

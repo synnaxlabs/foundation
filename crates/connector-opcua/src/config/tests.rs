@@ -515,12 +515,17 @@ fn diagnostics(has: &impl Fn(u8) -> bool) -> Vec<Diagnostic> {
             (5, 70, "password"),
         ];
         for (bit, at, key) in needs {
+            let why = if bit < 4 {
+                ""
+            } else {
+                ", and a `key` and `trust` for it, since a password never goes in clear"
+            };
             if has(bit) {
                 missing.push(self::missing(
                     at,
                     "certificate",
                     &format!(
-                        "Add a `certificate` with the certificate of the node, or \
+                        "Add a `certificate` with the certificate of the node{why}, or \
                          remove `{key}`"
                     ),
                 ));
@@ -646,6 +651,29 @@ fn refuses_a_user_that_is_not_a_string_or_is_empty() {
             "{message}"
         );
     }
+}
+
+/// A `user` and `password` with no `certificate` say why they need one and what it
+/// needs.
+#[test]
+fn a_user_with_no_certificate_says_that_a_password_never_goes_in_clear() {
+    let config = plus(&[
+        (60, "user", string("operator")),
+        (70, "password", file(71, PASSWORD)),
+    ]);
+    let fix = |key: &str| {
+        format!(
+            "Add a `certificate` with the certificate of the node, and a `key` and \
+             `trust` for it, since a password never goes in clear, or remove `{key}`"
+        )
+    };
+    assert_eq!(
+        parse(&config),
+        Err(vec![
+            missing(60, "certificate", &fix("user")),
+            missing(70, "certificate", &fix("password")),
+        ])
+    );
 }
 
 #[test]

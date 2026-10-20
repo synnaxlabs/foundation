@@ -335,6 +335,10 @@ pub(crate) fn security(config: &Document) -> Result<Option<Security>, Vec<Diagno
     }
 }
 
+/// What the `certificate` of a connector with a user holds, and why it needs one.
+const CLEAR: &str = "the certificate of the node, and a `key` and `trust` for it, \
+                     since a password never goes in clear";
+
 /// The `document.missing-attribute` of each attribute that another of `attributes`
 /// needs: `certificate` at each of `key`, `trust`, `unencrypted`, `user`, and
 /// `password` with no `certificate`, else `key` and `trust` at `certificate`, and
@@ -352,8 +356,11 @@ fn missing(attributes: &Map) -> Vec<Diagnostic> {
             ),
         ]);
     } else {
-        for by in ["key", "trust", "unencrypted", "user", "password"] {
+        for by in ["key", "trust", "unencrypted"] {
             needs.push((by, "certificate", "the certificate of the node"));
+        }
+        for by in ["user", "password"] {
+            needs.push((by, "certificate", CLEAR));
         }
     }
     needs.extend([
