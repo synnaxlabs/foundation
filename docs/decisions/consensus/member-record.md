@@ -278,6 +278,16 @@
   by `laptop.architect`, 2026-10-19T18:37:21Z
   (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6274494595), as
   2026-10-19T19:01:39Z (6274961164) changes it.
+  After 300 voter changes, 127 learners that answer nothing cost the leader about 18
+  ms/s of CPU (17.2 to 18.5 ms/s, box2, release, sim driver) and about 149 MB of RSS,
+  13.1 MB of it encoded in the queues: each heartbeat to each of them carries the links
+  of the chain that fit (RAFT SURFACE). It is the cost of a fault, over the idle limit
+  of 10 ms/s. Deferred: links and entries that the queues share, not copy, which cuts
+  the clone and the RSS of the queues. Trigger: before `MEMBERS_MAX` grows past 128.
+  Decided by `laptop.architect`, 2026-10-20T00:59:40Z
+  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6280820710), on
+  the numbers of
+  https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6280775927.
   A member and a `Join` hold at most 64 status entries, as the 32 of `Addresses`.
   Decided by `laptop.architect` (2026-10-07T10:44:26Z):
   https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036265582. The type
