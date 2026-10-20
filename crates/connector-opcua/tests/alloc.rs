@@ -183,6 +183,11 @@ fn sent(kind: u8, length: usize) -> u64 {
     // SAFETY: `buffer` is a block of `connector_opcua_malloc` of at least `length`.
     let ((), found) =
         ALLOCATOR.freed_holding(SECRET, || unsafe { shim_send_free(&raw mut buffer) });
+    assert_eq!(
+        (buffer.length, buffer.data.is_null()),
+        (0, true),
+        "the free empties the buffer"
+    );
     found
 }
 
