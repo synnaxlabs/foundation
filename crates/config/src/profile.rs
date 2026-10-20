@@ -32,6 +32,8 @@ const NODE_KEY: Holder = Holder {
 /// of its subject.
 const PASTED_KEY: &str = "Remove the private key from this file now, and write \
                           the path of its key file as `private_key`";
+const PASTED_NODE_KEY: &str = "Remove the private key from this file now, and use the \
+                               line that `foundation profile` prints";
 const BODY: Body = Body {
     summary: "The subject that a program on a client host acts as, and the public \
               key of each node that it connects to.",
@@ -121,11 +123,8 @@ pub struct Profile {
 /// no `subject`, a `node` block without one label or its `public_key`, and each later
 /// `node` block of an address.
 pub fn decode(document: &Document) -> Result<Profile, Vec<Diagnostic>> {
-    let mut alarms = crate::private_key::alarms(std::slice::from_ref(document));
+    let alarms = alarms(document);
     if !alarms.is_empty() {
-        for alarm in &mut alarms {
-            alarm.fix = PASTED_KEY.into();
-        }
         return Err(alarms);
     }
     let mut diagnostics = read::unknown(document, "the profile", &BODY);
@@ -178,6 +177,33 @@ pub fn decode(document: &Document) -> Result<Profile, Vec<Diagnostic>> {
     }
     crate::sort(&mut diagnostics);
     Err(diagnostics)
+}
+
+/// `config.private-key` at each string of `document` that holds a private key, in
+/// source order, with the fix of its place: in a `node` block or outside one.
+fn alarms(document: &Document) -> Vec<Diagnostic> {
+    let (nodes, rest) = document
+        .blocks
+        .iter()
+        .cloned()
+        .partition(|block| *block.keyword == *NODE.keyword);
+    let rest = Document {
+        attributes: document.attributes.clone(),
+        blocks: rest,
+    };
+    let nodes = Document {
+        blocks: nodes,
+        ..Document::default()
+    };
+    let mut alarms = Vec::new();
+    for (part, fix) in [(rest, PASTED_KEY), (nodes, PASTED_NODE_KEY)] {
+        for mut alarm in crate::private_key::alarms(&[part]) {
+            alarm.fix = fix.into();
+            alarms.push(alarm);
+        }
+    }
+    crate::sort(&mut alarms);
+    alarms
 }
 
 /// The `node` block that pins `public_key` at `address`. [`decode`] reads it back, with
