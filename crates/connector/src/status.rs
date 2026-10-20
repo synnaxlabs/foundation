@@ -73,6 +73,8 @@ const NOTE: usize = SUPERVISOR.len();
 const TEXT_MAX: usize = 1024;
 /// The mark in place of the middle of a text that is too long.
 const MARK: &str = "…";
+/// The mark in place of each value that a run read, as `Debug` of `secret::Value`.
+const HIDDEN: &str = "<secret>";
 /// The least time between two writes of a change of counts alone.
 const PERIOD: Span = Span::SECOND;
 /// The most time that the changes of state wait for the home to apply the status,
@@ -216,22 +218,40 @@ impl Status {
         }
     }
 
-    /// Shows `error` as the class `Retry` and its text, from the next write until the
-    /// end of the run.
+    /// Shows `value` of `source` as [`HIDDEN`] in each text of the run after the call,
+    /// in place of the last value of `source`. With no run, it does nothing.
+    pub(crate) fn hide(&self, source: &secret::Source, value: &secret::Value) {
+        let mut run = self.values.run.borrow_mut();
+        let Some(run) = run.as_mut() else {
+            return;
+        };
+        run.secrets.retain(|(held, _)| held != source);
+        let text = String::from_utf8_lossy(value.expose());
+        // An empty value would match at each char of each text.
+        if !text.is_empty() {
+            let text = secret::Value::new(text.into_owned().into_bytes());
+            run.secrets.push((source.clone(), text));
+        }
+    }
+
+    /// Shows `error` as the class `Retry` and its text, given by [`shown`], from the
+    /// next write until the end of the run.
     pub(crate) fn show(&self, error: &dyn fmt::Display) {
-        self.set(Shown::Error(cut(&error.to_string())));
+        let text = error.to_string();
+        self.set(|run| Shown::Error(shown(&text, &run.secrets)));
     }
 
     /// Clears the class and the text, from the next write until the end of the run.
     pub(crate) fn clear(&self) {
-        self.set(Shown::Cleared);
+        self.set(|_| Shown::Cleared);
     }
 
-    /// Shows `note`, cut by [`cut`], from the next write until the end of the run,
+    /// Shows `note`, given by [`shown`], from the next write until the end of the run,
     /// unless the run shows it already or no run runs.
     pub(crate) fn note(&self, note: &dyn fmt::Display) {
-        let note = cut(&note.to_string());
+        let text = note.to_string();
         self.change(|run| {
+            let note = shown(&text, &run.secrets);
             if run.note == note {
                 return false;
             }
@@ -240,9 +260,11 @@ impl Status {
         });
     }
 
-    /// Stages `new`, unless it is the error that the run shows, or no run runs.
-    fn set(&self, new: Shown) {
+    /// Stages what `new` gives, unless it is the error that the run shows, or no run
+    /// runs.
+    fn set(&self, new: impl FnOnce(&Run) -> Shown) {
         self.change(|run| {
+            let new = new(run);
             if run.error == new {
                 return false;
             }
@@ -354,8 +376,7 @@ pub enum Class {
 
 impl Class {
     /// The class of a run that ended with `end`, and the text of `error`: `None` and
-    /// an empty text for `Ok`, else the text of the error with no class, cut to
-    /// [`TEXT_MAX`] bytes.
+    /// an empty text for `Ok`, else the text of the error with no class.
     fn with_text(end: &Result<(), kind::Error>) -> (Option<Self>, String) {
         let (class, text) = match end {
             Ok(()) => (None, String::new()),
@@ -367,7 +388,7 @@ impl Class {
             }
             Err(kind::Error::Retry(source)) => (Some(Self::Retry), source.to_string()),
         };
-        (class, cut(&text))
+        (class, text)
     }
 
     /// The name of the class in a line of the log.
@@ -422,6 +443,9 @@ struct Run {
     error: Shown,
     /// Empty when the run shows no note.
     note: String,
+    /// The text form of the last value of each source that the run read, when not
+    /// empty.
+    secrets: Vec<(secret::Source, secret::Value)>,
 }
 
 /// The error that the running kind shows.
@@ -569,8 +593,10 @@ impl Writer {
         &self,
         end: &Result<(), kind::Error>,
     ) -> impl Future<Output = ()> + use<'_> {
-        self.values.run.take();
+        let secrets = self.values.run.take().map(|run| run.secrets);
         let (class, error) = Class::with_text(end);
+        let error = shown(&error, secrets.as_deref().unwrap_or_default());
+        drop(secrets);
         let span = &self.span;
         match class {
             None => tracing::info!(parent: span, "ended"),
@@ -880,6 +906,32 @@ impl Frame {
     }
 }
 
+/// `text` with each of `secrets` replaced by [`HIDDEN`], then [`cut`]. At each char,
+/// it replaces the longest value that starts there, in one pass, so a value inside
+/// [`HIDDEN`] does not change a mark. Each value is UTF-8 and not empty.
+fn shown(text: &str, secrets: &[(secret::Source, secret::Value)]) -> String {
+    if secrets.is_empty() {
+        return cut(text);
+    }
+    let mut hidden = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(next) = rest.chars().next() {
+        let value = (secrets.iter())
+            .map(|(_, value)| value.expose())
+            .filter(|value| rest.as_bytes().starts_with(value))
+            .max_by_key(|value| value.len());
+        let len = if let Some(value) = value {
+            hidden.push_str(HIDDEN);
+            value.len()
+        } else {
+            hidden.push(next);
+            next.len_utf8()
+        };
+        rest = &rest[len..];
+    }
+    cut(&hidden)
+}
+
 /// `text` when it fits in [`TEXT_MAX`] bytes. Else its head and its tail, cut at char
 /// boundaries and joined by [`MARK`], so that an error with a long subject keeps its
 /// reason at the end. No spare capacity.
@@ -1108,7 +1160,74 @@ mod tests {
         assert_eq!(channels, want);
     }
 
+    /// The secrets of `values`, each the source `secret("plant.s<i>")`.
+    fn secrets(values: &[&[u8]]) -> Vec<(secret::Source, secret::Value)> {
+        let source = |i| secret::Source::Secret(name(&format!("plant.s{i}")));
+        (values.iter().enumerate())
+            .map(|(i, value)| (source(i), secret::Value::new(value.to_vec())))
+            .collect()
+    }
+
+    #[test]
+    fn hides_the_longest_value_at_each_place_in_one_pass() {
+        let got = shown("ab abc b e", &secrets(&[b"ab", b"abc", b"e"]));
+        assert_eq!(got, "<secret> <secret> b <secret>");
+    }
+
+    #[test]
+    fn hides_nothing_with_no_value() {
+        assert_eq!(shown("a token", &[]), "a token");
+    }
+
+    #[test]
+    fn hides_only_the_last_value_of_each_source() {
+        let status = Status::new(Vec::new(), tracing::Span::none());
+        let (first, second) = (secret::Source::Env("A".into()), name("plant.b"));
+        let second = secret::Source::Secret(second);
+        status.hide(&first, &secret::Value::new(b"one".to_vec()));
+        status.values.run.replace(Some(Run::default()));
+        status.hide(&first, &secret::Value::new(b"two".to_vec()));
+        status.hide(&second, &secret::Value::new(b"x\xffy".to_vec()));
+        status.hide(&first, &secret::Value::new(b"three".to_vec()));
+        status.hide(&second, &secret::Value::new(Vec::new()));
+        status.show(&"one two three x\u{fffd}y");
+        status.note(&"three");
+        let run = status.values.run.take().expect("a run");
+        let want = Shown::Error("one two <secret> x\u{fffd}y".into());
+        assert_eq!((run.error, run.note.as_str()), (want, "<secret>"));
+    }
+
+    #[test]
+    fn hides_the_text_form_of_a_value_that_is_not_utf_8() {
+        let status = Status::new(Vec::new(), tracing::Span::none());
+        status.values.run.replace(Some(Run::default()));
+        let source = secret::Source::Env("A".into());
+        status.hide(&source, &secret::Value::new(b"x\xffy".to_vec()));
+        status.note(&"x\u{fffd}y and xy");
+        let run = status.values.run.take().expect("a run");
+        assert_eq!(run.note, "<secret> and xy");
+    }
+
     proptest! {
+        /// No value is left, and each part of the text between values stays.
+        #[test]
+        fn hides_each_value_and_keeps_the_rest(
+            parts in prop::collection::vec(("[a-z ]{1,8}", 0_usize..3), 0..20),
+            values in prop::collection::vec("[0-9]{1,4}", 1..4),
+        ) {
+            let text: String = (parts.iter())
+                .flat_map(|(plain, at)| [plain, &values[at % values.len()]])
+                .map(String::as_str)
+                .collect();
+            let bytes: Vec<&[u8]> = values.iter().map(String::as_bytes).collect();
+            let got = shown(&text, &secrets(&bytes));
+            prop_assert!(!got.bytes().any(|byte| byte.is_ascii_digit()), "{}", got);
+            let want: String = (parts.iter())
+                .flat_map(|(plain, _)| [plain.as_str(), HIDDEN])
+                .collect();
+            prop_assert_eq!(got, cut(&want));
+        }
+
         /// `cut` is pure, so this reaches each length and char width, which a run
         /// through the supervisor does not. A constant spare capacity cancels in each
         /// difference of held bytes that a caller can measure, so only this one sees
@@ -1139,10 +1258,15 @@ mod tests {
     /// can measure, so only this one sees it.
     #[test]
     fn gives_the_text_of_an_error_with_no_spare_capacity() {
-        let device = Err(kind::Error::Device("busy".into()));
+        let device = Err(kind::Error::Device("busy s3cret".into()));
         let (class, text) = Class::with_text(&device);
-        assert_eq!((class, text.as_str()), (Some(Class::Device), "busy"));
-        assert_eq!(text.capacity(), text.len());
+        assert_eq!((class, text.as_str()), (Some(Class::Device), "busy s3cret"));
+        let got = [shown(&text, &[]), shown(&text, &secrets(&[b"s3cret"]))];
+        assert_eq!(
+            got.each_ref().map(String::as_str),
+            ["busy s3cret", "busy <secret>"]
+        );
+        assert_eq!(got.map(|text| text.capacity() - text.len()), [0, 0]);
     }
 
     /// A constant spare capacity of the value cancels in each difference of held bytes

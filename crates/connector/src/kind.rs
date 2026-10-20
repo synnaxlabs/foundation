@@ -337,7 +337,8 @@ impl<C> Context<C> {
     /// failed with the class `retry`. The status gives it within one second. The end
     /// of the run replaces it, and a call after the run returned shows nothing. Each
     /// time the status takes a show that changes its text or its class, it also
-    /// writes the log line `error` (WARN).
+    /// writes the log line `error` (WARN). Each value that [`Context::secret`] read in
+    /// this run shows as `<secret>`, before the cut at 1024 bytes.
     pub fn error(&self, error: &dyn fmt::Display) {
         self.status.show(error);
     }
@@ -359,7 +360,8 @@ impl<C> Context<C> {
     /// bytes or less at char boundaries, joined by `…`. An empty `note` shows none. The
     /// end of the run clears it, and a call after the run returned shows nothing. Each
     /// time the status takes a note that changes its note, it also writes the log line
-    /// `note` (INFO).
+    /// `note` (INFO). Each value that [`Context::secret`] read in this run shows as
+    /// `<secret>`, before the cut at 1024 bytes.
     pub fn note(&self, note: &dyn fmt::Display) {
         self.status.note(note);
     }
@@ -389,6 +391,12 @@ impl<C> Context<C> {
     /// its next run. An `env()` gives the value of the node's start. Send its bytes
     /// only to the system they unlock, and never into a status or a log.
     ///
+    /// The status of the run shows `<secret>` in place of the value in each text of
+    /// [`Context::error`], of [`Context::note`], and of the end of the run, until the
+    /// run ends or the next read of `source`. It hides the text form of the value
+    /// (`String::from_utf8_lossy`), not a form that the kind makes of it, such as the
+    /// base64 of `user:password`.
+    ///
     /// # Errors
     ///
     /// [`Error::Config`] with code `connector.bad-secret-name` when the store cannot
@@ -401,7 +409,9 @@ impl<C> Context<C> {
         &self,
         source: &secret::Source,
     ) -> Result<secret::Value, Error> {
-        read_secret(&self.inputs.secrets, source).await
+        let value = read_secret(&self.inputs.secrets, source).await?;
+        self.status.hide(source, &value);
+        Ok(value)
     }
 
     /// Runs the kind's own tasks on its shard. Each task must end when

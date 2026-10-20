@@ -581,7 +581,16 @@ mod tests {
         /// Shows a note whose text is the debug of its context, waits the span, then
         /// returns `Ok`.
         NoteDebug(Span),
+        /// Reads [`TOKEN`], shows the error `the token s3cret is unknown` and the note
+        /// `token s3cret`, waits the span, shows an error of 1,113 bytes with `s3cret`
+        /// at bytes 507 to 513, waits the span, then returns the device error
+        /// `refused s3cret`.
+        Hide(Span),
     }
+
+    /// The secret `plant.token`, which [`supervise_with`] can write with the value
+    /// `s3cret`.
+    const TOKEN: &str = "plant.token";
 
     /// A note that shows the error `refused` on its context as it formats.
     struct Nested<'a>(&'a Context<bool>);
@@ -706,6 +715,7 @@ mod tests {
                 Ok(())
             }
             Some(Step::Late { failed, cleared }) => show_late(lent, failed, cleared),
+            Some(Step::Hide(span)) => hide(ctx, span).await,
             Some(step) => note(lent, step).await,
             None => {
                 ctx.cancel().wait().await;
@@ -748,6 +758,19 @@ mod tests {
             _ => unreachable!("a step of a note"),
         }
         Ok(())
+    }
+
+    /// Runs [`Step::Hide`].
+    async fn hide(ctx: &Context<bool>, span: Span) -> Result<(), Error> {
+        let clock = ctx.clock();
+        let token = secret::Source::Secret(name(TOKEN));
+        ctx.secret(&token).await?;
+        ctx.error(&"the token s3cret is unknown");
+        ctx.note(&"token s3cret");
+        clock.sleep(span).await;
+        ctx.error(&format!("{}s3cret{}", "a".repeat(507), "a".repeat(600)));
+        clock.sleep(span).await;
+        Err(Error::Device("refused s3cret".into()))
     }
 
     /// Runs [`Step::Late`].
@@ -958,7 +981,23 @@ mod tests {
         config: Document,
         cancel: Cancel,
     ) -> Outcome {
+        supervise_with(seed, kind, steps, config, cancel, &[])
+    }
+
+    /// [`supervise`] with each of `secrets`, a name and a value, in the store of the
+    /// node.
+    fn supervise_with(
+        seed: u64,
+        kind: &'static str,
+        steps: Vec<Step>,
+        config: Document,
+        cancel: Cancel,
+        secrets: &'static [(&'static str, &'static [u8])],
+    ) -> Outcome {
         run_in(seed, move |node, tasks| async move {
+            for (secret, value) in secrets {
+                testing::create_secret(&node.files(), &name(secret), value).await;
+            }
             let script = Script {
                 steps: Mutex::new(steps.into()),
                 ..Script::default()
@@ -1229,6 +1268,27 @@ mod tests {
                 false
             }
         });
+    }
+
+    #[test]
+    fn shows_each_value_that_a_run_read_as_a_mark_before_the_cut() {
+        let steps = vec![Step::Hide(ms(2_000))];
+        let secrets: &[(&str, &[u8])] = &[(TOKEN, b"s3cret")];
+        let cancel = Cancel::After(ms(4_500));
+        let out = supervise_with(0, "script", steps, config(), cancel, secrets);
+        out.result.expect("ok after a cancel");
+        let mut got: Vec<_> = (out.statuses.iter())
+            .map(|(_, _, text, note)| (text.as_str(), note.as_str()))
+            .collect();
+        got.dedup();
+        let cut = format!("{}<se…{}", "a".repeat(507), "a".repeat(510));
+        let want = [
+            ("", ""),
+            ("the token <secret> is unknown", "token <secret>"),
+            (cut.as_str(), "token <secret>"),
+            ("refused <secret>", ""),
+        ];
+        assert_eq!(got[..4], want, "{got:?}");
     }
 
     #[test]
