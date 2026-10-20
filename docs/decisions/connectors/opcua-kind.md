@@ -324,7 +324,7 @@
   `user`, the password, and a user name token in those policies (`laptop.architect-2`,
   2026-10-20T12:58:13Z:
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6291388946, and the
-  review of the texts:
+  review of the texts, 2026-10-20T13:46:04Z:
   https://github.com/synnaxlabs/foundation/pull/3597#issuecomment-6292345470). Lost: a
   block `user "operator" { password = ... }`, a block for one pair, as a later X.509
   user token would need a second form (plan:
