@@ -586,11 +586,17 @@ mod tests {
         /// at bytes 507 to 513, waits the span, then returns the device error
         /// `refused s3cret`.
         Hide(Span),
+        /// Reads [`TOKEN`] and [`LONG`], shows the error `s3cret-long s3cret`, waits
+        /// the span, reads [`TOKEN`] again, shows the error `s3cret-long s3cret n3w`,
+        /// waits the span, then returns `Ok`.
+        Reread(Span),
     }
 
     /// The secret `plant.token`, which [`supervise_with`] can write with the value
     /// `s3cret`.
     const TOKEN: &str = "plant.token";
+    /// A secret whose value starts with the value of [`TOKEN`].
+    const LONG: &str = "plant.long";
 
     /// A note that shows the error `refused` on its context as it formats.
     struct Nested<'a>(&'a Context<bool>);
@@ -716,6 +722,7 @@ mod tests {
             }
             Some(Step::Late { failed, cleared }) => show_late(lent, failed, cleared),
             Some(Step::Hide(span)) => hide(ctx, span).await,
+            Some(Step::Reread(span)) => reread(ctx, span).await,
             Some(step) => note(lent, step).await,
             None => {
                 ctx.cancel().wait().await;
@@ -771,6 +778,21 @@ mod tests {
         ctx.error(&format!("{}s3cret{}", "a".repeat(507), "a".repeat(600)));
         clock.sleep(span).await;
         Err(Error::Device("refused s3cret".into()))
+    }
+
+    /// Runs [`Step::Reread`].
+    async fn reread(ctx: &Context<bool>, span: Span) -> Result<(), Error> {
+        let clock = ctx.clock();
+        let (token, long) = (name(TOKEN), name(LONG));
+        let [token, long] = [token, long].map(secret::Source::Secret);
+        ctx.secret(&token).await?;
+        ctx.secret(&long).await?;
+        ctx.error(&"s3cret-long s3cret");
+        clock.sleep(span).await;
+        ctx.secret(&token).await?;
+        ctx.error(&"s3cret-long s3cret n3w");
+        clock.sleep(span).await;
+        Ok(())
     }
 
     /// Runs [`Step::Late`].
@@ -984,19 +1006,29 @@ mod tests {
         supervise_with(seed, kind, steps, config, cancel, &[])
     }
 
-    /// [`supervise`] with each of `secrets`, a name and a value, in the store of the
-    /// node.
+    /// [`supervise`] that writes each of `secrets`, a name and a value, to the store
+    /// of the node at its span after the start, or before the start at
+    /// [`Span::ZERO`].
     fn supervise_with(
         seed: u64,
         kind: &'static str,
         steps: Vec<Step>,
         config: Document,
         cancel: Cancel,
-        secrets: &'static [(&'static str, &'static [u8])],
+        secrets: &'static [(Span, &'static str, &'static [u8])],
     ) -> Outcome {
         run_in(seed, move |node, tasks| async move {
-            for (secret, value) in secrets {
-                testing::create_secret(&node.files(), &name(secret), value).await;
+            for &(at, secret, value) in secrets {
+                let (files, clock) = (node.files(), node.clock());
+                let write = async move {
+                    clock.sleep(at).await;
+                    testing::create_secret(&files, &name(secret), value).await;
+                };
+                if at == Span::ZERO {
+                    write.await;
+                } else {
+                    tasks.spawn(write);
+                }
             }
             let script = Script {
                 steps: Mutex::new(steps.into()),
@@ -1273,7 +1305,7 @@ mod tests {
     #[test]
     fn shows_each_value_that_a_run_read_as_a_mark_before_the_cut() {
         let steps = vec![Step::Hide(ms(2_000))];
-        let secrets: &[(&str, &[u8])] = &[(TOKEN, b"s3cret")];
+        let secrets: &[(Span, &str, &[u8])] = &[(Span::ZERO, TOKEN, b"s3cret")];
         let cancel = Cancel::After(ms(4_500));
         let out = supervise_with(0, "script", steps, config(), cancel, secrets);
         out.result.expect("ok after a cancel");
@@ -1289,6 +1321,25 @@ mod tests {
             ("refused <secret>", ""),
         ];
         assert_eq!(got[..4], want, "{got:?}");
+    }
+
+    #[test]
+    fn shows_the_value_of_a_source_before_its_last_read_in_clear() {
+        let steps = vec![Step::Reread(ms(2_000))];
+        let secrets: &[(Span, &str, &[u8])] = &[
+            (Span::ZERO, TOKEN, b"s3cret"),
+            (Span::ZERO, LONG, b"s3cret-long"),
+            (Span::SECOND, TOKEN, b"n3w"),
+        ];
+        let cancel = Cancel::After(ms(4_500));
+        let out = supervise_with(0, "script", steps, config(), cancel, secrets);
+        out.result.expect("ok after a cancel");
+        let mut got: Vec<_> = (out.statuses.iter())
+            .map(|(_, _, text, _)| text.as_str())
+            .collect();
+        got.dedup();
+        let want = ["", "<secret> <secret>", "<secret> s3cret <secret>"];
+        assert_eq!(got[..3], want, "{got:?}");
     }
 
     #[test]
