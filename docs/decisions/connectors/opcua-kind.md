@@ -264,12 +264,12 @@
   {address} failed with {status}" gains ": {cause}", which ends with its fix, for the
   statuses of the secure channel. `BadSecurityChecksFailed` names the certificate to
   install by its source, SHA-1 thumbprint, and subject, when the subject is not empty.
-  `BadCertificateUntrusted` names the source of the trust: only the check of the
-  client gives it, since the server hides it behind `BadSecurityChecksFailed`. The
-  server also sends `BadCertificateTimeInvalid`, `BadCertificateIssuerTimeInvalid`,
+  An open62541 server hides `BadCertificateUntrusted` behind
+  `BadSecurityChecksFailed`, and a server of another stack can send it. A server also
+  sends `BadCertificateTimeInvalid`, `BadCertificateIssuerTimeInvalid`,
   `BadCertificateUriInvalid`, and `BadCertificateUseNotAllowed` about the certificate
-  of the node, so the text of each names the certificate of the server and the
-  certificate of the node, with the source of each. The text of
+  of the node. So the text of each of these five names the certificate of the server
+  and the certificate of the node, with the source of each, and the fix of each side. The text of
   `BadCertificateUseNotAllowed` names `basicConstraints = CA:FALSE` as the fix of the
   certificate of the node. The connector has no `user`, so
   `BadIdentityTokenRejected` names the mode and the policies that the server must offer

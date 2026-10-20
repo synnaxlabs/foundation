@@ -35,7 +35,8 @@ use crate::client::tests::common::{env, rig};
 use crate::client::{self, GRACE};
 use crate::gate::Gate;
 use crate::secure::{
-    CA_CLIENT, CLIENT, END, HIGH_PEM, LASTING, NAMELESS, OTHER, Policy, SERVER, START,
+    CA_CLIENT, CLIENT, END, EXPIRED_CA, EXPIRED_CA_CLIENT, HIGH_PEM, LASTING, NAMELESS,
+    OTHER, Policy, SERVER, START,
 };
 use crate::sim::{Served, Variables, serve};
 
@@ -2103,7 +2104,10 @@ fn a_trust_without_the_certificate_of_the_server_names_the_trust() {
     let mut secure = Secure::of(Policy::Basic256Sha256);
     secure.credentials[2] = Some(OTHER.certificate);
     let cause = "the trust holds neither the certificate of the server nor the CA that \
-                 issued it. Check the trust secret(\"plant.opcua_trust\")";
+                 issued it, or the server does not trust the certificate of the node \
+                 secret(\"plant.opcua_certificate\"). Check the trust \
+                 secret(\"plant.opcua_trust\"), and install the certificate of the node \
+                 in the trust list of the server";
     connect_fails(secure, "BadCertificateUntrusted", cause);
 }
 
@@ -2148,6 +2152,23 @@ fn a_ca_certificate_of_the_node_names_the_certificate() {
                  Check the trust secret(\"plant.opcua_trust\"), and make the \
                  certificate of the node with `basicConstraints = CA:FALSE`";
     connect_fails(secure, "BadCertificateUseNotAllowed", cause);
+}
+
+/// The server finds that [`EXPIRED_CA`], which issued [`EXPIRED_CA_CLIENT`], expired
+/// before the mesh time, and sends the status about the certificate of the node.
+#[test]
+fn an_expired_ca_of_the_node_certificate_names_the_certificate() {
+    let mut secure = Secure::of(Policy::Basic256Sha256);
+    secure.credentials[0] = Some(EXPIRED_CA_CLIENT);
+    secure.server.trust = EXPIRED_CA;
+    let cause = "the mesh time is outside the validity window of the CA that issued the \
+                 certificate of the server, or the clock of the server is outside the \
+                 window of the CA that issued the certificate of the node \
+                 secret(\"plant.opcua_certificate\"). Check the trust \
+                 secret(\"plant.opcua_trust\"), the clock of the server, and the window \
+                 of the CA that issued the certificate \
+                 secret(\"plant.opcua_certificate\")";
+    connect_fails(secure, "BadCertificateIssuerTimeInvalid", cause);
 }
 
 /// The [`cause`] of a connect that failed with `status` over a channel on
@@ -2201,7 +2222,9 @@ fn a_refused_certificate_names_the_trust_and_the_certificate_of_the_node() {
             Status::BAD_CERTIFICATE_UNTRUSTED,
             format!(
                 "the trust holds neither the certificate of the server nor the CA that \
-                 issued it. Check the trust {trust}"
+                 issued it, or the server does not trust the certificate of the node \
+                 {certificate}. Check the trust {trust}, and install the certificate of \
+                 the node in the trust list of the server"
             ),
         ),
         (
@@ -2219,7 +2242,8 @@ fn a_refused_certificate_names_the_trust_and_the_certificate_of_the_node() {
                 "the mesh time is outside the validity window of the CA that issued \
                  the certificate of the server, or the clock of the server is outside \
                  the window of the CA that issued the certificate of the node \
-                 {certificate}. Check the trust {trust} and the clock of the server"
+                 {certificate}. Check the trust {trust}, the clock of the server, and \
+                 the window of the CA that issued the certificate {certificate}"
             ),
         ),
         (

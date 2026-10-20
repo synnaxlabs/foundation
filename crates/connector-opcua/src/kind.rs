@@ -404,7 +404,9 @@ fn cause(status: Status, secured: Option<&Secured<'_>>) -> Option<String> {
         Status::BAD_SECURITY_CHECKS_FAILED => secured.distrusted(),
         Status::BAD_CERTIFICATE_UNTRUSTED => format!(
             "the trust holds neither the certificate of the server nor the CA that \
-             issued it. Check the trust {trust}"
+             issued it, or the server does not trust the certificate of the node \
+             {certificate}. Check the trust {trust}, and install the certificate of \
+             the node in the trust list of the server"
         ),
         Status::BAD_CERTIFICATE_TIME_INVALID => format!(
             "the mesh time is outside the validity window of the certificate of the \
@@ -416,7 +418,8 @@ fn cause(status: Status, secured: Option<&Secured<'_>>) -> Option<String> {
             "the mesh time is outside the validity window of the CA that issued the \
              certificate of the server, or the clock of the server is outside the \
              window of the CA that issued the certificate of the node {certificate}. \
-             Check the trust {trust} and the clock of the server"
+             Check the trust {trust}, the clock of the server, and the window of the \
+             CA that issued the certificate {certificate}"
         ),
         Status::BAD_CERTIFICATE_URI_INVALID => format!(
             "the URI of the certificate of the server is not the application URI of \

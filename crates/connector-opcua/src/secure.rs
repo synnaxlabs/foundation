@@ -1,9 +1,10 @@
 //! The test peers of secure channels.
 //!
-//! The fixtures in `secure/` are self-signed RSA 2048 certificates with SHA-256 and
-//! their PKCS #1 keys, in DER from Python `cryptography` 41.0.7, each valid from
-//! [`START`] to [`END`] other than [`LASTING`], PEM copies of them, and one P-256
-//! certificate and its key. They are test keys only. `nameless.der` is from `openssl
+//! The fixtures in `secure/` are RSA 2048 certificates with SHA-256 and their PKCS #1
+//! keys, in DER from Python `cryptography` 41.0.7, each self-signed and valid from
+//! [`START`] to [`END`] other than [`LASTING`], [`EXPIRED_CA`], and
+//! [`EXPIRED_CA_CLIENT`], PEM copies of them, and one P-256 certificate and its key.
+//! They are test keys only. `nameless.der` is from `openssl
 //! req -x509`: a CA certificate with an empty subject and issuer and no subject
 //! alternative name, valid from 2026-10-20 to 2027-10-20.
 
@@ -54,6 +55,17 @@ pub(crate) const LONG_SUBJECT: &[u8] = include_bytes!("secure/long-subject.der")
 /// A certificate on the key of [`CLIENT`] whose subject is a description of 1100 `d`,
 /// then `/CN=client`.
 pub(crate) const LONG_ENTRY: &[u8] = include_bytes!("secure/long-entry.der");
+
+/// A certificate on the key of [`CLIENT`] whose subject is `/CN=client` and a unit
+/// `/OU=` of 150 000 `é`.
+pub(crate) const HUGE_SUBJECT: &[u8] = include_bytes!("secure/huge-subject.der");
+
+/// A CA `/CN=nodeca` on its own key, valid from 2000-01-01 to 2001-01-01 12:00.
+pub(crate) const EXPIRED_CA: &[u8] = include_bytes!("secure/expired-ca.der");
+
+/// A client with the URI of [`CLIENT`] on its key, issued by [`EXPIRED_CA`].
+pub(crate) const EXPIRED_CA_CLIENT: &[u8] =
+    include_bytes!("secure/expired-ca-client.der");
 
 /// A client on the key of [`CLIENT`] whose first URI is empty.
 pub(crate) const EMPTY_URI: Identity = Identity {
