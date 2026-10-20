@@ -26,6 +26,9 @@
 //! Each line runs on the `sim` driver and leaves out the carrier task of each
 //! transport, which seals and decodes the packets (#3584). Compare two builds on one
 //! pinned core whose SMT sibling is idle.
+//!
+//! Each argument that does not start with `--` names a line to run, such as
+//! `"direct 1x2"`, so `perf stat` can count one line alone. With none, each line runs.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -195,14 +198,30 @@ struct Progress {
 }
 
 fn main() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the bench binary is its own entry point"
+    )]
+    let names: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|arg| !arg.starts_with("--"))
+        .collect();
     let timer = Line::new("timer", 1);
-    let (timer, mut lines) = member(timer);
-    let (timer, direct) = direct(timer);
+    let (timer, mut lines) = member(timer, chosen(MEMBER, &names));
+    let (timer, direct) = direct(timer, chosen(DIRECT, &names));
     lines.extend(direct);
-    let (timer, home) = home(timer);
+    let (timer, home) = home(timer, chosen(HOME, &names));
     lines.extend(home);
     let title = format!("ns per frame over {ROUNDS} rounds");
     table::print(&title, &timer, &lines);
+}
+
+/// Each of `cases` that `names` names, or each of them when `names` is empty.
+fn chosen<const N: usize>(cases: [Case; N], names: &[String]) -> &'static [Case] {
+    let cases = cases
+        .into_iter()
+        .filter(|case| names.is_empty() || names.iter().any(|name| name == case.name));
+    Vec::leak(cases.collect())
 }
 
 /// The address of the hub transport of `node`.
@@ -218,20 +237,23 @@ fn shard(name: &str) -> env::shards::Config {
     }
 }
 
-/// The member half: a program writes each case of [`MEMBER`] at a member, which
-/// forwards it to a home by hand. Gives `timer` with the floor of each timed poll
-/// added, and a line for each case.
-fn member(timer: Line) -> (Line, Vec<Line>) {
+/// The member half: a program writes each of `cases` at a member, which forwards it
+/// to a home by hand. Gives `timer` with the floor of each timed poll added, and a
+/// line for each case.
+fn member(timer: Line, cases: &'static [Case]) -> (Line, Vec<Line>) {
+    if cases.is_empty() {
+        return (timer, Vec::new());
+    }
     let progress = Arc::new(Progress::default());
     let mut sim = sim::Sim::new(sim::Config::default());
     let [member, home, program] =
         [(); 3].map(|()| sim.node(sim::node::Config::default()));
     let (at, other) = (address(&member), address(&home));
     let node = home.clone();
-    let main = move |tasks| answer_member(node, tasks);
+    let main = move |tasks| answer_member(node, tasks, cases);
     drop(home.shards().start(shard("home"), main).expect("starts"));
     let (node, kept) = (program.clone(), Arc::clone(&progress));
-    let main = move |tasks| write(node, tasks, at, &MEMBER, kept);
+    let main = move |tasks| write(node, tasks, at, cases, kept);
     drop(
         program
             .shards()
@@ -240,20 +262,23 @@ fn member(timer: Line) -> (Line, Vec<Line>) {
     );
     sim.run_on(&member, move |node, tasks| {
         let others = vec![other];
-        serve_program(node, tasks, others, region::OTHER, &MEMBER, progress, timer)
+        serve_program(node, tasks, others, region::OTHER, cases, progress, timer)
     })
     .expect("the run ends")
 }
 
-/// The direct half: a program writes each case of [`DIRECT`] at the home of its
-/// index. Gives as [`member`] does.
-fn direct(timer: Line) -> (Line, Vec<Line>) {
+/// The direct half: a program writes each of `cases` at the home of its index. Gives
+/// as [`member`] does.
+fn direct(timer: Line, cases: &'static [Case]) -> (Line, Vec<Line>) {
+    if cases.is_empty() {
+        return (timer, Vec::new());
+    }
     let progress = Arc::new(Progress::default());
     let mut sim = sim::Sim::new(sim::Config::default());
     let [home, program] = [(); 2].map(|()| sim.node(sim::node::Config::default()));
     let at = address(&home);
     let (node, kept) = (program.clone(), Arc::clone(&progress));
-    let main = move |tasks| write(node, tasks, at, &DIRECT, kept);
+    let main = move |tasks| write(node, tasks, at, cases, kept);
     drop(
         program
             .shards()
@@ -261,20 +286,23 @@ fn direct(timer: Line) -> (Line, Vec<Line>) {
             .expect("starts"),
     );
     sim.run_on(&home, move |node, tasks| {
-        serve_program(node, tasks, Vec::new(), net::NODE, &DIRECT, progress, timer)
+        serve_program(node, tasks, Vec::new(), net::NODE, cases, progress, timer)
     })
     .expect("the run ends")
 }
 
-/// The home half: a member by hand forwards each case of [`HOME`] to a home. Gives
-/// as [`member`] does.
-fn home(timer: Line) -> (Line, Vec<Line>) {
+/// The home half: a member by hand forwards each of `cases` to a home. Gives as
+/// [`member`] does.
+fn home(timer: Line, cases: &'static [Case]) -> (Line, Vec<Line>) {
+    if cases.is_empty() {
+        return (timer, Vec::new());
+    }
     let progress = Arc::new(Progress::default());
     let mut sim = sim::Sim::new(sim::Config::default());
     let [home, member] = [(); 2].map(|()| sim.node(sim::node::Config::default()));
     let at = address(&home);
     let (node, kept) = (member.clone(), Arc::clone(&progress));
-    let main = move |tasks| forward(node, tasks, at, kept);
+    let main = move |tasks| forward(node, tasks, at, cases, kept);
     drop(
         member
             .shards()
@@ -282,7 +310,7 @@ fn home(timer: Line) -> (Line, Vec<Line>) {
             .expect("starts"),
     );
     sim.run_on(&home, move |node, tasks| {
-        serve_home(node, tasks, progress, timer)
+        serve_home(node, tasks, cases, progress, timer)
     })
     .expect("the run ends")
 }
@@ -327,10 +355,11 @@ async fn serve_program(
 }
 
 /// The home at [`net::NODE`] of [`TIME`], whose region names the member by hand
-/// [`region::OTHER`]: serves its forward of each case.
+/// [`region::OTHER`]: serves its forward of each of `cases`.
 async fn serve_home(
     node: sim::node::Node,
     tasks: Tasks,
+    cases: &[Case],
     progress: Arc<Progress>,
     mut timer: Line,
 ) -> (Line, Vec<Line>) {
@@ -352,7 +381,7 @@ async fn serve_home(
     let session = transport.accept().await.expect("a session");
     let link = hub.link(session.clone());
     let mut lines = Vec::new();
-    for case in &HOME {
+    for case in cases {
         let incoming = net::stream(&session).await;
         let mut serving = Serving::new(link.serve(incoming));
         lines.push(serving.run(&node, case, &progress, &mut timer).await);
@@ -525,12 +554,13 @@ async fn wait(
     }
 }
 
-/// The member by hand at [`region::OTHER`]: forwards a write of each case of [`HOME`]
-/// to the home at `at`, and sends each round when the bench lets it.
+/// The member by hand at [`region::OTHER`]: forwards a write of each of `cases` to the
+/// home at `at`, and sends each round when the bench lets it.
 async fn forward(
     node: sim::node::Node,
     tasks: Tasks,
     at: Address,
+    cases: &[Case],
     progress: Arc<Progress>,
 ) {
     let (clock, mesh) = clock::Clock::new(node.clock());
@@ -547,7 +577,7 @@ async fn forward(
     let public_key = net::public_key(&net::HOME);
     let session = transport.dial(public_key, &[at]).await.expect("dials");
     let mut sender = Sender::new(&progress);
-    for case in &HOME {
+    for case in cases {
         let hello = Hello {
             subject: name(SUBJECT),
             key: net::public_key(&AGENT),
@@ -668,13 +698,13 @@ fn frame(places: &[Place], stamp: i64) -> (Vec<(u32, u32)>, Vec<u8>) {
 
 /// The home by hand at [`region::OTHER`]: takes each forward of the member, sends the
 /// places of its write, answers each round of its timed forward, and finishes each
-/// forward once the member does.
-async fn answer_member(node: sim::node::Node, tasks: Tasks) {
+/// forward once the member does. Takes the forward of each of `cases`.
+async fn answer_member(node: sim::node::Node, tasks: Tasks, cases: &[Case]) {
     let (pool, sizes) = (net::own_pool(), (MESSAGE, 1 << 20));
     let transport =
         net::transport_sized(&node, &tasks, &pool, net::PEER, sizes, STREAMS);
     let session = transport.accept().await.expect("a session");
-    for case in &MEMBER {
+    for case in cases {
         let mut idle = Vec::with_capacity(case.idle);
         for _ in 0..case.idle {
             idle.push(opened(&session).await);
