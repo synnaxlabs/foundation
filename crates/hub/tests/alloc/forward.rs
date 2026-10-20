@@ -7,17 +7,14 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use env::tasks::Tasks;
-use transport::{Address, Session};
+use transport::Address;
 use types::channel;
 use types::sample::{Scalar, Type};
 use types::time::Span;
-use wire::Protocol;
-use wire::hub::client::write::{Open, Write};
-use wire::hub::client::{Place, Places, place};
-use wire::hub::forward::{Forward, places};
 use wire::hub::write::{Outcome, Reply};
 
-use crate::agent::{Stream, name};
+use crate::agent::{Stream, place};
+use crate::forwarded::{Forwarded, send_places};
 use crate::write::{Groups, Progress, SPACING, TAKE, wait, write};
 use crate::{ALLOCATOR, COUNTED, WARM, common, net, region, serving, sessions};
 
@@ -110,39 +107,14 @@ async fn serve(
 /// sends the places of `time` and `value`, and answers each frame of the run with its
 /// outcome and `Stored`.
 async fn serve_home(node: sim::node::Node, tasks: Tasks) {
-    let pool = net::own_pool();
-    let transport = net::transport(&node, &tasks, &pool, net::PEER, MESSAGE);
+    let transport = net::transport(&node, &tasks, &net::own_pool(), net::PEER, MESSAGE);
     let session = transport.accept().await.expect("a session");
-    let incoming = hub_stream(&session).await;
-    let sender = incoming.sender.expect("a stream both ways");
-    let mut stream = Stream::new(pool, sender, incoming.receiver);
-    let forward = Forward::decode(&next(&mut stream).await).expect("a forward");
-    next(&mut stream).await;
-    let write = Write::decode(&next(&mut stream).await).expect("a write");
-    let mut rest = write.body();
-    let mut body = Vec::new();
-    while rest.remain() > 0 {
-        let message = next(&mut stream).await;
-        body.extend_from_slice(rest.take(&message).expect("a body message"));
-    }
-    let open = Open::decode(&body).expect("an open");
-    let channels = u32::try_from(open.channels.len()).expect("a count");
-    let mut run = places::Run::new(forward, channels);
-    while !run.ended() {
-        run.decode(&next(&mut stream).await).expect("a run");
-    }
-    let mut out = [0; Places::LEN];
-    Places { count: 2 }.encode(&mut out);
-    stream.send(&out).await;
+    let mut stream = Forwarded::accept(&session).await.stream;
     let places = [
-        place(1, Type::Scalar(Scalar::Stamp), "time"),
-        place(2, Type::Scalar(Scalar::I64), "value"),
+        place(1, Type::Scalar(Scalar::Stamp), "time", 0),
+        place(2, Type::Scalar(Scalar::I64), "value", 0),
     ];
-    for message in place::messages(&places, MESSAGE) {
-        let mut out = vec![0; message.encoded_len()];
-        message.encode(&mut out);
-        stream.send(&out).await;
-    }
+    send_places(&mut stream, &places, MESSAGE).await;
     for seq in 0..u64::try_from(WARM + COUNTED).expect("few frames") {
         for _ in 0..3 {
             next(&mut stream).await;
@@ -171,34 +143,8 @@ async fn serve_home(node: sim::node::Node, tasks: Tasks) {
     drop(stream.recv().await);
 }
 
-/// The place of channel `key` of `data_type`, named `channel`, of the index at place 0.
-fn place(key: u128, data_type: Type, channel: &str) -> Place {
-    Place {
-        key: channel::Key::from_u128(key),
-        data_type,
-        name: name(channel),
-        index: 0,
-    }
-}
-
 /// The next message of `stream`.
 async fn next(stream: &mut Stream) -> Vec<u8> {
     let message = stream.recv().await.expect("receives");
     message.expect("a message before the finish")
-}
-
-/// The first stream of `session` of the hub, with its header read. The mesh of the
-/// member sends `raft` messages to [`region::OTHER`] on the same session, and this
-/// home, which runs no mesh, drops each of its streams.
-async fn hub_stream(session: &Session) -> transport::stream::Incoming {
-    loop {
-        let mut incoming = session.accept().await.expect("a stream");
-        let header = incoming.receiver.recv().await.expect("a header");
-        let header = header.expect("the header comes before the finish");
-        match wire::header::decode(&header) {
-            Ok((Protocol::Hub, [])) => return incoming,
-            Ok((Protocol::Mesh, [])) => drop(incoming),
-            other => panic!("a stream of the hub or the mesh: {other:?}"),
-        }
-    }
 }

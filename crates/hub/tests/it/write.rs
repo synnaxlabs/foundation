@@ -13,12 +13,11 @@ use hub::{serve, writer};
 use spec::data_type::DataType;
 use transport::Class;
 use types::authority::Authority;
-use types::channel;
 use types::frame::{Form, Path};
 use types::time::Span;
 use wire::header::MALFORMED;
 use wire::hub::client::write::Open;
-use wire::hub::client::{BODY_BYTES_MAX, Mode, Place, Places, REFUSED};
+use wire::hub::client::{BODY_BYTES_MAX, Mode, Places, REFUSED};
 use wire::hub::write::{End, Head, Outcome, Reply, Time};
 use wire::hub::{BUSY, FAILED, NOT_HOME, UNKNOWN};
 
@@ -29,27 +28,12 @@ use super::{
     AREA, BODY_MAX, COMMIT, I64, NODE, POOL, RING, STAMP, TIME, TIME_B, Test, channels,
     region, without,
 };
-use crate::agent::{AGENT, Agent, SUBJECT, Stream, name, reset_with};
+use crate::agent::{AGENT, Agent, SUBJECT, Stream, name, place, reset_with};
 use crate::net::{HOME, own_pool, transport};
 use crate::sessions::{Got, Kept, OTHER, recorded, rules, run_program, serve_each};
 
 /// When the home of a test changes what the write meets, after the program opened it.
 const START: Span = Span::from_nanos(100_000_000);
-
-/// The place of `channel`, whose group's index is at place `index`.
-pub(super) fn place(
-    key: u128,
-    data_type: types::sample::Type,
-    channel: &str,
-    index: usize,
-) -> Place {
-    Place {
-        key: channel::Key::from_u128(key),
-        data_type,
-        name: name(channel),
-        index,
-    }
-}
 
 /// The head of a frame of `series` series on the live path.
 fn live(series: u32) -> Head {

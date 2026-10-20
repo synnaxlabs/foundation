@@ -15,7 +15,7 @@ use env::tasks::Tasks;
 use hub::Hub;
 use hub::reader::{self, Ended, Mode};
 use spec::data_type::DataType;
-use transport::stream::{Incoming, Receiver, Sender};
+use transport::stream::{Receiver, Sender};
 use transport::{Address, Code, Session, Transport};
 use types::frame::key_set::{Group, Interner};
 use types::frame::{self, Form, Path, Range};
@@ -29,6 +29,7 @@ use super::{
     AREA, BODY_MAX, I64, NODE, POOL, TIME, TIME_B, Test, VALUE, fill, names, samples,
     unnamed, without, write, write_samples, write_series, write_wide,
 };
+use crate::forwarded::accept_hub;
 use crate::net::{HOME, PEER, PORT, own_pool, public_key, transport_sized};
 
 /// The fewest bytes that a transport takes in one message.
@@ -196,24 +197,6 @@ async fn serve_each(hub: Hub, transport: Transport, tasks: Tasks, steps: Arc<Ste
                 streams.spawn(async move { drop(serving.await) });
             }
         });
-    }
-}
-
-/// The next stream of `session` whose header names the hub protocol, with the header
-/// read. The mesh at [`NODE`] sends `raft` messages on the same session to its learner
-/// [`OTHER`], and this home, which runs no mesh, drops each mesh stream.
-pub(super) async fn accept_hub(
-    session: &Session,
-) -> Result<Incoming, transport::Error> {
-    loop {
-        let mut incoming = session.accept().await?;
-        let header = incoming.receiver.recv().await?;
-        let header = header.expect("the header comes before the finish");
-        match wire::header::decode(&header) {
-            Ok((Protocol::Hub, [])) => return Ok(incoming),
-            Ok((Protocol::Mesh, [])) => drop(incoming),
-            other => panic!("a stream of the hub or the mesh: {other:?}"),
-        }
     }
 }
 

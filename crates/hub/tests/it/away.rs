@@ -23,14 +23,15 @@ use wire::hub::client::{
     BODY_BYTES_MAX, CHANGED, Challenge, EXPIRED, Place, Places, REFUSED, Refusal,
     Signed, VIA, place,
 };
-use wire::hub::forward::{Forward, places};
+use wire::hub::forward::Forward;
 use wire::hub::write::{End, Head, Outcome, Reply, Time};
 use wire::hub::{BUSY, FAILED, NOT_HOME, UNKNOWN};
 
 use super::region::OTHER;
-use super::write::{place as at, stored, taken};
+use super::write::{stored, taken};
 use super::{AREA, BODY_MAX, I64, NODE, POOL, STAMP, TIME, Test};
-use crate::agent::{AGENT, Agent, SUBJECT, Stream, name, reset_with};
+use crate::agent::{AGENT, Agent, SUBJECT, Stream, name, place as at, reset_with};
+use crate::forwarded::{Forwarded, accept_hub, send_places};
 use crate::net::{HOME, PEER, PORT, own_pool, public_key, transport, transport_sized};
 use crate::sessions::{Got, Kept, closed_with, recorded, rules, serve_each};
 
@@ -63,14 +64,7 @@ struct Home {
 impl Home {
     /// Sends the places of a write of `value`: `time` at place 0, `value` at place 1.
     async fn start(&mut self) {
-        let mut out = [0; Places::LEN];
-        Places { count: 2 }.encode(&mut out);
-        self.stream.send(&out).await;
-        for message in place::messages(&places(), MESSAGE) {
-            let mut out = vec![0; message.encoded_len()];
-            message.encode(&mut out);
-            self.stream.send(&out).await;
-        }
+        send_places(&mut self.stream, &places(), MESSAGE).await;
     }
 
     /// The next `count` messages of the member.
@@ -304,30 +298,14 @@ impl Home {
     /// The first forward that the member sends on the session of `raw`, after its first
     /// messages.
     async fn forwarded(raw: Raw) -> Home {
-        let incoming = super::remote::accept_hub(&raw.session)
-            .await
-            .expect("a stream");
-        let sender = incoming.sender.expect("a stream both ways");
-        let mut stream = Stream::new(own_pool(), sender, incoming.receiver);
-        let mut next = async || {
-            let message = stream.recv().await.expect("receives");
-            message.expect("a message before the finish")
-        };
-        let forward = Forward::decode(&next().await).expect("a forward");
-        let signed = Signed::decode(&next().await).expect("a hello");
-        let write = Write::decode(&next().await).expect("a write");
-        let mut rest = write.body();
-        let mut body = Vec::new();
-        while rest.remain() > 0 {
-            body.extend_from_slice(rest.take(&next().await).expect("a body message"));
-        }
-        let open = Open::decode(&body).expect("an open");
-        let channels = u32::try_from(open.channels.len()).expect("a count");
-        let mut decoder = places::Run::new(forward, channels);
-        let mut run = Vec::new();
-        while !decoder.ended() {
-            run.extend(decoder.decode(&next().await).expect("a run"));
-        }
+        let Forwarded {
+            stream,
+            forward,
+            signed,
+            write,
+            open,
+            run,
+        } = Forwarded::accept(&raw.session).await;
         Home {
             node: raw.node,
             stream,
@@ -566,7 +544,7 @@ fn holds_the_places_of_a_forward_while_it_sends_them() {
             assert_eq!(home.stream.recv().await, reset_with(0));
         },
         |mut agent, _| async move {
-            let write = agent.write(&["value"; COUNT]).await;
+            let write = agent.write(&vec!["value"; COUNT]).await;
             agent.node.clock().sleep(QUIET).await;
             let mut busy = agent.unfinished(BODY_BYTES_MAX - 39, &[]).await;
             assert_eq!(busy.recv().await, reset_with(BUSY));
@@ -893,9 +871,7 @@ fn forwards_the_write_again_when_the_home_closes_the_session_with_code_0() {
         16,
         MESSAGE,
         async |raw| {
-            super::remote::accept_hub(&raw.session)
-                .await
-                .expect("a stream");
+            accept_hub(&raw.session).await.expect("a stream");
             raw.session.close(Code(0));
             let session = raw.transport.accept().await.expect("a session");
             let held = session.clone();

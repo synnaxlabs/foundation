@@ -40,6 +40,8 @@ mod agent;
 mod away;
 mod definitions;
 mod forward;
+#[path = "../common/forwarded.rs"]
+mod forwarded;
 mod link;
 mod named;
 #[path = "../common/node.rs"]

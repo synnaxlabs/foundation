@@ -20,6 +20,9 @@ mod agent;
 #[path = "../common/mod.rs"]
 mod common;
 mod forward;
+#[path = "../common/forwarded.rs"]
+#[expect(dead_code, reason = "the binary uses only some of the helpers")]
+mod forwarded;
 #[path = "../common/net.rs"]
 mod net;
 #[path = "../common/node.rs"]
