@@ -121,7 +121,7 @@ fn a_pointer_that_moves_before_the_joint_entry_is_put_until_a_majority_holds_it(
 // Voter 3 is down at the apply, and comes back while voters 1 and 2 answer no blob
 // stream, so its store lacks the tree, from its root.
 #[test]
-fn a_proposer_whose_store_lacks_the_tree_in_force_gives_lacking() {
+fn a_proposer_whose_store_lacks_the_tree_in_force_gives_tree_missing() {
     let mut cluster = Cluster::new(0);
     cluster.start_voter(1);
     cluster.start_voter(2);
@@ -135,11 +135,13 @@ fn a_proposer_whose_store_lacks_the_tree_in_force_gives_lacking() {
     cluster.configure(3, IDS.into());
     cluster.run(seconds(5));
     let root = pointer(1, &definitions).root;
-    let lacking = Error::Lacking(root);
-    assert_eq!(outcomes(&cluster.board()), [(3, Err(lacking.clone()))]);
+    let missing = Error::Tree(tree::Error::Missing(root));
+    assert_eq!(outcomes(&cluster.board()), [(3, Err(missing.clone()))]);
     assert_eq!(
-        lacking.to_string(),
-        format!("this node's store cannot give chunk {root} of the spec in use")
+        missing.to_string(),
+        format!(
+            "this node cannot list the spec tree in force: chunk {root} is not here"
+        )
     );
 }
 

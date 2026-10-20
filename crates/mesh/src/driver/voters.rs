@@ -22,20 +22,20 @@ impl Mesh {
     /// once the holders are a majority of the set. After the joint entry applies, it
     /// puts the tree of the pointer then in force on the set again when that pointer
     /// moved, and tries again each second until a majority holds it. No failed put
-    /// after the joint entry fails the call: the change of voters is in force.
+    /// after the joint entry fails the call, other than one that cannot run again:
+    /// the change of voters is in force.
     ///
     /// # Errors
     ///
-    /// None of these propose anything, other than `Stopped`, `Blob`, and `NotLeader`
-    /// after the write: the set is in force after the joint entry.
+    /// None of these propose anything, other than `Stopped`, `Blob`, `Tree`, and
+    /// `NotLeader` after the write: the set is in force after the joint entry.
     ///
     /// - [`Error::Voters`] when the set holds more voters than one set can hold.
     /// - [`Error::NotMember`] when a node of the set is not a member in the applied
     ///   state of this node.
     /// - [`Error::NoVote`] when this node is not a voter.
     /// - [`Error::Stopped`] when the group stopped, or stops before the call ends.
-    /// - [`Error::Lacking`] when this node's store cannot give a chunk of the tree in
-    ///   force.
+    /// - [`Error::Tree`] when this node cannot list the tree in force from its store.
     /// - [`Error::Blob`] when a call of the store fails.
     /// - [`Error::Quorum`] when the holders are not a majority of the set once each
     ///   put ended, with each voter whose put failed and why.
@@ -88,7 +88,7 @@ impl Mesh {
             }
             match self.put(&set, moved.root).await {
                 Ok(()) => return Ok(at),
-                Err(Error::Quorum { .. } | Error::Lacking(_)) => {}
+                Err(Error::Quorum { .. } | Error::Tree(tree::Error::Missing(_))) => {}
                 Err(error) => return Err(error),
             }
             self.clock.sleep(RETRY).await;
@@ -104,13 +104,11 @@ impl Mesh {
             let digest = match tree::diff(&chunks, tree::empty(), root) {
                 Ok(_) => break,
                 Err(tree::Error::Missing(digest)) => digest,
-                Err(tree::Error::Corrupt(digest)) => {
-                    return Err(Error::Lacking(digest));
-                }
+                Err(error) => return Err(Error::Tree(error)),
             };
             match self.store.get(digest).await.map_err(Error::Blob)? {
                 Some(chunk) => chunks.insert(chunk.to_vec()),
-                None => return Err(Error::Lacking(digest)),
+                None => return Err(Error::Tree(tree::Error::Missing(digest))),
             };
             digests.push(digest);
         }

@@ -187,7 +187,7 @@ fn code(error: &Error) -> Option<Code> {
         | Error::Stale { .. }
         | Error::Large { .. }
         | Error::Problems(_)
-        | Error::Lacking(_)
+        | Error::Tree(_)
         | Error::Quorum { .. }
         | Error::Blob(_)
         | Error::Files(_)

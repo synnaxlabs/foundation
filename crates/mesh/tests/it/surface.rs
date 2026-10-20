@@ -504,7 +504,7 @@ fn error_has_one_case_for_each_cause_that_a_public_call_gives() {
         | Error::Stale { .. }
         | Error::Large { .. }
         | Error::Problems(_)
-        | Error::Lacking(_)
+        | Error::Tree(_)
         | Error::Quorum { .. }
         | Error::Blob(_)
         | Error::Files(_)

@@ -56,7 +56,9 @@
   `propose_voters` puts the tree of the pointer in force on the new set before its
   joint entry, and after the entry applies puts the tree of a pointer that moved,
   each `RETRY` of the spec in use until a majority of the set holds it. No failed put
-  after the joint entry fails the call: the set is in force. Simple version: `raft`
+  after the joint entry fails the call, other than one that cannot run again (a chunk
+  that is not a tree chunk, `Error::Tree`, or a failure of the store): the set is in
+  force. Simple version: `raft`
   leaves the joint phase on its own, so between that leave and the end of the second
   put only a majority of the old voters can hold the chunks of a `Spec` entry that
   came between the read of the pointer and the joint entry. Trigger: before a removed
@@ -148,4 +150,6 @@
   (https://github.com/synnaxlabs/foundation/issues/1231#issuecomment-6272668202), and
   the put before a `Remove`, 2026-10-19T23:28:13Z
   (https://github.com/synnaxlabs/foundation/issues/3355#issuecomment-6279615451); the
-  deferral (kind 8) sent to `laptop.monitor`, 2026-10-19 (#3400).
+  deferral (kind 8) sent to `laptop.monitor`, 2026-10-19 (#3400); `Error::Tree` and
+  the end of the call on a corrupt chunk, 2026-10-20T14:08:15Z
+  (https://github.com/synnaxlabs/foundation/issues/1231#issuecomment-6292805335).
