@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::fs::Permissions;
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
+use std::time::Duration;
 
 use types::quality::Quality;
 use types::time::{Span, Stamp};
@@ -28,7 +29,7 @@ const VARIABLES: [(&str, &str); 3] = [
     ("ns=3;s=PositiveTrendData", "plant.trend"),
 ];
 
-/// The changes of each variable: 2 s at 10 Hz. Each change steps the value.
+/// The changes of each variable, at most 10 a second. Each change steps the value.
 const TICKS: usize = 20;
 
 /// The changes of each variable in the test of the time bound: 5 s at 10 Hz, so that a
@@ -788,15 +789,11 @@ fn a_plant_starts_before_its_first_read() {
     );
 }
 
-/// `Ok` once `stored` holds the values of `served`, the reads of one variable by a
-/// subscription, from the first stored value on, each value once. Each stored sample
-/// is at a time within [`BOUND`] of the first read of its value.
+/// `Ok` when `stored` holds the values of `served`, the reads of one variable by a
+/// subscription, each value once. Each stored sample is at a time within [`BOUND`] of
+/// the first read of its value.
 fn subscribed(served: &[Sample], stored: &[Sample]) -> Result<(), String> {
-    let first = stored.first().ok_or("no sample stored")?;
-    let start = (served.iter())
-        .position(|read| read.value.to_bits() == first.value.to_bits())
-        .ok_or_else(|| format!("{first:?} is no served value"))?;
-    let mut reads = served[start..].to_vec();
+    let mut reads = served.to_vec();
     reads.dedup_by(|b, a| a.value.to_bits() == b.value.to_bits());
     let values =
         |samples: &[Sample]| samples.iter().map(|s| s.value).collect::<Vec<_>>();
@@ -819,33 +816,36 @@ fn a_subscribed_plant_stores_each_change_at_its_read() {
     first_stored(&plant, &VARIABLES);
     let value = |tick: usize| f64::from(u32::try_from(tick).expect("a few ticks"));
     for tick in 1..=TICKS {
+        if tick == TICKS / 2 {
+            // A late wake of the thread of the changes, as on a loaded runner. A pace
+            // that catches up puts two changes in one sampling interval.
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "the test thread is not a thread that env started"
+            )]
+            std::thread::sleep(Duration::from_millis(300));
+        }
         plant.opcua.change(1, Quality::GOOD);
-        // The next change waits for a read of this one, so that no change replaces
-        // another before the server samples it.
-        plant.rig.wait("the server reads the change", || {
-            let served = plant.opcua.served();
-            VARIABLES.iter().try_for_each(|&(variable, _)| {
-                let last = served[variable].last().map(|read| read.value);
-                let read = last == Some(value(tick));
-                read.then_some(())
-                    .ok_or(format!("{variable}: {last:?} is the last read"))
+        // The next change waits until InfluxDB holds this one, so that a stall of the
+        // node cannot fill the queue of the server.
+        plant.rig.wait("InfluxDB holds the change", || {
+            let stored = plant.influx.stored();
+            let missed = count(&plant.rig.status(), "plc", "missed");
+            VARIABLES.iter().try_for_each(|&(_, channel)| {
+                let last = stored[channel].last().map(|sample| sample.value);
+                let held = last == Some(value(tick));
+                (held.then_some(()))
+                    .ok_or(format!("{channel}: {last:?} is last, missed {missed:?}"))
             })
         });
     }
-    plant.rig.wait("InfluxDB holds each change", || {
-        let (served, stored) = (plant.opcua.served(), plant.influx.stored());
-        VARIABLES.iter().try_for_each(|&(variable, channel)| {
-            let stored = stored.get(channel).map_or(&[][..], Vec::as_slice);
-            subscribed(&served[variable], stored).map_err(|e| format!("{channel}: {e}"))
-        })
-    });
-    let stored = plant.influx.stored();
-    for (_, channel) in VARIABLES {
-        let values: Vec<_> =
-            stored[channel].iter().map(|sample| sample.value).collect();
-        let changes: Vec<_> = (0..=TICKS).map(value).collect();
-        assert_eq!(values, changes, "{channel}");
+    let (served, stored) = (plant.opcua.served(), plant.influx.stored());
+    for (variable, channel) in VARIABLES {
+        let checked = subscribed(&served[variable], &stored[channel]);
+        checked.unwrap_or_else(|e| panic!("{channel}: {e}"));
     }
+    let missed = count(&plant.rig.status(), "plc", "missed");
+    assert_eq!(missed, Some(0), "no queue of the server overflows");
 }
 
 #[test]
