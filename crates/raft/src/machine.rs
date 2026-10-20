@@ -1098,7 +1098,7 @@ impl Raft {
                 proof,
                 chain: Vec::new(),
             };
-            fit(self.fits, &mut message, self.log.links(term));
+            fit(self.fits, &self.log, &mut message);
             let entries = message.body.entries();
             let last = entries.last().map_or(prev.index, |entry| entry.at.index);
             peer.progress.sent(last);
@@ -1603,7 +1603,7 @@ impl Raft {
                 proof: proof.cloned(),
                 chain: Vec::new(),
             };
-            fit(self.fits, &mut message, self.log.links(term));
+            fit(self.fits, &self.log, &mut message);
             self.outbox.push(message);
         }
     }
@@ -1618,21 +1618,34 @@ impl Raft {
             proof,
             chain: Vec::new(),
         };
-        fit(self.fits, &mut message, self.log.links(term));
+        fit(self.fits, &self.log, &mut message);
         self.outbox.push(message);
     }
 }
 
-// Gives `message`, when it carries a proof, the chain of `links` (newest first), then
-// drops what it can lose until it fits: the last entries of an append, down to one
-// with no proof and to none with a proof, then the oldest links.
-fn fit(
-    fits: fn(&Message) -> bool,
-    message: &mut Message,
-    links: impl Iterator<Item = Link>,
-) {
+// Gives `message`, when it carries a proof, the newest links of `log` below its term
+// that fit with no entry, and clones no other but the first that does not fit. Then
+// drops the last entries of an append until it fits, down to one with no proof and to
+// none with a proof. An append with a proof keeps its entries only when each link fits.
+fn fit(fits: fn(&Message) -> bool, log: &Log, message: &mut Message) {
     if message.proof.is_some() {
-        chain(fits, message, links);
+        let mut entries = Vec::new();
+        if let Body::Append { entries: all, .. } = &mut message.body {
+            std::mem::swap(all, &mut entries);
+        }
+        let mut whole = true;
+        for link in log.links(message.term) {
+            message.chain.push(link);
+            if !fits(message) {
+                message.chain.pop();
+                whole = false;
+                break;
+            }
+        }
+        message.chain.reverse();
+        if whole && let Body::Append { entries: kept, .. } = &mut message.body {
+            *kept = entries;
+        }
     }
     let least = usize::from(message.proof.is_none());
     while !fits(message) {
@@ -1642,8 +1655,7 @@ fn fit(
             entries.pop();
             continue;
         }
-        assert!(
-            !message.chain.is_empty(),
+        panic!(
             "invariant: `Config::fits` holds an append of one entry with no proof, \
              and each message with no entry and no link; to {:?}, term {:?}, {} \
              entries, {}",
@@ -1656,33 +1668,6 @@ fn fit(
                 "no proof"
             },
         );
-        message.chain.remove(0);
-    }
-}
-
-// Gives `message` the newest of `links` (newest first) that fit with no entry, and
-// clones no other. An append keeps its entries only when each link fits, as `fit`
-// drops the oldest link only after the last entry.
-fn chain(
-    fits: fn(&Message) -> bool,
-    message: &mut Message,
-    links: impl Iterator<Item = Link>,
-) {
-    let mut entries = Vec::new();
-    if let Body::Append { entries: all, .. } = &mut message.body {
-        std::mem::swap(all, &mut entries);
-    }
-    for link in links {
-        message.chain.push(link);
-        if !fits(message) {
-            message.chain.pop();
-            message.chain.reverse();
-            return;
-        }
-    }
-    message.chain.reverse();
-    if let Body::Append { entries: kept, .. } = &mut message.body {
-        *kept = entries;
     }
 }
 
@@ -6718,6 +6703,8 @@ mod tests {
         }
     }
 
+    // These tests call the private `fit`: a `Config::fits` is a `fn` and cannot take
+    // a random budget for each case, so `fits` here reads it from the commit index.
     mod fit {
         use proptest::prelude::*;
 
@@ -6781,6 +6768,21 @@ mod tests {
             }
         }
 
+        // A log of `links` configuration entries in term 1.
+        fn log(links: u64) -> Log {
+            let voters = Voters {
+                incoming: [key(1)].into(),
+                ..Voters::default()
+            };
+            let entries = (1..=links)
+                .map(|index| Entry {
+                    at: position(1, index),
+                    data: change(1, voters.clone()),
+                })
+                .collect();
+            Log::new(voters, entries, 0).unwrap()
+        }
+
         proptest! {
             // `fit` keeps the same entries and links as one that drops one at a time
             // from a message that holds every link.
@@ -6792,24 +6794,17 @@ mod tests {
                 appending: bool,
                 budget in 0..200_u64,
             ) {
-                let Data::Voters(change) = change(1, Voters::default()) else {
-                    unreachable!()
-                };
-                let links: Vec<_> = (1..=links)
-                    .map(|index| Link {
-                        at: position(1, index),
-                        change: change.clone(),
-                    })
-                    .collect();
+                let log = log(links);
                 let first = u64::from(!proved && entries > 0 && appending) * 2;
                 let least = first + if proved { 3 } else { 0 };
                 let mut got = message(entries, budget.max(least), proved, appending);
                 let mut want = got.clone();
                 if proved {
-                    want.chain.clone_from(&links);
+                    want.chain = log.links(want.term).collect();
+                    want.chain.reverse();
                 }
                 dropping(fits, &mut want);
-                fit(fits, &mut got, links.into_iter().rev());
+                fit(fits, &log, &mut got);
                 prop_assert_eq!(got, want);
             }
         }
