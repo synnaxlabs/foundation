@@ -220,9 +220,9 @@ impl Reserved {
 
     /// Reserves the rest of `bytes`, at least what it holds, until it drops.
     fn grow(&mut self, bytes: u64) -> Result<(), Error> {
-        let more = bytes
-            .checked_sub(self.bytes)
-            .expect("invariant: a hold grows");
+        let more = bytes.checked_sub(self.bytes).unwrap_or_else(|| {
+            panic!("invariant: a hold of {} bytes falls to {bytes}", self.bytes)
+        });
         self.state.borrow().bodies.reserve(&self.subject, more)?;
         self.bytes += more;
         Ok(())
