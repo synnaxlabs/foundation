@@ -1,15 +1,19 @@
+//! The `access` block, a policy that allows subjects to do actions on names.
+
 use std::slice;
 
 use document::diagnostic::{Code, Diagnostic};
+use document::encoding::Checked;
 use document::schema::{self, Attribute, Body, Presence};
 use document::value::{Kind, Value};
-use document::{Block, read};
+use document::{Block, Document, Label, Map, read};
 use spec::access::{Action, Actions, Error, Policy};
 use spec::definition;
 use types::authority::Authority;
+use types::ed25519::PublicKey;
 use types::name::Name;
 
-use crate::{Definition, Found};
+use crate::{Definition, Found, openssh};
 
 const BAD_ACTION: Code = Code::new("config.bad-action");
 const EMPTY_ALLOW: Code = Code::new("config.empty-allow");
@@ -164,4 +168,59 @@ fn authority(value: &Value) -> Result<Authority, Diagnostic> {
     };
     let fix = "Write an integer from 0 to 255".into();
     Err(Diagnostic::new(BAD_AUTHORITY, value.span, message, fix))
+}
+
+/// The document of the `subject` and `access` blocks that admit `subject` with
+/// `public_key` to read each channel.
+#[must_use]
+pub fn admit(subject: &Name, public_key: PublicKey) -> Checked {
+    let string = |text: &str| Value {
+        kind: Kind::String(text.into()),
+        span: None,
+    };
+    let keys = [("keys", string(&openssh::line(public_key)))];
+    let read = Value {
+        kind: Kind::List(vec![string("read")]),
+        span: None,
+    };
+    let policy = [
+        ("subjects", string(subject.as_str())),
+        ("select", string("**")),
+        ("allow", read),
+    ];
+    let blocks = vec![
+        block("subject", subject, keys.into()),
+        block("access", subject, policy.into()),
+    ];
+    Checked::new(Document {
+        attributes: Map::default(),
+        blocks,
+    })
+    .unwrap_or_else(|_| unreachable!("invariant: two blocks of strings are shallow"))
+}
+
+/// The block `keyword` labeled `label`, of `attributes`.
+fn block(keyword: &str, label: &Name, attributes: Vec<(&str, Value)>) -> Block {
+    let attributes = attributes
+        .into_iter()
+        .map(|(key, value)| document::Attribute {
+            key: key.into(),
+            key_span: None,
+            value,
+        });
+    Block {
+        keyword: keyword.into(),
+        keyword_span: None,
+        labels: vec![Label {
+            text: label.as_str().into(),
+            span: None,
+        }],
+        body: Document {
+            attributes: Map::new(attributes.collect()).unwrap_or_else(|_| {
+                unreachable!("invariant: each key is written once")
+            }),
+            blocks: Vec::new(),
+        },
+        span: None,
+    }
 }
