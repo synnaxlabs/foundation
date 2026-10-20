@@ -11,8 +11,9 @@ pub struct Config {
     /// real wait is random, from this value to one tick below twice this value.
     pub election_ticks: u32,
     /// The ticks between a leader's heartbeats to a voter. A learner gets one each
-    /// `election_ticks` ([`Raft::set_learners`](crate::Raft::set_learners)). Must be
-    /// at least 1 and lower than `election_ticks`.
+    /// `election_ticks`, and at the next tick after the commit index that it can take
+    /// moves ([`Raft::set_learners`](crate::Raft::set_learners)). Must be at least 1
+    /// and lower than `election_ticks`.
     pub heartbeat_ticks: u32,
     /// Whether the caller can send `message` to each peer. An `Append` with no proof
     /// drops its last entries until it fits, down to one, so `fits` must hold an

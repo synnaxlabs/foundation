@@ -5,6 +5,7 @@ use control::lease::Lease;
 use control::{Gate, Writer};
 use divan::Bencher;
 use types::authority::Authority;
+use types::node;
 use types::time::{Monotonic, Span};
 
 fn main() {
@@ -15,6 +16,7 @@ fn writer(subject: &str) -> Writer {
     Writer {
         subject: subject.parse().expect("valid name"),
         authority: Authority(100),
+        via: node::Key::from_u128(1),
     }
 }
 

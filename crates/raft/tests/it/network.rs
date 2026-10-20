@@ -17,6 +17,8 @@ use types::node;
 
 pub(crate) const ELECTION: u32 = 5;
 pub(crate) const HEARTBEAT: u32 = 2;
+/// The most nodes of a run.
+pub(crate) const NODES_MAX: usize = 5;
 
 #[derive(Clone, Debug)]
 pub(crate) enum Action {
@@ -34,6 +36,8 @@ pub(crate) enum Action {
     Mend,
     // A proposal to `node` of the flagged nodes as the voters.
     ChangeVoters { node: usize, voters: Vec<bool> },
+    // The flagged nodes become the learners of every node.
+    SetLearners { learners: Vec<bool> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,6 +102,9 @@ fn action(nodes: usize, fixed: bool) -> impl Strategy<Value = Action> {
         let change = (node, prop::collection::vec(any::<bool>(), nodes))
             .prop_map(|(node, voters)| Action::ChangeVoters { node, voters });
         arms.push((1, change.boxed()));
+        let learners = prop::collection::vec(any::<bool>(), nodes)
+            .prop_map(|learners| Action::SetLearners { learners });
+        arms.push((1, learners.boxed()));
     }
     Union::new_weighted(arms)
 }
@@ -114,7 +121,8 @@ fn position() -> impl Strategy<Value = Position> {
 /// The last log position of each node, and the actions to run, with changes to the
 /// voters.
 pub(crate) fn run() -> impl Strategy<Value = (Vec<Position>, Vec<Action>)> {
-    let nodes = prop_oneof![1 => 1..=2_usize, 5 => Just(3), 1 => Just(4), 4 => Just(5)];
+    let nodes =
+        prop_oneof![1 => 1..=2_usize, 5 => Just(3), 1 => Just(4), 4 => Just(NODES_MAX)];
     run_of(nodes, false)
 }
 
@@ -122,7 +130,7 @@ pub(crate) fn run() -> impl Strategy<Value = (Vec<Position>, Vec<Action>)> {
 /// change.
 pub(crate) fn run_of_many() -> impl Strategy<Value = (Vec<Position>, Vec<Action>)> {
     run_of(
-        prop_oneof![5 => Just(3_usize), 1 => Just(4), 4 => Just(5)],
+        prop_oneof![5 => Just(3_usize), 1 => Just(4), 4 => Just(NODES_MAX)],
         true,
     )
 }
@@ -132,6 +140,7 @@ fn run_of(
     fixed: bool,
 ) -> impl Strategy<Value = (Vec<Position>, Vec<Action>)> {
     nodes.prop_flat_map(move |nodes| {
+        assert!(nodes <= NODES_MAX, "a run of {nodes} nodes");
         (
             prop::collection::vec(position(), nodes),
             prop::collection::vec(action(nodes, fixed), 0..400),
@@ -198,9 +207,9 @@ pub(crate) struct Network {
     // `refused`; any other error fails the run.
     wiped: Vec<bool>,
     pub(crate) refused: Vec<Error>,
-    // During `settle`, a candidate's reply at a term past every led one was
-    // refused as unproven: the group cannot prove its term (#1485).
-    unprovable: bool,
+    // After `settle` mended the network, a candidate's reply at a term past every led
+    // one was refused as unproven: the group cannot prove its term (#1485).
+    pub(crate) unprovable: bool,
     crash: Vec<Option<Kept>>,
     flight: Vec<Message>,
     leaders: BTreeMap<Term, node::Key>,
@@ -218,6 +227,8 @@ pub(crate) struct Network {
     // The state of a splitmix64 generator for the ticks of `round`.
     random: u64,
     fits: fn(&Message) -> bool,
+    // The learners that every node holds, also after a restart.
+    learners: BTreeSet<node::Key>,
 }
 
 impl Network {
@@ -272,6 +283,7 @@ impl Network {
             proposed: 0,
             random,
             fits,
+            learners: BTreeSet::new(),
         };
         for node in 0..logs.len() {
             let raft = network.build(node);
@@ -342,7 +354,9 @@ impl Network {
             entries: disk.entries.clone(),
             applied: disk.applied,
         };
-        Raft::new(config, start).unwrap()
+        let mut raft = Raft::new(config, start).unwrap();
+        raft.set_learners(self.learners.iter().copied());
+        raft
     }
 
     // The configuration every node starts from: every node.
@@ -423,6 +437,15 @@ impl Network {
             Action::Mend => self.cut.fill(false),
             Action::ChangeVoters { node, voters } => {
                 self.change_voters(*node, voters);
+            }
+            Action::SetLearners { learners } => {
+                self.learners = (0..learners.len())
+                    .filter(|&at| learners[at])
+                    .map(Self::key)
+                    .collect();
+                for node in &mut self.nodes {
+                    node.set_learners(self.learners.iter().copied());
+                }
             }
         }
         self.collect();
@@ -889,6 +912,17 @@ impl Network {
             let key = Self::key(at);
             voters.incoming.contains(&key) || voters.outgoing.contains(&key)
         })
+    }
+
+    /// The learners of `node`: each node of the set that its configuration does not
+    /// hold, in order.
+    pub(crate) fn learners(&self, node: usize) -> Vec<usize> {
+        let voters: Vec<usize> = self.voters(node).collect();
+        (0..self.nodes.len())
+            .filter(|at| {
+                self.learners.contains(&Self::key(*at)) && !voters.contains(at)
+            })
+            .collect()
     }
 
     /// Runs the actions, mends the network, and runs rounds until the leader's

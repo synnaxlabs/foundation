@@ -232,12 +232,17 @@ fn serve_gives_the_group_each_message_of_a_one_way_stream() {
             let reply = mesh.outgoing(key(2)).await.unwrap();
             assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
             let reply = mesh.outgoing(key(2)).await.unwrap();
-            assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
+            assert_eq!(reply, message(1, 2, Body::AppendReply { last: 0 }));
             assert!(quiet(&mesh, 2).await);
             served
         },
         |peer| async move {
-            let messages = [raft(heartbeat()), raft(heartbeat())];
+            let append = Body::Append {
+                prev: Position::default(),
+                entries: Vec::new(),
+                commit: 0,
+            };
+            let messages = [raft(heartbeat()), raft(proven(2, 1, append))];
             let mut sender = peer.send_each(&messages).await;
             let finished = sender.finish();
             peer.settle().await;
@@ -312,12 +317,12 @@ fn serve_removes_a_vote_that_fails_under_a_written_join() {
             unapplied::write(&mesh, unapplied::changes(&[unapplied::stale_join()]))
                 .await;
             let served = mesh.serve(public(2), incoming).await;
-            let reply = mesh.outgoing(key(2)).await.unwrap();
-            assert_eq!(
-                (reply.body, reply.term),
-                (Body::HeartbeatReply, unapplied::later())
-            );
+            // The answer to the stale heartbeat replaces the reply to the proven one.
             let answer = mesh.outgoing(key(2)).await.unwrap();
+            assert_eq!(
+                (&answer.body, answer.term),
+                (&Body::HeartbeatReply, unapplied::later())
+            );
             let voters = answer.proof.map(|proof| proof.voters.into_keys());
             let voters: Option<Vec<_>> = voters.map(Iterator::collect);
             assert_eq!(voters, Some(vec![key(2), key(3)]));

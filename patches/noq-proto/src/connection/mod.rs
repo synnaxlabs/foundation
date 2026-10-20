@@ -1539,10 +1539,18 @@ impl Connection {
             // We want to send on this space, check congestion control if we can. But only
             // if we will need to start a new datagram. If we are coalescing into an already
             // started datagram we do not need to check congestion control again.
+            let mut ack_only = false;
             if transmit.datagram_remaining_mut() == 0 {
                 let path_blocked =
                     self.path_congestion_check(space_id, path_id, transmit, &can_send, now);
-                if path_blocked != PathBlocked::No {
+                // A due ACK leaves in a packet of its own when congestion blocks the
+                // other frames: an ACK-only packet is not congestion controlled
+                // (RFC 9002 section 7). `populate_packet` writes ACKs only when
+                // `may_send_data`, and the ACK loop below has no such check.
+                ack_only = path_blocked == PathBlocked::Congestion
+                    && can_send.acks
+                    && scheduling_info.may_send_data;
+                if path_blocked != PathBlocked::No && !ack_only {
                     // Previous iterations of this loop may have built packets already.
                     return match last_packet_number {
                         Some(pn) => PollPathSpaceStatus::WrotePacket {
@@ -1725,7 +1733,31 @@ impl Connection {
                 };
             }
 
-            self.populate_packet(now, space_id, path_id, scheduling_info, &mut builder);
+            if ack_only {
+                let is_multipath_negotiated = self.is_multipath_negotiated();
+                let space = &mut self.spaces[space_id];
+                for ack_path_id in space
+                    .number_spaces
+                    .iter()
+                    .filter(|(_, pns)| pns.pending_acks.can_send())
+                    .map(|(&path_id, _)| path_id)
+                    .collect::<Vec<_>>()
+                {
+                    Self::populate_acks(
+                        now,
+                        self.receiving_ecn,
+                        ack_path_id,
+                        space_id,
+                        space,
+                        is_multipath_negotiated,
+                        &mut builder,
+                        &mut self.path_stats.get_mut(path_id).frame_tx,
+                        self.crypto_state.has_keys(space_id.encryption_level()),
+                    );
+                }
+            } else {
+                self.populate_packet(now, space_id, path_id, scheduling_info, &mut builder);
+            }
 
             // ACK-only packets should only be sent when explicitly allowed. If we write them due to
             // any other reason, there is a bug which leads to one component announcing write
@@ -1755,6 +1787,16 @@ impl Connection {
                     Timer::PerPath(*path_id, PathTimer::MaxAckDelay),
                     self.qlog.with_time(now),
                 );
+            }
+
+            if ack_only {
+                // A GSO batch takes the size of its first datagram, so a batch that went
+                // on after this small packet would hold packets of padding alone.
+                let last_pn = builder.packet_number;
+                builder.finish_and_track(now, self, path_id, pad_datagram);
+                return PollPathSpaceStatus::Send {
+                    last_packet_number: last_pn,
+                };
             }
 
             // Now we need to finish the packet.  Before we do so we need to know if we will

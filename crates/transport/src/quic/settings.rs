@@ -838,7 +838,14 @@ mod tests {
     }
 
     mod loss {
+        use std::any::Any;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::time::Instant;
+
+        use noq_proto::congestion::{Controller, ControllerFactory};
+
         use super::*;
+        use crate::quic::pair::Foreign;
 
         #[test]
         fn sends_a_lost_packet_again_nine_eighths_of_a_round_trip_after_it_left() {
@@ -872,7 +879,144 @@ mod tests {
             assert!(expected <= resend && resend < expected + late, "{resend:?}");
         }
 
+        #[test]
+        fn acks_within_the_max_ack_delay_with_a_full_congestion_window() {
+            let (ping, ack, len, acked) = testing::run(1, |shard| {
+                let idle = Span::from_nanos(10 * Span::SECOND.nanos());
+                let mut pair = Pair::new(shard, idle, DELAY);
+                pair.dial(pair::SERVER_KEY.public());
+                pair.run(Duration::from_secs(1));
+                let mut streams = pair.client.connection().streams();
+                let stream = streams.open(Dir::Uni).expect("a stream");
+                pair.client.drops = usize::MAX;
+                let mut send = pair.client.connection().send_stream(stream);
+                send.write(&vec![0; 100_000]).expect("written");
+                pair.run(Duration::from_millis(500));
+                pair.client.drops = 0;
+                let (ping, before) = (pair.now(), pair.client.sent.len());
+                let acks = pair.server.connection().stats().frame_rx.acks;
+                pair.server.connection().ping();
+                pair.run(2 * DELAY + MAX_ACK_DELAY + Duration::from_millis(1));
+                let acked = pair.server.connection().stats().frame_rx.acks - acks;
+                pair.run(Duration::from_secs(1));
+                let (ack, _, bytes) = pair.client.sent.get(before).expect("a datagram");
+                (Duration::from_nanos(ping.0), *ack, bytes.len(), acked)
+            });
+            let late = ack.checked_sub(ping + DELAY).expect("after it arrives");
+            assert!(late <= MAX_ACK_DELAY, "{late:?}");
+            // A stream frame would fill the datagram to the MTU.
+            assert!(len < 100, "{len}");
+            assert_eq!(acked, 1);
+        }
+
+        /// A GSO batch takes the size of its first datagram, so a batch that went on
+        /// after a small ACK-only datagram would hold datagrams of padding alone.
+        #[test]
+        fn an_ack_with_a_full_congestion_window_leaves_alone_in_its_batch() {
+            let sent = testing::run(1, |shard| {
+                let idle = Span::from_nanos(10 * Span::SECOND.nanos());
+                let mut pair = Pair::new(shard, idle, ROUND_TRIP);
+                let config = shard.config(pair::CLIENT_KEY, idle);
+                let setup = testing::setup(&config);
+                pair.client.endpoint = Endpoint::new(&setup, CLIENT_SHARD, BATCH_MAX);
+                pair.dial(pair::SERVER_KEY.public());
+                pair.run(Duration::from_secs(2));
+                let mut streams = pair.client.connection().streams();
+                let stream = streams.open(Dir::Uni).expect("a stream");
+                let mut send = pair.client.connection().send_stream(stream);
+                send.write(&vec![0; 100_000]).expect("written");
+                pair.server.connection().ping();
+                let before = pair.client.sent.len();
+                pair.run(ROUND_TRIP + MAX_ACK_DELAY);
+                pair.client.sent[before..]
+                    .iter()
+                    .map(|(at, _, bytes)| (*at, bytes.len()))
+                    .collect::<Vec<_>>()
+            });
+            let &(ack, len) = sent.iter().find(|(_, len)| *len < 100).expect("an ACK");
+            let batch: Vec<_> = sent.iter().filter(|(at, _)| *at == ack).collect();
+            assert_eq!(batch, [&(ack, len)]);
+        }
+
+        /// After a NAT rebinding, a peer sends no ACK on the path that it has not
+        /// validated, also with a full congestion window, as it sends no other frame
+        /// of the data space there.
+        #[test]
+        fn no_ack_on_an_unvalidated_path_with_a_full_congestion_window() {
+            testing::run(1, |shard| {
+                let window = Arc::new(AtomicU64::new(u64::MAX / 2));
+                let factory = Arc::new(SetWindow(Arc::clone(&window)));
+                let foreign = Foreign::new(shard, |config| {
+                    config.congestion_controller_factory(factory);
+                });
+                let idle = Span::from_nanos(10 * Span::SECOND.nanos());
+                let mut pair = Pair::new(shard, idle, ROUND_TRIP);
+                pair.foreign = Some(foreign);
+                let (now, peer) = (pair.now(), pair::FOREIGN_KEY.public());
+                let key = pair.client.endpoint.connect(now, peer, pair::FOREIGN);
+                pair.client.key = Some(key);
+                pair.run(Duration::from_secs(2));
+                let foreign = pair.foreign.as_mut().expect("a foreign peer");
+                let connection = foreign.connection();
+                let stream = connection.streams().open(Dir::Uni).expect("a stream");
+                window.store(0, Ordering::Relaxed);
+                let mut send = connection.send_stream(stream);
+                assert_eq!(send.write(&[0; 1024]), Ok(1024));
+                let acks = connection.stats().frame_tx.acks;
+                pair.client.address.set_port(pair::CLIENT.port() + 1);
+                pair.client.connection().ping();
+                // The path challenge comes back a round trip after the ping arrives.
+                pair.run(ROUND_TRIP + 2 * MAX_ACK_DELAY);
+                let foreign = pair.foreign.as_mut().expect("a foreign peer");
+                assert_eq!(foreign.connection().stats().frame_tx.acks, acks);
+            });
+        }
+
+        /// A congestion controller whose window is the value that a test sets.
+        #[derive(Debug, Clone)]
+        struct SetWindow(Arc<AtomicU64>);
+
+        impl Controller for SetWindow {
+            fn on_congestion_event(
+                &mut self,
+                _now: Instant,
+                _sent: Instant,
+                _is_persistent_congestion: bool,
+                _is_ecn: bool,
+                _lost_bytes: u64,
+                _largest_lost_pn: u64,
+            ) {
+            }
+
+            fn on_mtu_update(&mut self, _new_mtu: u16) {}
+
+            fn window(&self) -> u64 {
+                self.0.load(Ordering::Relaxed)
+            }
+
+            fn clone_box(&self) -> Box<dyn Controller> {
+                Box::new(self.clone())
+            }
+
+            fn initial_window(&self) -> u64 {
+                self.window()
+            }
+
+            fn into_any(self: Box<Self>) -> Box<dyn Any> {
+                self
+            }
+        }
+
+        impl ControllerFactory for SetWindow {
+            fn build(self: Arc<Self>, _now: Instant, _mtu: u16) -> Box<dyn Controller> {
+                Box::new((*self).clone())
+            }
+        }
+
         const ROUND_TRIP: Duration = Duration::from_millis(125);
+
+        /// The max ACK delay of noq-proto, which `transport` keeps.
+        const MAX_ACK_DELAY: Duration = Duration::from_millis(25);
     }
 
     mod probe {

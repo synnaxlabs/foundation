@@ -42,7 +42,7 @@ fn reader(
     };
     let main = move |tasks: Tasks| async move {
         let group = Group::new(tasks);
-        let session = session(node, subject, group.tasks().clone()).await;
+        let session = session(node, subject, group.tasks().clone(), 64 << 10).await;
         let mut reader = session.reader(select, Mode::Complete).await.unwrap();
         sender.send(()).unwrap();
         for _ in 0..frames {
@@ -614,11 +614,12 @@ fn each_call_after_the_node_ended_the_session_gives_the_cause() {
     assert_eq!(client.close(), Err(ended));
 }
 
-/// Only Unix: `counting::Local` names the thread with `pthread_self`. A warm `write`
-/// and `write_series` make no allocation on the caller's thread.
+/// Only Unix: `counting::Local` names the thread with `pthread_self`. A warm `write`,
+/// `write_series`, and `next` make no allocation on the caller's thread. Two calls of
+/// `count` at once panic, so this is the one test of the binary that counts (#3319).
 #[cfg(unix)]
 #[test]
-fn a_warm_write_makes_no_allocation_on_the_thread_of_its_caller() {
+fn a_warm_call_makes_no_allocation_on_the_thread_of_its_caller() {
     const WARMUP: usize = 100;
     const CALLS: usize = 1_000;
     const SAMPLES: u32 = 64;
@@ -657,4 +658,7 @@ fn a_warm_write_makes_no_allocation_on_the_thread_of_its_caller() {
     assert_eq!(writer.close(), Ok(()));
     assert_eq!(client.close(), Ok(()));
     rig.stop();
+    read::a_warm_next_makes_no_allocation();
 }
+
+mod read;

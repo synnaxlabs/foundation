@@ -52,3 +52,27 @@
   `laptop.monitor`:
   https://github.com/synnaxlabs/foundation/pull/3151#issuecomment-6251116435. The person
   approved `ci.yaml` on GitHub at `1697708a8`.
+  Amended (the person, through `laptop.monitor`, recorded in #3418 at
+  2026-10-19T19:46:19Z: "Let's do it ASAP"; the plain test paths and the test targets
+  with no harness, the plan, 2026-10-19T19:54:31Z,
+  https://github.com/synnaxlabs/foundation/issues/3418#issuecomment-6275974482; the
+  job `os`, the third part, and ARM, `laptop.monitor`, recorded at
+  2026-10-19T20:12:18Z,
+  https://github.com/synnaxlabs/foundation/issues/3418#issuecomment-6276305229): the
+  job `check` runs three parts on each OS at the same time: `lint` (Format, Clippy,
+  Layers, Globals, Skips, Oracles), `test` (`cargo xtask test nextest`, Root tests),
+  and `serial` (`cargo xtask test serial`). The job `os` gives the required checks
+  `check`, `macos`, and `windows`, each of which passes when each part of `check` on
+  each OS passed. `cargo xtask test nextest` runs `cargo nextest run` with no retry and
+  no fail-fast. `cargo xtask test serial` runs `cargo test --doc`, and `cargo test` on
+  each `test` or `bench` target that `cargo test` runs and whose root has a `main`, as
+  `cargo xtask skips` reads them, other than in a package that `--exclude` leaves out:
+  nextest runs such a binary to list its tests, and the binary lists none or prints a
+  table that nextest cannot read. The test targets of these took 260 s on Linux, 302 s
+  on macOS, and 183 s on Windows in queue run 39308250221, over the 3 min that
+  `laptop.monitor` gave for a third part. The job `test` of `arm.yaml` runs both parts,
+  one after the other. Each skipped test of the lists of LINUX CI is a full test path
+  that nextest leaves out with `test(=<path>)`: nextest 0.9.146 skips no test with
+  `--exact --skip`. In queue run 39308250221, `check` took 32 min, `macos` 35 min,
+  `windows` 28 min, and the `test` of ARM 22 min, and on Linux `cargo test` ran 173 test
+  binaries and 40 doc-test sets one after another.

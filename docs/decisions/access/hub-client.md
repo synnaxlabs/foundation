@@ -96,8 +96,9 @@
   `Frames::open` takes the end of the stream as `None` (`laptop.architect`,
   2026-10-16T06:47:02Z,
   https://github.com/synnaxlabs/foundation/issues/2808#issuecomment-6209795527). So
-  does the decoder, and a message that the decoder refuses leaves it as it was
-  (`laptop.architect`, 2026-10-16T07:19:58Z,
+  does the decoder, and a message that the decoder refuses leaves it as it was,
+  other than `Error::ManyIndexes`, after which the decoder is done (Amended (#3283)
+  below) (`laptop.architect`, 2026-10-16T07:19:58Z,
   https://github.com/synnaxlabs/foundation/pull/2839#issuecomment-6210275086). The plan
   (https://github.com/synnaxlabs/foundation/issues/1749#issuecomment-6204280445) was
   approved by `laptop.architect` at 2026-10-15T23:19:38Z
@@ -350,3 +351,39 @@
   changes `wire` for one fact of the stream. Decided by `laptop.architect` at
   2026-10-18T20:58:27Z
   (https://github.com/synnaxlabs/foundation/issues/3266#issuecomment-6255066811).
+  Amended (#3283): the node splits a write by index, not the client. The person, at
+  2026-10-19T12:27:44Z
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267198734):
+  "Decision of the person on #3283 (2026-10-19, about 06:45 MDT): the node splits a
+  write by index, not the client. The client opens one write stream with channels of
+  any index; the node groups each frame by index and writes each group at its home
+  (forwarding the parts through the BQ12 forward of #3104 when the home is another
+  node). Prior art the person named: the CockroachDB gateway splits a batch by range;
+  the Synnax Core splits a frame by index. A write call may hold channels of more than
+  one index: check names, types, and lengths before anything is sent, and when a group
+  fails after that, the error names the channels written and not written. An error of
+  one index group does not end the others." This ends the client split that
+  `laptop.architect-2` approved at 2026-10-19T12:32:48Z
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267292269). The
+  plan: https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267483536.
+  PR 1: each `Place` holds `index`, the place of the index of its group, an index its
+  own place, approved by `laptop.architect` at 2026-10-19T13:10:34Z
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268011114), and
+  `Places` holds only `count`, from 1 to `PLACES_MAX`. A read has one index, so each of
+  its places names it. `Opening` builds the key set with `KeySet::ordered`, and at the
+  last place gives, for the first place in place order that breaks a rule,
+  `Error::Index` when its index is not a place whose index is itself, or
+  `Error::Unstamped` when it is an index that is not `Stamp`, then `Error::Repeated`.
+  `KeySet::ordered` checks these rules and gives `key_set::Error`, which `Opening`
+  maps to them. When `Opening` gives the start, `client::Reader` gives
+  `Error::ManyIndexes` in its place for the first place whose index is not that of
+  place 0, and is then done. This is a step: #3356 makes the node merge the reads of
+  many indexes, so that no user sees `Error::ManyIndexes` (`laptop.monitor`,
+  2026-10-19T12:29:43Z, https://github.com/synnaxlabs/foundation/issues/3356). Ruled
+  by `laptop.architect` at 2026-10-19T15:10:51Z
+  (https://github.com/synnaxlabs/foundation/pull/3365#issuecomment-6270542720).
+  `Place::index` is a `usize`, as the other places of the crate are, not the `u32` of
+  the plan; the wire holds a `u32`. This replaces the lost flag of #3266 above: the
+  index is now a fact of each group, not of the stream. Lost: a `Places` with a run of
+  the index places, whose length is not fixed and which can pass a message. The format
+  is key choice (f), sent to `laptop.monitor` with the plan.

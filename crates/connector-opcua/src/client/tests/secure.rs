@@ -5,13 +5,14 @@ use std::net::SocketAddr;
 use types::time::{Span, Stamp};
 
 use super::{Client, PORT, VALUE, fits, fitting, long, run, serve_on};
-use crate::client::{Credentials, Large, Mode};
+use crate::client::{Credentials, Error, Large, Mode, Refusal};
 use crate::event;
 use crate::ffi::{self, Status};
 use crate::secure::{
     ANONYMOUS, BROKEN_TRUST, CLIENT, CLIENT_ONLY_SERVER, CLIENT_PEM, EC, EMPTY_URI,
-    END, HEADED_TRUST, Identity, LINE_TRUST, LONG_BLOCK_TRUST, ONE_BLOCK_TRUST, OTHER,
-    Policy, REJECTED_SERVER, SERVER, START, TRUST, TWO_URIS, UNNAMED,
+    END, HEADED_TRUST, Identity, LASTING, LINE_TRUST, LONG_BLOCK_TRUST,
+    ONE_BLOCK_TRUST, OTHER, Policy, REJECTED_SERVER, SERVER, START, TRUST, TWO_URIS,
+    UNNAMED,
 };
 use crate::server::Limits;
 use crate::value::{Fault, Value};
@@ -68,7 +69,7 @@ fn connect(
     (client, trust, client_wall): (Identity, impl AsRef<[u8]> + Send + 'static, Stamp),
     policies: &[Policy],
     mode: Mode,
-) -> (Result<Read, Status>, u64) {
+) -> (Result<Read, Error>, u64) {
     let policies = policies.to_vec();
     run(seed, async move |node| {
         let client = Credentials {
@@ -99,7 +100,7 @@ fn connect(
 
 /// A read from a server that offers `policies`, in `mode` at [`START`], in a run of
 /// `seed`.
-fn read(seed: u64, policies: &[Policy], mode: Mode) -> (Result<Read, Status>, u64) {
+fn read(seed: u64, policies: &[Policy], mode: Mode) -> (Result<Read, Error>, u64) {
     connect(
         seed,
         (SERVED, START),
@@ -143,7 +144,7 @@ fn a_client_takes_the_policy_of_the_highest_level() {
 }
 
 /// The connect of a client with [`CLIENT`] that trusts `trust`, in `Sign`.
-fn trusting(trust: impl AsRef<[u8]> + Send + 'static) -> Result<Read, Status> {
+fn trusting(trust: impl AsRef<[u8]> + Send + 'static) -> Result<Read, Error> {
     let (read, _) = connect(
         0,
         (SERVED, START),
@@ -208,7 +209,8 @@ fn a_client_that_trusts_a_second_trusted_certificate_block_reads() {
 #[test]
 fn a_client_that_trusts_a_pem_past_4_gib_reads() {
     let (other, server) = blocks();
-    // Zeros take no memory until written. A cut to 32 bits keeps only `other`.
+    // The group copies the trust, so the test writes all 4 GiB. A cut to 32 bits keeps
+    // only `other`.
     let mut trust = vec![0; (1 << 32) + other.len()];
     trust[..other.len()].copy_from_slice(other.as_bytes());
     let at = trust.len() - server.len();
@@ -238,27 +240,230 @@ fn a_client_with_a_pem_certificate_and_key_reads() {
     assert_eq!(read.answer, Ok(read.value));
 }
 
+/// The refusal of a trust whose certificate `number` does not parse.
+fn invalid(number: usize) -> Error {
+    Error::Refused(Refusal::Invalid { number })
+}
+
+/// The refusal of a trust whose block of certificate `number` holds bytes after it.
+fn trailing(number: usize) -> Error {
+    Error::Refused(Refusal::Trailing { number })
+}
+
 #[test]
 fn a_trust_whose_second_certificate_does_not_parse_ends_the_connect() {
-    assert_eq!(trusting(BROKEN_TRUST), Err(Status::BAD_INTERNAL_ERROR));
+    assert_eq!(trusting(BROKEN_TRUST), Err(invalid(2)));
+}
+
+#[test]
+fn a_trust_whose_second_block_has_no_end_line_ends_the_connect() {
+    let (other, _) = blocks();
+    let trust = format!("{other}-----BEGIN CERTIFICATE-----\nMIIB\n");
+    assert_eq!(trusting(trust), Err(invalid(2)));
+}
+
+#[test]
+fn a_trust_with_a_damaged_or_empty_block_of_another_label_ends_the_connect() {
+    let (other, _) = blocks();
+    for body in ["!!!!\n", ""] {
+        let trust = format!("{other}-----BEGIN NOTE-----\n{body}-----END NOTE-----\n");
+        assert_eq!(trusting(trust), Err(invalid(2)), "{body:?}");
+    }
+}
+
+#[test]
+fn a_trust_whose_begin_line_starts_no_block_drops_it() {
+    let (other, server) = blocks();
+    for begin in [
+        "----BEGIN CERTIFICATE-----",
+        "-----BEGIN CERTIFICATE----",
+        "-----BEGIN CERTIFICATE-----\u{A0}x",
+    ] {
+        let server = server.replacen("-----BEGIN CERTIFICATE-----", begin, 1);
+        assert_eq!(
+            trusting(format!("{other}{server}")),
+            Err(Error::Failed(Status::BAD_CERTIFICATE_UNTRUSTED)),
+            "{begin}"
+        );
+    }
+}
+
+#[test]
+fn a_begin_line_at_a_piece_of_253_bytes_of_a_long_line_starts_a_block() {
+    let (other, server) = blocks();
+    let untrusted = trusting(format!("{other}{}{server}", "x".repeat(252)));
+    assert_eq!(
+        untrusted.map(|_| ()),
+        Err(Error::Failed(Status::BAD_CERTIFICATE_UNTRUSTED))
+    );
+    for text in [253, 506] {
+        let read = trusting(format!("{other}{}{server}", "x".repeat(text)))
+            .expect("the client connects");
+        assert_eq!(read.answer, Ok(read.value), "{text}");
+    }
+}
+
+#[test]
+fn a_begin_line_with_white_space_after_its_dashes_starts_a_block() {
+    let (other, server) = blocks();
+    for tail in [" ", "\t", "\r"] {
+        let begin = format!("-----BEGIN CERTIFICATE-----{tail}");
+        let server = server.replacen("-----BEGIN CERTIFICATE-----", &begin, 1);
+        let read = trusting(format!("{other}{server}")).expect("the client connects");
+        assert_eq!(read.answer, Ok(read.value), "{tail:?}");
+    }
+}
+
+#[test]
+fn a_trust_whose_end_line_names_another_label_ends_the_connect() {
+    let (other, server) = blocks();
+    for (line, with) in [
+        (
+            "-----BEGIN CERTIFICATE-----",
+            "-----BEGIN CERTIFICATE------",
+        ),
+        (
+            "-----BEGIN CERTIFICATE-----",
+            "-----BEGIN  CERTIFICATE-----",
+        ),
+        (
+            "-----END CERTIFICATE-----",
+            "-----END CERTIFICATE-----\u{A0}x",
+        ),
+    ] {
+        let server = server.replacen(line, with, 1);
+        assert_eq!(
+            trusting(format!("{other}{server}")),
+            Err(invalid(2)),
+            "{with}"
+        );
+    }
+}
+
+/// The `Line` refusal of line `number` of the trust.
+fn line(number: usize) -> Error {
+    Error::Refused(Refusal::Line { number })
+}
+
+/// [`TRUST`] with `tail` before the `\n` of line `at`, from 0, of its second block, and
+/// the number from 1 of that line in the trust.
+fn with_tail(at: usize, tail: &[u8]) -> (Vec<u8>, usize) {
+    let (other, server) = blocks();
+    let number = other.matches('\n').count() + at + 1;
+    let mut trust = other.into_bytes();
+    for (index, line) in server.split_inclusive('\n').enumerate() {
+        let line = line.as_bytes();
+        if index == at {
+            trust.extend_from_slice(&line[..line.len() - 1]);
+            trust.extend_from_slice(tail);
+            trust.push(b'\n');
+        } else {
+            trust.extend_from_slice(line);
+        }
+    }
+    (trust, number)
+}
+
+#[test]
+fn a_line_of_a_block_with_a_high_byte_after_its_text_ends_the_connect() {
+    let last = blocks().1.lines().count() - 1;
+    for at in [0, 1, 2, last] {
+        for tail in [b"\xA0".as_slice(), b" \xFF\r", b"\x80 "] {
+            let (trust, number) = with_tail(at, tail);
+            assert_eq!(trusting(trust), Err(line(number)), "{at} {tail:?}");
+        }
+    }
+}
+
+#[test]
+fn a_line_of_a_block_of_only_a_high_byte_ends_the_connect() {
+    let (trust, number) = with_tail(0, b"\n\xA0");
+    assert_eq!(trusting(trust), Err(line(number + 1)));
+}
+
+#[test]
+fn a_trust_whose_last_byte_is_high_ends_the_connect() {
+    let (mut trust, number) = with_tail(blocks().1.lines().count() - 1, b"\xA0");
+    assert_eq!(trust.pop(), Some(b'\n'));
+    assert_eq!(trusting(trust), Err(line(number)));
+}
+
+#[test]
+fn a_begin_line_with_a_high_byte_at_a_piece_of_a_long_line_ends_the_connect() {
+    let (trust, number) = with_tail(0, b"\xA0");
+    let at = blocks().0.len();
+    let text = "x".repeat(253);
+    let trust = [&trust[..at], text.as_bytes(), &trust[at..]].concat();
+    assert_eq!(trusting(trust), Err(line(number)));
+}
+
+#[test]
+fn a_client_that_trusts_a_pem_with_utf_8_text_outside_its_blocks_reads() {
+    let (other, server) = blocks();
+    let long = "é".repeat(200);
+    for trust in [
+        format!("{other}Certigna é\n{server}"),
+        format!("{other}-----BEGIN A NOTE é\na note that ends in -----é\n{server}"),
+        format!("{long}\n{other}{long}\n{server}{long}"),
+    ] {
+        let read = trusting(trust).expect("the client connects");
+        assert_eq!(read.answer, Ok(read.value));
+    }
+}
+
+#[test]
+fn a_begin_line_with_a_nul_before_its_dashes_is_text() {
+    let trust = [b"-----BEGIN X\0-----\xA0\n", TRUST].concat();
+    let read = trusting(trust).expect("the client connects");
+    assert_eq!(read.answer, Ok(read.value));
+}
+
+#[test]
+fn a_begin_line_with_no_label_and_a_high_byte_ends_the_connect() {
+    let trust = [b"-----BEGIN -----\xA0\n", TRUST].concat();
+    assert_eq!(trusting(trust), Err(line(1)));
+}
+
+#[test]
+fn a_begin_line_with_no_space_or_four_dashes_starts_no_block() {
+    for begin in [b"-----BEGINX-----".as_slice(), b"-----BEGIN X----"] {
+        let trust = [begin, b"\nnote \xA0\n", TRUST].concat();
+        let read = trusting(trust).expect("the client connects");
+        assert_eq!(read.answer, Ok(read.value), "{begin:?}");
+    }
+}
+
+#[test]
+fn an_end_line_of_10_bytes_ends_a_block() {
+    let trust = [b"-----BEGIN X-----\n-----END X\nnote \xA0\n", TRUST].concat();
+    assert_eq!(trusting(trust), Err(invalid(1)));
+}
+
+#[test]
+fn an_end_line_with_no_space_ends_no_block() {
+    let block = b"-----BEGIN X-----\n-----ENDXYZ\nnote \xA0\n-----END X-----\n";
+    assert_eq!(trusting([block, TRUST].concat()), Err(line(3)));
 }
 
 #[test]
 fn a_trust_that_does_not_parse_ends_the_connect() {
-    assert_eq!(trusting(b"no certificate"), Err(Status::BAD_INTERNAL_ERROR));
+    assert_eq!(
+        trusting(b"no certificate"),
+        Err(Error::Refused(Refusal::Empty))
+    );
 }
 
 #[test]
 fn a_trust_with_a_byte_after_its_der_certificate_ends_the_connect() {
     let trust = [SERVER.certificate, b"\n"].concat();
-    assert_eq!(trusting(trust), Err(Status::BAD_INTERNAL_ERROR));
+    assert_eq!(trusting(trust), Err(invalid(2)));
 }
 
 #[test]
 fn a_trust_of_der_then_pem_ends_the_connect() {
     let (_, server) = blocks();
     let trust = [OTHER.certificate, server.as_bytes()].concat();
-    assert_eq!(trusting(trust), Err(Status::BAD_INTERNAL_ERROR));
+    assert_eq!(trusting(trust), Err(invalid(2)));
 }
 
 #[test]
@@ -268,24 +473,34 @@ fn a_trust_of_a_damaged_der_then_pem_drops_the_der() {
     assert_eq!(damaged[4], 0x30, "the to-be-signed part is a sequence");
     damaged[4] = 0x31;
     let trust = [&damaged, b"\n".as_slice(), other.as_bytes()].concat();
-    assert_eq!(trusting(trust), Err(Status::BAD_CERTIFICATE_UNTRUSTED));
+    assert_eq!(
+        trusting(trust),
+        Err(Error::Failed(Status::BAD_CERTIFICATE_UNTRUSTED))
+    );
 }
 
 #[test]
 fn a_trust_of_pem_then_der_drops_the_der() {
     let (other, _) = blocks();
     let trust = [other.as_bytes(), SERVER.certificate].concat();
-    assert_eq!(trusting(trust), Err(Status::BAD_CERTIFICATE_UNTRUSTED));
+    assert_eq!(
+        trusting(trust),
+        Err(Error::Failed(Status::BAD_CERTIFICATE_UNTRUSTED))
+    );
 }
 
 #[test]
 fn a_trust_of_two_certificates_in_one_block_ends_the_connect() {
-    assert_eq!(trusting(ONE_BLOCK_TRUST), Err(Status::BAD_INTERNAL_ERROR));
+    assert_eq!(trusting(ONE_BLOCK_TRUST), Err(trailing(1)));
 }
 
 #[test]
 fn a_trust_of_a_block_with_a_byte_after_its_certificate_ends_the_connect() {
-    assert_eq!(trusting(LONG_BLOCK_TRUST), Err(Status::BAD_INTERNAL_ERROR));
+    let (other, _) = blocks();
+    let trust = [LONG_BLOCK_TRUST, other.as_bytes()].concat();
+    for trust in [LONG_BLOCK_TRUST.to_vec(), trust] {
+        assert_eq!(trusting(trust), Err(trailing(1)));
+    }
 }
 
 #[test]
@@ -293,26 +508,48 @@ fn a_trusted_certificate_block_with_trust_settings_ends_the_connect() {
     for settings in [REJECTED_SERVER, CLIENT_ONLY_SERVER] {
         let (other, _) = blocks();
         let trust = [other.as_bytes(), settings].concat();
-        assert_eq!(trusting(trust), Err(Status::BAD_INTERNAL_ERROR));
+        assert_eq!(trusting(trust), Err(trailing(2)));
     }
 }
 
 #[test]
 fn an_empty_trust_ends_the_connect() {
-    assert_eq!(trusting(b""), Err(Status::BAD_INTERNAL_ERROR));
+    assert_eq!(trusting(b""), Err(Error::Refused(Refusal::Empty)));
+}
+
+/// A server loads its trust through the group alone, which refuses each trust that
+/// the client refuses before the dial.
+#[test]
+fn a_group_whose_trust_does_not_load_is_refused() {
+    let trusts = [
+        b"".as_slice(),
+        b"no certificate",
+        BROKEN_TRUST,
+        ONE_BLOCK_TRUST,
+        &with_tail(0, b"\xA0").0,
+    ];
+    for trust in trusts {
+        let status = crate::validity::verify(SERVER.certificate, Some(trust), START);
+        assert_eq!(status.name(), "BadInternalError", "{trust:?}");
+    }
 }
 
 /// The connect of a client with `own` that trusts [`SERVER`], in `Sign`, to a port
 /// where no server listens, so that a refusal before the dial is the only error that
 /// is not one of the dial.
-fn refused(own: Identity) -> Result<(), Status> {
+fn refused(own: Identity) -> Result<(), Error> {
+    refused_at(own, SERVER.certificate, START)
+}
+
+/// [`refused`] with a trust of `trust`, on a loop whose wall time starts at `wall`.
+fn refused_at(own: Identity, trust: &'static [u8], wall: Stamp) -> Result<(), Error> {
     let (connect, _) = run(0, async move |node| {
-        let client = with(own, SERVER.certificate);
+        let client = with(own, trust);
         let mut rng = node.entropy().rng();
         let url = format!("opc.tcp://{}", SocketAddr::new(node.addresses()[0], PORT));
         let url = CString::new(url).expect("the URL holds no NUL");
         let connect = Client::connect(
-            event::Time::since(node.clock(), START),
+            event::Time::since(node.clock(), wall),
             tracing::Span::none(),
             node.net(),
             &mut rng,
@@ -326,17 +563,75 @@ fn refused(own: Identity) -> Result<(), Status> {
 }
 
 #[test]
+fn a_certificate_is_valid_only_inside_its_window_on_the_loop() {
+    let dials = Err(Error::Failed(Status::BAD_CONNECTION_REJECTED));
+    let refused = Err(Error::Refused(Refusal::Time));
+    for (wall, connect) in [
+        (START - Span::NANOSECOND, &refused),
+        (START, &dials),
+        (END - Span::NANOSECOND, &dials),
+        (END, &refused),
+    ] {
+        let connect_at = refused_at(CLIENT, SERVER.certificate, wall);
+        assert_eq!(&connect_at, connect, "{wall:?}");
+    }
+}
+
+#[test]
+fn a_refusal_names_the_part_that_fails() {
+    for (refusal, text) in [
+        (
+            Refusal::Certificate,
+            "the certificate does not parse or holds no RSA key",
+        ),
+        (Refusal::Key, "the key does not parse"),
+        (
+            Refusal::Mismatch,
+            "the key is not the key of the certificate",
+        ),
+        (
+            Refusal::Time,
+            "the time is outside the validity window of the certificate",
+        ),
+        (
+            Refusal::Empty,
+            "the trust holds no certificate in DER or PEM",
+        ),
+        (
+            Refusal::Invalid { number: 2 },
+            "certificate 2 of the trust, or a damaged PEM block in its place, does not \
+             parse",
+        ),
+        (
+            Refusal::Trailing { number: 3 },
+            "the PEM block of certificate 3 of the trust holds bytes after it",
+        ),
+        (
+            Refusal::Line { number: 4 },
+            "line 4 of the trust, in a PEM block, holds a byte of 0x80 to 0xFF, which \
+             PEM does not allow",
+        ),
+        (
+            Refusal::Uri,
+            "the certificate holds no URI in its subject alternative name",
+        ),
+    ] {
+        assert_eq!(refusal.to_string(), text);
+    }
+}
+
+#[test]
 fn a_certificate_that_does_not_parse_ends_the_connect_before_the_dial() {
     let own = Identity {
         certificate: b"no certificate",
         ..CLIENT
     };
-    assert_eq!(refused(own), Err(Status::BAD_CERTIFICATE_INVALID));
+    assert_eq!(refused(own), Err(Error::Refused(Refusal::Certificate)));
 }
 
 #[test]
 fn a_certificate_with_no_rsa_key_ends_the_connect_before_the_dial() {
-    assert_eq!(refused(EC), Err(Status::BAD_CERTIFICATE_INVALID));
+    assert_eq!(refused(EC), Err(Error::Refused(Refusal::Certificate)));
 }
 
 #[test]
@@ -345,7 +640,7 @@ fn a_key_that_does_not_parse_ends_the_connect_before_the_dial() {
         key: b"no key",
         ..CLIENT
     };
-    assert_eq!(refused(own), Err(Status::BAD_INVALID_ARGUMENT));
+    assert_eq!(refused(own), Err(Error::Refused(Refusal::Key)));
 }
 
 #[test]
@@ -354,22 +649,22 @@ fn a_key_of_another_certificate_ends_the_connect_before_the_dial() {
         key: OTHER.key,
         ..CLIENT
     };
-    assert_eq!(refused(own), Err(Status::BAD_SECURITY_CHECKS_FAILED));
+    assert_eq!(refused(own), Err(Error::Refused(Refusal::Mismatch)));
 }
 
 #[test]
 fn a_certificate_with_no_application_uri_ends_the_connect_before_the_dial() {
-    assert_eq!(refused(ANONYMOUS), Err(Status::BAD_CERTIFICATE_URI_INVALID));
+    assert_eq!(refused(ANONYMOUS), Err(Error::Refused(Refusal::Uri)));
 }
 
 #[test]
 fn a_certificate_with_no_alternative_name_ends_the_connect_before_the_dial() {
-    assert_eq!(refused(UNNAMED), Err(Status::BAD_CERTIFICATE_URI_INVALID));
+    assert_eq!(refused(UNNAMED), Err(Error::Refused(Refusal::Uri)));
 }
 
 #[test]
 fn a_certificate_whose_first_uri_is_empty_ends_the_connect_before_the_dial() {
-    assert_eq!(refused(EMPTY_URI), Err(Status::BAD_CERTIFICATE_URI_INVALID));
+    assert_eq!(refused(EMPTY_URI), Err(Error::Refused(Refusal::Uri)));
 }
 
 #[test]
@@ -403,7 +698,10 @@ fn a_client_sends_the_first_uri_of_its_certificate() {
 
 #[test]
 fn a_client_with_a_valid_certificate_dials() {
-    assert_eq!(refused(CLIENT), Err(Status::BAD_CONNECTION_REJECTED));
+    assert_eq!(
+        refused(CLIENT),
+        Err(Error::Failed(Status::BAD_CONNECTION_REJECTED))
+    );
 }
 
 #[test]
@@ -430,27 +728,30 @@ fn a_server_certificate_that_the_client_does_not_trust_ends_the_connect() {
         &Policy::ALL,
         Mode::Sign,
     );
-    assert_eq!(read, Err(Status::BAD_CERTIFICATE_UNTRUSTED));
+    assert_eq!(read, Err(Error::Failed(Status::BAD_CERTIFICATE_UNTRUSTED)));
 }
 
 #[test]
 fn a_client_past_the_end_of_the_server_certificate_ends_the_connect() {
     let (read, _) = connect(
         0,
-        (SERVED, START),
-        (CLIENT, SERVER.certificate, END + Span::SECOND),
+        (with(SERVER, LASTING.certificate), START),
+        (LASTING, SERVER.certificate, END + Span::SECOND),
         &Policy::ALL,
         Mode::Sign,
     );
-    assert_eq!(read, Err(Status::BAD_CERTIFICATE_TIME_INVALID));
+    assert_eq!(
+        read,
+        Err(Error::Failed(Status::BAD_CERTIFICATE_TIME_INVALID))
+    );
 }
 
 #[test]
 fn a_client_one_second_before_the_end_of_the_server_certificate_reads() {
     let (read, _) = connect(
         0,
-        (SERVED, START),
-        (CLIENT, SERVER.certificate, END - Span::SECOND),
+        (with(SERVER, LASTING.certificate), START),
+        (LASTING, SERVER.certificate, END - Span::SECOND),
         &Policy::ALL,
         Mode::Sign,
     );
@@ -462,12 +763,15 @@ fn a_client_one_second_before_the_end_of_the_server_certificate_reads() {
 fn a_client_one_second_before_the_start_of_the_server_certificate_ends_the_connect() {
     let (read, _) = connect(
         0,
-        (SERVED, START),
-        (CLIENT, SERVER.certificate, START - Span::SECOND),
+        (with(SERVER, LASTING.certificate), START),
+        (LASTING, SERVER.certificate, START - Span::SECOND),
         &Policy::ALL,
         Mode::Sign,
     );
-    assert_eq!(read, Err(Status::BAD_CERTIFICATE_TIME_INVALID));
+    assert_eq!(
+        read,
+        Err(Error::Failed(Status::BAD_CERTIFICATE_TIME_INVALID))
+    );
 }
 
 #[test]
@@ -480,7 +784,10 @@ fn a_server_past_the_end_of_the_client_certificate_refuses_the_channel() {
         Mode::Sign,
     );
     // The server sends the status of its check in the ERR message.
-    assert_eq!(read, Err(Status::BAD_CERTIFICATE_TIME_INVALID));
+    assert_eq!(
+        read,
+        Err(Error::Failed(Status::BAD_CERTIFICATE_TIME_INVALID))
+    );
 }
 
 /// What a read of the largest request after [`VALUE`] in one message gives.
@@ -700,4 +1007,29 @@ fn a_received_chunk_holds_the_smaller_of_two_payloads() {
         });
         assert_eq!(limits, (Status::GOOD, payloads), "{mode:?} {buffer}");
     }
+}
+
+#[test]
+fn the_window_is_checked_before_the_trust() {
+    assert_eq!(
+        refused_at(CLIENT, BROKEN_TRUST, END),
+        Err(Error::Refused(Refusal::Time))
+    );
+}
+
+#[test]
+fn the_trust_is_checked_before_the_uri() {
+    assert_eq!(refused_at(ANONYMOUS, BROKEN_TRUST, START), Err(invalid(2)));
+}
+
+#[test]
+fn the_key_pair_is_checked_before_the_window() {
+    let own = Identity {
+        key: OTHER.key,
+        ..CLIENT
+    };
+    assert_eq!(
+        refused_at(own, SERVER.certificate, END),
+        Err(Error::Refused(Refusal::Mismatch))
+    );
 }

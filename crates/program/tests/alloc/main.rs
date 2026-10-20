@@ -57,11 +57,12 @@ fn main() {
     writes_a_frame_with_no_allocation();
 }
 
-fn place(key: u128, data_type: Type, channel: &str) -> Place {
+fn place(key: u128, data_type: Type, channel: &str, index: usize) -> Place {
     Place {
         key: channel::Key::from_u128(key),
         data_type,
         name: channel.parse().expect("a valid name"),
+        index,
     }
 }
 
@@ -69,15 +70,15 @@ fn place(key: u128, data_type: Type, channel: &str) -> Place {
 /// poll, and it and the drop of the frame make no allocation.
 fn takes_a_frame_with_no_allocation() {
     let places = [
-        place(10, Type::Scalar(Scalar::I64), "a"),
-        place(1, Type::Scalar(Scalar::Stamp), "time"),
-        place(11, Type::Scalar(Scalar::I64), "b"),
+        place(10, Type::Scalar(Scalar::I64), "a", 1),
+        place(1, Type::Scalar(Scalar::Stamp), "time", 1),
+        place(11, Type::Scalar(Scalar::I64), "b", 1),
     ];
     let body: Vec<u8> = (0..24).collect();
     by_hand(
         430,
         move |session, node| async move {
-            let mut read = opened(&session, &places, 1).await;
+            let mut read = opened(&session, &places).await;
             for seq in 0..WARM + COUNTED {
                 let range = Range { seq, count: 1 };
                 let run = [(0, 8), (1, 16), (2, 24)];
@@ -117,8 +118,8 @@ fn takes_a_frame_with_no_allocation() {
 /// an allocation.
 fn writes_a_frame_with_no_allocation() {
     let places = [
-        place(1, Type::Scalar(Scalar::Stamp), "time"),
-        place(10, Type::Scalar(Scalar::I64), "a"),
+        place(1, Type::Scalar(Scalar::Stamp), "time", 0),
+        place(10, Type::Scalar(Scalar::I64), "a", 0),
     ];
     by_hand(
         431,
@@ -127,7 +128,7 @@ fn writes_a_frame_with_no_allocation() {
                 Write::decode(first).expect("a write").body()
             })
             .await;
-            start(&mut write, &places, 0, places.len()).await;
+            start(&mut write, &places, places.len()).await;
             for seq in 0..WARM + COUNTED {
                 for _ in ["head", "ends", "body"] {
                     let message = write.receiver.recv().await.expect("receives");

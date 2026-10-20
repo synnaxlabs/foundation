@@ -425,6 +425,7 @@ fn operator(
         let files = host.files();
         let local = sector::local::read(&files).await.expect("a node runs");
         let (transport, pool) = program(&host, tasks.clone());
+        let frames = super::pool();
         let config = program::Config {
             via: local.key,
             node: local.public_key,
@@ -435,7 +436,8 @@ fn operator(
             entropy: host.entropy(),
             tasks,
             pool,
-            frames: super::pool(),
+            frames: Rc::clone(&frames),
+            reads: frames,
         };
         let client = program::Session::connect(&transport, config).await;
         let reply = match client {

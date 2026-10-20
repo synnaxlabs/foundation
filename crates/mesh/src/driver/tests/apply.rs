@@ -1,5 +1,5 @@
-//! Tests of `Mesh::apply` on one node, and of its spec change on a cluster of three
-//! voters, where each voter holds the chunks.
+//! Tests of `Mesh::apply` on one node and on a cluster of three voters, and of its
+//! spec change on a cluster.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -13,6 +13,7 @@ use super::send::stop;
 use super::*;
 use crate::change::HOMES_MAX;
 use crate::common::name;
+use crate::error::{Miss, Missed};
 
 impl Cluster {
     /// Node `node` proposes the spec change of `definitions` on `base` at its next
@@ -44,6 +45,30 @@ impl Cluster {
             homes,
         };
         self.board.lock().unwrap().applies.insert(node, spec);
+    }
+
+    /// Node `node` calls `Mesh::apply` of `definitions` on `base` at its next tick.
+    fn change(
+        &self,
+        node: u8,
+        base: Pointer,
+        definitions: &BTreeMap<Name, Definition>,
+    ) {
+        let change = (base, definitions.clone());
+        self.board.lock().unwrap().changes.insert(node, change);
+    }
+
+    /// Sets a one-way delay of `delay` on each link between two voters.
+    fn delay(&mut self, delay: Span) {
+        let config = link::Config {
+            delay,
+            ..link::Config::default()
+        };
+        for (a, b) in [(1, 2), (1, 3), (2, 3)] {
+            let (a, b) = (self.node(a).clone(), self.node(b).clone());
+            self.sim.link(&a, &b, config);
+            self.sim.link(&b, &a, config);
+        }
     }
 
     /// Node `node` proposes `voters` at its next tick.
@@ -642,21 +667,40 @@ fn a_change_on_a_base_whose_tree_the_store_cannot_give_lists_each_chunk() {
     assert_eq!(specs(&entries).len(), 2);
 }
 
+// No node runs at the addresses of voters 2 and 3, so each dial fails.
 #[test]
-fn apply_in_a_region_of_three_voters_gives_quorum_and_puts_and_proposes_nothing() {
+fn apply_in_a_region_of_three_voters_with_no_peer_gives_quorum_and_proposes_nothing() {
     let entries = solo_stored(|node, tasks| async move {
         let (mesh, store) = open_kept(&node, &tasks, &IDS).await;
         let definitions = create_subjects(&["plant.a"], 1);
         let root = spec::region::tree(&mut Chunks::default(), &definitions).root;
-        let quorum = Error::Quorum { held: 1, voters: 3 };
+        let missed = |id| Missed {
+            node: key(id),
+            name: Some(name(&format!("plant.node{id}"))),
+            cause: Miss::Dial(transport::Error::Unreachable {
+                peer: public(id),
+                attempts: Vec::new(),
+            }),
+        };
+        let quorum = Error::Quorum {
+            held: 1,
+            voters: 3,
+            missed: vec![missed(2), missed(3)],
+        };
         assert_eq!(
             mesh.apply(base(), definitions, BTreeMap::new()).await,
             Err(quorum.clone())
         );
-        assert!(store.get(root).await.unwrap().is_none());
+        assert!(store.get(root).await.unwrap().is_some());
+        let unreachable = |id| format!("no address reached peer {}", public(id));
         assert_eq!(
             quorum.to_string(),
-            "1 of 3 voters hold the chunks of the spec change, not a majority"
+            format!(
+                "1 of 3 voters hold the chunks of the spec change, not a majority; \
+                 plant.node2: its dial failed: {}; plant.node3: its dial failed: {}",
+                unreachable(2),
+                unreachable(3)
+            )
         );
         assert_eq!(mesh.pointer(), base());
     });
@@ -680,13 +724,378 @@ fn each_member_refuses_a_change_whose_holders_lack_a_majority_of_its_voters() {
     cluster.script(|_| home_to(9));
     cluster.run(seconds(5));
     let board = cluster.board();
-    let quorum = Error::Quorum { held: 1, voters: 2 };
+    let quorum = Error::Quorum {
+        held: 1,
+        voters: 2,
+        missed: Vec::new(),
+    };
+    assert_eq!(
+        quorum.to_string(),
+        "1 of 2 voters hold the chunks of the spec change, not a majority, at the \
+         apply of the change"
+    );
     assert_eq!(board.applied, [(1, base(), Err(quorum))]);
     // Node 3 is in no configuration, so it gets each entry as a learner.
     for id in IDS {
         assert_eq!(board.homes[&id].last(), Some(&Some(key(9))), "node {id}");
         assert_eq!(board.pointers[&id], base(), "node {id}");
     }
+}
+
+/// Asserts that each of `ids` uses the spec of `definitions` at `pointer`.
+fn assert_used(
+    board: &Board,
+    ids: &[u8],
+    pointer: Pointer,
+    definitions: &BTreeMap<Name, Definition>,
+) {
+    for id in ids {
+        let seen = &board.specs[id];
+        assert_eq!(seen.pointer, Some(pointer), "node {id}");
+        assert_eq!(&seen.definitions, definitions, "node {id}");
+    }
+}
+
+// Voter 3 is down, so the holders are 1 and 2, and voter 2 uses the spec from the
+// chunks that voter 1 put on it.
+#[test]
+fn an_apply_with_one_voter_down_commits_and_the_other_voter_uses_the_spec() {
+    let mut cluster = Cluster::new(0);
+    cluster.start_voter(1);
+    cluster.start_voter(2);
+    cluster.run(seconds(5));
+    let definitions = create_subjects(&["plant.a"], 1);
+    cluster.change(1, base(), &definitions);
+    cluster.run(seconds(5));
+    let board = cluster.board();
+    let moved = pointer(1, &definitions);
+    assert_eq!(board.applied, [(1, moved, Ok(moved))]);
+    assert_used(&board, &[1, 2], moved, &definitions);
+}
+
+#[test]
+fn an_apply_in_a_region_of_two_voters_commits_and_each_uses_the_spec() {
+    let mut cluster = Cluster::new(0);
+    cluster.board.lock().unwrap().learners = [3].into();
+    cluster.start();
+    cluster.run(seconds(5));
+    let definitions = create_subjects(&["plant.a"], 1);
+    cluster.change(2, base(), &definitions);
+    cluster.run(seconds(5));
+    let board = cluster.board();
+    let moved = pointer(1, &definitions);
+    assert_eq!(board.applied, [(2, moved, Ok(moved))]);
+    assert_used(&board, &[1, 2], moved, &definitions);
+}
+
+// Voter 2 takes the put and never answers, and voter 3 is down, so the apply ends at
+// the deadline of its call on voter 2.
+#[test]
+fn an_apply_whose_one_live_peer_never_answers_gives_quorum_at_the_deadline() {
+    let mut cluster = Cluster::new(0);
+    cluster.board.lock().unwrap().silent = Some(2);
+    cluster.start_voter(1);
+    cluster.start_voter(2);
+    cluster.run(seconds(5));
+    cluster.change(1, base(), &create_subjects(&["plant.a"], 1));
+    cluster.run(peer::DEADLINE);
+    assert_eq!(cluster.board.lock().unwrap().applied, []);
+    cluster.run(seconds(1));
+    let quorum = Error::Quorum {
+        held: 1,
+        voters: 3,
+        missed: vec![late(2), late(3)],
+    };
+    assert_eq!(cluster.board().applied, [(1, base(), Err(quorum))]);
+}
+
+// Each chunk takes about 1 s over links of 300 ms, so the first call of 16 chunks on
+// each voter passes the deadline.
+#[test]
+fn an_apply_over_links_of_300_ms_names_each_voter_whose_call_passed_the_deadline() {
+    let mut cluster = Cluster::new(0);
+    cluster.delay(Span::from_nanos(300 * Span::MILLISECOND.nanos()));
+    cluster.start();
+    cluster.run(seconds(10));
+    let labels: Vec<String> = (0..40).map(|at| format!("plant.s{at}")).collect();
+    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let definitions = create_subjects(&labels, 512);
+    cluster.change(1, base(), &definitions);
+    cluster.run(seconds(60));
+    let quorum = Error::Quorum {
+        held: 1,
+        voters: 3,
+        missed: vec![late(2), late(3)],
+    };
+    assert_eq!(
+        quorum.to_string(),
+        "1 of 3 voters hold the chunks of the spec change, not a majority; \
+         plant.node2: a call of its put of at most 16 chunks passed the deadline of 10 \
+         s; plant.node3: a call of its put of at most 16 chunks passed the deadline of \
+         10 s"
+    );
+    assert_eq!(cluster.board().applied, [(1, base(), Err(quorum))]);
+}
+
+// Voter `id`, whose call of its put passed the deadline.
+fn late(id: u8) -> Missed {
+    Missed {
+        node: key(id),
+        name: Some(name(&format!("plant.node{id}"))),
+        cause: Miss::Deadline,
+    }
+}
+
+// The follower `p` sends no `raft` message to the follower `q`, which restarts, and
+// the leader holds each blob stream with no answer. So the apply of `p` commits only
+// when its put reaches the new process of `q`.
+#[test]
+fn an_apply_of_a_follower_counts_a_follower_that_restarted() {
+    let mut cluster = Cluster::new(4);
+    cluster.script(home_to);
+    cluster.start();
+    cluster.run(seconds(5));
+    let leader = cluster.take().0[0];
+    let mut followers = IDS.into_iter().filter(|&id| id != leader);
+    let (p, q) = (followers.next().unwrap(), followers.next().unwrap());
+    let node = cluster.node(q).clone();
+    cluster.sim.crash(&node, Crash::Power);
+    cluster.start_voter(q);
+    cluster.run(seconds(5));
+    cluster.board.lock().unwrap().silent = Some(leader);
+    let definitions = create_subjects(&["plant.a"], 1);
+    cluster.change(p, base(), &definitions);
+    cluster.run(seconds(5));
+    let moved = pointer(1, &definitions);
+    assert_eq!(cluster.board().applied, [(p, moved, Ok(moved))]);
+}
+
+// The cards of voters 2 and 3 have addresses where no node answers, so the puts
+// wait in their dials. The apply runs in a task of its own, so only the stop wakes
+// it, and the stop falls between two wakes of the dials, which come each second.
+#[test]
+fn an_apply_whose_puts_wait_gives_stopped_as_soon_as_the_group_stops() {
+    let entries = solo_stored(|node, tasks| async move {
+        let mesh = Mesh::start(dialed_at(&node, &tasks, 1, PORT, &IDS, &IDS).await);
+        let mesh = mesh.await.unwrap();
+        let clock = node.clock();
+        let given = Rc::new(RefCell::new(None));
+        let (proposer, slot) = (mesh.clone(), Rc::clone(&given));
+        tasks.spawn(async move {
+            let definitions = create_subjects(&["plant.a"], 1);
+            let applied = proposer.apply(base(), definitions, BTreeMap::new()).await;
+            *slot.borrow_mut() = Some(applied);
+        });
+        clock
+            .sleep(Span::from_nanos(1_123 * Span::MILLISECOND.nanos()))
+            .await;
+        assert_eq!(*given.borrow(), None);
+        let stopped = stop(&node, &mesh);
+        clock.sleep(Span::MILLISECOND).await;
+        assert_eq!(*given.borrow(), Some(Err(Error::Stopped(stopped))));
+    });
+    assert_eq!(specs(&entries), []);
+}
+
+// The puts on voters 2 and 3 wait in their dials until the deadline, so the apply
+// waits in the group before its `Quorum`. A waker left in the group only takes memory
+// until the next commit, change of leader, or stop. tests/memory
+// `dropped_calls_of_the_spec_hold_no_heap` shows it through `spec`.
+#[test]
+fn an_apply_that_ends_frees_its_waker_in_the_group() {
+    solo(|node, tasks| async move {
+        let mesh = Mesh::start(dialed_at(&node, &tasks, 1, PORT, &IDS, &IDS).await);
+        let mesh = mesh.await.unwrap();
+        let definitions = create_subjects(&["plant.a"], 1);
+        let applied = mesh.apply(base(), definitions, BTreeMap::new()).await;
+        let quorum = Error::Quorum {
+            held: 1,
+            voters: 3,
+            missed: vec![late(2), late(3)],
+        };
+        assert_eq!(applied, Err(quorum));
+        assert!(mesh.group.borrow().calls.is_empty());
+    });
+}
+
+// The store of voter 2 fails the put of the chunks, so the proposer is the one holder
+// of the two voters.
+#[test]
+fn an_apply_whose_one_peer_fails_its_put_gives_quorum() {
+    let mut cluster = Cluster::new(0);
+    cluster.board.lock().unwrap().learners = [3].into();
+    cluster.start();
+    cluster.run(seconds(5));
+    cluster
+        .node(2)
+        .fail_file(Path::new(BLOB), Operation::SyncDir);
+    cluster.change(1, base(), &create_subjects(&["plant.a"], 1));
+    cluster.run(seconds(1));
+    let reset = transport::Error::Reset {
+        code: transport::Code(0),
+    };
+    let quorum = Error::Quorum {
+        held: 1,
+        voters: 2,
+        missed: vec![Missed {
+            node: key(2),
+            name: Some(name("plant.node2")),
+            cause: Miss::Put(blob::peer::Error::Stream(reset)),
+        }],
+    };
+    assert_eq!(cluster.board().applied, [(1, base(), Err(quorum))]);
+}
+
+// The put on voter 2 reads the chunk file of the proposer, which fails.
+#[test]
+fn an_apply_whose_store_fails_a_read_for_a_peer_names_the_error_of_the_store() {
+    let mut cluster = Cluster::new(0);
+    cluster.board.lock().unwrap().learners = [3].into();
+    cluster.start();
+    cluster.run(seconds(5));
+    let definitions = create_subjects(&["plant.a"], 1);
+    let root = spec::region::tree(&mut Chunks::default(), &definitions).root;
+    let path = Path::new(BLOB).join(root.to_string());
+    cluster.node(1).fail_file(&path, Operation::ReadAt);
+    cluster.change(1, base(), &definitions);
+    cluster.run(seconds(5));
+    let shown = path.display().to_string();
+    let cause = files::Error::Io {
+        path,
+        operation: Operation::ReadAt,
+        code: 5,
+    };
+    let quorum = Error::Quorum {
+        held: 1,
+        voters: 2,
+        missed: vec![Missed {
+            node: key(2),
+            name: Some(name("plant.node2")),
+            cause: Miss::Put(blob::peer::Error::Store(blob::Error::Files(cause))),
+        }],
+    };
+    assert_eq!(cluster.board().applied, [(1, base(), Err(quorum.clone()))]);
+    assert_eq!(
+        quorum.to_string(),
+        format!(
+            "1 of 2 voters hold the chunks of the spec change, not a majority; \
+             plant.node2: its put failed: read_at of {shown} failed with OS error 5"
+        )
+    );
+}
+
+// Voter 1 leaves 127 voters for voter 128. With no chunk to put, each put ends `Ok`
+// at once, in the order of the keys. A change holds the 65 holders. It calls `spread`,
+// as `apply` cannot reach a joint configuration until #336.
+#[test]
+fn spread_in_a_joint_configuration_counts_a_majority_of_each_half() {
+    solo(|node, tasks| async move {
+        let members: Vec<u8> = (1..=128).collect();
+        let mesh = open(&node, &tasks, 1, &members, &[1]).await.unwrap();
+        let keys = |ids: std::ops::RangeInclusive<u8>| ids.map(key).collect();
+        let voters = Voters {
+            incoming: keys(2..=128),
+            outgoing: keys(1..=127),
+        };
+        let holders = mesh.spread(&voters, &[]).await.unwrap();
+        assert_eq!(holders, keys(1..=65));
+        let change = Change::Spec {
+            base: base(),
+            root: base().root,
+            chunks: BTreeSet::new(),
+            holders,
+            homes: BTreeMap::new(),
+        };
+        let mut bytes = Vec::new();
+        change.encode(&mut bytes);
+        assert_eq!(Change::decode(&bytes), Ok(change));
+    });
+}
+
+// It calls `spread`, as `check_proposer` gives `NoVote` to a node that is not a voter,
+// so `apply` cannot reach this case.
+#[test]
+fn spread_on_a_node_that_is_not_a_voter_counts_only_the_voters() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1, 2, 3, 4], &[1]).await.unwrap();
+        let voters = Voters {
+            incoming: [2, 3, 4].map(key).into(),
+            outgoing: BTreeSet::new(),
+        };
+        assert_eq!(mesh.spread(&voters, &[]).await, Ok([2, 3].map(key).into()));
+    });
+}
+
+#[test]
+fn spread_names_a_voter_that_this_node_has_no_record_of() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1, 2], &[1]).await.unwrap();
+        let voters = Voters {
+            incoming: [1, 9].map(key).into(),
+            outgoing: BTreeSet::new(),
+        };
+        let quorum = Error::Quorum {
+            held: 1,
+            voters: 2,
+            missed: vec![Missed {
+                node: key(9),
+                name: None,
+                cause: Miss::Unknown,
+            }],
+        };
+        let spread = mesh.spread(&voters, &[Digest([1; 32])]).await;
+        assert_eq!(spread, Err(quorum.clone()));
+        assert_eq!(
+            quorum.to_string(),
+            format!(
+                "1 of 2 voters hold the chunks of the spec change, not a majority; {}: \
+                 this node has no record of it",
+                key(9)
+            )
+        );
+    });
+}
+
+// Each chunk takes a round trip of 200 ms, so one call of all 1024 chunks would miss
+// the deadline.
+#[test]
+fn an_apply_of_the_most_chunks_commits_over_links_of_100_ms() {
+    let mut cluster = Cluster::new(0);
+    cluster.delay(Span::from_nanos(100 * Span::MILLISECOND.nanos()));
+    cluster.start();
+    cluster.run(seconds(10));
+    let definitions = create_large(1950);
+    cluster.change(1, base(), &definitions);
+    cluster.run(seconds(300));
+    let board = cluster.board();
+    let moved = pointer(1, &definitions);
+    assert_eq!(board.applied, [(1, moved, Ok(moved))]);
+    assert_used(&board, &IDS, moved, &definitions);
+}
+
+// Each of 40 subjects of 512 keys fills one chunk of 16 417 bytes, the size at which
+// the chunker cuts, and each chunk takes about 340 ms, so a call of 32 chunks would
+// miss the deadline.
+#[test]
+fn an_apply_of_the_largest_chunks_commits_over_links_of_100_ms() {
+    let mut cluster = Cluster::new(0);
+    cluster.delay(Span::from_nanos(100 * Span::MILLISECOND.nanos()));
+    cluster.start();
+    cluster.run(seconds(10));
+    let labels: Vec<String> = (0..40).map(|at| format!("plant.s{at}")).collect();
+    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let definitions = create_subjects(&labels, 512);
+    let mut chunks = Chunks::default();
+    let update = spec::region::tree(&mut chunks, &definitions);
+    let largest = update.chunks.iter().map(|&d| chunks.get(d).unwrap().len());
+    assert_eq!(largest.max(), Some(16_417));
+    assert_eq!(update.chunks.len(), 41);
+    cluster.change(1, base(), &definitions);
+    cluster.run(seconds(60));
+    let board = cluster.board();
+    let moved = pointer(1, &definitions);
+    assert_eq!(board.applied, [(1, moved, Ok(moved))]);
+    assert_used(&board, &IDS, moved, &definitions);
 }
 
 #[test]
