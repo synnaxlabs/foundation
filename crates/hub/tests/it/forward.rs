@@ -418,8 +418,8 @@ fn finishes_a_forward_that_ends_before_its_last_place() {
 }
 
 /// A forward holds its decoded names and 4 bytes for each channel of its open in the
-/// share of its subject before it reads a place. The names of `value` are 21 bytes,
-/// so a forward of `value` holds 25.
+/// share of its subject before it reads a place. The names of `value` and `value-b`
+/// are 44 bytes, so a forward of them holds 52.
 #[test]
 fn stops_a_forward_whose_places_pass_the_share_as_busy() {
     let held = BODY_BYTES_MAX - 24;
@@ -435,14 +435,15 @@ fn stops_a_forward_whose_places_pass_the_share_as_busy() {
             let _holding = agent.unfinished(held, &[]).await;
             member.sleep(Span::MILLISECOND).await;
             let mut busy = member.forward(1, member.hello(LIFE)).await;
-            busy.write(&open(&["value"]), Kind::Write, &AGENT).await;
+            let channels = open(&["value", "value-b"]);
+            busy.write(&channels, Kind::Write, &AGENT).await;
             assert_eq!(busy.recv().await, reset_with(BUSY));
             agent.session.close(Code(0));
         },
     );
     let share = serve::Error::Share {
         subject: name(SUBJECT),
-        length: 25,
+        length: 52,
         held,
     };
     let closed = || Err(serve::Error::Stream(closed_with(0)));
