@@ -1,10 +1,10 @@
 - **OPCUA KIND (#435)** Five choices of the `opcua` kind, each approved by the person as
   `box2.builder-6` recommended (2026-10-13T20:14:06Z, "All 5 decisions are approved for
   OPC UA": https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6154297722).
-  Security: with no `certificate`, the kind connects with the mode None and an
-  anonymous user, so it is only for an isolated network or a test. With `certificate`,
-  it connects with SignAndEncrypt or Sign (the secure channel paragraph below). User
-  names and passwords come in a later part of #2934, before a release (question:
+  Security: with no `certificate`, the kind connects with the mode None and an anonymous
+  user, so it is only for an isolated network or a test. With `certificate`, it connects
+  with SignAndEncrypt or Sign (the secure channel paragraph below). User names and
+  passwords come in a later part of #2934, before a release (question:
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6150341828). Tests:
   the tests of the kind and exit test 1 run against the open62541 test server on the
   simulated clock and network. One more test on real I/O against `opc-plc` runs in CI
@@ -22,15 +22,15 @@
   2026-10-14T00:36:21Z:
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6158211076). Time:
   with `polled = true` (OPCUA READ), each frame has the midpoint of the request on mesh
-  time (STAMP). The default mode subscribes, and each value has the mesh time of its
-  device time, as OPCUA SUBSCRIBE states (question:
+  time (STAMP) (question:
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6150343218). The
-  device clock is the server clock. The client reads `CurrentTime` as a `Stamp`, and a
-  `DateTime` that a `Stamp` cannot hold, the null one too, gives `BadOutOfRange`, and
-  the plan of PR 5 of #2622 states what the kind does with that status. PR 5 maps each
-  server time, `CurrentTime` and each timestamp of a value, to the `Monotonic` of the
-  fit with one crate-private function and no `as` cast (`laptop.architect-2`,
-  2026-10-19T13:20:40Z:
+  default mode subscribes, and each value has the mesh time of its device time, as OPCUA
+  SUBSCRIBE states. The device clock is the server clock. The client reads `CurrentTime`
+  as a `Stamp`, and a `DateTime` that a `Stamp` cannot hold, the null one too, gives
+  `BadOutOfRange`, and the plan of PR 5 of #2622 states what the kind does with that
+  status. PR 5 maps each server time, `CurrentTime` and each timestamp of a value, to
+  the `Monotonic` of the fit with one crate-private function and no `as` cast
+  (`laptop.architect-2`, 2026-10-19T13:20:40Z:
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6268217457). The map
   is `Monotonic(s.abs_diff(i64::MIN))`, which holds each `Stamp`, so no server time that
   a `Stamp` holds drops: `Fit` holds its offsets from the offset of its first reading,
@@ -49,23 +49,25 @@
   loses each time after mid 2185. Status: a Good with a subcode counts as Good. A frame
   leaves out each value that is not Good and keeps the others: an Uncertain value adds 1
   to the count `uncertain`, and each other one, also no value (`BadNoData`) and a
-  `BadTypeMismatch` of the server, adds 1 to `bad`. A tick of `polled = true` that
-  leaves out each value writes no frame. A quality channel comes with the quality
-  model of the MVP (question:
+  `BadTypeMismatch` of the server, adds 1 to `bad`. A frame that leaves out each value
+  is not written. A quality channel comes with the quality model of the MVP (question:
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6150343529). Approved
   by the person (2026-10-15T16:34:12Z:
   https://github.com/synnaxlabs/foundation/issues/1737#issuecomment-6197131223). A Good
   value of another type than the sample type of its channel is also left out, and adds 1
   to `mistyped`: the user fixes it in the spec or on the server, so it is not in `bad`.
-  The note names the first such node of the latest tick that has one, and the OPC UA
-  type of its value, such as String, Range, or array of Double. A tick with none clears
-  it (`laptop.architect-2`, 2026-10-14T02:31:51Z:
+  The note names the first such node of the latest frame that has one, and the OPC UA
+  type of its value, such as String, Range, or array of Double. A later value of that
+  node that is of its sample type, or that is not Good, clears it (`laptop.architect-2`,
+  2026-10-14T02:31:51Z:
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6159574954, the type
   of an array or a String at 2026-10-15T19:32:35Z:
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6200602125, and the
   `BadTypeMismatch` of the server, the note of the latest tick, and the name of the type
   at 2026-10-15T22:16:48Z:
-  https://github.com/synnaxlabs/foundation/pull/2766#issuecomment-6203414079). A connect
+  https://github.com/synnaxlabs/foundation/pull/2766#issuecomment-6203414079, and the
+  note of the latest frame in each mode at 2026-10-20T09:11:27Z:
+  https://github.com/synnaxlabs/foundation/pull/3557#issuecomment-6287556289). A connect
   calls `Context::clear_error`: until then, the status shows the error of the last run
   (scenario 3 of CONNECTOR CONFORMANCE found it, 2026-10-17T21:08:01Z:
   https://github.com/synnaxlabs/foundation/issues/2641#issuecomment-6241104680; text of
@@ -79,14 +81,15 @@
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6206438915, and its
   amendment at 2026-10-16T02:44:43Z:
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6206868666).
-  Keep-alive: between the ticks of `polled = true`, and in a run with no read, the
-  run waits through `Client::idle`, which drives the client. When 10 s pass with no
-  read, `idle` reads `Server_ServerStatus_State` (ns=0;i=2259) to check the
-  connection, so a run that reads more often than each 10 s sends no check. A check
-  fails when its answer has a bad service result, when it gets no answer in the
-  request timeout (5 s), or when the close of the channel cuts it. The
-  status and the value of the server state are not judged: each answer came over the
-  channel and the session (`laptop.architect-2`, 2026-10-16T05:10:17Z,
+  Keep-alive: the run waits through `Client::idle`, which drives the client, between the
+  ticks of `polled = true`, in `Client::changes` while the default waits for a change,
+  and in a run with no read. When 10 s pass with no read, `idle` reads
+  `Server_ServerStatus_State` (ns=0;i=2259) to check the connection, so a run that reads
+  more often than each 10 s sends no check. A check fails when its answer has a bad
+  service result, when it gets no answer in the request timeout (5 s), or when the close
+  of the channel cuts it. The status and the value of the server state are not judged:
+  each answer came over the channel and the session (`laptop.architect-2`,
+  2026-10-16T05:10:17Z,
   https://github.com/synnaxlabs/foundation/pull/2809#issuecomment-6208565249). The first
   failed check ends the run with `Error::Device` and the text "the connectivity check of
   <address> failed with <status>", where <address> is the `address` of the connector, so
@@ -223,9 +226,9 @@
   removed refused case approved by the person (`laptop.monitor`, 2026-10-18T21:32:10Z:
   https://github.com/synnaxlabs/foundation/issues/3269#issuecomment-6255400141), and the
   new check case at 2026-10-18T21:35:52Z:
-  https://github.com/synnaxlabs/foundation/issues/3269#issuecomment-6255436768).
-  Secure channel (#2934): `opcua` takes `certificate`, `key`, and `trust`, each a secret
-  source (`env(...)`, `file(...)`, or `secret(...)`), and the bool `unencrypted`. With
+  https://github.com/synnaxlabs/foundation/issues/3269#issuecomment-6255436768). Secure
+  channel (#2934): `opcua` takes `certificate`, `key`, and `trust`, each a secret source
+  (`env(...)`, `file(...)`, or `secret(...)`), and the bool `unencrypted`. With
   `certificate`, the channel is `SignAndEncrypt`, or `Sign` with `unencrypted = true`.
   With no `certificate`, the mode is None. A `key`, `trust`, or `unencrypted` with no
   `certificate` gives a `document.missing-attribute` for `certificate` at each of them,
