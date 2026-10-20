@@ -15,7 +15,7 @@ use types::node;
 use wire::Protocol;
 use wire::header::MALFORMED;
 use wire::hub::client::write::{Open, Opening, Start, Write};
-use wire::hub::client::{Place, Places, Refusal, Signed};
+use wire::hub::client::{Refusal, Signed};
 use wire::hub::forward::{Forward, places};
 use wire::hub::write::{Due, Frames, Replies, Reply, Step};
 
@@ -240,8 +240,8 @@ async fn opened(
     mut to: Sender,
     mut from: Receiver,
 ) -> Result<Started, Error> {
-    let mut opening = Opening::default();
-    let mut held: Option<Reserved> = None;
+    let mut opening = Opening::new(places + 1);
+    let mut held = Reserved::new(state, subject.clone(), 0)?;
     loop {
         let message = match next(renewal, || true, &mut from).await? {
             Next::Renewed(signed) => {
@@ -253,23 +253,10 @@ async fn opened(
             }
             Next::Message(message) => message,
         };
-        if let Some(message) = message.as_deref() {
-            if let Some(held) = held.as_mut() {
-                // A place holds no more than its bytes, past its fixed size.
-                held.add(bytes(message.len()))?;
-            } else if let Ok(head) = Places::decode(message) {
-                if head.count > places + 1 {
-                    return Err(broken(home, to, from));
-                }
-                let count = usize::try_from(head.count)
-                    .expect("invariant: a usize holds a u32");
-                let fixed = bytes(count * size_of::<Place>());
-                held = Some(Reserved::new(state, subject.clone(), fixed)?);
-            }
-        }
-        match opening.decode(message.as_deref()) {
+        let decoded = opening.decode(message.as_deref());
+        held.grow(opening.held())?;
+        match decoded {
             Ok(Some(start)) => {
-                let held = held.expect("invariant: a start follows its places");
                 return Ok(Started {
                     to,
                     from,

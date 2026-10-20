@@ -218,10 +218,12 @@ impl Reserved {
         })
     }
 
-    /// Reserves `bytes` more, until it drops.
-    fn add(&mut self, bytes: u64) -> Result<(), Error> {
-        self.state.borrow().bodies.reserve(&self.subject, bytes)?;
-        self.bytes += bytes;
+    /// Reserves the rest of `bytes` past what it holds, until it drops. It keeps what
+    /// it holds when `bytes` is less.
+    fn grow(&mut self, bytes: u64) -> Result<(), Error> {
+        let more = bytes.saturating_sub(self.bytes);
+        self.state.borrow().bodies.reserve(&self.subject, more)?;
+        self.bytes += more;
         Ok(())
     }
 }

@@ -427,6 +427,88 @@ mod opening {
         let (places, _) = home(opening.decode(Some(&messages(&run, 300)[0])).unwrap());
         assert_eq!(places, run);
     }
+
+    #[test]
+    fn takes_a_count_at_its_bound_and_refuses_one_past_it() {
+        assert!(matches!(
+            Opening::new(3).decode(Some(&places_of(3))),
+            Ok(None)
+        ));
+        assert_eq!(
+            Opening::new(3).decode(Some(&places_of(4))).err(),
+            Some(Error::Places { count: 4, cap: 3 })
+        );
+    }
+
+    /// The first message of the places, with any `count`.
+    fn places_of(count: u32) -> Vec<u8> {
+        let mut out = vec![6];
+        out.extend_from_slice(&count.to_le_bytes());
+        out
+    }
+
+    proptest! {
+        #[test]
+        fn takes_each_count_up_to_its_bound_and_refuses_one_over_it(
+            most in 0..=2 * PLACES_MAX,
+            count in 0..=2 * PLACES_MAX,
+        ) {
+            let mut opening = Opening::new(most);
+            let decoded = opening.decode(Some(&places_of(count)));
+            let cap = if count == 0 || count > PLACES_MAX {
+                PLACES_MAX
+            } else {
+                most
+            };
+            if count <= cap && count > 0 {
+                prop_assert!(matches!(decoded, Ok(None)));
+            } else {
+                prop_assert_eq!(decoded.err(), Some(Error::Places { count, cap }));
+                prop_assert_eq!(opening.held(), 0);
+                if most > 0 {
+                    let one = opening.decode(Some(&places_of(1)));
+                    prop_assert!(matches!(one, Ok(None)));
+                }
+            }
+        }
+
+        #[test]
+        fn holds_the_room_of_its_places_and_the_bytes_of_their_names(
+            names in proptest::collection::vec(name(), 1..64),
+            max in 304_usize..2048,
+        ) {
+            let run: Vec<Place> = names
+                .into_iter()
+                .zip(1..)
+                .map(|(name, key)| {
+                    let data_type = if key == 1 { "timestamp" } else { "u8" };
+                    Place {
+                        key: channel::Key::from_u128(key),
+                        data_type: data_type.parse().unwrap(),
+                        name,
+                        index: 0,
+                    }
+                })
+                .collect();
+            let count = u32::try_from(run.len()).unwrap();
+            let mut opening = Opening::new(count);
+            prop_assert_eq!(opening.held(), 0);
+            opening.decode(Some(&encode_places(Places { count }))).unwrap();
+            let room = run.len().checked_mul(size_of::<Place>()).unwrap();
+            prop_assert_eq!(opening.held(), u64::try_from(room).unwrap());
+            let (mut arrived, mut start) = (0_usize, None);
+            for message in messages(&run, max) {
+                start = opening.decode(Some(&message)).unwrap();
+                let more = place::decode(&message).unwrap().len();
+                arrived = arrived.checked_add(more).unwrap();
+                let names: usize =
+                    run[..arrived].iter().map(|place| place.name.as_str().len()).sum();
+                let held = room.checked_add(names).unwrap();
+                prop_assert_eq!(opening.held(), u64::try_from(held).unwrap());
+            }
+            prop_assert_eq!(home(start).0, run);
+        }
+    }
 }
 
 fn name() -> impl Strategy<Value = Name> {

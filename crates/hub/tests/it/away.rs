@@ -485,9 +485,9 @@ fn sends_the_home_each_renewal_before_its_places() {
 
 /// The member holds the places of the home in the share of the subject until it sends
 /// them to the program: the size of a [`Place`] for each that the home counts, then
-/// each message of places. Here, with the 40 bytes of the ends and the 8 of the open,
-/// it holds `held` bytes of the share, of which `free` were free, when the hold of
-/// `length` fails.
+/// the bytes of the names of each message of places. Here, with the 40 bytes of the
+/// ends and the 8 of the open, it holds `held` bytes of the share, of which `free` were
+/// free, when the hold of `length` fails.
 fn stops_a_forward_whose_places_pass_the_share(
     seed: u64,
     free: u64,
@@ -528,15 +528,15 @@ fn stops_a_forward_whose_places_pass_the_share_as_busy() {
     stops_a_forward_whose_places_pass_the_share(23, 48 + fixed() - 1, fixed(), 48);
 }
 
-/// The 2 places of `value` come in one message of 65 bytes.
+/// The 2 places of `value` come in one message, with 9 bytes of names.
 #[test]
 fn stops_a_forward_whose_message_of_places_passes_the_share_as_busy() {
-    let free = 48 + fixed() + 65 - 1;
-    stops_a_forward_whose_places_pass_the_share(24, free, 65, 48 + fixed());
+    let free = 48 + fixed() + 9 - 1;
+    stops_a_forward_whose_places_pass_the_share(24, free, 9, 48 + fixed());
 }
 
 /// Once the member sends the places to the program, it gives back their whole hold,
-/// the message of 65 bytes too, and holds only the 40 bytes of the ends.
+/// the 9 bytes of names too, and holds only the 40 bytes of the ends.
 #[test]
 fn frees_the_places_of_a_forward_once_it_sends_them() {
     let served = away(
@@ -564,7 +564,7 @@ fn frees_the_places_of_a_forward_once_it_sends_them() {
 
 /// The member holds the places of a forward in the share of its subject while it sends
 /// them to a program that takes none. The frames of 10 001 channels hold 200 020
-/// bytes, and the places 3 280 006.
+/// bytes, and the places 3 030 000.
 #[test]
 fn holds_the_places_of_a_forward_while_it_sends_them() {
     const COUNT: usize = 10_000;
@@ -603,7 +603,7 @@ fn holds_the_places_of_a_forward_while_it_sends_them() {
     let share = serve::Error::Share {
         subject: name(SUBJECT),
         length: BODY_BYTES_MAX - 39,
-        held: 200_020 + 3_280_006,
+        held: 200_020 + 3_030_000,
     };
     let closed = serve::Error::Stream(transport::Error::Closed { code: Code(0) });
     assert_eq!(served, [Err(share), Ok(Got::Ended), Err(closed)]);
