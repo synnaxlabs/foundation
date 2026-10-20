@@ -983,7 +983,6 @@ mod tests {
     use std::cell::RefCell;
     use std::env::VarError;
     use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     use super::{replayed, seeds};
@@ -1000,10 +999,29 @@ mod tests {
         assert_eq!(seeds(Ok("0x5..0x6".into())), 5..=5);
     }
 
+    #[cfg(unix)]
+    fn not_utf_8() -> OsString {
+        use std::os::unix::ffi::OsStringExt;
+        OsString::from_vec(vec![0xff])
+    }
+
+    #[cfg(windows)]
+    fn not_utf_8() -> OsString {
+        use std::os::windows::ffi::OsStringExt;
+        OsString::from_wide(&[0xd800])
+    }
+
     #[test]
-    #[should_panic(expected = "CONFORMANCE_SEED is not UTF-8: \"\\xFF\"")]
+    #[cfg_attr(
+        unix,
+        should_panic(expected = "CONFORMANCE_SEED is not UTF-8: \"\\xFF\"")
+    )]
+    #[cfg_attr(
+        windows,
+        should_panic(expected = "CONFORMANCE_SEED is not UTF-8: \"\\u{d800}\"")
+    )]
     fn seeds_panic_on_a_value_that_is_not_utf_8() {
-        seeds(Err(VarError::NotUnicode(OsString::from_vec(vec![0xff]))));
+        seeds(Err(VarError::NotUnicode(not_utf_8())));
     }
 
     #[test]
