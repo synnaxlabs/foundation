@@ -352,3 +352,12 @@ proptest! {
         prop_assert_eq!(openssh::private_key(text.as_bytes()).unwrap().0, bytes);
     }
 }
+
+/// `ssh-key` skips a text before the begin mark, and OpenSSH does not.
+#[test]
+fn a_text_before_the_begin_mark_is_refused() {
+    let text = format!("my laptop key\n{KEYGEN}");
+    ssh_key::PrivateKey::from_openssh(&text).unwrap();
+    let key = openssh::private_key(text.as_bytes()).map(|key| key.0);
+    assert_eq!(key, Err(Unreadable::Format));
+}

@@ -49,10 +49,10 @@
   refuses another algorithm by its name (an ECDSA key as `ECDSA`, which `ssh-key` reads
   only with its `ecdsa` feature), an encrypted key, a public key that is not the key of
   the private key (`Mismatch`), a comment that is not UTF-8 (`Comment`), and a text that
-  is not a key file. It reads each such file that `ssh-key` 0.6.7 reads, also one with a
-  body of any width or with white space, any bytes on the lines after the end mark, CRLF
-  line ends, or no line end after the end mark (the bytes, `laptop.architect-2`,
-  2026-10-20T02:30:05Z,
+  is not a key file. It reads each such file that starts with the begin mark and that
+  `ssh-key` 0.6.7 reads, also one with a body of any width or with white space, any
+  bytes on the lines after the end mark, CRLF line ends, or no line end after the end
+  mark (the bytes, `laptop.architect-2`, 2026-10-20T02:30:05Z,
   https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6281938918; on the
   lines, 2026-10-20T03:11:15Z,
   https://github.com/synnaxlabs/foundation/pull/3473#issuecomment-6282446293). It
