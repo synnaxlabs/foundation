@@ -143,7 +143,7 @@ impl Frames {
                 Ok(Step::Head(head))
             }
             FromHome::Ends { ends, last } => {
-                self.assembly.ends(ends, last);
+                self.assembly.ends(ends, last, |_, _| {});
                 Ok(Step::More)
             }
             FromHome::Opened { .. } => {

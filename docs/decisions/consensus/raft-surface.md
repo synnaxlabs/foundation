@@ -237,7 +237,21 @@
   `Config`, two fields where one predicate says the same. Decided by `laptop.architect`,
   2026-10-12T18:29:52Z
   (https://github.com/synnaxlabs/foundation/issues/1361#issuecomment-6130215772), with
-  the deferral of #2471.
+  the deferral of #2471. A message with a proof takes the links from the newest back
+  while they fit with no entry, and clones only those and the first one that does not
+  fit. An `Append` keeps its entries only when the whole chain fits with no entry.
+  This gives the message that a drop of the oldest link at a time gives, under the two
+  conditions of `fits` in its doc. The `mesh` length is a sum, so it meets both. A
+  leader with 127 silent learners after 300 voter changes uses 17.2 to 18.5 ms/s of
+  idle CPU (box2, release, sim driver), in place of 134 to 136 ms/s with a clone of
+  each link and a drop of the oldest one at a time: the cost of a fault, over the idle
+  limit of 10 ms/s. Lost: a binary search on the count of links to drop, which clones
+  each link of the log first; links that the queues share, the deferral "entries that
+  the queues share, not copy" below. Decided by `laptop.architect`,
+  2026-10-20T00:59:40Z
+  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6280820710), and
+  the two conditions of `fits`, 2026-10-20T01:27:53Z
+  (https://github.com/synnaxlabs/foundation/pull/3478#issuecomment-6281170235).
   `Raft::set_learners` sets the nodes that get the log and have no vote. `raft` keeps
   the set apart from the configuration: a key that the configuration in force holds as
   a voter is a voter. A leader sends each learner the log and the commit index, and
@@ -285,3 +299,23 @@
   deferred. Trigger: before `MEMBERS_MAX` grows past 128. Supersedes the pace of a
   learner "as it does a voter" of the surface, 2026-10-19T14:40:23Z
   (https://github.com/synnaxlabs/foundation/issues/3375#issuecomment-6269894725).
+  `Message::replaces(&self, older)` tells the caller that `older`, a message that has
+  not gone yet, can drop when this one goes after it. Both have the same sender and the
+  same receiver, and one of these holds: `older` has a lower term, and this one is not a
+  `PreVote` or a `PreVoteReply`, whose term can differ from the sender's own; or both
+  are a `Heartbeat`, both a `PreVote`, both a `Vote`, both a `HeartbeatReply`, or both a
+  `PreVoteReply` with the same answer, and `older` has the same term or a lower one.
+  `raft` owns the rule, and the caller's queue applies it, so the queue of a node that
+  does not read holds one heartbeat, not one for each tick, and a message of a term that
+  its sender left drops when the sender sends that node a message of a later term. Lost:
+  a receiver still at the lower term can apply later, when the commit index that `older`
+  named comes in an append of the new term. Decided by `laptop.architect`,
+  2026-10-19T19:31:21Z
+  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6275544916), for
+  the lower term and the requests of a vote, 2026-10-19T19:53:12Z
+  (https://github.com/synnaxlabs/foundation/pull/3417#issuecomment-6275950285), and for
+  the replies to a heartbeat and a pre-vote, 2026-10-19T20:33:44Z
+  (https://github.com/synnaxlabs/foundation/pull/3417#issuecomment-6276712034), and for
+  its cost, 2026-10-19T19:56:42Z
+  (https://github.com/synnaxlabs/foundation/pull/3417#issuecomment-6276015270, finding
+  3).

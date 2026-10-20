@@ -22,7 +22,8 @@ report = stream.getvalue()
 
 /// The files of `sdk/python/tests`, each with whether it runs only with the feature
 /// `sim`.
-const FILES: [(&str, bool); 3] = [
+const FILES: [(&str, bool); 4] = [
+    ("test_stubs.py", false),
     ("test_client.py", false),
     ("test_sim.py", true),
     ("test_writer.py", false),
@@ -278,6 +279,30 @@ fn raises<const N: usize>(cases: [(sdk::Error, &str, &str); N]) {
             let error = super::error(py, &variant);
             assert_eq!(error.get_type(py).name().unwrap().to_string(), class);
             assert_eq!(error.value(py).to_string(), text);
+        }
+    });
+}
+
+/// Maps a write that ended with a frame that may not be on disk to `Stopped`, with the
+/// code of a stream that the node stopped for the cause of its group's end, and its
+/// text.
+#[test]
+fn error_raises_stopped_with_the_code_of_the_end_of_an_unstored_write() {
+    let ends = [
+        (program::write::End::Removed, "unknown"),
+        (program::write::End::Failed, "failed"),
+    ];
+    Python::initialize();
+    Python::attach(|py| {
+        for (end, code) in ends {
+            let unstored = program::Error::Unstored(vec![(1, end)]);
+            let text = unstored.to_string();
+            let error = super::error(py, &sdk::Error::Stream(unstored));
+            assert_eq!(error.get_type(py).name().unwrap().to_string(), "Stopped");
+            let value = error.value(py);
+            assert_eq!(value.to_string(), text);
+            let given: String = value.getattr("code").unwrap().extract().unwrap();
+            assert_eq!(given, code, "{end:?}");
         }
     });
 }

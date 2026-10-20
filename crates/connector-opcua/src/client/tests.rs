@@ -253,7 +253,7 @@ async fn serve_on<T>(
     let local = SocketAddr::new(node.addresses()[0], PORT);
     let manager = Manager::listening(time, node.net(), local, 4, &mut rng)
         .expect("the port is free");
-    let mut server = match security {
+    let server = match security {
         // SAFETY: the close below deletes the server before the manager drops.
         Some((credentials, policies)) => unsafe {
             let modes = [Mode::Sign, Mode::SignAndEncrypt];
@@ -3020,4 +3020,5 @@ mod chunks;
 pub(crate) mod common;
 mod flood;
 mod secure;
+mod subscription;
 mod walk;
