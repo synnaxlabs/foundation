@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use buffer::{Buffer, Entry};
+use buffer::{Buffer, Entry, Layout, Limit};
 use control::Gate;
 use control::lease::Lease;
 use types::channel::{self, Slot};
@@ -501,6 +501,48 @@ impl Shard {
     #[must_use]
     pub fn pool(&self) -> &block::Pool {
         self.buffer.pool()
+    }
+
+    /// The most body bytes of a frame of `set`, with each entry present, that
+    /// [`Shard::write`] never refuses with [`Error::Large`]: the series and their
+    /// padding, as [`Frame::body`] holds them, raw or encoded. Its draft fits
+    /// [`Shard::pool`], and the entries of its groups fit one record and
+    /// [`buffer::Buffer::block_max`] when encoded. A frame with fewer entries of `set`
+    /// is never refused for this many either. 0 when no frame of `set` fits.
+    #[must_use]
+    pub fn write_body_max(&self, set: &KeySet) -> usize {
+        let largest = self.buffer.pool().largest();
+        let entries = set.entries();
+        let mut series: Vec<(usize, usize)> =
+            (0..entries.len()).map(|e| (e, 0)).collect();
+        let mut max = largest.saturating_sub(block_len(set, &series));
+        series.sort_by_key(|&(entry, _)| (entries[entry].group, entry));
+        let data_type = |&(entry, _): &(usize, usize)| entries[entry].data_type;
+        // Each series but the first of a group may start up to 7 bytes after the end
+        // of the one before, when its encoded length differs from its raw length.
+        let gaps = |series: usize| 7 * series;
+        let mut headers = 0;
+        for run in series.chunk_by(|a, b| entries[a.0].group == entries[b.0].group) {
+            let header = stored::header_len(run.len());
+            headers += header;
+            let room = self.buffer.block_max().saturating_sub(header);
+            let room = room.min(largest.saturating_sub(block_len(set, run)));
+            let room = room.saturating_sub(gaps(run.len() - 1));
+            max = max.min(codec::len_within(run.iter().map(data_type), room));
+        }
+        let groups = set.groups().len();
+        let room = batch_room(self.buffer.layout(), groups).saturating_sub(headers);
+        let room = room.saturating_sub(gaps(series.len() - groups));
+        max.min(codec::len_within(series.iter().map(data_type), room))
+    }
+
+    /// The most body bytes of a frame that a reader of this shard gives: the longest
+    /// [`Frame::body`] of one stored entry, at the least stored header.
+    #[must_use]
+    pub fn read_body_max(&self) -> usize {
+        let entry = self.buffer.layout().entry_max();
+        let entry = entry.min(self.buffer.block_max());
+        entry.saturating_sub(stored::header_len(1))
     }
 
     /// Opens `writer` on each index of its key set, and appends a handoff for each
@@ -1045,6 +1087,25 @@ fn target<'a>(buffer: &'a Buffer, index: &Index, mesh: Stamp) -> state::Target<'
     }
 }
 
+/// The most bytes of parts that a batch of `entries` entries, of two parts each, holds
+/// in one record of `layout`: its body less the table, which [`Limit::Body`] counts.
+/// 0 when no record holds so many entries.
+fn batch_room(layout: Layout, entries: usize) -> usize {
+    let max = layout.body_max();
+    match layout.check(entries, 2 * entries, max) {
+        Ok(()) => max,
+        Err(Limit::Body { len, .. }) => max.saturating_sub(len.saturating_sub(max)),
+        Err(_) => 0,
+    }
+}
+
+/// Bytes of the block of a frame of `set` with each of `series` present and empty.
+fn block_len(set: &KeySet, series: &[(usize, usize)]) -> usize {
+    let layout = frame::Layout::new(set, series);
+    let layout = layout.expect("invariant: each entry of a set makes a frame");
+    layout.block_len()
+}
+
 /// The midpoint of `mesh`, the best guess of the true time.
 fn midpoint(mesh: Interval) -> Stamp {
     Stamp::from_nanos(mesh.earliest.nanos().midpoint(mesh.latest.nanos()))
@@ -1202,7 +1263,6 @@ mod tests {
     use std::time::Instant;
 
     use block::{Pool, Unique};
-    use buffer::Layout;
     use env::clock::Clock;
     use env::entropy::Entropy;
     use env::files::{Mode, Operation};
@@ -2994,6 +3054,440 @@ mod tests {
             drop(blocks);
             let written = shard.write(b, BACKFILL, over_block(&set, 100, &[]));
             assert_eq!(written, Err(Error::Large));
+        });
+    }
+
+    /// The ring and pool of a shard whose entries meet one limit before the others.
+    #[derive(Clone, Copy)]
+    struct Bound {
+        budget: usize,
+        body_max: usize,
+        area: u64,
+        /// Scattered bytes of each frame that fills the ring before the last ones.
+        fill: usize,
+    }
+
+    /// The record: one batch of `BODY_MAX` bytes holds less than a block of the pool.
+    const RECORD: Bound = Bound {
+        budget: POOL,
+        body_max: BODY_MAX,
+        area: 1 << 16,
+        fill: 4000,
+    };
+    /// [`Buffer::block_max`]: 229377 bytes, under the largest block, 262144 bytes.
+    const BLOCK_MAX: Bound = Bound {
+        budget: 327_680,
+        body_max: 1 << 18,
+        area: 1 << 21,
+        fill: 100_000,
+    };
+    /// The largest block of the pool, 524288 bytes, which is also
+    /// [`Buffer::block_max`]. A group of one series takes 10 more bytes as a frame than
+    /// as an entry, so the pool binds it first.
+    const LARGEST: Bound = Bound {
+        budget: 655_360,
+        body_max: 1 << 20,
+        area: 5 << 20,
+        fill: 200_000,
+    };
+    /// Stamps past those of each frame of a test that its live frames follow.
+    const LATER: i64 = 500_000_000;
+    /// More than the stamps of one frame of [`stepped`] span.
+    const SPAN: i64 = 150_000_000;
+
+    /// Group 0: the index at slot 0 alone. Group 1: the index at slot 2, with a `Bytes`
+    /// channel at slot 3, the last series of a frame.
+    fn bytes_last() -> Arc<KeySet> {
+        intern(&[
+            Group {
+                index: key(Slot::new(0)),
+                data: &[],
+            },
+            Group {
+                index: key(Slot::new(2)),
+                data: &[(key(Slot::new(3)), Type::Bytes)],
+            },
+        ])
+    }
+
+    /// One `Bytes` sample of `len` scattered bytes, raw.
+    fn sample(len: usize) -> Vec<u8> {
+        let end = u32::try_from(len).expect("a short sample");
+        let bytes = scattered(len.div_ceil(8))
+            .into_iter()
+            .flat_map(i64::to_le_bytes);
+        end.to_le_bytes()
+            .into_iter()
+            .chain(bytes.take(len))
+            .collect()
+    }
+
+    /// A raw frame of [`bytes_last`] with `stamp` at index 2 and one sample of `len`
+    /// scattered bytes at slot 3, and `stamp` at index 0 too when `both`. Its body is
+    /// `12 + len` bytes, or `20 + len` when `both`.
+    fn raw_last(
+        pool: &Pool,
+        set: &KeySet,
+        stamp: i64,
+        len: usize,
+        both: bool,
+    ) -> Draft {
+        let stamp = stamp.to_le_bytes();
+        let sample = sample(len);
+        let mut lens = vec![(1, 8), (2, sample.len())];
+        if both {
+            lens.insert(0, (0, 8));
+        }
+        let mut draft = Draft::new(pool, set, Form::Raw, &lens).expect("a frame");
+        for (entry, out) in draft.iter_mut() {
+            out.copy_from_slice(if entry == 2 { &sample } else { &stamp });
+        }
+        for &(entry, _) in &lens[..lens.len() - 1] {
+            draft.set_count(set.entries()[entry].group, 1);
+        }
+        draft
+    }
+
+    /// An encoded frame of group 1 of [`bytes_last`]: `stamp` at index 2, and one
+    /// sample at slot 3 that encodes to `len` bytes. Its body is `16 + len` bytes.
+    fn encoded_last(pool: &Pool, set: &KeySet, stamp: i64, len: usize) -> Draft {
+        let encode = |k: usize| {
+            let raw = sample(k);
+            let mut out = vec![0; codec::max_len(Type::Bytes, raw.len())];
+            let encoded = codec::Encoder::new(Type::Bytes).encode(1, &raw, &mut out);
+            out.truncate(encoded.expect("a sample"));
+            out
+        };
+        let bytes = (len - len / 500 - 32..len)
+            .map(encode)
+            .find(|bytes| bytes.len() == len)
+            .expect("a sample encodes to each length");
+        let series: [(usize, &[u8]); 2] = [(1, &encoded(&[stamp])), (2, &bytes)];
+        encoded_frame(pool, set, &series, &[(1, 1)])
+    }
+
+    /// `count` stamps from `first`, in steps of 1 to 512.
+    fn stepped(first: i64, count: usize) -> Vec<i64> {
+        let steps = scattered(count)
+            .into_iter()
+            .map(|x| x.cast_unsigned() >> 55);
+        let steps = steps.map(|step| i64::try_from(step).expect("9 bits") + 1);
+        let stamps = steps.scan(first, |stamp, step| {
+            let at = *stamp;
+            *stamp += step;
+            Some(at)
+        });
+        stamps.collect()
+    }
+
+    /// A raw frame of group 0 of [`bytes_last`] whose stamps from `first` encode to
+    /// `len` bytes.
+    fn stamps_last(pool: &Pool, set: &KeySet, first: i64, len: usize) -> Draft {
+        let stamps = stepped(first, len);
+        let (mut low, mut high) = (1, stamps.len());
+        while low < high {
+            let mid = low.midpoint(high);
+            if encoded(&stamps[..mid]).len() < len {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        let stamps = &stamps[..low];
+        assert_eq!(encoded(stamps).len(), len, "stamps encode to each length");
+        frame(pool, set, &[(0, stamps)])
+    }
+
+    /// Writes a frame of [`bytes_last`] with `write_body_max` raw bytes, the first of
+    /// bodies, at [`LATER`], and checks that a complete reader gets it within
+    /// `read_body_max`, the second. Then writes a small frame of both groups.
+    async fn apply_most(
+        shard: &mut Shard,
+        a: writer::Key,
+        writers: &Pool,
+        [write_max, read_max]: [usize; 2],
+    ) {
+        let set = bytes_last();
+        let reader = complete(shard, Slot::new(2));
+        let most = raw_last(writers, &set, LATER, write_max - 20, true);
+        let written = shard.write(a, LIVE, most);
+        assert_eq!(written, Ok(&[applied(0, 0, 1), applied(2, 0, 1)][..]));
+        shard.committed().await.expect("the commit ends");
+        woken(shard);
+        let (frames, _) = drain(shard, reader);
+        assert_eq!(ranges(&frames, 1), [seq(0, 1)]);
+        let body = frames[0].body().len();
+        assert!(body <= read_max, "{body}");
+        shard.close_reader(reader);
+        drop(frames);
+        // The groups of `most` share one block, which the newest frame of each index
+        // holds until a small frame replaces it.
+        let small = raw_last(writers, &set, LATER + 1, 1, true);
+        let written = shard.write(a, LIVE, small);
+        assert_eq!(written, Ok(&[applied(0, 1, 1), applied(2, 1, 1)][..]));
+        shard.committed().await.expect("the commit ends");
+    }
+
+    /// Writes live frames of group 1 of [`bytes_last`] after [`fit_limit`], of `fill`
+    /// scattered bytes and then of 1, each until one is lost. `next` is the next seq of
+    /// index 2, and the function returns it.
+    async fn fill_ring(
+        shard: &mut Shard,
+        a: writer::Key,
+        writers: &Pool,
+        fill: usize,
+        mut next: u64,
+    ) -> u64 {
+        let set = bytes_last();
+        for len in [fill, 1] {
+            loop {
+                let stamp = LATER + SPAN + i64::try_from(next).expect("few frames");
+                let write = raw_last(writers, &set, stamp, len, false);
+                let written = shard.write(a, LIVE, write).expect("written");
+                next += 1;
+                if written == [lost(2, next - 1, 1)] {
+                    break;
+                }
+                assert_eq!(written, [applied(2, next - 1, 1)]);
+                shard.committed().await.expect("the commit ends");
+            }
+        }
+        next
+    }
+
+    /// A raw frame of one sample at `stamp` of the group of [`bytes_last`] with the
+    /// index at `slot`.
+    fn small(writers: &Pool, slot: u32, stamp: i64) -> Draft {
+        let set = bytes_last();
+        if slot == 2 {
+            raw_last(writers, &set, stamp, 1, false)
+        } else {
+            frame(writers, &set, &[(0, &[stamp])])
+        }
+    }
+
+    /// With room after [`apply_most`], a frame of `limit` over it gives `Large`, and
+    /// one at it is applied on the index at `slot`. A small frame then replaces it as
+    /// the newest frame of the index. Returns the next seq of indexes 0 and 2.
+    async fn fit_limit(
+        shard: &mut Shard,
+        a: writer::Key,
+        writers: &Pool,
+        slot: u32,
+        limit: &impl Fn(&Pool, &KeySet, i64, bool) -> Draft,
+    ) -> [u64; 2] {
+        let set = bytes_last();
+        let over = limit(writers, &set, LATER + 2, true);
+        assert_eq!(shard.write(a, LIVE, over), Err(Error::Large));
+        let at = limit(writers, &set, LATER + 2, false);
+        let written = shard.write(a, LIVE, at).expect("written").to_vec();
+        let [Outcome::Applied { slot: at, range }] = written[..] else {
+            panic!("{written:?}");
+        };
+        assert_eq!((at, range.seq), (Slot::new(slot), 2));
+        shard.committed().await.expect("the commit ends");
+        let place = usize::from(slot == 2);
+        let mut next = [2, 2];
+        next[place] += u64::from(range.count);
+        let written = shard.write(a, LIVE, small(writers, slot, LATER + SPAN));
+        assert_eq!(written, Ok(&[applied(slot, next[place], 1)][..]));
+        shard.committed().await.expect("the commit ends");
+        next[place] += 1;
+        next
+    }
+
+    /// After [`check_bound`] loses a frame at the limit on the index at `slot`, writes
+    /// a frame of `write_body_max` bytes, the first of `bodies`, with no room. Each of
+    /// the `latest` readers, of indexes 0 and 2, gets it within `read_body_max`, the
+    /// second. `next` is the next seq of each.
+    fn lose_most(
+        shard: &mut Shard,
+        b: writer::Key,
+        writers: &Pool,
+        latest: [reader::Key; 2],
+        slot: u32,
+        mut next: [u64; 2],
+        [write_max, read_max]: [usize; 2],
+    ) {
+        let set = bytes_last();
+        let place = usize::from(slot == 2);
+        // A small frame replaces the frame at the limit, which holds its block as the
+        // newest frame of its index.
+        let stamp = LATER + 4 * SPAN;
+        let written = shard.write(b, LIVE, small(writers, slot, stamp));
+        assert_eq!(written, Ok(&[lost(slot, next[place], 1)][..]));
+        assert_eq!(drain(shard, latest[place]).0.len(), 1);
+        next[place] += 1;
+        let most = raw_last(writers, &set, stamp + 1, write_max - 20, true);
+        let written = shard.write(b, LIVE, most);
+        assert_eq!(written, Ok(&[lost(0, next[0], 1), lost(2, next[1], 1)][..]));
+        for reader in latest {
+            let (frames, _) = drain(shard, reader);
+            assert_eq!(frames.len(), 1);
+            assert!(
+                frames[0].body().len() <= read_max,
+                "{}",
+                frames[0].body().len()
+            );
+        }
+    }
+
+    /// Checks a shard over `bound`, whose `write_body_max` of [`bytes_last`] and
+    /// `read_body_max` are `bodies`. `limit` makes a frame of the index at `slot` with
+    /// stamps from the stamp that it gets: at the limit, or the least over it when
+    /// `over`. With room, a raw frame of `write_body_max` is applied, and a complete
+    /// reader gets it within `read_body_max`. A frame over the limit gives `Large`, and
+    /// one at it is applied. Then, with no room for the handoff to a new writer, a live
+    /// and a backfill frame over the limit give `Large`, no seq moves, and no latest
+    /// reader gets a frame. At it, they give `Lost` and `Full`. A frame of
+    /// `write_body_max` is lost, and reaches each latest reader within `read_body_max`.
+    async fn check_bound(
+        mut test: Test,
+        bound: Bound,
+        bodies: [usize; 2],
+        slot: u32,
+        limit: impl Fn(&Pool, &KeySet, i64, bool) -> Draft,
+    ) {
+        test.pool = Rc::new(create_pool(bound.budget));
+        let buffer = test.create_buffer(bound.area, bound.body_max, 4).await;
+        let mut shard = test.over(buffer).await;
+        for n in [0, 2] {
+            assert!(shard.carry(Slot::new(n), key(Slot::new(n))));
+        }
+        let set = bytes_last();
+        assert_eq!([shard.write_body_max(&set), shard.read_body_max()], bodies);
+        let writers = create_pool(4 * POOL);
+        let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+        apply_most(&mut shard, a, &writers, bodies).await;
+        let [first, next] = fit_limit(&mut shard, a, &writers, slot, &limit).await;
+        let next = [
+            first,
+            fill_ring(&mut shard, a, &writers, bound.fill, next).await,
+        ];
+        let latest = [0, 2].map(|n| shard.open_latest(Slot::new(n)).key);
+        for reader in latest {
+            drain(&mut shard, reader);
+        }
+        let b = shard.open_writer(writer("b", 2, &set)).expect("synced");
+        assert!(shard.indexes[0].handoff().is_some(), "no room at the open");
+        let limits = [
+            (BACKFILL, 10, true, Error::Large),
+            (BACKFILL, 10 + SPAN, false, Error::Full),
+            (LIVE, LATER + 2 * SPAN, true, Error::Large),
+        ];
+        for (label, first, over, expected) in limits {
+            let written = shard.write(b, label, limit(&writers, &set, first, over));
+            assert_eq!(written, Err(expected), "{label:?}, {over}");
+        }
+        for reader in latest {
+            assert!(drain(&mut shard, reader).0.is_empty(), "{reader:?}");
+        }
+        let at = limit(&writers, &set, LATER + 3 * SPAN, false);
+        let written = shard.write(b, LIVE, at).expect("written").to_vec();
+        let [
+            Outcome::Lost {
+                slot: at_slot,
+                range,
+            },
+        ] = written[..]
+        else {
+            panic!("{written:?}");
+        };
+        let place = usize::from(slot == 2);
+        assert_eq!((at_slot, range.seq), (Slot::new(slot), next[place]));
+        let group = u32::from(slot == 2);
+        assert_eq!(taken(&mut shard, latest[place], group), [range]);
+        assert!(drain(&mut shard, latest[1 - place]).0.is_empty());
+        let mut next = next;
+        next[place] += u64::from(range.count);
+        lose_most(&mut shard, b, &writers, latest, slot, next, bodies);
+    }
+
+    #[test]
+    fn gives_the_bounds_of_a_shard_whose_record_binds_first() {
+        run(150, |test| async move {
+            // 8183 bytes of a record, less 55 of the table of one entry, 56 of the
+            // stored header of two series, and 16 of one encoded stamp.
+            let limit = |pool: &Pool, set: &KeySet, stamp: i64, over: bool| {
+                encoded_last(pool, set, stamp, 8056 + usize::from(over))
+            };
+            check_bound(test, RECORD, [7938, 8098], 2, limit).await;
+        });
+    }
+
+    #[test]
+    fn gives_the_bounds_of_a_shard_whose_block_max_binds_first() {
+        run(151, |test| async move {
+            // 229377 bytes of `block_max`, less 56 of the stored header of two series
+            // and 16 of one encoded stamp.
+            let limit = |pool: &Pool, set: &KeySet, stamp: i64, over: bool| {
+                encoded_last(pool, set, stamp, 229_305 + usize::from(over))
+            };
+            check_bound(test, BLOCK_MAX, [228_630, 229_347], 2, limit).await;
+        });
+    }
+
+    #[test]
+    fn gives_the_bounds_of_a_shard_whose_largest_block_binds_first() {
+        run(152, |test| async move {
+            // 524288 bytes of the largest block, less 40 of the head, range, and
+            // descriptor of an index frame. Stamps encode in words of 8 bytes.
+            let limit = |pool: &Pool, set: &KeySet, first: i64, over: bool| {
+                stamps_last(pool, set, first, 524_248 + 8 * usize::from(over))
+            };
+            check_bound(test, LARGEST, [522_679, 524_258], 0, limit).await;
+        });
+    }
+
+    #[test]
+    fn bounds_a_frame_of_one_index_by_the_largest_block() {
+        run(153, |mut test| async move {
+            test.pool = Rc::new(create_pool(LARGEST.budget));
+            let buffer = test.create_buffer(LARGEST.area, LARGEST.body_max, 4).await;
+            let mut shard = test.over(buffer).await;
+            assert!(shard.carry(Slot::new(0), key(Slot::new(0))));
+            let set = intern(&[Group {
+                index: key(Slot::new(0)),
+                data: &[],
+            }]);
+            // The most bytes that one encoder writes within 524248: 524288 bytes of
+            // the largest block, less 40 of the head, range, and descriptor.
+            assert_eq!(shard.write_body_max(&set), 523_728);
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let stamps = stepped(10, 523_728 / 8);
+            let at = frame(&test.pool, &set, &[(0, &stamps)]);
+            assert_eq!(shard.write(a, LIVE, at), Ok(&[applied(0, 0, 65_466)][..]));
+        });
+    }
+
+    #[test]
+    fn bounds_a_frame_of_many_groups_by_the_largest_block() {
+        run(154, |mut test| async move {
+            test.pool = Rc::new(create_pool(LARGEST.budget));
+            let buffer = test.create_buffer(LARGEST.area, LARGEST.body_max, 32).await;
+            let shard = test.over(buffer).await;
+            let groups: Vec<_> = (0..32)
+                .map(|n| Group {
+                    index: key(Slot::new(n)),
+                    data: &[],
+                })
+                .collect();
+            let set = intern(&groups);
+            // 524288 bytes of the largest block, less 16 of the head, and 16 of the
+            // range and 8 of the descriptor of each group.
+            let max = 523_504;
+            assert_eq!(shard.write_body_max(&set), max);
+            let mut lens: Vec<_> = (0..32).map(|n| (n, max / 32 / 8 * 8)).collect();
+            lens[..30].iter_mut().for_each(|(_, len)| *len += 8);
+            let draft = Draft::new(shard.pool(), &set, Form::Raw, &lens);
+            assert!(draft.is_ok(), "{draft:?}");
+            lens[0].1 += 8;
+            let error = block::Error::TooLarge {
+                requested: 524_296,
+                largest: 524_288,
+            };
+            let draft = Draft::new(shard.pool(), &set, Form::Raw, &lens);
+            assert_eq!(draft.map(|_| ()), Err(frame::Error::Pool(error)));
         });
     }
 

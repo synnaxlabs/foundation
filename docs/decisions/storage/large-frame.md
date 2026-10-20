@@ -10,9 +10,18 @@
   indexes are still recorded (HANDOFF RECORD). The writer splits the frame by samples or
   by indexes and writes each part. The home never splits a frame, because a frame
   applies whole (B7). Each handoff goes in its own append, so a handoff never makes a
-  frame large. The size is checked only when the bodies are appended, after the
+  frame large. The size decides before the room, also when a handoff of the frame
+  finds no room: `Shard::write` then checks the frozen entries against `Layout::check`
+  and `Buffer::block_max`, as `append` checks an entry with tag 0, and a frame whose
+  draft no block of the shard's pool holds gives `Large` too. A backfill frame over a
+  limit gets `Large`, not `Full`. The order is `Resend`, `Disk`, `Large`, then no room
+  (`Lost` live, `Full` backfill). Decided by `laptop.architect` (2026-10-20T10:19:44Z):
+  https://github.com/synnaxlabs/foundation/issues/3366#issuecomment-6288713154. It
+  supersedes "The size is checked only when the bodies are appended, after the
   handoffs: a frame whose handoff finds no room is lost (live) or refused with `Full`
-  (backfill) before its size is known. Decided by the `write-path` builder (#191). After
+  (backfill) before its size is known" (#191). Lost: a `buffer` function that checks
+  a batch as `append` does, for one caller. Trigger to look again: a new `Limit` that
+  an entry with tag 0 can meet. After
   a failed commit, the home gives `Disk` before it checks the size, so a frame that no
   record of the ring holds, or with an entry whose parts, joined, pass
   `Buffer::block_max`, gets `Disk`, not `Large`, on either path (#1260). Decided by
