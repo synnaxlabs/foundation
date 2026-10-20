@@ -100,7 +100,7 @@ impl Settings {
     /// `setup` is a node's. Every connection ID the endpoint issues starts with
     /// `shard`.
     pub(super) fn new(setup: &Setup, shard: u8) -> (Self, Endpoint) {
-        Self::with(setup, shard, transport(setup))
+        Self::with(setup, shard, transport(setup), tls(&setup.role))
     }
 
     /// As [`Settings::new`], with `change` made to the transport parameters, for a
@@ -113,15 +113,22 @@ impl Settings {
     ) -> (Self, Endpoint) {
         let mut transport = transport(setup);
         change(&mut transport);
-        Self::with(setup, shard, transport)
+        Self::with(setup, shard, transport, tls(&setup.role))
     }
 
-    fn with(setup: &Setup, shard: u8, transport: TransportConfig) -> (Self, Endpoint) {
+    /// As [`Settings::new`], with `tls` in place of the TLS of the role.
+    #[cfg(test)]
+    pub(super) fn proving(setup: &Setup, shard: u8, tls: Tls) -> (Self, Endpoint) {
+        Self::with(setup, shard, transport(setup), tls)
+    }
+
+    fn with(
+        setup: &Setup,
+        shard: u8,
+        transport: TransportConfig,
+        tls: Tls,
+    ) -> (Self, Endpoint) {
         let transport = Arc::new(transport);
-        let tls = match &setup.role {
-            Role::Node(private_key) => Tls::new(private_key),
-            Role::Program => Tls::program(),
-        };
         let server = tls.server().map(|tls| Arc::new(server(tls, &transport)));
         // `true`: `env::net` sets don't-fragment, so MTU discovery may run.
         #[expect(clippy::disallowed_methods, reason = "the config sets rng_seed")]
@@ -134,8 +141,8 @@ impl Settings {
         (settings, endpoint)
     }
 
-    /// The settings for a dial that expects `expected`.
-    pub(super) fn client(&self, expected: PublicKey) -> ClientConfig {
+    /// The settings for a dial that expects `expected`, or any node key for `None`.
+    pub(super) fn client(&self, expected: Option<PublicKey>) -> ClientConfig {
         self.dial(self.tls.client(expected))
     }
 
@@ -159,6 +166,13 @@ impl Settings {
             .version(QUIC_V1)
             .initial_dst_cid_provider(Arc::new(move || cid::random(&entropy)));
         client
+    }
+}
+
+fn tls(role: &Role) -> Tls {
+    match role {
+        Role::Node(private_key) => Tls::new(private_key),
+        Role::Program => Tls::program(),
     }
 }
 
@@ -576,7 +590,7 @@ mod tests {
             testing::run(1, |shard| {
                 let (now, mut buffer) = (pair::at(Duration::ZERO), Vec::new());
                 let mut dialer = program(shard);
-                dialer.connect(now, pair::SERVER_KEY.public(), pair::SERVER);
+                dialer.connect(now, Some(pair::SERVER_KEY.public()), pair::SERVER);
                 let initial = dialer.transmit(now, &mut buffer).expect("an Initial");
                 let issued = ids(initial.contents).1.expect("a source ID").to_vec();
                 // A program resets a short packet only to an ID that it could issue.
@@ -594,7 +608,7 @@ mod tests {
                 let (now, mut buffer) =
                     (pair::at(Duration::from_millis(1)), Vec::new());
                 let mut dialer = program(shard);
-                dialer.connect(now, pair::SERVER_KEY.public(), pair::SERVER);
+                dialer.connect(now, Some(pair::SERVER_KEY.public()), pair::SERVER);
                 let initial = dialer.transmit(now, &mut buffer).expect("an Initial");
                 let initial = initial.contents.to_vec();
                 let mut endpoint = program(shard);
@@ -953,7 +967,7 @@ mod tests {
                 let mut pair = Pair::new(shard, idle, ROUND_TRIP);
                 pair.foreign = Some(foreign);
                 let (now, peer) = (pair.now(), pair::FOREIGN_KEY.public());
-                let key = pair.client.endpoint.connect(now, peer, pair::FOREIGN);
+                let key = pair.client.endpoint.connect(now, Some(peer), pair::FOREIGN);
                 pair.client.key = Some(key);
                 pair.run(Duration::from_secs(2));
                 let foreign = pair.foreign.as_mut().expect("a foreign peer");

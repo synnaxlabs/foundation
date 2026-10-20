@@ -42,7 +42,8 @@ fn a_reset_frees_its_blocks_before_the_peer_acknowledges_it() {
         let mut pair = Pair::new(shard, Span::SECOND, DELAY);
         pair.foreign = Some(foreign);
         let (now, peer) = (pair.now(), pair::FOREIGN_KEY.public());
-        pair.client.key = Some(pair.client.endpoint.connect(now, peer, pair::FOREIGN));
+        pair.client.key =
+            Some(pair.client.endpoint.connect(now, Some(peer), pair::FOREIGN));
         pair.run(RUN);
         let own = Hello {
             window_bytes: 1 << 20,

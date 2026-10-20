@@ -108,9 +108,9 @@ pub(crate) unsafe fn unconnected(el: *mut ffi::EventLoop) -> NonNull<ffi::Client
 /// The certificate and private key of a peer, each DER or PEM, and its `trust`: DER
 /// certificates back to back, or PEM. In PEM, a client trusts each block of
 /// `CERTIFICATE`, `X509 CERTIFICATE`, or `TRUSTED CERTIFICATE`, each with one DER
-/// certificate and no byte after it, as `PEM_bytes_read_bio` of aws-lc reads the
-/// blocks. It skips DER bytes and what that reader skips, such as text and a block
-/// of another label, but a block of any label that the reader cannot read refuses
+/// certificate, no header other than one that starts with a NUL byte, and no byte after
+/// it, as `PEM_read_bio` of aws-lc reads the blocks. It skips DER bytes, text, and a
+/// block of another label, but a block of any label that the reader cannot read refuses
 /// the trust. It does not trust a certificate in a skipped part, so the connect to its
 /// server gives `BadCertificateUntrusted`. A client offers each of the three policies
 /// of the copy on them, with the URI of `certificate` as its application URI.
@@ -162,10 +162,14 @@ pub(crate) enum Refusal {
     Time,
     /// `trust` holds no certificate in DER or PEM.
     Empty,
-    /// The certificate `number`, from 1, of `trust` does not parse. In DER, bytes
-    /// after the last certificate are one more. In PEM, a block of any label that
-    /// aws-lc cannot read is one more.
+    /// The certificate `number`, from 1, of `trust` does not parse, or its PEM block
+    /// has a header that does not start with a NUL byte, such as of encryption. In DER,
+    /// bytes after the last certificate are one more.
     Invalid { number: usize },
+    /// A PEM block of any label of `trust` that aws-lc cannot read, such as an empty
+    /// one, damaged base64, or one with no `END` line of its label, comes after
+    /// `after` certificates.
+    Damaged { after: usize },
     /// The PEM block of the certificate `number`, from 1, of `trust` holds bytes after
     /// it, such as trust settings or a second certificate.
     Trailing { number: usize },
@@ -195,11 +199,12 @@ impl Refusal {
             ffi::Refusal::EMPTY => Self::Empty,
             ffi::Refusal::INVALID => Self::Invalid { number: raw.number },
             ffi::Refusal::TRAILING => Self::Trailing { number: raw.number },
+            ffi::Refusal::DAMAGED => Self::Damaged { after: raw.number },
             ffi::Refusal::TRUST_LINE => Self::line(Credential::Trust, raw),
             ffi::Refusal::CERTIFICATE_LINE => Self::line(Credential::Certificate, raw),
             ffi::Refusal::KEY_LINE => Self::line(Credential::Key, raw),
             ffi::Refusal::URI => Self::Uri,
-            kind => panic!("invariant: shim.c gives a refusal of 0 to 11, not {kind}"),
+            kind => panic!("invariant: shim.c gives a refusal of 0 to 12, not {kind}"),
         })
     }
 
@@ -225,12 +230,15 @@ impl fmt::Display for Refusal {
             ),
             Self::Empty => f.write_str("the trust holds no certificate in DER or PEM"),
             Self::Invalid { number } => {
-                write!(
-                    f,
-                    "certificate {number} of the trust, or a damaged PEM block in its \
-                     place, does not parse"
-                )
+                write!(f, "certificate {number} of the trust does not parse")
             }
+            Self::Damaged { after: 0 } => f.write_str(
+                "a PEM block of the trust is damaged, with no certificate before it",
+            ),
+            Self::Damaged { after } => write!(
+                f,
+                "a PEM block after certificate {after} of the trust is damaged"
+            ),
             Self::Trailing { number } => write!(
                 f,
                 "the PEM block of certificate {number} of the trust holds bytes after it"

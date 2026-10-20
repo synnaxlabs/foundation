@@ -99,7 +99,7 @@ pub(crate) async fn dial(
             let addresses = addresses.to_vec();
             let started = Rc::clone(&attempt);
             table.tasks.spawn(async move {
-                let mut dial = pin!(dial::dial(&carrier, node, &addresses));
+                let mut dial = pin!(dial::dial(&carrier, Some(node), &addresses));
                 // A session from the peer that ends the attempt drops the dial. The
                 // take task can run after this one in the instant that both connect.
                 let dialed = poll_fn(|cx| {
@@ -414,8 +414,11 @@ mod tests {
     /// What a dial to `peer` at [`dead`] on `node` gives.
     fn unreachable(peer: PublicKey, node: &Node) -> Error {
         let [address] = dead(node);
-        let attempts = vec![(address, Error::TimedOut)];
-        Error::Unreachable { peer, attempts }
+        let attempts = vec![(address, Error::TimedOut)].into_boxed_slice();
+        Error::Unreachable {
+            peer: Some(peer),
+            attempts,
+        }
     }
 
     /// Gives the close of a shard that ends now time to go out: a shard that ends
@@ -647,8 +650,8 @@ mod tests {
             assert_eq!([first.err(), second.err()], [failed.clone(), failed]);
             let third = transport.dial(SERVER.public(), &[]).await;
             let none = Error::Unreachable {
-                peer: SERVER.public(),
-                attempts: Vec::new(),
+                peer: Some(SERVER.public()),
+                attempts: Box::default(),
             };
             assert_eq!(third.err(), Some(none));
         });
@@ -1579,8 +1582,14 @@ mod tests {
             let others: Vec<_> = others.collect();
             for &peer in &others[1..] {
                 let dialed = transport.dial(peer, &[]).await;
-                let attempts = Vec::new();
-                assert_eq!(dialed.err(), Some(Error::Unreachable { peer, attempts }));
+                let attempts = Box::default();
+                assert_eq!(
+                    dialed.err(),
+                    Some(Error::Unreachable {
+                        peer: Some(peer),
+                        attempts
+                    })
+                );
             }
             node.clock()
                 .sleep(testing::spans(Span::MILLISECOND, 20))
