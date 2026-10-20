@@ -100,7 +100,9 @@
   a secure channel: a relay cannot change a signed message, and open62541 has one
   service table for the process, so no hook of one server refuses a subscribe
   (`laptop.architect-2`, 2026-10-20T12:29:05Z,
-  https://github.com/synnaxlabs/foundation/issues/3539#issuecomment-6290852770). The
+  https://github.com/synnaxlabs/foundation/issues/3539#issuecomment-6290852770, and
+  for the stages of a run, 2026-10-20T12:59:18Z,
+  https://github.com/synnaxlabs/foundation/issues/3539#issuecomment-6291409151). The
   opcua conformance suite runs the subscribed path, and crate tests run the polled path
   (`laptop.architect-2`, item 4 of 6279727836,
   approved without its "only" in item 2 of
