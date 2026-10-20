@@ -162,7 +162,7 @@ impl Client {
     ///
     /// # Aborts
     ///
-    /// When open62541 cannot allocate the memory of the decode of a Publish answer:
+    /// When the client cannot reserve the memory of the decode of a Publish answer:
     /// the process stops as the Rust allocator does when it has no memory.
     #[cfg_attr(
         not(any(test, feature = "sim")),
