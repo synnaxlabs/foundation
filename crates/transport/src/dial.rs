@@ -793,8 +793,11 @@ mod tests {
         let want = if connects {
             Ok(Peer::Node(peer))
         } else {
-            let attempts = vec![(at, Error::TimedOut)];
-            Err(Error::Unreachable { peer, attempts })
+            let attempts = Box::new([(at, Error::TimedOut)]);
+            Err(Error::Unreachable {
+                peer: Some(peer),
+                attempts,
+            })
         };
         testing::shard(&client, CLIENT, move |config, node| async move {
             let part = testing::part(&node.net(), address(&node));
