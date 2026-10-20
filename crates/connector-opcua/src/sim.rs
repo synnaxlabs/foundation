@@ -34,6 +34,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::CString;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use connector::cancel::Token;
@@ -47,7 +48,7 @@ use crate::connection::Manager;
 use crate::event;
 pub use crate::log::call_refused;
 use crate::node::Node;
-use crate::server::Server;
+use crate::server::{Answer, Server};
 use crate::value::Value;
 
 /// The sessions and secure channels of [`serve`].
@@ -85,6 +86,8 @@ struct Variable {
     text: String,
     node: Node,
     value: Value,
+    /// The source timestamp of `value`, `None` until the first read after a change.
+    source: Option<Stamp>,
     served: Vec<Served>,
     #[cfg(test)]
     hooks: Hooks,
@@ -132,6 +135,7 @@ impl Variables {
                 text: text.into(),
                 node,
                 value: Value::F64(0.0),
+                source: None,
                 served: Vec::new(),
                 #[cfg(test)]
                 hooks: Hooks::default(),
@@ -153,13 +157,25 @@ impl Variables {
     }
 
     /// Adds 1 to the value of each variable, and gives each later read the status
-    /// `quality`.
+    /// `quality`. The source timestamp of each new value is the time of the server
+    /// clock when the server first reads it.
     pub fn change(&self, quality: Quality) {
+        self.changed(quality, None);
+    }
+
+    /// As [`Variables::change`], with `source` as the source timestamp of each new
+    /// value, on the clock of the server.
+    pub fn change_at(&self, quality: Quality, source: Stamp) {
+        self.changed(quality, Some(source));
+    }
+
+    fn changed(&self, quality: Quality, source: Option<Stamp>) {
         let mut state = self.state();
         for variable in &mut state.variables {
             if let Value::F64(value) = &mut variable.value {
                 *value += 1.0;
             }
+            variable.source = source;
         }
         state.quality = quality;
     }
@@ -263,11 +279,13 @@ impl Variables {
     }
 
     /// Answers a read of variable `index` at `time`, and records it when its value is
-    /// a Double.
-    fn read(&self, index: usize, time: Monotonic) -> (Value, Quality) {
+    /// a Double. The first read after a change sets the source timestamp to the server
+    /// time of `wall`.
+    fn read(&self, index: usize, time: Monotonic, wall: Stamp) -> Answer {
         let mut state = self.state();
-        let quality = state.quality;
+        let (quality, ahead) = (state.quality, state.ahead);
         let variable = &mut state.variables[index];
+        let source = *variable.source.get_or_insert_with(|| shift(wall, ahead));
         #[cfg(test)]
         let quality = variable.hooks.quality.unwrap_or(quality);
         if let Value::F64(value) = variable.value {
@@ -278,12 +296,17 @@ impl Variables {
             };
             variable.served.push(served);
         }
-        (variable.value, quality)
+        (variable.value, quality, Some(source))
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
         self.0.lock().expect("no holder of the variables panics")
     }
+}
+
+/// Gives the server time at the wall time `wall`, when the server clock is `ahead`.
+fn shift(wall: Stamp, ahead: Span) -> Stamp {
+    Stamp::from_nanos(wall.nanos().saturating_add(ahead.nanos()))
 }
 
 /// A read that a server answered.
@@ -339,12 +362,12 @@ pub async fn serve(
     variables: &Variables,
     until: Token,
 ) -> Result<(), net::Error> {
-    let shifted = Variables::clone(variables);
+    let wall = Rc::new(wall);
     let time = event::Time {
         clock: Clock::clone(&clock),
-        wall: Box::new(move || {
-            let nanos = wall().nanos().saturating_add(shifted.state().ahead.nanos());
-            Stamp::from_nanos(nanos)
+        wall: Box::new({
+            let (wall, variables) = (Rc::clone(&wall), Variables::clone(variables));
+            move || shift(wall(), variables.state().ahead)
         }),
     };
     let manager = Manager::accepting(time, net, listener, rng);
@@ -389,9 +412,12 @@ pub async fn serve(
                 }
                 continue;
             }
-            let (variables, clock) =
-                (Variables::clone(variables), Clock::clone(&clock));
-            server.add_source(node, move || variables.read(index, clock.now()));
+            let (variables, clock, wall) = (
+                Variables::clone(variables),
+                Clock::clone(&clock),
+                Rc::clone(&wall),
+            );
+            server.add_source(node, move || variables.read(index, clock.now(), wall()));
         }
     };
     Server::serve(manager, SESSIONS, add, until.wait()).await
