@@ -858,27 +858,42 @@ fn a_voter_that_goes_silent_in_its_put_misses_the_deadline_after_its_last_stored
     assert_eq!(cluster.board().applied, [(1, base(), Err(quorum))]);
 }
 
-// Voter 3 is down, and voter 2 restarts at 10 s and at 25 s in a put of about 41 s.
-// The put dials voter 2 again after each restart, as the session before each stored a
-// chunk, so the apply commits.
+// Voter 3 is down, and voter 2 restarts at each of `restarts` in a put of about 41
+// s, over seeds. The put dials voter 2 again after each restart, as the session
+// before each stored a chunk, or lost to the dial of voter 2 at its start. So the
+// apply commits.
+fn restart_in_put(restarts: &[i64]) {
+    for seed in 0..16 {
+        let mut cluster = Cluster::new(seed);
+        cluster.delay(Span::from_nanos(300 * Span::MILLISECOND.nanos()));
+        cluster.start_voter(1);
+        cluster.start_voter(2);
+        cluster.run(seconds(10));
+        let definitions = create_largest(40);
+        cluster.change(1, base(), &definitions);
+        for &run in restarts {
+            cluster.run(seconds(run));
+            let node = cluster.node(2).clone();
+            cluster.sim.crash(&node, Crash::Power);
+            cluster.start_voter(2);
+        }
+        cluster.run(seconds(120));
+        let moved = pointer(1, &definitions);
+        let board = cluster.board();
+        assert_eq!(board.applied, [(1, moved, Ok(moved))], "seed {seed}");
+        assert_used(&board, &[1, 2], moved, &definitions);
+        assert!(!board.blobs.contains_key(&1), "seed {seed}: {:?}", board.blobs);
+    }
+}
+
+#[test]
+fn an_apply_counts_a_voter_that_restarts_once_in_its_put() {
+    restart_in_put(&[10]);
+}
+
 #[test]
 fn an_apply_counts_a_voter_that_restarts_twice_in_its_put() {
-    let mut cluster = Cluster::new(0);
-    cluster.delay(Span::from_nanos(300 * Span::MILLISECOND.nanos()));
-    cluster.start_voter(1);
-    cluster.start_voter(2);
-    cluster.run(seconds(10));
-    let definitions = create_largest(40);
-    cluster.change(1, base(), &definitions);
-    for run in [10, 15] {
-        cluster.run(seconds(run));
-        let node = cluster.node(2).clone();
-        cluster.sim.crash(&node, Crash::Power);
-        cluster.start_voter(2);
-    }
-    cluster.run(seconds(120));
-    let moved = pointer(1, &definitions);
-    assert_eq!(cluster.board().applied, [(1, moved, Ok(moved))]);
+    restart_in_put(&[10, 15]);
 }
 
 // Voter 3 is down, and voter 2 restarts at 10 s and again 1 s later, before the
@@ -944,6 +959,29 @@ fn an_apply_counts_a_voter_whose_stream_end_fails_after_each_stored() {
     assert_eq!(board.blobs, [(2, 1)].into());
     cluster.delay(Span::from_nanos(300 * Span::MILLISECOND.nanos()));
     cluster.run(seconds(60));
+    let moved = pointer(1, &definitions);
+    assert_eq!(cluster.board().applied, [(1, moved, Ok(moved))]);
+}
+
+// Voter 3 holds each blob stream with no answer, and the links of voters 1 and 2
+// break 1.5 s into the apply, after the last `Stored` of the put on voter 2. The end
+// of that stream never comes, so the put ends `Ok` at its deadline, and the apply
+// commits with voter 3 before the links come back.
+#[test]
+fn an_apply_counts_a_voter_whose_stream_never_ends_at_the_deadline_of_the_end() {
+    let mut cluster = Cluster::new(0);
+    cluster.delay(Span::from_nanos(300 * Span::MILLISECOND.nanos()));
+    cluster.start();
+    cluster.run(seconds(10));
+    let (led, _) = cluster.take();
+    assert!(!led.contains(&2), "voter 2 led: {led:?}");
+    cluster.board.lock().unwrap().silent = [3].into();
+    let definitions = create_largest(1);
+    cluster.change(1, base(), &definitions);
+    cluster.run(Span::from_nanos(1500 * Span::MILLISECOND.nanos()));
+    cluster.link(1, 2, 1.0);
+    cluster.link(2, 1, 1.0);
+    cluster.run(seconds(15));
     let moved = pointer(1, &definitions);
     assert_eq!(cluster.board().applied, [(1, moved, Ok(moved))]);
 }

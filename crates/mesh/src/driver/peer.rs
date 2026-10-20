@@ -122,11 +122,12 @@ impl Mesh {
                 Ok(push) => self.push(push, &mut left).await,
                 Err(error) => Err(Failed::Call(error)),
             };
+            let again = |ended: transport::Error| {
+                redial || left.len() < before || replaced(&ended)
+            };
             match pushed {
                 Ok(()) => return Ok(()),
-                Err(Failed::Call(_))
-                    if session.ended().is_some() && (redial || left.len() < before) =>
-                {
+                Err(Failed::Call(_)) if session.ended().is_some_and(again) => {
                     redial = false;
                 }
                 Err(failed) => return Err(failed.into()),
@@ -280,6 +281,16 @@ async fn ask<T>(
     within(clock, DEADLINE, redialed)
         .await
         .unwrap_or(Err(Failed::Deadline))
+}
+
+// Whether a session that ended with `ended` lost to a session that the peer dialed at
+// the same time, which the next dial gives.
+fn replaced(ended: &transport::Error) -> bool {
+    use transport::{Code, Error};
+    matches!(
+        ended,
+        Error::Closed { code: Code(0) } | Error::PeerClosed { code: Code(0) }
+    )
 }
 
 // The output of `future`, or `Failed::Deadline` when `DEADLINE` passes first.
