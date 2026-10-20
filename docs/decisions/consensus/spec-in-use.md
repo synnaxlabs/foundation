@@ -16,8 +16,10 @@
   chunk that the tree needs, one at a time. It reads again once a get gave one of them.
   A get that finds no chunk asks again each second (`RETRY`, on the `env` clock). A get
   asks the voters in key order, without this node, from the voter that gave the last
-  chunk, also of an earlier pointer, and around. A get that a newer pointer drops keeps
-  the voter it was asking, and the next get starts after it. Each peer gets the chunks
+  chunk, also of an earlier pointer or of a dropped get, and around. A get that a newer
+  pointer drops keeps the voter that it was asking, and the next get starts after it.
+  One exception: when that voter gave the last chunk, to a get of the same pointer, the
+  next get starts at it. Each peer gets the chunks
   still missing in calls of at most `CHUNKS`, each within `peer::DEADLINE`. A call that
   fails or passes the deadline gives the rest of the round to the next peer. Lost:
   holders first; a set of the peers that failed; the get of one listed chunk at a time.
@@ -92,4 +94,8 @@
   line, `laptop.architect`, 2026-10-20T06:46:57Z
   (https://github.com/synnaxlabs/foundation/pull/3495#issuecomment-6285124027), which
   supersedes the start "from the voter that gave the last chunk of the pointer" of
-  https://github.com/synnaxlabs/foundation/pull/3495#issuecomment-6282311269.
+  https://github.com/synnaxlabs/foundation/pull/3495#issuecomment-6282311269. The start
+  at a dropped get's voter that gave the last chunk of the same pointer,
+  `laptop.architect`, 2026-10-20T07:16:31Z
+  (https://github.com/synnaxlabs/foundation/pull/3495#issuecomment-6285554859), which
+  supersedes the keep of each dropped get's voter of 6285124027.

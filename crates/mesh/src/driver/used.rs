@@ -44,8 +44,8 @@ pub(super) struct Used {
     // The peer that gave the last chunk that a get got, of this pointer or an earlier
     // one, where the next get starts, and the pointer of that get.
     gave: Option<(node::Key, Pointer)>,
-    // The peer that a get was asking when a newer pointer dropped it, when that peer
-    // gave no chunk to a get of that pointer. The next get starts after it.
+    // The peer that a get was asking when a newer pointer dropped it, unless that peer
+    // gave the last chunk, to a get of that pointer. The next get starts after it.
     dropped: Option<node::Key>,
     // The task of `keep`, while it waits for a pointer to read.
     task: Option<Waker>,
@@ -213,9 +213,9 @@ impl Used {
     }
 
     // Records where a get of `pointer` got to, also one that a newer pointer dropped.
-    // The next get starts after the voter that a dropped get was asking when that voter
-    // gave no chunk to a get of `pointer`, or else at the voter that gave the last
-    // chunk.
+    // The next get starts at the voter that gave the last chunk, or after the voter
+    // that a dropped get was asking, unless that voter gave the last chunk, to a get of
+    // `pointer`.
     fn asked(&mut self, pointer: Pointer, Progress { asking, gave }: Progress) {
         if let Some(gave) = gave {
             (self.gave, self.dropped) = (Some((gave, pointer)), None);
