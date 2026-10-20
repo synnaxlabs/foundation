@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import os
 import uuid
-from collections.abc import Iterable
+from collections.abc import (
+    ItemsView,
+    Iterable,
+    Iterator,
+    KeysView,
+    Mapping,
+    ValuesView,
+)
 from types import TracebackType
 from typing import (
     Any,
@@ -85,12 +92,16 @@ class Rejected(Exception):
     code: str
 
 class DataLost(Exception):
-    """The node found no room for a live frame, so its samples are a gap in the log.
-    `seqs` is a `dict` from the name of each channel of the frame to the `range` of the
-    seqs of its lost samples. The writer goes on, as a later frame can find room.
+    """Samples were lost. A writer with `on_loss="raise"` raises it when the node found
+    no room for a live frame, so its samples are a gap in the log, and goes on, as a
+    later frame can find room: `seqs` is a `dict` from the name of each channel of the
+    frame to the `range` of the seqs of its lost samples, and `frame` is `None`. A
+    reader with `on_loss="raise"` raises it for a frame after a loss, and closes: `seqs`
+    is `Frame.lost` of that frame, and `frame` is the frame.
     """
 
     seqs: dict[str, range]
+    frame: Frame | None
 
 @final
 class Client:
@@ -141,6 +152,36 @@ class Client:
         a text that names each channel of the open for `unknown`; `ConnectionError` when
         the session failed; `RuntimeError` when the client closed or in a process that
         the program forked; and `PanicException` when the client's thread panicked.
+        """
+
+    def open_reader(
+        self,
+        channels: str | Iterable[str],
+        *,
+        mode: Literal["complete", "latest"] = "complete",
+        on_loss: Literal["warn", "raise", "ignore"] = "warn",
+    ) -> Reader:
+        """Opens a reader of `channels` at the home of their index, and blocks until the
+        node opened it. The reader gives only the frames written after its open, so open
+        it before the writer writes. `channels` is one channel name or an iterable of
+        names, all of one index. Place `n` is `channels[n]`, and the index is place
+        `len(channels)` when `channels` does not name it. `mode` is `"complete"`: each
+        frame from the open on, in order, past a loss of the node's buffer; or
+        `"latest"`: the newest frame, which skips each frame that a newer one replaced
+        before the node sent it, and loses nothing. `on_loss` is what the reader does
+        with a frame after a loss: `"warn"` logs a warning on the `foundation` logger,
+        `"raise"` raises `DataLost` and closes the reader, and `"ignore"` does nothing.
+        `Frame.lost` holds the loss in each case. A channel of `uuid` reads as an
+        `object` array, which costs one `uuid.UUID` for each sample. Other Python
+        threads run while it waits.
+
+        Raises `TypeError` for an argument of a wrong type, or for a channel of a type
+        that is not a scalar; `ValueError` for no channel, a name that does not parse,
+        or another `mode` or `on_loss`, with no reader opened; `Stopped` when the node
+        refused the open, with a text that names each channel of the open for `unknown`;
+        `ConnectionError` when the session failed; `RuntimeError` when the client closed
+        or in a process that the program forked; and `PanicException` when the client's
+        thread panicked.
         """
 
     def __enter__(self) -> Self: ...
@@ -248,3 +289,91 @@ class Writer:
         """Closes the writer. When the block raised, an error of the close is a note on
         the error of the block; else it raises.
         """
+
+@final
+class Reader:
+    """A reader of channels of one index, which `Client.open_reader` opens. `for frame
+    in reader:` gives each frame as it comes, and ends after a close. A `with` block
+    closes it at its end. Read each frame as it comes: a frame that the node sent and
+    the program did not read holds a part of the receive window of the client, and when
+    the window is full, each writer and reader of the client waits. Read on a client of
+    its own when the program cannot. A process that forks from the program does not own
+    the reader: in it, each call but a close raises `RuntimeError`, and a close gives
+    `None` and ends nothing.
+
+    `next(reader)` blocks until the next frame comes, with other Python threads
+    running. It runs the signal handlers (Ctrl-C) at least each 100 ms while it waits
+    for a frame, and none while a `next` of another thread holds the reader, so read a
+    reader on one thread. It raises `StopIteration` after a close; `DataLost` for a
+    frame after a loss with `on_loss="raise"`, after which the reader is closed;
+    `Stopped` with `unknown` when a channel was removed; `ConnectionError` when the
+    session failed, or a frame of the node does not decode or is over the read budget
+    of the client; `RuntimeError` when the client closed or in a forked process; and
+    `PanicException` when the client's thread panicked. After `Stopped`,
+    `ConnectionError`, or `RuntimeError` of a closed client, each later call raises it
+    again.
+    """
+
+    @property
+    def places(self) -> tuple[tuple[str, str], ...]:
+        """The name and the type of each place, in place order, the type as the spec
+        writes it (`f64`, `timestamp`).
+        """
+
+    def __iter__(self) -> Self: ...
+    def __next__(self) -> Frame: ...
+    def close(self) -> None:
+        """Ends the reader. A `__next__` that waits on another thread raises
+        `StopIteration` within 100 ms. A close after a close gives `None`, and in a
+        forked process it gives `None` and ends nothing.
+        """
+
+    def __enter__(self) -> Self: ...
+    def __exit__(
+        self,
+        _kind: type[BaseException] | None,
+        _raised: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
+        """Closes the reader."""
+
+@final
+class Frame(Mapping[str, NDArray[Any]]):
+    """One frame of a reader: a read-only mapping (`collections.abc.Mapping`) from the
+    name of each channel of the frame, the index included, to its series, `count`
+    samples each: `frame["pt_1"]`, `"pt_1" in frame`, `for name in frame`, and
+    `len(frame)`, the count of its channels. A channel that did not move in the frame is
+    not a key, and a name given twice is one key. Each series is a new one-dimensional
+    `numpy.ndarray` that the program owns, in native byte order: `bool`, `int8` to
+    `uint64`, `float32`, `float64`, `datetime64[ns]` for `timestamp`, `timedelta64[ns]`
+    for `duration`, and `object` for `uuid`, with one `uuid.UUID` for each sample. A
+    later frame does not change it.
+    """
+
+    @property
+    def count(self) -> int:
+        """The samples of each series."""
+
+    @property
+    def lost(self) -> dict[str, range]:
+        """A `dict` from each channel of the frame whose index lost seqs after the last
+        series of the channel with a sample, up to this frame, to the `range` of those
+        seqs: `len` of it is their count. Empty when nothing was lost, and always for a
+        latest reader.
+        """
+
+    def __getitem__(self, key: str, /) -> NDArray[Any]: ...
+    def __contains__(self, key: object, /) -> bool: ...
+    def __iter__(self) -> Iterator[str]: ...
+    def __len__(self) -> int: ...
+    def keys(self) -> KeysView[str]:
+        """The names of the frame, as `Mapping.keys` gives them."""
+
+    def values(self) -> ValuesView[NDArray[Any]]:
+        """The series of the frame, as `Mapping.values` gives them."""
+
+    def items(self) -> ItemsView[str, NDArray[Any]]:
+        """The pairs of each name and its series, as `Mapping.items` gives them."""
+
+    def get(self, key: str, default: Any = None) -> NDArray[Any] | Any:
+        """The series of `key`, or `default` when the frame has no series of it."""

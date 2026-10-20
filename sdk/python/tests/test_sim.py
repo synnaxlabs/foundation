@@ -81,5 +81,21 @@ class WriterSimTest(unittest.TestCase):
             self.assertEqual(writer._kept, kept)
 
 
+class ReaderSimTest(unittest.TestCase):
+    def test_a_frame_gives_the_part_after_it_and_none_comes_before(self) -> None:
+        node = Node()
+        self.addCleanup(node.stop)
+        client = planted(node)
+        self.addCleanup(client.close)
+        writes = node.connect()
+        self.addCleanup(writes.close)
+        with client.open_reader("plant.a") as reader:
+            self.assertEqual(reader._part, 0)
+            with writes.open_writer("plant.a") as writer:
+                writer.write(1.5)
+            self.assertEqual(next(reader)["plant.a"].tolist(), [1.5])
+            self.assertGreater(reader._part, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
