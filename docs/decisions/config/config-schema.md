@@ -125,6 +125,9 @@
   (https://github.com/synnaxlabs/foundation/pull/3505#issuecomment-6283734442). Each
   name is another attribute, by `laptop.architect-2` at 2026-10-20T04:54:13Z
   (https://github.com/synnaxlabs/foundation/pull/3505#issuecomment-6283692312). Each
-  attribute with a `When` is absent in at least one example, by `laptop.architect-2` at
-  2026-10-20T05:01:36Z
+  attribute with an `Unless` or a `When` is not needed in at least one example, by
+  `laptop.architect-2` at 2026-10-20T05:09:52Z
+  (https://github.com/synnaxlabs/foundation/pull/3505#issuecomment-6283877244). It
+  supersedes the rule that each attribute with a `When` is absent in at least one
+  example, of 2026-10-20T05:01:36Z
   (https://github.com/synnaxlabs/foundation/pull/3505#issuecomment-6283779355).
