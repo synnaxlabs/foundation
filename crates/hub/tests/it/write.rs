@@ -37,7 +37,7 @@ use crate::sessions::{Got, Kept, OTHER, recorded, rules, run_program, serve_each
 const START: Span = Span::from_nanos(100_000_000);
 
 /// The place of `channel`, whose group's index is at place `index`.
-fn place(
+pub(super) fn place(
     key: u128,
     data_type: types::sample::Type,
     channel: &str,
@@ -83,7 +83,7 @@ fn frame(series: &[(u32, &[i64])]) -> (Vec<(u32, u32)>, Vec<u8>) {
 }
 
 /// Sends a live frame of `stamps` at place 0 and `values` at place 1.
-async fn send(stream: &mut Stream, stamps: &[i64], values: &[i64]) {
+pub(super) async fn send(stream: &mut Stream, stamps: &[i64], values: &[i64]) {
     let count = u32::try_from(stamps.len()).expect("a count");
     let (ends, body) = frame(&[(0, stamps), (1, values)]);
     stream.frame(live(2), &[count], &ends, &body).await;
@@ -96,7 +96,7 @@ async fn send_untimed(stream: &mut Stream, value: i64) {
 }
 
 /// Finishes `stream`, and gives each reply that the node sent before it finished.
-async fn end(stream: &mut Stream) -> Vec<Reply> {
+pub(super) async fn end(stream: &mut Stream) -> Vec<Reply> {
     stream.sender.finish().expect("finishes");
     let mut replies = Vec::new();
     while let Some(message) = stream.recv().await.expect("receives") {
@@ -105,11 +105,11 @@ async fn end(stream: &mut Stream) -> Vec<Reply> {
     replies
 }
 
-fn stored(frames: u64) -> Reply {
+pub(super) fn stored(frames: u64) -> Reply {
     Reply::Stored { group: 0, frames }
 }
 
-fn taken(frame: u64, seq: u64, count: u32) -> Reply {
+pub(super) fn taken(frame: u64, seq: u64, count: u32) -> Reply {
     Reply::Outcome {
         frame,
         group: 0,

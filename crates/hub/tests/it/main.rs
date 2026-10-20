@@ -38,6 +38,7 @@ mod net;
 #[path = "../common/agent.rs"]
 mod agent;
 mod definitions;
+mod forward;
 mod link;
 mod named;
 #[path = "../common/node.rs"]
