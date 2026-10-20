@@ -652,7 +652,8 @@ mod tests {
     }
 
     /// open62541 fails a connect with `BadIdentityTokenRejected` when the server
-    /// offers no endpoint in the mode of the client.
+    /// offers no endpoint in the mode of the client. The test calls the private
+    /// `Server::dial`: no public call connects in a mode other than that of the server.
     #[test]
     fn a_secure_server_offers_no_endpoint_in_another_mode() {
         let modes = [
