@@ -45,7 +45,7 @@ pub(crate) struct Session {
 /// What a stream of the link carries, taken when [`Link::serve`] is called.
 enum Role {
     /// A node stream, with the member that holds the node's key, if any.
-    Node(Rc<RefCell<State>>, Option<node::Key>),
+    Node(Rc<RefCell<State>>, PublicKey, Option<node::Key>),
     Hello(Rc<Session>),
     /// A client stream after the hello stream: a request or a read.
     Later(Rc<Session>),
@@ -102,7 +102,7 @@ impl Link {
         let role = match &self.0 {
             Peer::Node(state, key) => {
                 let holder = state.borrow().holder(*key);
-                Role::Node(Rc::clone(state), holder)
+                Role::Node(Rc::clone(state), *key, holder)
             }
             Peer::Client(session) if session.client.first() => {
                 Role::Hello(Rc::clone(session))
@@ -111,9 +111,11 @@ impl Link {
         };
         async move {
             match role {
-                Role::Node(state, holder) => serve::run(&state, holder, incoming)
-                    .await
-                    .map(|()| Served::Ended),
+                Role::Node(state, peer, holder) => {
+                    serve::run(&state, peer, holder, incoming)
+                        .await
+                        .map(|()| Served::Ended)
+                }
                 Role::Hello(session) => client::hello(&session, incoming).await,
                 Role::Later(session) => client::later(&session, incoming).await,
             }

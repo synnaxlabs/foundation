@@ -56,7 +56,7 @@ impl Member {
         Hello {
             subject: name(SUBJECT),
             key: public_key(&AGENT),
-            via: region::OTHER,
+            via: public_key(&PEER),
             connection: CONNECTION,
             nonce: [0; 16],
             expires: self.mesh.now().mesh.expect("mesh time").latest + life,
@@ -296,17 +296,17 @@ fn writes_the_group_at_the_places_of_a_forward() {
 fn stops_a_forward_whose_hello_names_another_node_as_via() {
     let served = forwarded(4101, homed, |member| async move {
         let hello = Hello {
-            via: NODE,
+            via: public_key(&HOME),
             ..member.hello(LIFE)
         };
         let mut stream = member.forward(1, hello).await;
         assert_eq!(stream.recv().await, reset_with(VIA));
     });
     let via = Refusal::Via {
-        via: NODE,
-        peer: region::OTHER,
+        via: public_key(&HOME),
+        peer: public_key(&PEER),
     };
-    assert_eq!(served, [Err(serve::Error::Access(via))]);
+    assert_eq!(served, [Err(serve::Error::Access(Box::new(via)))]);
 }
 
 #[test]
@@ -318,7 +318,10 @@ fn refuses_a_forwarded_open_signed_with_another_key() {
             .await;
         assert_eq!(stream.recv().await, reset_with(REFUSED));
     });
-    assert_eq!(served, [Err(serve::Error::Access(Refusal::Signature))]);
+    assert_eq!(
+        served,
+        [Err(serve::Error::Access(Box::new(Refusal::Signature)))]
+    );
 }
 
 #[test]
@@ -336,7 +339,7 @@ fn stops_a_forward_at_a_renewal_of_another_subject_as_changed() {
     let changed = Refusal::Changed {
         field: Field::Subject,
     };
-    assert_eq!(served, [Err(serve::Error::Access(changed))]);
+    assert_eq!(served, [Err(serve::Error::Access(Box::new(changed)))]);
 }
 
 /// A forward takes frames until its hello ends, then stops as `EXPIRED`.
@@ -355,8 +358,9 @@ fn stops_a_forward_as_expired_at_the_end_of_its_hello() {
     });
     assert!(
         matches!(
-            served[..],
-            [Err(serve::Error::Access(Refusal::Expired { .. }))]
+            served.as_slice(),
+            [Err(serve::Error::Access(refusal))]
+                if matches!(**refusal, Refusal::Expired { .. })
         ),
         "{served:?}"
     );
@@ -556,8 +560,8 @@ fn stops_a_forward_at_a_bad_message_while_it_waits_for_its_home() {
     assert_eq!(
         served,
         [
-            Err(serve::Error::Access(Refusal::Signature)),
-            Err(serve::Error::Access(changed)),
+            Err(serve::Error::Access(Box::new(Refusal::Signature))),
+            Err(serve::Error::Access(Box::new(changed))),
             Err(serve::Error::Client(kind)),
         ]
     );
@@ -619,8 +623,9 @@ fn stops_a_forward_whose_first_hello_has_ended_as_expired() {
     });
     assert!(
         matches!(
-            served[..],
-            [Err(serve::Error::Access(Refusal::Expired { .. }))]
+            served.as_slice(),
+            [Err(serve::Error::Access(refusal))]
+                if matches!(**refusal, Refusal::Expired { .. })
         ),
         "{served:?}"
     );
@@ -667,5 +672,8 @@ fn stops_a_forward_at_a_home_with_no_mesh_time_as_unsynced() {
             assert_eq!(stream.recv().await, reset_with(UNSYNCED));
         },
     );
-    assert_eq!(served, [Err(serve::Error::Access(Refusal::Unsynced))]);
+    assert_eq!(
+        served,
+        [Err(serve::Error::Access(Box::new(Refusal::Unsynced)))]
+    );
 }

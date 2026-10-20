@@ -17,6 +17,7 @@ use block::{Block, Unique};
 use transport::stream::{Incoming, Part, Receiver, Sender};
 use transport::{Class, Code};
 use types::channel::{self, Slot};
+use types::ed25519::PublicKey;
 use types::frame::key_set::KeySet;
 use types::frame::{self, Frame, Placed};
 use types::name::Name;
@@ -299,7 +300,8 @@ impl From<transport::Error> for Error {
 }
 
 /// Serves the stream `incoming` from a node, a forward or a reader session by its
-/// first message. `holder` is the node when the hub's region holds it as a member.
+/// first message. `peer` is the public key that the node's transport session proved,
+/// and `holder` is the node when the hub's region holds `peer` as a member.
 /// Stops the stream with the code of the error that ends it.
 ///
 /// # Panics
@@ -307,6 +309,7 @@ impl From<transport::Error> for Error {
 /// When `holder` is `None` and the first message is a forward.
 pub(crate) async fn run(
     state: &Rc<RefCell<State>>,
+    peer: PublicKey,
     holder: Option<node::Key>,
     incoming: Incoming,
 ) -> Result<(), Error> {
@@ -324,6 +327,7 @@ pub(crate) async fn run(
                     Box::pin(client::forward::serve(
                         state,
                         via,
+                        peer,
                         forward,
                         &mut receiver,
                         &mut sender,
