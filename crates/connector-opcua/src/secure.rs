@@ -13,6 +13,8 @@ use std::ffi::CStr;
 
 use types::time::{Span, Stamp};
 
+use crate::client::Credentials;
+
 /// 2001-01-01.
 pub(crate) const START: Stamp = from_secs(978_307_200);
 
@@ -30,6 +32,12 @@ pub(crate) const CLIENT: Identity = Identity {
     certificate: include_bytes!("secure/client.der"),
     key: include_bytes!("secure/client-key.der"),
 };
+
+/// The credentials of [`SERVER`], which trust [`CLIENT`].
+pub(crate) const SERVER_SIDE: Credentials<'_> = SERVER.trusting(CLIENT.certificate);
+
+/// The credentials of [`CLIENT`], which trust [`SERVER`].
+pub(crate) const CLIENT_SIDE: Credentials<'_> = CLIENT.trusting(SERVER.certificate);
 
 /// A client on the key of [`CLIENT`] whose subject alternative name holds no URI.
 pub(crate) const ANONYMOUS: Identity = Identity {
@@ -256,6 +264,17 @@ const fn from_secs(secs: i64) -> Stamp {
 pub(crate) struct Identity {
     pub(crate) certificate: &'static [u8],
     pub(crate) key: &'static [u8],
+}
+
+impl Identity {
+    /// The credentials of the identity that trust `trust`.
+    pub(crate) const fn trusting(self, trust: &'static [u8]) -> Credentials<'static> {
+        Credentials {
+            certificate: self.certificate,
+            key: self.key,
+            trust,
+        }
+    }
 }
 
 /// The three policies that the copy compiles.

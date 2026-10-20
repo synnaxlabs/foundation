@@ -7,7 +7,8 @@ use document::value::{Kind as ValueKind, Value};
 use document::{Attribute, Document, Map};
 use env::tasks::Tasks;
 
-use crate::ffi::Status;
+use crate::client::Client;
+use crate::ffi::{self, Status};
 use crate::kind::Kind;
 
 /// The config of an `opcua` connector of `address`.
@@ -132,4 +133,18 @@ fn renumber(next: &mut Option<u32>, chunk: &mut [u8]) {
         chunk[16..20].copy_from_slice(&number.to_le_bytes());
         *number += 1;
     }
+}
+
+/// The policy URI and the mode of the channel of `client`, read from C: no call of
+/// `Client` and no server log gives them, and a read alone passes over each policy
+/// and mode that the server offers.
+pub(crate) fn channel(client: &Client) -> (String, ffi::Mode) {
+    let mut mode = ffi::Mode(0);
+    // SAFETY: the client lives, and `mode` is a place to write.
+    let policy =
+        unsafe { ffi::test::shim_client_channel(client.raw.as_ptr(), &raw mut mode) };
+    // SAFETY: open62541 gives a live string of the config of the client, or null.
+    let policy = unsafe { policy.as_ref() }.expect("the client has a channel");
+    // SAFETY: as above.
+    (unsafe { policy.lossy() }, mode)
 }

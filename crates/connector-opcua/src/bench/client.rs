@@ -15,11 +15,14 @@ use types::sample::Scalar;
 use types::time::Span;
 
 use super::PORT;
+pub use crate::client::Mode;
 use crate::client::Nodes;
 use crate::client::browse::Base;
 use crate::connection;
 use crate::event;
 use crate::node::{Key, Name, Node};
+use crate::secure::{CLIENT_SIDE, Policy, SERVER_SIDE, START};
+use crate::server::Secure;
 use crate::unwind::caught;
 use crate::value::Value;
 
@@ -60,7 +63,8 @@ pub enum Variable {
 
 /// A test server of open62541 on its own connection manager over `env::net`, with a
 /// variable of each [`Variable`] and a `MaxNodesPerRead` of [`PER_READ`], for
-/// the clients of [`Server::connect`].
+/// the clients of [`Server::connect`]. The server and each client read a wall time
+/// from 2001-01-01, in the window of the test certificates of the crate.
 pub struct Server {
     clock: Clock,
     net: Net,
@@ -68,6 +72,26 @@ pub struct Server {
     /// Gives the next value of each client. The loop of a client sets the random
     /// numbers of open62541 on its thread, which the server also draws from.
     rng: RefCell<Rng>,
+    /// The mode of each channel, or `None` for the policy `None`.
+    mode: Option<Mode>,
+}
+
+/// What a [`Server`] serves.
+struct Setup {
+    /// The value of each variable other than the counters.
+    double: f64,
+    /// The count of the counters of [`Server::counting`].
+    counters: usize,
+    /// The mode of each channel of [`Server::secure`].
+    mode: Option<Mode>,
+}
+
+impl Setup {
+    const PLAIN: Self = Self {
+        double: DOUBLE,
+        counters: 0,
+        mode: None,
+    };
 }
 
 impl Server {
@@ -95,7 +119,28 @@ impl Server {
         rng: Rng,
         body: impl AsyncFnOnce(&Self) -> T,
     ) -> T {
-        Self::serve(clock, net, address, rng, DOUBLE, 0, body).await
+        Self::serve(clock, net, address, rng, Setup::PLAIN, body).await
+    }
+
+    /// As [`Server::scope`], with channels only in `mode` under `Basic256Sha256`, on
+    /// test certificates of the crate.
+    ///
+    /// # Panics
+    ///
+    /// As [`Server::scope`].
+    pub async fn secure<T>(
+        clock: Clock,
+        net: Net,
+        address: IpAddr,
+        rng: Rng,
+        mode: Mode,
+        body: impl AsyncFnOnce(&Self) -> T,
+    ) -> T {
+        let setup = Setup {
+            mode: Some(mode),
+            ..Setup::PLAIN
+        };
+        Self::serve(clock, net, address, rng, setup, body).await
     }
 
     /// As [`Server::scope`], with `counters` more Double variables for
@@ -113,35 +158,43 @@ impl Server {
         counters: usize,
         body: impl AsyncFnOnce(&Self) -> T,
     ) -> T {
-        Self::serve(clock, net, address, rng, DOUBLE, counters, body).await
+        let setup = Setup {
+            counters,
+            ..Setup::PLAIN
+        };
+        Self::serve(clock, net, address, rng, setup, body).await
     }
 
-    /// As [`Server::counting`], with `double` as the value of each variable other than
-    /// the counters.
+    /// Serves `setup` as [`Server::scope`] and its siblings do.
     async fn serve<T>(
         clock: Clock,
         net: Net,
         address: IpAddr,
-        mut rng: Rng,
-        double: f64,
-        counters: usize,
+        rng: Rng,
+        setup: Setup,
         body: impl AsyncFnOnce(&Self) -> T,
     ) -> T {
+        let Setup {
+            double,
+            counters,
+            mode,
+        } = setup;
         let local = SocketAddr::new(address, PORT);
-        let manager = connection::Manager::listening(
-            event::Time::monotonic(Clock::clone(&clock)),
-            Net::clone(&net),
-            local,
-            u32::from(SESSIONS),
-            &mut rng,
-        )
-        .expect("the port is free");
         let this = Self {
             clock,
             net,
             url: CString::new(format!("opc.tcp://{local}")).expect("no NUL"),
             rng: RefCell::new(rng),
+            mode,
         };
+        let manager = connection::Manager::listening(
+            this.time(),
+            Net::clone(&this.net),
+            local,
+            u32::from(SESSIONS),
+            &mut this.rng.borrow_mut(),
+        )
+        .expect("the port is free");
         let add = |server: &mut crate::server::Server| {
             server.add_scalar(&VALUE, Value::F64(double));
             server.add_scalar(&named(), Value::F64(double));
@@ -157,15 +210,22 @@ impl Server {
             }
         };
         let body = caught(async { body(&this).await });
-        let value =
-            crate::server::Server::serve(manager, SESSIONS, None, add, body).await;
+        let modes = mode.map(|mode| [mode]);
+        let secure = modes.as_ref().map(|modes| Secure {
+            credentials: &SERVER_SIDE,
+            policies: &[Policy::Basic256Sha256],
+            modes,
+        });
+        let serve = crate::server::Server::serve;
+        let value = serve(manager, SESSIONS, secure.as_ref(), add, body).await;
         let value = value.expect("the listener of a bench does not fail");
         value.unwrap_or_else(|panic| panic::resume_unwind(panic))
     }
 
     /// Connects a client to the server, on its own connection manager, whose reads
     /// each read `count` copies of a [`Variable`], in one request while they number at
-    /// most [`PER_READ`] and fit one message of the session.
+    /// most [`PER_READ`] and fit one message of the session, in the mode of a
+    /// [`Server::secure`].
     ///
     /// # Panics
     ///
@@ -177,27 +237,13 @@ impl Server {
     /// a Read request: the process stops as the Rust allocator does when it has no
     /// memory.
     pub async fn connect(&self, count: usize) -> Client {
-        let rng = &mut Rng::from_seed(self.rng.borrow_mut().next_u64());
-        let time = event::Time::monotonic(Clock::clone(&self.clock));
-        let net = Net::clone(&self.net);
-        let connect = crate::client::Client::connect(
-            time,
-            tracing::Span::none(),
-            net,
-            rng,
-            &self.url,
-            None,
-            future::pending(),
-        );
-        let session = match connect.await {
+        let session = match self.dial(self.mode).await {
             Ok(session) => session.expect("a pending wait never ends"),
             Err(crate::client::Error::Failed(status)) => {
                 panic!("a connect failed: {status:?}")
             }
             Err(crate::client::Error::Refused(refusal)) => {
-                panic!(
-                    "invariant: a client with no credentials refuses none: {refusal}"
-                )
+                panic!("invariant: the test credentials are valid: {refusal}")
             }
         };
         let nodes = |node: Node| {
@@ -214,6 +260,30 @@ impl Server {
             name,
             bytes,
         }
+    }
+
+    /// Connects a client to the server in `mode`, on its own connection manager.
+    async fn dial(
+        &self,
+        mode: Option<Mode>,
+    ) -> Result<Option<crate::client::Client>, crate::client::Error> {
+        let rng = &mut Rng::from_seed(self.rng.borrow_mut().next_u64());
+        crate::client::Client::connect(
+            self.time(),
+            tracing::Span::none(),
+            Net::clone(&self.net),
+            rng,
+            &self.url,
+            mode.map(|mode| (&CLIENT_SIDE, mode)),
+            future::pending(),
+        )
+        .await
+    }
+
+    /// The wall time of the server and its clients, in the window of the test
+    /// certificates.
+    fn time(&self) -> event::Time {
+        event::Time::since(Clock::clone(&self.clock), START)
     }
 }
 
@@ -363,8 +433,12 @@ mod tests {
     use sim::{Sim, node};
     use types::time::Span;
 
-    use super::{PORT, Server, Variable};
+    use super::{Mode, PORT, Server, Variable};
+    use crate::client::Error;
+    use crate::client::tests::common::channel;
+    use crate::ffi::{self, Status};
     use crate::peer::session;
+    use crate::secure::Policy;
     use crate::unwind::caught;
 
     /// Runs `body` on a node of a sim, and gives the error of the run as text.
@@ -540,10 +614,61 @@ mod tests {
     fn a_read_of_another_value_panics_with_it() {
         let result = run(async |node| {
             let (clock, net, address) = (node.clock(), node.net(), node.addresses()[0]);
-            Server::serve(clock, net, address, node.entropy().rng(), 2.5, 0, read)
-                .await;
+            let setup = super::Setup {
+                double: 2.5,
+                ..super::Setup::PLAIN
+            };
+            Server::serve(clock, net, address, node.entropy().rng(), setup, read).await;
         });
         assert_eq!(result, panicked("read 2.5"));
+    }
+
+    /// Runs `body` in the scope of a server in `mode` on `node`.
+    async fn secure<T>(
+        node: &Node,
+        mode: Mode,
+        body: impl AsyncFnOnce(&Server) -> T,
+    ) -> T {
+        let (clock, net, address) = (node.clock(), node.net(), node.addresses()[0]);
+        Server::secure(clock, net, address, node.entropy().rng(), mode, body).await
+    }
+
+    #[test]
+    fn a_client_reads_over_a_channel_in_the_mode_of_a_secure_server() {
+        for mode in [Mode::Sign, Mode::SignAndEncrypt] {
+            let result = run(async move |node| {
+                let body = async |server: &Server| {
+                    let mut client = server.connect(1).await;
+                    client.read(Variable::Number).await;
+                    let channel = channel(&client.session);
+                    client.close().await;
+                    channel
+                };
+                secure(&node, mode, body).await
+            });
+            let policy = Policy::Basic256Sha256.uri().to_string_lossy().into_owned();
+            assert_eq!(result, Ok((policy, ffi::Mode::from(mode))), "{mode:?}");
+        }
+    }
+
+    /// open62541 fails a connect with `BadIdentityTokenRejected` when the server
+    /// offers no endpoint in the mode of the client. The test calls the private
+    /// `Server::dial`: no public call connects in a mode other than that of the server.
+    #[test]
+    fn a_secure_server_offers_no_endpoint_in_another_mode() {
+        let modes = [
+            (Mode::Sign, Some(Mode::SignAndEncrypt)),
+            (Mode::SignAndEncrypt, Some(Mode::Sign)),
+            (Mode::Sign, None),
+        ];
+        let results = modes.map(|(served, mode)| {
+            run(async move |node| {
+                let body = async |server: &Server| server.dial(mode).await.map(drop);
+                secure(&node, served, body).await
+            })
+        });
+        let refused = || Ok(Err(Error::Failed(Status::BAD_IDENTITY_TOKEN_REJECTED)));
+        assert_eq!(results, [refused(), refused(), refused()]);
     }
 
     #[test]

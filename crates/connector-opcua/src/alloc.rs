@@ -3,11 +3,14 @@
 //! so each C allocation goes through the global allocator of the binary. Each keeps
 //! the C contract: a failure gives NULL and never panics, and each pointer is aligned
 //! to 16. [`exhausted`] stops the process when a constructor of `shim.c` gives NULL.
+//! Behind `sim`, [`route_crypto`] gives these functions to aws-lc too.
 
 #![expect(unsafe_code, reason = "C allocates through these functions")]
 
 use std::alloc::{self, Layout};
 use std::ffi::c_void;
+#[cfg(feature = "sim")]
+use std::ffi::{c_char, c_int};
 use std::ptr;
 
 /// The alignment of each block, the `max_align_t` of each target, and the size of the
@@ -171,6 +174,63 @@ unsafe extern "C" fn connector_opcua_free(ptr: *mut c_void) {
     let (block, layout) = unsafe { block(ptr) };
     // SAFETY: `block` is a live block of `layout`, from the global allocator.
     unsafe { alloc::dealloc(block, layout) };
+}
+
+/// Makes `OPENSSL_malloc`, `OPENSSL_realloc`, and `OPENSSL_free` of aws-lc use the
+/// global allocator of the binary, so a counting allocator counts the blocks of aws-lc
+/// too, other than the blocks that aws-lc takes from `malloc` itself: the array of its
+/// thread locals, one block for each thread, and its error queue (the state of each
+/// thread that puts an error, and the data of each error). aws-lc then does not clear a
+/// block before it frees it.
+///
+/// # Safety
+///
+/// When no earlier call routed aws-lc, no block of aws-lc is live: call it before the
+/// first call of aws-lc in the process. The free of an older block reads a header that
+/// it does not have.
+///
+/// # Panics
+///
+/// When aws-lc already has the functions of another call of
+/// `CRYPTO_set_mem_functions`.
+#[cfg(feature = "sim")]
+pub unsafe fn route_crypto() {
+    extern "C" fn crypto_malloc(
+        size: usize,
+        _: *const c_char,
+        _: c_int,
+    ) -> *mut c_void {
+        connector_opcua_malloc(size)
+    }
+    /// # Safety
+    ///
+    /// `ptr` is NULL or a live block of `crypto_malloc` or `crypto_realloc`.
+    unsafe extern "C" fn crypto_realloc(
+        ptr: *mut c_void,
+        size: usize,
+        _: *const c_char,
+        _: c_int,
+    ) -> *mut c_void {
+        // SAFETY: the caller gives NULL or a live block of these functions.
+        unsafe { connector_opcua_realloc(ptr, size) }
+    }
+    /// # Safety
+    ///
+    /// As `crypto_realloc`.
+    unsafe extern "C" fn crypto_free(ptr: *mut c_void, _: *const c_char, _: c_int) {
+        // SAFETY: as in `crypto_realloc`.
+        unsafe { connector_opcua_free(ptr) }
+    }
+    // SAFETY: aws-lc keeps the three functions, which live for the process, and the
+    // caller ensures that no block of aws-lc is live.
+    let set = unsafe {
+        aws_lc_sys::CRYPTO_set_mem_functions(
+            Some(crypto_malloc),
+            Some(crypto_realloc),
+            Some(crypto_free),
+        )
+    };
+    assert!(set == 1, "aws-lc already has the functions of another call");
 }
 
 #[cfg(test)]
