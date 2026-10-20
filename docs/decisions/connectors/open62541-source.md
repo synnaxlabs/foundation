@@ -1098,7 +1098,7 @@
   supersedes the first item of
   https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6272707868 for such
   a line). Such an `END` line fails in aws-lc on each target as
-  `client::Refusal::Invalid`, unless it names the label of a block that such a `BEGIN`
+  `client::Refusal::Damaged`, unless it names the label of a block that such a `BEGIN`
   line starts; that block drops
   (https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6278296455;
   `laptop.architect-2`,
@@ -1181,10 +1181,11 @@
   for out of memory and the cause (`BadCertificateInvalid` of the policies when
   `UA_OpenSSL_LoadCertificate` gives NULL, `BadInvalidArgument` of the policies when
   `i2d_X509` fails, the key pair check, the URI check when `X509_get_ext_d2i` gives
-  NULL, and the trust load when `d2i_X509` or `PEM_bytes_read_bio` fails, which gives
-  `Invalid`, or `Empty` at the first DER certificate, as the load does not read the
-  `ERR_R_MALLOC_FAILURE` of aws-lc, #3391), the refusal names the cause, and the time
-  check gives `Failed(BadCertificateInvalid)` when its load of the certificate fails
+  NULL, and the trust load when `d2i_X509` fails, which gives `Invalid`, or `Empty` at
+  the first DER certificate, or `PEM_bytes_read_bio` fails, which gives `Damaged`, as
+  the load does not read the `ERR_R_MALLOC_FAILURE` of aws-lc, #3391), the refusal
+  names the cause, and the time check gives `Failed(BadCertificateInvalid)` when its
+  load of the certificate fails
   (`laptop.monitor`, 2026-10-19 14:46 UTC,
   https://github.com/synnaxlabs/foundation/pull/3371#issuecomment-6270025607, item 2;
   `laptop.architect-2`, 2026-10-19 14:49 UTC,

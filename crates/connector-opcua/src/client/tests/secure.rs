@@ -301,6 +301,12 @@ fn invalid(number: usize) -> Error {
     Error::Refused(Refusal::Invalid { number })
 }
 
+/// The refusal of a trust with a PEM block that does not read after `after`
+/// certificates.
+fn damaged(after: usize) -> Error {
+    Error::Refused(Refusal::Damaged { after })
+}
+
 /// The refusal of a trust whose block of certificate `number` holds bytes after it.
 fn trailing(number: usize) -> Error {
     Error::Refused(Refusal::Trailing { number })
@@ -315,7 +321,7 @@ fn a_trust_whose_second_certificate_does_not_parse_ends_the_connect() {
 fn a_trust_whose_second_block_has_no_end_line_ends_the_connect() {
     let (other, _) = blocks();
     let trust = format!("{other}-----BEGIN CERTIFICATE-----\nMIIB\n");
-    assert_eq!(trusting(trust), Err(invalid(2)));
+    assert_eq!(trusting(trust), Err(damaged(1)));
 }
 
 #[test]
@@ -323,8 +329,22 @@ fn a_trust_with_a_damaged_or_empty_block_of_another_label_ends_the_connect() {
     let (other, _) = blocks();
     for body in ["!!!!\n", ""] {
         let trust = format!("{other}-----BEGIN NOTE-----\n{body}-----END NOTE-----\n");
-        assert_eq!(trusting(trust), Err(invalid(2)), "{body:?}");
+        assert_eq!(trusting(trust), Err(damaged(1)), "{body:?}");
     }
+}
+
+#[test]
+fn a_damaged_block_between_two_certificates_names_the_certificate_before_it() {
+    let (other, server) = blocks();
+    let key = "-----BEGIN PRIVATE KEY-----\n!!!!\n-----END PRIVATE KEY-----\n";
+    assert_eq!(trusting(format!("{other}{key}{server}")), Err(damaged(1)));
+}
+
+#[test]
+fn a_damaged_block_before_each_certificate_names_none() {
+    let (other, _) = blocks();
+    let note = "-----BEGIN NOTE-----\n!!!!\n-----END NOTE-----\n";
+    assert_eq!(trusting(format!("{note}{other}")), Err(damaged(0)));
 }
 
 #[test]
@@ -390,7 +410,7 @@ fn a_trust_whose_end_line_names_another_label_ends_the_connect() {
         let server = server.replacen(line, with, 1);
         assert_eq!(
             trusting(format!("{other}{server}")),
-            Err(invalid(2)),
+            Err(damaged(1)),
             "{with}"
         );
     }
@@ -461,7 +481,7 @@ fn a_begin_line_whose_label_holds_a_high_byte_starts_a_block() {
     let (other, server) = blocks();
     let begin = "-----BEGIN CERTIFICATE-----\u{A0}-----";
     let server = server.replacen("-----BEGIN CERTIFICATE-----", begin, 1);
-    assert_eq!(trusting(format!("{other}{server}")), Err(invalid(2)));
+    assert_eq!(trusting(format!("{other}{server}")), Err(damaged(1)));
     let end = "-----END CERTIFICATE-----\u{A0}-----";
     let server = server.replacen("-----END CERTIFICATE-----", end, 1);
     assert_eq!(
@@ -513,7 +533,7 @@ fn a_begin_line_with_no_space_or_four_dashes_starts_no_block() {
 #[test]
 fn an_end_line_of_10_bytes_ends_a_block() {
     let trust = [b"-----BEGIN X-----\n-----END X\nnote \xA0\n", TRUST].concat();
-    assert_eq!(trusting(trust), Err(invalid(1)));
+    assert_eq!(trusting(trust), Err(damaged(0)));
 }
 
 #[test]
@@ -676,8 +696,15 @@ fn a_refusal_names_the_part_that_fails() {
         ),
         (
             Refusal::Invalid { number: 2 },
-            "certificate 2 of the trust, or a damaged PEM block in its place, does not \
-             parse",
+            "certificate 2 of the trust does not parse",
+        ),
+        (
+            Refusal::Damaged { after: 1 },
+            "a PEM block after certificate 1 of the trust is damaged",
+        ),
+        (
+            Refusal::Damaged { after: 0 },
+            "a PEM block of the trust before its first certificate is damaged",
         ),
         (
             Refusal::Trailing { number: 3 },
