@@ -122,7 +122,7 @@ pub fn needs(body: &Body, key: &str, held: &Document) -> bool {
 /// Asserts that each example holds to its body. At each site of each example,
 /// `problems` finds none in the example, none with an attribute removed that its site
 /// does not need, and none with each attribute with a default of its site removed. Each
-/// `Unless` and `When` of a site names at least one attribute, and each name is an
+/// `Unless` and `When` of a site names at least one attribute, and each name is another
 /// attribute of that site. Each item of `examples` is a key that `problems` gets, the
 /// body, and the example.
 ///
@@ -158,7 +158,8 @@ pub fn assert_examples<K>(
                 };
                 assert!(!others.is_empty(), "{}: {}", body.summary, attribute.name);
                 for other in others {
-                    let stated = body.attributes.iter().any(|key| key.name == *other);
+                    let stated = *other != attribute.name
+                        && body.attributes.iter().any(|key| key.name == *other);
                     assert!(stated, "{}: {}: {other}", body.summary, attribute.name);
                     names = names.saturating_add(1);
                 }
@@ -279,6 +280,15 @@ mod tests {
 
     const NOTHING: Body =
         holding("Nothing.", &[attribute("w", Presence::When(&[]))], &[]);
+
+    const SELF: Body = holding(
+        "Self.",
+        &[
+            attribute("b", Presence::Default("1")),
+            attribute("w", Presence::When(&["w"])),
+        ],
+        &[],
+    );
 
     const WHEN: Body = holding(
         "When.",
@@ -449,6 +459,13 @@ mod tests {
     fn fails_a_when_that_names_no_attribute_of_its_body() {
         let example = document(&["b"], Vec::new());
         assert_examples([((), &WHEN, example)], |(), _| Vec::new());
+    }
+
+    #[test]
+    #[should_panic(expected = "Self.: w: w")]
+    fn fails_a_when_that_names_its_own_attribute() {
+        let example = document(&["b", "w"], Vec::new());
+        assert_examples([((), &SELF, example)], |(), _| Vec::new());
     }
 
     #[test]

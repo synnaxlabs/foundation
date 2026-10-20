@@ -20,7 +20,7 @@
   it does not need, with a `document.missing-attribute` that names one that it needs
   when that one is removed, still with each attribute with a default removed at once,
   and with one `document.unknown-attribute` for a name that the body does not state.
-  Each `Unless` and each `When` names at least one attribute, and each name is an
+  Each `Unless` and each `When` names at least one attribute, and each name is another
   attribute of its body. Without the `kind` that picks its form, a block reads as the
   form whose `kind` has a default. No test reads the text of `value` or of a `Default`.
   The first block of an example is of its body, and of a block with more than one form,
