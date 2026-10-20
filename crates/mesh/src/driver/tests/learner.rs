@@ -49,10 +49,9 @@ fn a_learner_that_no_leader_can_dial_applies_the_changes_of_each_leader() {
     }
 }
 
-// A dial of the learner reuses an open session, so the test restarts a follower,
-// which then holds only the sessions dialed after its restart.
-// A dial gives the open session to the peer, and the session of node 4 to the
-// follower that crashes ends only at `IDLE`, so the run after the restart is longer.
+// A dial gives the open session to its peer, so the test restarts a follower, which
+// then holds only the sessions made after its restart. The old session of node 4 to
+// it ends at the first ping, each third of `IDLE`, so the run after is longer.
 #[test]
 fn a_learner_that_the_leader_reaches_dials_no_voter() {
     for seed in 0..4 {
@@ -74,7 +73,7 @@ fn a_learner_that_the_leader_reaches_dials_no_voter() {
         cluster.board.lock().unwrap().learners = [4].into();
         cluster.script(|_| home_to(9));
         cluster.start_voter(follower);
-        cluster.run(seconds(70));
+        cluster.run(seconds(30));
         let board = cluster.board();
         assert_eq!(last(&board.homes, 4), Some(key(9)), "run {seed}");
         let homes = last(&board.homes, follower);
@@ -88,27 +87,38 @@ fn a_learner_that_the_leader_reaches_dials_no_voter() {
     }
 }
 
-// With no leader, node 4 names the voters in key order, one each two election
-// timeouts, and starts again after the last. Each look falls half a tick after a
-// tick.
+// No voter answers node 4, so each dial waits until it times out.
 #[test]
-fn a_learner_that_no_leader_reaches_names_each_voter_in_turn() {
+fn the_drop_of_the_mesh_stops_the_dial_of_a_learner() {
+    for seed in 0..8 {
+        solo_at(seed, move |node, tasks| async move {
+            let config = dialed_at(&node, &tasks, 4, 0, &MEMBERS, &IDS).await;
+            let transport = Rc::clone(&config.transport);
+            let mesh = Mesh::open(config).await.unwrap();
+            let clock = node.clock();
+            clock.sleep(seconds(5)).await;
+            let ended = mesh.ended();
+            let dropped = clock.now();
+            drop(mesh);
+            ended.await;
+            let waited = clock.now() - dropped;
+            assert!(waited <= TICK, "seed {seed}: it ended after {waited}");
+            assert_eq!(Rc::strong_count(&transport), 1, "seed {seed}");
+        });
+    }
+}
+
+// No voter answers node 4, so each dial would wait until it times out.
+#[test]
+fn a_learner_stops_its_dial_when_it_names_the_next_voter() {
     solo(|node, tasks| async move {
-        let mesh = open(&node, &tasks, 4, &MEMBERS, &IDS).await.unwrap();
+        let config = dialed_at(&node, &tasks, 4, 0, &MEMBERS, &IDS).await;
+        let transport = Rc::clone(&config.transport);
+        let _mesh = Mesh::open(config).await.unwrap();
         let clock = node.clock();
-        clock.sleep(Span::from_nanos(TICK.nanos() / 2)).await;
-        let mut turns = Vec::new();
-        let mut turn = None;
-        let quiet = 2 * ELECTION_TICKS;
-        for tick in 0..=4 * quiet {
-            let now = mesh.group.borrow().turn;
-            if now != turn {
-                turns.push((tick, now));
-                turn = now;
-            }
-            clock.sleep(TICK).await;
-        }
-        let at = |turn, id| (turn * quiet, Some(key(id)));
-        assert_eq!(turns, [at(1, 1), at(2, 2), at(3, 3), at(4, 1)]);
+        clock.sleep(seconds(3)).await;
+        let one = Rc::strong_count(&transport);
+        clock.sleep(seconds(30)).await;
+        assert_eq!(Rc::strong_count(&transport), one);
     });
 }

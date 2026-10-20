@@ -81,7 +81,8 @@ impl Senders {
                     group.starter = Some(cx.waker().clone());
                     return Poll::Pending;
                 }
-                Poll::Ready(Some((mem::take(&mut group.fresh), group.reach.take())))
+                let reach = group.reach.take().map(|to| (to, group.reaches));
+                Poll::Ready(Some((mem::take(&mut group.fresh), reach)))
             });
             let Some((fresh, reach)) = fresh.await else {
                 return;
@@ -89,26 +90,30 @@ impl Senders {
             for to in fresh {
                 self.tasks.tasks().spawn(self.clone().send(to));
             }
-            if let Some(to) = reach {
-                self.tasks.tasks().spawn(self.clone().reach(to));
+            if let Some((to, dial)) = reach {
+                self.tasks.tasks().spawn(self.clone().reach(to, dial));
             }
         }
     }
 
-    // Dials `to` and keeps the session in the group while it runs, so that `to`
-    // can send on it. A failed dial does nothing: the group names the next voter
-    // after a timeout.
-    async fn reach(self, to: node::Key) {
-        let contact = self.running().and_then(|group| group.borrow().contact(to));
-        let Some((public_key, addresses)) = contact else {
-            return;
-        };
-        let Ok(session) = self.transport.dial(public_key, &addresses).await else {
-            return;
-        };
-        if let Some(group) = self.running() {
-            group.borrow_mut().sessions.insert(to, session);
-        }
+    // Dials `to`, so that `to` can send on the session. The dial stops when the
+    // group stops or drops, or names the dial after `dial`. A failed dial does
+    // nothing: the group names the next voter after a timeout.
+    async fn reach(self, to: node::Key, dial: u64) {
+        let mut dialed = pin!(self.dial(to));
+        poll_fn(|cx| {
+            let Some(group) = self.running() else {
+                return Poll::Ready(());
+            };
+            let mut group = group.borrow_mut();
+            if group.reaches != dial {
+                return Poll::Ready(());
+            }
+            group.reacher = Some(cx.waker().clone());
+            drop(group);
+            dialed.as_mut().poll(cx).map(drop)
+        })
+        .await;
     }
 
     // Sends each message for `to`. A message that fails drops, with the part that
@@ -199,8 +204,8 @@ impl Senders {
         running.then_some(group)
     }
 
-    // The group, in a step of the send of a message: `alive` found it at the last
-    // poll, and no other task ran since.
+    // The group, in a step of the send of a message or of a reach: `alive` or
+    // `reach` found it at the last poll, and no other task ran since.
     fn group(&self) -> Rc<RefCell<Group>> {
         let group = self.group.upgrade();
         group.expect("invariant: the group lives in each step of a send")

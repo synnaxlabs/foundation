@@ -40,6 +40,7 @@ use crate::status::Status;
 use bound::Bound;
 pub use founding::founding;
 use send::Senders;
+use turn::Turn;
 use used::{Opening, Used};
 
 mod addresses;
@@ -52,6 +53,7 @@ mod peer;
 mod propose;
 mod send;
 mod stream;
+mod turn;
 
 pub(crate) use peer::CHUNKS;
 pub(crate) mod used;
@@ -60,10 +62,6 @@ mod version;
 /// The time of one `raft` tick.
 const TICK: Span = Span::from_nanos(100 * Span::MILLISECOND.nanos());
 const ELECTION_TICKS: u32 = 10;
-/// The ticks after which a member that is not a voter, with no message from the
-/// leader, dials a voter. A leader sends it a heartbeat at each quorum check, which
-/// comes each `ELECTION_TICKS`.
-const QUIET_TICKS: u32 = 2 * ELECTION_TICKS;
 
 /// The header that goes first on each stream that this node opens.
 fn header(pool: &Pool) -> Result<Block, block::Error> {
@@ -409,7 +407,8 @@ impl Mesh {
         }
         claim::check(&group.raft, &mut message, |key| group.public_key(key))?;
         group.input(|raft| raft.step(message))?;
-        group.heard(from);
+        let leader = group.raft.leader();
+        group.turn.heard(leader, from);
         group.sync();
         group.wake();
         Ok(())
@@ -765,8 +764,8 @@ struct Group {
     raft: Raft,
     state: region::State,
     queues: BTreeMap<node::Key, Queue>,
-    // The session to each member that its task dialed, until a send finds that the
-    // session failed or the group stops.
+    // The session to each member that its task or a reach dialed, until a send finds
+    // that the session failed or the group stops.
     sessions: BTreeMap<node::Key, Session>,
     // Why the group stopped. Each watch shares it, so the cause outlives the group.
     stopped: Rc<OnceCell<Stopped>>,
@@ -791,13 +790,13 @@ struct Group {
     fresh: Vec<node::Key>,
     // The voter that `Senders::run` dials next, for a member that is not a voter.
     reach: Option<node::Key>,
+    // The count of dials that `reach` named. A dial stops when the next is named.
+    reaches: u64,
+    // The task of the dial that `reach` named last, while it waits.
+    reacher: Option<Waker>,
     // The task of `Senders::run`, while it waits for a new queue or a `reach`.
     starter: Option<Waker>,
-    // The ticks since the leader last reached this node.
-    quiet: u32,
-    // The voter that led when it last reached this node, else the last that
-    // `reach` named.
-    turn: Option<node::Key>,
+    turn: Turn,
     applied: Applied,
     // The task of each call that waits for the outcome of a try of its proposal, or
     // for a read of the spec.
@@ -830,9 +829,10 @@ impl Group {
             waits: None,
             fresh: Vec::new(),
             reach: None,
+            reaches: 0,
+            reacher: None,
             starter: None,
-            quiet: 0,
-            turn: None,
+            turn: Turn::new(),
             applied: Applied::default(),
             calls: BTreeMap::new(),
             used,
@@ -994,35 +994,12 @@ impl Group {
         slot
     }
 
-    // Notes that the leader reached this node when `from`, the sender of a message
-    // that `raft` just took, leads.
-    fn heard(&mut self, from: node::Key) {
-        if self.raft.leader() == Some(from) {
-            self.quiet = 0;
-            self.turn = Some(from);
-        }
-    }
-
-    // Counts a tick. A member that is not a voter and that no leader reached for
-    // `QUIET_TICKS` dials the next voter after `turn`, in key order: a leader that
-    // has no address of this node then sends on that session.
-    fn tick(&mut self) {
-        let voters = self.raft.voters();
-        if voters.contains(self.raft.key()) {
-            return;
-        }
-        self.quiet = self.quiet.saturating_add(1);
-        if self.quiet < QUIET_TICKS {
-            return;
-        }
-        self.quiet = 0;
-        let after = |key: &node::Key| self.turn.is_some_and(|turn| *key > turn);
-        let next = voters.nodes().find(after).or_else(|| voters.nodes().next());
-        if let Some(next) = next {
-            self.turn = Some(next);
-            self.reach = Some(next);
-            self.starter.take().into_iter().for_each(Waker::wake);
-        }
+    // Asks `Senders::run` to dial `to`, which stops the dial it asked for before.
+    fn reach(&mut self, to: node::Key) {
+        self.reach = Some(to);
+        self.reaches = self.reaches.wrapping_add(1);
+        let waiting = self.reacher.take().into_iter();
+        waiting.chain(self.starter.take()).for_each(Waker::wake);
     }
 
     // Tells `run` that the group has an input.
@@ -1066,7 +1043,8 @@ impl Group {
         self.sessions.clear();
         let queues = self.queues.values_mut();
         let waiting = queues.filter_map(|queue| queue.waker.take());
-        waiting.chain(self.starter.take()).for_each(Waker::wake);
+        let starters = self.starter.take().into_iter().chain(self.reacher.take());
+        waiting.chain(starters).for_each(Waker::wake);
     }
 
     // Applies each change in `committed`, and wakes each watch when a home moves.
@@ -1369,7 +1347,11 @@ async fn run(
             // slows.
             while Pin::new(&mut tick).poll(cx).is_ready() {
                 group.input(|raft| raft.tick(rng.next_u64()));
-                group.tick();
+                let group = &mut *group;
+                if let Some(to) = group.turn.tick(group.raft.voters(), group.raft.key())
+                {
+                    group.reach(to);
+                }
                 tick = clock.sleep(TICK);
             }
             let ready = group.raft.ready();
@@ -1553,8 +1535,8 @@ mod tests {
         settled: Vec<(u8, Settled)>,
         /// Each `Error::Contested` that a serve gave, in order, with its node.
         contested: Vec<(u8, Error)>,
-        /// Each session that a peer opened to a node, in order: the node, and the
-        /// public key of the peer.
+        /// Each new session of a node, also one that it dialed, in order: the node,
+        /// and the public key of the peer.
         opened: Vec<(u8, PublicKey)>,
         /// The members that are not founding voters.
         learners: BTreeSet<u8>,
