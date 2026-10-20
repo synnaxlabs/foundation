@@ -551,7 +551,8 @@
   Amended (2026-10-20, PR 5e of #336): the mesh directory also holds the file `join`,
   which `join::ask` writes before its first ask (MEMBER RECORD). Its check, version,
   and frame are those of `founding`, and a body over `change::BYTES_MAX` bytes gives
-  `Error::JoinFile` with no read. A founding never holds a node that joined, so the file
+  `Error::JoinFile` with no read, as a body of `founding` over `FOUNDING_BYTES_MAX`
+  bytes gives `Error::Unfounded`. A founding never holds a node that joined, so the file
   stays for the life of the directory: each open of a founding that lacks this node
   reads it. An `ask` in a directory that holds `founding` gives `Error::Founded`, so a
   node that opened a region never writes over its join file (`laptop.architect`,

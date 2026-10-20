@@ -113,6 +113,10 @@
   and homes, which still has no bound and needs the chunks of the founding tree at
   the voter (`laptop.architect`, 2026-10-19T00:03:42Z:
   https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6256819172).
+  Amended (2026-10-20, round 2 of PR 5e of #336): "only a first open checks it" is of
+  the founding that the open is given. Each read of the founding file refuses a body
+  over `FOUNDING_BYTES_MAX` with `Error::Unfounded`, with no read. A file that a first
+  open wrote is never over it, so a node with a stored founding still always opens.
   `Config::time` gives the mesh time of the stamp, and a voter with no such time answers
   `Unsynced` (same ruling). `stamp` gives the `Refusal` of the answer, so `Unstamped` is
   gone, and `Unstamped::Stopped` above is `Refusal::Stopped`, which holds no cause: the
