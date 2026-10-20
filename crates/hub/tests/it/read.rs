@@ -205,7 +205,7 @@ fn refuses_a_read_signed_with_another_key_or_as_a_request() {
             finish(&mut agent).await;
         },
     );
-    let signature = || Err(serve::Error::Access(Refusal::Signature));
+    let signature = || Err(serve::Error::Access(Box::new(Refusal::Signature)));
     assert_eq!(home.served, [signature(), signature(), Ok(Got::Ended)]);
 }
 
@@ -735,12 +735,13 @@ where
     let (kept, giving) = (Arc::clone(&served), Arc::clone(&given));
     let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
         let transport = Rc::new(transport(&node, &tasks, &own_pool(), HOME, 1 << 16));
-        let region =
+        let region = Some(
             region::open(&node, &tasks, Rc::clone(&transport), Vec::new(), channels())
-                .await;
+                .await,
+        );
         let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
         let mut test =
-            Test::new(node.clone(), tasks.clone(), layout, POOL, Some(region)).await;
+            Test::new(node.clone(), NODE, tasks.clone(), layout, POOL, region).await;
         test.sync().await;
         test.hub.set_rules(rules());
         let session = transport.accept().await.expect("a session");
@@ -905,12 +906,13 @@ fn stops_a_read_whose_home_is_another_node_as_not_home() {
     let (kept, counted) = (Arc::clone(&served), Arc::clone(&sets));
     let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
         let transport = Rc::new(transport(&node, &tasks, &own_pool(), HOME, 1 << 16));
-        let region =
+        let region = Some(
             region::open(&node, &tasks, Rc::clone(&transport), Vec::new(), channels())
-                .await;
+                .await,
+        );
         let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
         let mut test =
-            Test::new(node.clone(), tasks.clone(), layout, POOL, Some(region)).await;
+            Test::new(node.clone(), NODE, tasks.clone(), layout, POOL, region).await;
         test.sync().await;
         test.set_home(TIME, region::OTHER).await;
         test.set_home(TIME_B, NODE).await;

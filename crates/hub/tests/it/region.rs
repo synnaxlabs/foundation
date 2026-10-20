@@ -66,7 +66,7 @@ where
         let region =
             open(&node, &tasks, Rc::new(transport), Vec::new(), channels()).await;
         let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
-        main(Test::new(node, tasks, layout, POOL, Some(region)).await).await;
+        main(Test::new(node, NODE, tasks, layout, POOL, Some(region)).await).await;
     })
     .expect("the run ends");
 }
@@ -740,8 +740,8 @@ fn a_reader_of_an_index_at_a_member_with_no_address_does_not_reach_it() {
         let opened = test.hub.reader(unnamed(&names, reader::Mode::Latest)).await;
         let error = opened.expect_err("the other node has no address");
         let unreachable = transport::Error::Unreachable {
-            peer: public_key(&PEER),
-            attempts: Vec::new(),
+            peer: Some(public_key(&PEER)),
+            attempts: Box::default(),
         };
         assert_eq!(error, reader::Error::Transport(unreachable));
         assert_eq!(

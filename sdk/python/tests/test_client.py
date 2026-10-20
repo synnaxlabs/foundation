@@ -16,10 +16,10 @@ import threading
 import time
 import typing
 import unittest
-import uuid
 import warnings
 
 import foundation
+from test_stubs import assert_stated, called
 
 PATIENCE = 90.0
 # The node sends its close before it exits. No call of the client shows that the client
@@ -186,7 +186,7 @@ class ClientTest(unittest.TestCase):
 
     def test_a_client_connects_and_connects_again_after_its_close(self) -> None:
         client = self.node.connect()
-        self.assertIsNone(client.close())
+        called(self, client.close)
         self.assertIsNone(client.close())
         client = self.node.connect()
         del client
@@ -194,6 +194,9 @@ class ClientTest(unittest.TestCase):
     def test_a_with_block_closes_the_client(self) -> None:
         with self.node.connect() as client:
             self.assertIsInstance(client, foundation.Client)
+        client = self.node.connect()
+        self.assertIs(called(self, client.__enter__), client)
+        called(self, client.__exit__, None, None, None)
         self.node.stop()
         time.sleep(CLOSED)
         self.assertIsNone(client.close())
@@ -312,14 +315,16 @@ class ClientTest(unittest.TestCase):
         cwd = os.getcwd()
         self.addCleanup(os.chdir, cwd)
         os.chdir(self.node.dir.name)
-        with foundation.connect() as client:
+        with called(self, foundation.connect) as client:
             self.assertEqual(client.address, self.node.address)
-        with foundation.connect(self.node.address) as client:
+        with called(self, foundation.connect, self.node.address) as client:
             self.assertEqual(client.address, self.node.address)
 
     def test_the_subject_keywords_win_over_the_data_directory(self) -> None:
         with self.assertRaises(ConnectionError) as raised:
             self.node.connect(subject=ADMIN, private_key=bytes(32))
+        assert_stated(self, raised.exception)
+        self.assertEqual(raised.exception.code, "refused")
         self.assertEqual(
             str(raised.exception),
             "the spec has no such subject, does not list the key for it, or the "
@@ -332,13 +337,17 @@ class ClientTest(unittest.TestCase):
             foundation.connect(at, data=self.node.data)
         self.assertEqual(
             str(raised.exception),
-            f"no source gives the keys of the node at {at}: {self.node.data} holds "
-            f"the node at {self.node.address}; pass node= and public_key=, or connect "
-            f"to {self.node.address}",
+            f"no source gives the public key of the node at {at}: {self.node.data} "
+            f"holds the node at {self.node.address}; pass public_key=, or connect to "
+            f"{self.node.address}",
         )
         with self.assertRaises(ConnectionError) as raised:
-            foundation.connect(
-                at, node=uuid.UUID(int=1), public_key=WRONG, data=self.node.data
+            called(
+                self,
+                foundation.connect,
+                at,
+                public_key=WRONG,
+                data=self.node.data,
             )
         self.assertEqual(
             str(raised.exception),
@@ -348,7 +357,8 @@ class ClientTest(unittest.TestCase):
         )
 
     def test_the_data_directory_can_be_a_path(self) -> None:
-        with foundation.connect(data=pathlib.Path(self.node.data)) as client:
+        data = pathlib.Path(self.node.data)
+        with called(self, foundation.connect, data=data) as client:
             self.assertEqual(client.address, self.node.address)
 
     def test_a_data_directory_with_no_admin_key_gives_no_subject(self) -> None:
@@ -365,8 +375,12 @@ class ClientTest(unittest.TestCase):
             str(raised.exception), f"{copy.name} holds no admin.key that a node wrote"
         )
         with self.assertRaises(ConnectionError) as raised:
-            foundation.connect(
-                data=copy.name, subject="plant.operator", private_key=bytes(32)
+            called(
+                self,
+                foundation.connect,
+                data=copy.name,
+                subject="plant.operator",
+                private_key=bytes(32),
             )
         self.assertEqual(
             str(raised.exception),
@@ -385,7 +399,7 @@ class ClientTest(unittest.TestCase):
 
     def test_a_wrong_public_key_is_not_authenticated(self) -> None:
         with self.assertRaises(ConnectionError) as raised:
-            self.node.connect(node=uuid.UUID(int=1), public_key=WRONG)
+            self.node.connect(public_key=WRONG)
         address = self.node.address
         self.assertEqual(
             str(raised.exception),
@@ -434,7 +448,6 @@ class ArgumentTest(unittest.TestCase):
         return foundation.connect(
             **{
                 "address": "127.0.0.1:1",
-                "node": uuid.UUID(int=1),
                 "public_key": BASE,
                 "subject": ADMIN,
                 "private_key": bytes(32),
@@ -465,8 +478,6 @@ class ArgumentTest(unittest.TestCase):
 
     def test_a_pair_given_in_half_is_refused(self) -> None:
         for half, text in [
-            ({"node": uuid.UUID(int=1)}, "node and public_key"),
-            ({"public_key": BASE}, "node and public_key"),
             ({"subject": ADMIN}, "subject and private_key"),
             ({"private_key": bytes(32)}, "subject and private_key"),
         ]:
@@ -504,7 +515,7 @@ class ArgumentTest(unittest.TestCase):
             foundation.connect("127.0.0.1:1", data=self.directory())
         self.assertEqual(
             str(raised.exception),
-            "no source gives the keys of the node at 127.0.0.1:1: pass node= and "
+            "no source gives the public key of the node at 127.0.0.1:1: pass "
             "public_key=, or data= with the --data of foundation start on the node's "
             "host",
         )
@@ -513,7 +524,6 @@ class ArgumentTest(unittest.TestCase):
         with self.assertRaises(ConnectionError) as raised:
             foundation.connect(
                 "127.0.0.1:1",
-                node=uuid.UUID(int=1),
                 public_key=BASE,
                 data=self.directory(),
             )
@@ -535,7 +545,7 @@ class ArgumentTest(unittest.TestCase):
                 "syntax",
             ),
             (
-                {"node": uuid.UUID(int=1), "public_key": bytes(31)},
+                {"public_key": bytes(31)},
                 "public_key is 31 bytes, not 32",
             ),
             (
@@ -612,10 +622,12 @@ class ArgumentTest(unittest.TestCase):
             self.connect(private_key=bytes(33))
         self.assertEqual(str(raised.exception), "private_key is 33 bytes, not 32")
 
-    def test_a_node_that_is_not_a_uuid_is_refused(self) -> None:
+    def test_a_node_key_is_no_argument(self) -> None:
         with self.assertRaises(TypeError) as raised:
             self.connect(node=1)
-        self.assertEqual(str(raised.exception), "node is int, not uuid.UUID")
+        self.assertEqual(
+            str(raised.exception), "connect() got an unexpected keyword argument 'node'"
+        )
 
     def test_a_subject_that_is_not_a_name_is_refused(self) -> None:
         with self.assertRaises(ValueError) as raised:
@@ -623,9 +635,13 @@ class ArgumentTest(unittest.TestCase):
         self.assertEqual(str(raised.exception), "subject: a name or pattern is empty")
 
     def test_a_data_directory_with_a_nul_byte_is_refused(self) -> None:
-        with self.assertRaises(ValueError) as raised:
-            self.connect(data="a\0b")
-        self.assertEqual(str(raised.exception), "data: the path holds a NUL byte")
+        for given, connect in (("data", foundation.connect), ("each", self.connect)):
+            with self.subTest(given=given):
+                with self.assertRaises(ValueError) as raised:
+                    connect(data="a\0b")
+                self.assertEqual(
+                    str(raised.exception), "data: the path holds a NUL byte"
+                )
 
     def test_other_threads_run_while_a_client_dials(self) -> None:
         silent = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)

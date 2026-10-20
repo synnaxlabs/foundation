@@ -1,0 +1,15 @@
+node {
+  public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPJio0ewQQkFj37UOssW9cm2gKr9m075UHcwrYgPa9Xo"
+}
+node "10.0.0.5" {
+  public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPJio0ewQQkFj37UOssW9cm2gKr9m075UHcwrYgPa9Xo"
+}
+node "10.0.0.6:7400" {
+}
+node "10.0.0.7:7400" {
+  public_key = "ssh-ed25519"
+  key = "a"
+}
+node "10.0.0.8:7400" {
+  public_key = 3
+}

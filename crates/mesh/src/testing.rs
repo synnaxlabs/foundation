@@ -408,30 +408,45 @@ mod tests {
 
     #[test]
     fn each_holder_bound_input_is_what_its_name_says() {
-        let inputs = inputs!("mesh_change": "spec_holders_64", "spec_holders_65");
-        let at_bound = Change::Spec {
+        let inputs = inputs!(
+            "mesh_change": "spec_holders_64",
+            "spec_holders_65",
+            "spec_holders_128_homes_0",
+            "spec_holders_129_homes_0",
+        );
+        let held = |count: u8| Change::Spec {
             base: Pointer {
                 version: 1,
                 root: Digest([2; 32]),
             },
             root: Digest([3; 32]),
             chunks: BTreeSet::new(),
-            holders: (1..=64).map(key).collect(),
+            holders: (1..=count).map(key).collect(),
             homes: BTreeMap::new(),
         };
-        let mut bytes = unhomed(&at_bound);
-        assert_eq!(inputs["spec_holders_64"], bytes);
-        assert_eq!(Change::decode(&homed(&bytes)), Ok(at_bound));
+        for (name, count) in [("spec_holders_64", 64), ("spec_holders_65", 65)] {
+            let bytes = unhomed(&held(count));
+            assert_eq!(inputs[name], bytes, "{name}");
+            assert_eq!(Change::decode(&homed(&bytes)), Ok(held(count)), "{name}");
+        }
+        let mut bytes = unhomed(&held(128));
+        assert_eq!(inputs["spec_holders_128_homes_0"], homed(&bytes));
+        let round_trip = round_trip_change(inputs["spec_holders_128_homes_0"]);
+        assert_eq!(
+            round_trip.as_deref(),
+            Some(inputs["spec_holders_128_homes_0"])
+        );
         // The count of holders is after the count of chunks, which is 0.
-        bytes[75..77].copy_from_slice(&65_u16.to_le_bytes());
-        bytes.extend(key(65).as_u128().to_le_bytes());
-        assert_eq!(inputs["spec_holders_65"], bytes);
-        let homed = homed(&bytes);
+        bytes[75..77].copy_from_slice(&129_u16.to_le_bytes());
+        bytes.extend(key(129).as_u128().to_le_bytes());
+        let over = homed(&bytes);
+        assert_eq!(inputs["spec_holders_129_homes_0"], over);
         let body = Malformed::Body(Undecoded {
             kind: 4,
-            length: homed.len(),
+            length: over.len(),
         });
-        assert_eq!(Change::decode(&homed), Err(body));
+        assert_eq!(Change::decode(&over), Err(body));
+        assert_eq!(round_trip_change(&over), None);
     }
 
     #[test]
@@ -741,7 +756,7 @@ mod tests {
     }
 
     /// The message that each valid input of `mesh_message` holds.
-    fn messages() -> [(&'static str, Message); 19] {
+    fn messages() -> [(&'static str, Message); 20] {
         let raft = |body| message(body, None, Vec::new());
         let heartbeat = || Body::Heartbeat { commit: 4 };
         let home = include_bytes!("../../../oracles/fuzz/mesh_change/home");
@@ -777,6 +792,7 @@ mod tests {
                     commit: 4,
                 }),
             ),
+            ("raft_append_entry_50256_bytes", within_bytes_max()),
             ("raft_append_reply", raft(Body::AppendReply { last: 6 })),
             ("raft_append_reject", raft(Body::AppendReject { hint: 3 })),
             (
@@ -868,6 +884,7 @@ mod tests {
                 }),
             ),
             ("unjoined_reused", unfit(Unfit::Reused { key: index(5) })),
+            ("unjoined_full", unfit(Unfit::Full)),
             (
                 "unjoined_unknown",
                 region::Refused::Unknown {
@@ -971,6 +988,7 @@ mod tests {
             "raft_chain_cut_in_link",
             "raft_chain_count_no_link",
             "raft_append_entry_over_bytes_max",
+            "raft_append_entry_50256_bytes",
             "raft_proof_over_grants_max",
             "join",
             "joined",
@@ -985,6 +1003,7 @@ mod tests {
             "unjoined_held",
             "unjoined_taken",
             "unjoined_reused",
+            "unjoined_full",
             "unjoined_unknown",
             "unjoined_ticket_forged",
             "unjoined_scope",
@@ -1050,6 +1069,20 @@ mod tests {
             assert_eq!(inputs[name], want, "{name}");
             assert_eq!(round_trip_message(inputs[name]), None, "{name}");
         }
+    }
+
+    // An append of one entry of 50 256 bytes, within `change::BYTES_MAX`.
+    fn within_bytes_max() -> Message {
+        let entry = Entry {
+            at: at(3, 4),
+            data: Data::Bytes(vec![7; 50_256]),
+        };
+        let body = Body::Append {
+            prev: at(2, 3),
+            entries: vec![entry],
+            commit: 4,
+        };
+        message(body, None, Vec::new())
     }
 
     // The message inputs that a bound of the decode refuses.

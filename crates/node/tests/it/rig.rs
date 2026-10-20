@@ -38,7 +38,8 @@ const PREFIX: &str = "foundation-node-";
 pub(crate) struct Rig {
     /// The working directory of each command. It holds `plant.hcl`.
     pub(crate) dir: PathBuf,
-    /// The disk budget that [`Rig::new`] keeps: 8 MiB for each core.
+    /// The disk budget of each data directory of the rig. [`Rig::new`] keeps 8 MiB for
+    /// each core.
     pub(crate) disk: u64,
     /// The environment variables that [`Rig::var`] sets.
     vars: Vec<(String, String)>,
@@ -148,6 +149,13 @@ impl Rig {
         let node = self.node.take().expect("a node runs");
         node.process.term();
         node.exit(&self.clock, PATIENCE, "the node exits at SIGTERM")
+    }
+
+    /// Kills the node of [`Rig::start`] with SIGKILL, as a crash ends it, and waits
+    /// for it to exit. Panics when no node runs.
+    pub(crate) fn kill(&mut self) {
+        let mut node = self.node.take().expect("a node runs");
+        node.process.end();
     }
 
     /// Only Linux: only tests on Linux call it. Starts `foundation` with `args` in

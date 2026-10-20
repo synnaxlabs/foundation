@@ -3,9 +3,12 @@
 `FOUNDATION_NODE` is the path of the `foundation` binary that each test starts.
 """
 
+import decimal
+import fractions
 import gc
 import logging
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -17,6 +20,7 @@ import numpy as np
 
 import foundation
 from test_client import PATIENCE, Node, fork
+from test_stubs import assert_stated, called
 
 CHANNELS = """
 channel "plant.time" { kind = "index" }
@@ -100,6 +104,51 @@ def planted(node: Node) -> foundation.Client:
             time.sleep(0.01)
 
 
+def backstop(test: unittest.TestCase, node: Node) -> subprocess.Popen:
+    """Continues the paused `node` after 10 s, for a call that keeps the GIL and so
+    stops each thread, unless `test` ends first. The shell leads a session of its own,
+    and a cleanup of `test` ends each of its processes: a process that outlives its
+    parent in the group of this process can end the last tie of the group to a parent
+    outside it, and the OS then hangs up each process of the group while a node is
+    paused. Gives the shell."""
+    shell = subprocess.Popen(
+        ["sh", "-c", f"sleep 10; kill -CONT {node.process.pid}"],
+        start_new_session=True,
+    )
+    test.addCleanup(shell.wait)
+    test.addCleanup(end_group, shell.pid)
+    return shell
+
+
+def end_group(group: int) -> None:
+    """Kills each process of the process group `group`, if it has one."""
+    try:
+        os.killpg(group, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def children(test: unittest.TestCase, parent: int) -> set:
+    """The children of the process `parent`, once it has one. Fails `test` when it
+    has none after `PATIENCE`."""
+    deadline = time.monotonic() + PATIENCE
+    while True:
+        listed = subprocess.run(["pgrep", "-P", str(parent)], capture_output=True)
+        if listed.returncode == 0:
+            return set(map(int, listed.stdout.split()))
+        test.assertLess(time.monotonic(), deadline)
+        time.sleep(0.01)
+
+
+def in_group(pids: set) -> set:
+    """The processes of `pids` that are in the process group of this process."""
+    listed = subprocess.run(
+        ["ps", "-A", "-o", "pid=,pgid="], capture_output=True, check=True
+    )
+    fields = (map(int, line.split()) for line in listed.stdout.splitlines())
+    return {pid for pid, pgid in fields if pid in pids and pgid == os.getpgrp()}
+
+
 class Selfish(np.ndarray):
     """An array whose `copy` and `view` give the array itself."""
 
@@ -118,7 +167,7 @@ class WriterTest(unittest.TestCase):
         self.addCleanup(self.client.close)
 
     def test_a_writer_gives_its_places_in_the_order_of_its_channels(self) -> None:
-        with self.client.open_writer(["plant.b", "plant.a"]) as writer:
+        with called(self, self.client.open_writer, ["plant.b", "plant.a"]) as writer:
             self.assertEqual(
                 writer.places,
                 (
@@ -128,8 +177,9 @@ class WriterTest(unittest.TestCase):
                 ),
             )
             self.assertEqual(writer.index, 2)
-        with self.client.open_writer(["plant.time", "plant.a"]) as writer:
-            self.assertEqual(writer.index, 0)
+        writer = called(self, self.client.open_writer, ["plant.time", "plant.a"])
+        self.assertEqual(writer.index, 0)
+        called(self, writer.close)
 
     def test_write_takes_frames_of_node_time_and_of_the_callers_stamps(self) -> None:
         with self.client.open_writer(["plant.a", "plant.b"]) as writer:
@@ -138,6 +188,7 @@ class WriterTest(unittest.TestCase):
             self.assertIsNone(writer.write({"plant.a": 2.5, 1: 3, 2: stamp}))
             with self.assertRaises(foundation.Rejected) as raised:
                 writer.write({"plant.a": 3.5, "plant.time": stamp})
+            assert_stated(self, raised.exception)
             self.assertEqual(raised.exception.code, "order")
             self.assertEqual(str(raised.exception), ORDER)
             self.assertIsNone(writer.write({"plant.a": 3.5, "plant.time": stamp + 1}))
@@ -166,7 +217,9 @@ class WriterTest(unittest.TestCase):
                 "plant.f": 1.5,
                 "plant.g": 2**63 - 1,
             }
-            self.assertIsNone(writer.write(values))
+            called(self, writer.write, values)
+        with self.client.open_writer("plant.e") as writer:
+            called(self, writer.write, uuid.uuid4())
 
     def test_write_raises_for_each_value_that_its_place_does_not_take(self) -> None:
         channels = ["plant.a", "plant.b", "plant.c", "plant.d", "plant.e", "plant.f"]
@@ -181,6 +234,17 @@ class WriterTest(unittest.TestCase):
             ({"plant.f": np.True_}, TypeError, f"plant.f holds f32, not {flag}"),
             ({"plant.b": np.True_}, TypeError, f"plant.b holds i64, not {flag}"),
             ({"plant.c": np.False_}, TypeError, f"plant.c holds u8, not {flag}"),
+            (
+                {"plant.a": np.array([1.0, 2.0])},
+                TypeError,
+                "plant.a holds f64, not ndarray",
+            ),
+            (
+                {"plant.b": np.array([1, 2])},
+                TypeError,
+                "plant.b holds i64, not ndarray",
+            ),
+            ({"plant.a": np.str_("x")}, TypeError, "plant.a holds f64, not str_"),
             (
                 {"plant.time": np.True_},
                 TypeError,
@@ -251,7 +315,7 @@ class WriterTest(unittest.TestCase):
                 "plant.d": np.arange(count) % 2 == 0,
                 "plant.time": stamps,
             }
-            self.assertIsNone(writer.write_series(series))
+            called(self, writer.write_series, series)
             later = (stamps + count).astype("datetime64[ns]")
             series["plant.time"] = later
             self.assertIsNone(writer.write_series(series))
@@ -347,7 +411,7 @@ class WriterTest(unittest.TestCase):
 
     def test_open_writer_raises_for_each_argument_that_it_does_not_take(self) -> None:
         cases = [
-            ([], {}, ValueError, "the writer names no channel"),
+            ([], {}, ValueError, "the stream names no channel"),
             ([5], {}, TypeError, "a channel name is a str, not int"),
             (
                 "plant.a",
@@ -365,32 +429,39 @@ class WriterTest(unittest.TestCase):
                 "plant.a",
                 {"lease": 0.0},
                 ValueError,
-                "lease is 0.0 s, not a finite number of seconds over 0",
+                "lease is 0.0 s, which does not round to 1 to 2^63 - 1 ns",
             ),
             (
                 "plant.a",
                 {"lease": 1e-12},
                 ValueError,
-                "lease is 1e-12 s, not a finite number of seconds over 0",
+                "lease is 1e-12 s, which does not round to 1 to 2^63 - 1 ns",
             ),
             (
                 "plant.a",
                 # Its nanoseconds round to 2^63, one past the largest i64.
                 {"lease": 2**63 / 1e9},
                 ValueError,
-                "lease is 9223372036.854776 s, not a finite number of seconds over 0",
+                "lease is 9223372036.854776 s, which does not round to 1 to 2^63 - 1 "
+                "ns",
             ),
             (
                 "plant.a",
                 {"lease": float("inf")},
                 ValueError,
-                "lease is inf s, not a finite number of seconds over 0",
+                "lease is inf s, which does not round to 1 to 2^63 - 1 ns",
             ),
             (
                 "plant.a",
                 {"lease": float("nan")},
                 ValueError,
-                "lease is NaN s, not a finite number of seconds over 0",
+                "lease is NaN s, which does not round to 1 to 2^63 - 1 ns",
+            ),
+            (
+                "plant.a",
+                {"lease": "5"},
+                TypeError,
+                "must be real number, not str",
             ),
             (
                 "plant.a",
@@ -416,12 +487,125 @@ class WriterTest(unittest.TestCase):
                     self.client.open_writer("plant.a", authority=authority)
                 text = f"authority is an int, not {kind}"
                 self.assertEqual(str(raised.exception), text)
-        writer = self.client.open_writer(("plant.a",), authority=255, lease=5.0)
-        self.assertIsNone(writer.close())
+        writer = called(
+            self, self.client.open_writer, ("plant.a",), authority=255, lease=5.0
+        )
+        self.assertIs(called(self, writer.__enter__), writer)
+        called(self, writer.__exit__, None, None, None)
+
+    def test_a_lease_past_the_range_of_a_float_raises_value_error(self) -> None:
+        class Index:
+            def __index__(self) -> int:
+                return 10**400
+
+        for lease in [10**400, -(10**400), fractions.Fraction(10**400), Index()]:
+            with self.subTest(lease=type(lease).__name__):
+                with self.assertRaises(ValueError) as raised:
+                    called(self, self.client.open_writer, "plant.a", lease=lease)
+                self.assertIs(type(raised.exception), ValueError)
+                self.assertEqual(
+                    str(raised.exception),
+                    f"lease is {lease!r} s, which does not round to 1 to 2^63 - 1 ns",
+                )
+        # Its repr raises: it has more digits than Python converts to a str. So does
+        # the message of `called`.
+        with self.assertRaises(ValueError) as raised:
+            self.client.open_writer("plant.a", lease=10**5000)
+        self.assertEqual(
+            str(raised.exception),
+            "lease is past the range of a float, which does not round to 1 to 2^63 - 1 "
+            "ns",
+        )
+
+    def test_a_lease_is_taken_as_a_float_before_it_rounds(self) -> None:
+        # 0.49999... ns, which is 0.5 ns as a float, and rounds to 1 ns.
+        lease = decimal.Decimal("4.9999999999999999999E-10")
+        called(self, self.client.open_writer, "plant.a", lease=lease).close()
+        # 2^63 - 1 ns, which is 2^63 ns as a float.
+        with self.assertRaises(ValueError) as raised:
+            lease = decimal.Decimal("9223372036.854775807")
+            called(self, self.client.open_writer, "plant.a", lease=lease)
+        self.assertEqual(
+            str(raised.exception),
+            "lease is 9223372036.854776 s, which does not round to 1 to 2^63 - 1 ns",
+        )
+
+    def test_the_stub_types_each_value_and_lease_that_the_module_takes(self) -> None:
+        class Float:
+            def __float__(self) -> float:
+                return 1.5
+
+        class Index:
+            def __index__(self) -> int:
+                return 2
+
+        values = [
+            1.5,
+            3,
+            np.float32(2.5),
+            np.int64(3),
+            fractions.Fraction(1, 2),
+            decimal.Decimal("1.5"),
+            Float(),
+            Index(),
+        ]
+        for value in values:
+            with self.subTest(value=value):
+                kwargs = {"authority": 255, "lease": value, "on_loss": "raise"}
+                with called(self, self.client.open_writer, "plant.a", **kwargs) as w:
+                    called(self, w.write, value)
+
+    def test_write_raises_the_error_that_the_conversion_of_a_value_raised(
+        self,
+    ) -> None:
+        class Broken:
+            def __float__(self) -> float:
+                raise ZeroDivisionError("the sensor divided by zero")
+
+            def __index__(self) -> int:
+                raise ZeroDivisionError("the sensor divided by zero")
+
+        cases = [
+            ("plant.a", decimal.Decimal("sNaN"), ValueError),
+            ("plant.a", Broken(), ZeroDivisionError),
+            ("plant.b", Broken(), ZeroDivisionError),
+        ]
+        with self.client.open_writer(["plant.a", "plant.b"]) as writer:
+            for name, value, kind in cases:
+                with self.subTest(name=name, value=type(value).__name__):
+                    with self.assertRaises(kind) as raised:
+                        called(self, writer.write, {name: value})
+                    self.assertIs(type(raised.exception), kind)
+                    if kind is ZeroDivisionError:
+                        text = "the sensor divided by zero"
+                        self.assertEqual(str(raised.exception), text)
+            called(self, writer.write, {"plant.a": 1.5, "plant.b": 2})
+
+    def test_a_type_error_of_a_conversion_is_the_cause_of_the_error_of_the_place(
+        self,
+    ) -> None:
+        class Buggy:
+            def __float__(self) -> float:
+                raise TypeError("the sensor read a str")
+
+            def __index__(self) -> int:
+                raise TypeError("the sensor read a str")
+
+        with self.client.open_writer(["plant.a", "plant.b"]) as writer:
+            for name, kind in [("plant.a", "f64"), ("plant.b", "i64")]:
+                with self.subTest(name=name):
+                    with self.assertRaises(TypeError) as raised:
+                        called(self, writer.write, {name: Buggy()})
+                    text = f"{name} holds {kind}, not Buggy"
+                    self.assertEqual(str(raised.exception), text)
+                    cause = raised.exception.__cause__
+                    self.assertIs(type(cause), TypeError)
+                    self.assertEqual(str(cause), "the sensor read a str")
 
     def test_open_writer_raises_stopped_with_the_code_of_the_node(self) -> None:
         with self.assertRaises(foundation.Stopped) as raised:
             self.client.open_writer(["plant.a", "plant.z"])
+        assert_stated(self, raised.exception)
         self.assertNotIsInstance(raised.exception, ConnectionError)
         self.assertEqual(raised.exception.code, "unknown")
         self.assertEqual(
@@ -498,12 +682,7 @@ class WriterTest(unittest.TestCase):
         0.2 s and then continues the node ran while `call` waited. Gives what `call`
         gives."""
         self.node.pause()
-        # Continues the node when a call that keeps the GIL stops each thread.
-        backstop = subprocess.Popen(
-            ["sh", "-c", f"sleep 10; kill -CONT {self.node.process.pid}"]
-        )
-        self.addCleanup(backstop.wait)
-        self.addCleanup(backstop.kill)
+        backstop(self, self.node)
         counts = []
 
         def counter() -> None:
@@ -521,6 +700,21 @@ class WriterTest(unittest.TestCase):
         thread.join(PATIENCE)
         self.assertGreater(counts[0], 20)
         return given
+
+    def test_a_backstop_leaves_no_process_in_the_group_of_this_process(self) -> None:
+        self.node.pause()
+        shell = backstop(self, self.node)
+        pids = {shell.pid, *children(self, shell.pid)}
+        self.node.resume()
+        self.doCleanups()
+        # Its sleep is a process of this group whose parent is not this process, as a
+        # runner that shares its group with the test can start at any time.
+        other = subprocess.Popen(["sh", "-c", "sleep 30; :"])
+        self.addCleanup(other.wait)
+        self.addCleanup(other.kill)
+        self.addCleanup(subprocess.run, ["pkill", "-P", str(other.pid)])
+        children(self, other.pid)
+        self.assertEqual(in_group(pids), set())
 
     def test_other_threads_run_while_a_write_waits(self) -> None:
         with self.client.open_writer("plant.a") as writer:
@@ -552,6 +746,16 @@ class WriterTest(unittest.TestCase):
                     str(raised.exception),
                     "the node refused the frame: another writer holds control",
                 )
+
+    def test_a_writer_of_authority_1_takes_control_from_one_of_no_authority(
+        self,
+    ) -> None:
+        with self.client.open_writer("plant.a") as low:
+            with self.client.open_writer("plant.a", authority=1) as high:
+                self.assertIsNone(high.write(1.5))
+                with self.assertRaises(foundation.Rejected) as raised:
+                    low.write(2.5)
+                self.assertEqual(raised.exception.code, "waiting")
 
     def test_a_write_after_the_lease_ran_out_raises_expired(self) -> None:
         with self.client.open_writer("plant.a", lease=0.05) as writer:
@@ -673,6 +877,7 @@ class WriterTest(unittest.TestCase):
             with self.assertRaises(foundation.DataLost) as raised:
                 while time.monotonic() < deadline:
                     writer.write(1.5)
+        assert_stated(self, raised.exception)
         self.assertEqual(
             str(raised.exception), "samples were lost: plant.a (1), plant.time (1)"
         )
@@ -814,12 +1019,7 @@ class WriterTest(unittest.TestCase):
                 raised.append(str(error))
 
         self.node.pause()
-        # Continues the node when a call that keeps the GIL stops each thread.
-        backstop = subprocess.Popen(
-            ["sh", "-c", f"sleep 10; kill -CONT {self.node.process.pid}"]
-        )
-        self.addCleanup(backstop.wait)
-        self.addCleanup(backstop.kill)
+        backstop(self, self.node)
         threads = [
             threading.Thread(target=writer.write, args=(1.0,), daemon=True),
             threading.Thread(target=second, daemon=True),
@@ -871,7 +1071,7 @@ class WriterTest(unittest.TestCase):
         with self.client.open_writer("plant.d") as writer:
             for flag in np.array([False, True]):
                 self.assertIsInstance(flag, np.bool_)
-                self.assertIsNone(writer.write(flag))
+                called(self, writer.write, flag)
 
 
 if __name__ == "__main__":

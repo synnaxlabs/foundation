@@ -1062,7 +1062,7 @@ fn refuses_a_write_signed_with_another_key_or_as_a_read() {
             finish(&mut agent).await;
         },
     );
-    let signature = || Err(serve::Error::Access(Refusal::Signature));
+    let signature = || Err(serve::Error::Access(Box::new(Refusal::Signature)));
     assert_eq!(home.served, [signature(), signature(), Ok(Got::Ended)]);
 }
 
@@ -1603,8 +1603,15 @@ async fn in_region(
         region::open(&node, &tasks, Rc::clone(&transport), Vec::new(), channels())
             .await;
     let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
-    let mut test =
-        Test::new(node.clone(), tasks.clone(), layout, POOL, Some(region)).await;
+    let mut test = Test::new(
+        node.clone(),
+        NODE,
+        tasks.clone(),
+        layout,
+        POOL,
+        Some(region),
+    )
+    .await;
     test.sync().await;
     test.set_home(TIME_B, NODE).await;
     test.hub.set_rules(rules());

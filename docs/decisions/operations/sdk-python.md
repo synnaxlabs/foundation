@@ -7,33 +7,32 @@
   crate and the two names are key choices of kinds 1 and 2 that `laptop.monitor`
   accepted at 2026-10-17T21:32:06Z
   (https://github.com/synnaxlabs/foundation/pull/3061#issuecomment-6241427370).
-  `connect(address=None, *, node=None, public_key=None, subject=None,
-  private_key=None, data=None)` dials a node (#3212 PR 1b). Each of the address, the
-  pair (`node`, `public_key`), and the pair (`subject`, `private_key`) comes from the
-  arguments, else from `sdk::Node::local` on the data directory `data` (a `str` or an
-  `os.PathLike`, by default `foundation-data`): the node gives its address and keys,
-  and its first admin gives the subject. With an address, the data directory counts
+  `connect(address=None, *, public_key=None, subject=None, private_key=None,
+  data=None)` dials a node (#3212 PR 1b). Each of the address, `public_key`, and the
+  pair (`subject`, `private_key`) comes from the arguments, else from
+  `sdk::Node::local` on the data directory `data` (a `str` or an `os.PathLike`, by
+  default `foundation-data`): the node gives its address and public key, and its first
+  admin gives the subject. With an address, the data directory counts
   only when its node is at that address. Each given argument parses before any read,
   and with every value given, `connect` reads no file. `NotRunning` is no source;
-  `Version` and `Files` raise. When no source gives the keys and the subject, the text
-  of the keys wins. `Client.address` is the address that `connect` dialed. The rules
-  are in Rust, not Python. A profile of PR 2 goes between the arguments and the data
-  directory (default 1 of `laptop.architect-2`, 2026-10-15T17:01:25Z,
+  `Version` and `Files` raise. When no source gives the public key and the subject, the
+  text of the public key wins. `Client.address` is the address that `connect` dialed.
+  The rules are in Rust, not Python. A profile of PR 2 goes between the arguments and
+  the data directory (default 1 of `laptop.architect-2`, 2026-10-15T17:01:25Z,
   https://github.com/synnaxlabs/foundation/issues/2177#issuecomment-6197670062). The
   texts:
-  - `ValueError`: `node and public_key go together: give both or neither`, and
-    `subject and private_key go together: give both or neither`. A `data` with a NUL
-    byte: `data: the path holds a NUL byte`, as each other value parses
+  - `ValueError`: `subject and private_key go together: give both or neither`. A `data`
+    with a NUL byte: `data: the path holds a NUL byte`, as each other value parses
     (`laptop.architect-2`, 2026-10-18T21:14:26Z, item 5 of
     https://github.com/synnaxlabs/foundation/pull/3255#issuecomment-6255225319).
   - `ConnectionError`, with no address and no node on `data`: `no node runs in
     <data>: pass the address of the node, or data= with the --data of foundation
     start`.
-  - `ConnectionError`, with no source of the keys: `no source gives the keys of the
-    node at <address>: pass node= and public_key=, or data= with the --data of
+  - `ConnectionError`, with no source of the public key: `no source gives the public
+    key of the node at <address>: pass public_key=, or data= with the --data of
     foundation start on the node's host`. When `data` holds a node at another address:
-    `no source gives the keys of the node at <address>: <data> holds the node at
-    <other>; pass node= and public_key=, or connect to <other>`.
+    `no source gives the public key of the node at <address>: <data> holds the node at
+    <other>; pass public_key=, or connect to <other>`.
   - `ConnectionError`, with no source of the subject: `no source gives the subject for
     the node at <address>: pass subject= and private_key=, or data= with the --data of
     foundation start on the node's host`, and the same form with `<data> holds the
@@ -58,8 +57,9 @@
   https://github.com/synnaxlabs/foundation/pull/3231#issuecomment-6252975559, and
   2026-10-18T20:05:17Z,
   https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6254526787.)
-  `connect` takes the node key as a `uuid.UUID`, and a value of another type raises
-  `TypeError`.
+  `connect` takes no node key: each hello names the node by its public key (SUBJECT
+  PROOF; `laptop.architect`, 2026-10-19T23:45:44Z,
+  https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279846281).
   `sdk::Error::Thread` raises `RuntimeError`, `Bind` raises `OSError`, `Session` and
   `Local` raise `ConnectionError`, and `Panicked` raises `PanicException`
   (`laptop.architect-2`, 2026-10-17T18:44:19Z,
@@ -67,6 +67,13 @@
   `Session` that the node refused with a code raises `Refused`, a subclass of
   `ConnectionError` (SDK PYTHON WRITER in
   `docs/decisions/operations/sdk-python-writer.md`).
+  `Memory`, the refusal of the memory of the pool of the frames of the readers, raises
+  `MemoryError` (`laptop.architect-2`, 2026-10-19T14:39:03Z,
+  https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6269865289).
+  `Decode`, a series of a read that does not decode, raises `ConnectionError`: it
+  breaks the protocol of the node, as the `Stream` errors that map there
+  (`laptop.architect-2`, 2026-10-19T12:21:56Z, item 2 of
+  https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6267089707).
   No Python test reaches `Bind`, so the Rust table test of the map, with a real `Bind`,
   is its only test (`laptop.architect-2`, 2026-10-18T15:00:03Z,
   https://github.com/synnaxlabs/foundation/pull/3193#issuecomment-6251395290).
@@ -93,9 +100,32 @@
   surface is a step: the demo needs `foundation.connect("address")` alone, so the
   defaults of #2177 land before it
   (https://github.com/synnaxlabs/foundation/issues/2923#issuecomment-6238857409). The
-  feature `sim` adds test-only functions, so a test asserts that a panic on the caller's
-  thread gives `PanicException`, not an abort (`laptop.architect-2`,
-  2026-10-17T18:39:00Z,
+  wheel gives the stub `foundation/_native.pyi`, with the doc of each item, and
+  `py.typed` (`laptop.architect-2`, 2026-10-19T18:31:12Z,
+  https://github.com/synnaxlabs/foundation/pull/3394#issuecomment-6274374226).
+  `tests/test_stubs.py` asserts that the stub defines each public item of the module,
+  with its parameters, defaults, bases, `final`, and doc, that each annotation names a
+  type, that each value that the module gives (a return, also `None`, a property, and
+  each attribute of an exception) is of the type that the stub states, and that each
+  argument of the calls that check the stub is of the type of its parameter (#3212 PR
+  1c; `box2.builder-5`, plan, 2026-10-19T16:53:36Z,
+  https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6272502641).
+  The types of the stub are a key choice of kind 2 that `laptop.monitor` accepted at
+  2026-10-19T17:24Z
+  (https://github.com/synnaxlabs/foundation/pull/3394#issuecomment-6274540156), with
+  the defaults that let `connect()` and `open_writer("pt_1")` give no other argument.
+  The stub is written by hand. A stub that PyO3 `experimental-inspect` generates lost:
+  in PyO3 0.30.1 its guide calls it still in development, so its text can move with a
+  PyO3 bump; it works only on an inline `#[pymodule] mod`, and a `&Bound<PyAny>`
+  argument needs its type as a string in `#[pyo3(signature)]`, so the second copy of
+  each type moves into Rust; and no introspection states `code` and `seqs`, which the
+  module sets when it raises. The generated stub may come back when the guide of PyO3
+  no longer calls the feature experimental; then `test_stubs.py` keeps only what the
+  generator cannot state. The keys of the `dict` of `write` and `write_series`, and the
+  values of the `dict` of `write`, are `Any` until #3408. The feature `sim` adds
+  test-only functions, so a test asserts that a panic on the caller's thread gives
+  `PanicException`, not an abort
+  (`laptop.architect-2`, 2026-10-17T18:39:00Z,
   https://github.com/synnaxlabs/foundation/issues/3059#issuecomment-6238735903). One
   Rust test runs the suite `sdk/python/tests` in an embedded interpreter on the build
   of the crate, so `cargo test` and `cargo mutants` test the module. It starts the

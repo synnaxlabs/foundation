@@ -13,9 +13,10 @@ const POOL: block::Config = match block::Config::new(1 << 21) {
     Err(_) => panic!("invariant: the budget fits"),
 };
 
-/// The budget of the pool of the frames of the session's reads. No command reads yet,
-/// so it is small. Its largest block is the largest frame that a read takes: a larger
-/// one gives `program::Error::Pool`.
+/// The budget of the pool of the drafts of the session's writers and of the frames of
+/// its reads. No command writes or reads yet, so it is small. Its largest block is the
+/// largest frame that a write or a read takes: a larger one gives
+/// `program::Error::Pool`.
 const FRAMES: block::Config = match block::Config::new(64 << 10) {
     Ok(config) => config,
     Err(_) => panic!("invariant: the budget fits"),
@@ -64,8 +65,8 @@ pub async fn reach(config: Config) -> Result<program::Session, Error> {
     })
     .map_err(Error::Transport)?;
     let at = local.address;
+    let frames = Rc::new(block::Pool::heap(FRAMES));
     let config = program::Config {
-        via: local.key,
         node: local.public_key,
         addresses: vec![transport::Address::Udp(at)],
         subject: spec::founding::admin(),
@@ -74,7 +75,8 @@ pub async fn reach(config: Config) -> Result<program::Session, Error> {
         entropy,
         tasks,
         pool,
-        frames: Rc::new(block::Pool::heap(FRAMES)),
+        frames: Rc::clone(&frames),
+        reads: frames,
     };
     program::Session::connect(&transport, config)
         .await

@@ -1280,12 +1280,10 @@ mod corpus {
     /// groups, as the fuzz target gives it, and the `Replies` after them: each message
     /// of a length byte and its bytes, where a message whose first byte is 0 counts a
     /// frame sent, whose groups are its other bytes, or group 0 when it has none.
-    fn run(mut bytes: &[u8]) -> (Vec<Result<Reply, Error>>, Replies) {
+    fn run(bytes: &[u8]) -> (Vec<Result<Reply, Error>>, Replies) {
         let mut replies = Replies::new(256);
         let mut got = Vec::new();
-        while let Some((&len, rest)) = bytes.split_first() {
-            let (message, rest) = rest.split_at(usize::from(len).min(rest.len()));
-            bytes = rest;
+        for message in crate::common::messages(bytes) {
             match message {
                 [0] => replies.sent([0]),
                 [0, groups @ ..] => replies.sent(groups.iter().map(|&g| u32::from(g))),

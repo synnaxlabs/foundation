@@ -170,8 +170,7 @@ pub struct Writer {
 /// with no wait.
 pub(crate) struct Homed {
     state: Rc<RefCell<State>>,
-    subject: Name,
-    authority: Authority,
+    holder: control::Writer,
     lease: Option<Span>,
     keys: Vec<channel::Key>,
     groups: Vec<Indexed>,
@@ -208,10 +207,14 @@ impl Homed {
                 break (keys, groups);
             }
         };
-        Ok(Self {
-            state: Rc::clone(state),
+        let holder = control::Writer {
             subject,
             authority,
+            via: state.borrow().node,
+        };
+        Ok(Self {
+            state: Rc::clone(state),
+            holder,
             lease,
             keys,
             groups,
@@ -294,8 +297,7 @@ impl Homed {
     ) -> Result<Writer, Error> {
         let set = state.interner.intern(groups);
         let writer = ::home::writer::Writer {
-            subject: self.subject.clone(),
-            authority: self.authority,
+            holder: self.holder.clone(),
             lease: self.lease,
             set: Arc::clone(&set),
         };

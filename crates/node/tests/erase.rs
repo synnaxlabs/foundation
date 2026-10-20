@@ -23,13 +23,26 @@ type Get<'a> = Pin<Box<dyn Future<Output = Result<Value, Error>> + 'a>>;
 #[global_allocator]
 static ALLOCATOR: counting::Allocator = counting::Allocator::new();
 
-const PLAIN: [u8; 32] = [0x5a; 32];
+/// The value of the file, which the scan looks for.
+type Needle = [u8; 32];
+
+/// The needle of case `case`. No other case and no fill of one byte gives it, so a
+/// case finds no copy that an earlier case left and no fill of the allocator.
+const fn needle(case: u8) -> Needle {
+    let mut needle = *b"?a needle that no fill can give.";
+    needle[0] = case;
+    needle
+}
+
+/// The needle of each case, in static memory, so that a case holds only a reference
+/// to it in the futures and threads that it frees.
+static NEEDLES: [Needle; 3] = [needle(0), needle(1), needle(2)];
 
 fn main() {
     let found = [
-        ("reads", freed("reads", reads)),
-        ("cut", freed("cut", cut)),
-        ("dropped", freed("dropped", dropped)),
+        ("reads", freed("reads", &NEEDLES[0], reads)),
+        ("cut", freed("cut", &NEEDLES[1], cut)),
+        ("dropped", freed("dropped", &NEEDLES[2], dropped)),
     ];
     assert_eq!(
         found,
@@ -39,9 +52,13 @@ fn main() {
 }
 
 /// Runs `case` on a shard with the real disk of a new directory, whose file
-/// `data/secrets/site.token` holds `PLAIN` and a line end. Gives the count of freed
-/// blocks that hold `PLAIN`, from the start of `case` to the end of the I/O thread.
-fn freed<F>(name: &str, case: fn(Files, PathBuf) -> F) -> u64
+/// `data/secrets/site.token` holds `plain` and a line end. Gives the count of freed
+/// blocks that hold `plain`, from the start of `case` to the end of the I/O thread.
+fn freed<F>(
+    name: &str,
+    plain: &'static Needle,
+    case: fn(Files, PathBuf, &'static Needle) -> F,
+) -> u64
 where
     F: Future<Output = ()> + 'static,
 {
@@ -51,13 +68,13 @@ where
     let (disk, io) = os::files(&dir, &threads, "files").expect("the disk opens");
     let data = dir.join("data");
     std::fs::create_dir(data.join("secrets")).expect("makes the directory");
-    let token = [&PLAIN[..], b"\n"].concat();
+    let token = [&plain[..], b"\n"].concat();
     let file = data.join("secrets/site.token");
     std::fs::write(&file, token).expect("writes it");
     std::fs::set_permissions(&file, Permissions::from_mode(0o600))
         .expect("makes it private");
-    let ((), found) = ALLOCATOR.freed_holding(&PLAIN, || {
-        let get = threads.start("get", move || case(Files::new(disk), data));
+    let ((), found) = ALLOCATOR.freed_holding(plain, || {
+        let get = threads.start("get", move || case(Files::new(disk), data, plain));
         get.expect("the thread starts")
             .join()
             .expect("the get ends");
@@ -67,21 +84,21 @@ where
     found
 }
 
-async fn reads(files: Files, _: PathBuf) {
+async fn reads(files: Files, _: PathBuf, plain: &'static Needle) {
     let resolver = resolver(files);
     let value = resolver.get(&source()).await;
     let value = value.expect("the file holds the value");
-    assert_eq!(value.expose(), PLAIN, "the file store reads the value");
+    assert_eq!(value.expose(), plain, "the file store reads the value");
 }
 
-/// Cuts the file to `PLAIN` after the get opened it, so the read fills 32 of its 33
+/// Cuts the file to `plain` after the get opened it, so the read fills 32 of its 33
 /// bytes and fails.
-async fn cut(files: Files, data: PathBuf) {
+async fn cut(files: Files, data: PathBuf, plain: &'static Needle) {
     let resolver = resolver(files.clone());
     let source = source();
     let mut get: Get<'_> = Box::pin(resolver.get(&source));
     hold_read(&files, &data, &mut get).await;
-    std::fs::write(data.join("secrets/site.token"), PLAIN).expect("cuts the file");
+    std::fs::write(data.join("secrets/site.token"), plain).expect("cuts the file");
     release(&data, "b");
     let failed = Err(Error::Unavailable {
         detail: format!(
@@ -95,7 +112,7 @@ async fn cut(files: Files, data: PathBuf) {
 }
 
 /// Drops the get while its read waits on the I/O thread.
-async fn dropped(files: Files, data: PathBuf) {
+async fn dropped(files: Files, data: PathBuf, _: &'static Needle) {
     let resolver = resolver(files.clone());
     let source = source();
     let mut get: Get<'_> = Box::pin(resolver.get(&source));

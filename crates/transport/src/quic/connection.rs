@@ -51,8 +51,9 @@ pub(super) struct Connection {
 }
 
 enum State {
-    /// A dial that waits for the peer to prove `expected`.
-    Dialing { expected: PublicKey },
+    /// A dial that waits for the peer to prove `expected`, or any node key for
+    /// `None`.
+    Dialing { expected: Option<PublicKey> },
     /// An accepted connection that the caller does not know yet.
     Accepting,
     /// The caller has the key.
@@ -62,11 +63,11 @@ enum State {
 }
 
 impl Connection {
-    /// A dial that expects `expected`.
+    /// A dial that expects `expected`, or any node key for `None`.
     pub(super) fn dialed(
         key: Key,
         inner: noq_proto::Connection,
-        expected: PublicKey,
+        expected: Option<PublicKey>,
         streams: Streams,
     ) -> Self {
         Self::new(key, inner, State::Dialing { expected }, streams)
@@ -199,7 +200,7 @@ impl Connection {
             }
             noq_proto::Event::ConnectionLost { reason } => {
                 let expected = match self.end() {
-                    State::Dialing { expected } => Some(expected),
+                    State::Dialing { expected } => expected,
                     State::Open => None,
                     State::Accepting | State::Ended => return,
                 };

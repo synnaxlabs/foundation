@@ -19,7 +19,7 @@ use types::digest::Digest;
 use types::name::{Name, Prefix};
 use types::time::Span;
 
-use super::{Group, Mesh, Slot};
+use super::{Call, Group, Mesh, Slot};
 use crate::error::{Error, Stopped};
 use crate::used::{Behind, Cause, Spec};
 use spec::Pointer;
@@ -601,24 +601,5 @@ impl Watch {
     pub async fn next(&mut self) -> Result<Spec, Stopped> {
         let read = |group: &Group| (group.used.spec.pointer, group.used.spec.clone());
         self.slot.next(read).await
-    }
-}
-
-// The slot of a call in `Group::calls`, which it frees when it drops.
-struct Call<'a> {
-    group: &'a RefCell<Group>,
-    slot: u64,
-}
-
-impl<'a> Call<'a> {
-    fn new(group: &'a RefCell<Group>) -> Self {
-        let slot = group.borrow_mut().slot();
-        Self { group, slot }
-    }
-}
-
-impl Drop for Call<'_> {
-    fn drop(&mut self) {
-        self.group.borrow_mut().calls.remove(&self.slot);
     }
 }

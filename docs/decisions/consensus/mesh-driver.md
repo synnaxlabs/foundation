@@ -6,17 +6,22 @@
   lost, so the group's time only slows. Before each `step`, `mesh` checks a message in
   this order: the peer holds the key of the member that the message names
   (`Error::Spoofed`), a request comes from a voter of this node's configuration
-  (`Error::Removed` for a sender that a committed configuration removed, else
+  (`Raft::admission`: `Error::Removed` for a `PreVote` or a `Vote` at or below the
+  commit, or below the term at it (`laptop.architect`, 2026-10-19T18:56:00Z:
+  https://github.com/synnaxlabs/foundation/pull/3407#issuecomment-6274855859), of a
+  sender that a committed configuration removed and that is not a member, with no join
+  in the log that this node has not applied (`laptop.architect`, 2026-10-20T02:45:51Z:
+  https://github.com/synnaxlabs/foundation/pull/3411#issuecomment-6282135192), else
   `Error::NotVoter`), and each claim holds (`Error::Claim`), the claims being what
-  `Raft::claims` gives, so a link that the node does not read is not checked. So a
-  node with a configuration refuses a leader that is not a voter of that
-  configuration, when a change that the node does not hold made that leader a voter.
-  The node does not get the log from that leader (a known defect, #1096, that #1107
-  fixes). A leader that stays a voter through the change passes the check, and its
-  chain proves the change (RAFT SURFACE). A node with no
-  configuration takes no request. Only a voter that an operator wiped is such a node
-  (#881), because a node that joins opens with the founding voters from its join answer
-  (decided by the architect, #242, 2026-10-07T04:20:40Z:
+  `Raft::claims` gives, so a link that the node does not read is not checked. So a node
+  with a configuration refuses a leader that is not a voter of that configuration, when
+  a change that the node does not hold made that leader a voter. The node does not get
+  the log from that leader (a known defect, #1096, that #1107 fixes). A leader that
+  stays a voter through the change passes the check, and its chain proves the change
+  (RAFT SURFACE). A node with no configuration takes no request. Only a voter that an
+  operator wiped is such a node (#881), because a node that joins opens with the
+  founding voters from its join answer (decided by the architect, #242,
+  2026-10-07T04:20:40Z:
   https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). A claim
   in the proof whose signer has no key at the node, or whose signature does not hold
   under a key from a join that is not applied, is removed before `step`. An append is
@@ -159,9 +164,25 @@
   (decided by the architect, 2026-10-07T08:15:18Z:
   https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025). The
   messages for one member wait in a queue of 64 that drops its oldest, because `raft`
-  sends again. A write that finds the pool full (`block::Error::Exhausted`), or that the
-  system refuses memory for (`Refused`), does not stop the group, because each may
-  succeed later (MEMORY BOUNDS): the task writes the same `Ready` again at each tick,
+  sends again. Before it adds a message, the queue drops each message that the new one
+  replaces (`raft::Message::replaces`). So the queue for a member that does not read,
+  and that answers only what it read, holds at most one heartbeat, one `PreVote`, one
+  `Vote`, and the appends of its window: one while it probes, else up to `INFLIGHT` (one
+  for a learner). Of the replies to what that member sends, it holds at most one
+  `HeartbeatReply` and one `PreVoteReply` of each answer, and one reply to each append
+  or `Vote` that the member sends (`laptop.architect`, 2026-10-19T19:31:21Z:
+  https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6275544916,
+  2026-10-19T19:53:12Z:
+  https://github.com/synnaxlabs/foundation/pull/3417#issuecomment-6275950285, and
+  2026-10-19T20:33:44Z:
+  https://github.com/synnaxlabs/foundation/pull/3417#issuecomment-6276712034). A member
+  that answers a message that it did not read frees a place of the window at each
+  answer, so only the queue of 64 bounds its queue (`laptop.architect`,
+  2026-10-19T23:33:03Z,
+  https://github.com/synnaxlabs/foundation/pull/3417#issuecomment-6279679805). A write
+  that finds the pool full (`block::Error::Exhausted`), or that the system refuses
+  memory for (`Refused`), does not stop the group, because each may succeed later
+  (MEMORY BOUNDS): the task writes the same `Ready` again at each tick,
   and until then no message leaves, nothing applies, and the group gets no tick. From
   the write that finds no block until the write ends, `propose` and `receive` give
   `Error::Pool` with the cause of the wait, so the group takes no proposal and no
@@ -201,13 +222,18 @@
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6031046531). A group
   stops when a write of the log fails, when a committed change has 0 bytes or a kind
   that this build does not know, or when each `Mesh` drops: this build cannot judge such
-  an entry, and a newer build can. An entry with no change (the first entry of a leader)
-  is not a change of 0 bytes. A committed entry of a known kind whose body does not
-  decode is `Refused::Body` on every node, and the group goes on, so one voter that
-  proposes bad bytes cannot halt the region. One `pub(crate)` type of `change` holds the
-  kind and the length of such a body: `Malformed::Body` and `Refused::Body` each hold
-  it, and the driver moves it from one to the other (decided by `laptop.architect`,
-  2026-10-11T12:05:22Z:
+  an entry, and a newer build can. A group also stops (`Stopped::Removed`, with the
+  voters that answered) when `Raft::removed_by` gives the voters (RAFT VOTERS). Each
+  member is a learner, so no member gets a `removed` answer: a voter that a change
+  removes keeps its group and follows the log. So `Stopped::Removed` needs the leave of
+  #3355 (`laptop.architect`, 2026-10-20T02:17:41Z:
+  https://github.com/synnaxlabs/foundation/pull/3411#issuecomment-6281787838). An entry
+  with no change (the first entry of a leader) is not a change of 0 bytes. A committed
+  entry of a known kind whose body does not decode is `Refused::Body` on every node, and
+  the group goes on, so one voter that proposes bad bytes cannot halt the region. One
+  `pub(crate)` type of `change` holds the kind and the length of such a body:
+  `Malformed::Body` and `Refused::Body` each hold it, and the driver moves it from one
+  to the other (decided by `laptop.architect`, 2026-10-11T12:05:22Z:
   https://github.com/synnaxlabs/foundation/issues/1509#issuecomment-6108834570). From
   the first stable release (C9d), a change to the body or to a cap of a known kind (the
   64 status entries of a `Join`) takes a new kind, which writers use only after the
@@ -245,6 +271,12 @@
   refuses the `node::Key` of a member (decided by `laptop.architect`,
   2026-10-07T08:33:14Z:
   https://github.com/synnaxlabs/foundation/pull/1277#issuecomment-6034146773). `open`
+  gives `raft` the founding members as learners, and the group gives the members again
+  after each join applies, so a member that is not a voter gets the log
+  (`Raft::set_learners`, RAFT SURFACE). A leader whose apply lags sends to fewer
+  learners for a while, which costs liveness, never safety (the plan of #3140). Decided
+  by `laptop.architect`, the plan, 2026-10-19T13:53:13Z
+  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6268881124). `open`
   starts the tasks that send: one for each member, from the first message for it
   (approved by the architect, 2026-10-07T13:40:50Z:
   https://github.com/synnaxlabs/foundation/pull/1410#issuecomment-6039206881, which
@@ -429,12 +461,12 @@
   https://github.com/synnaxlabs/foundation/pull/2755#issuecomment-6203047812.
   Amended (2026-10-18, #2283): `Mesh::set_addresses` proposes a `Change::Card` of the
   member of this node through `attempt` and `settle`, as `set_home` does. A member that
-  is not a voter gets `Error::NoVote`, as `set_home` gives, because a leader sends
-  entries only to the nodes of its configurations, so such a member applies no entry
-  after its join (`laptop.architect`, 2026-10-18T05:35:52Z:
-  https://github.com/synnaxlabs/foundation/issues/2283#issuecomment-6246157119). The
-  forward rule waits for B2 of #2283 (#3116, which waits on #3140): a member that is
-  not a voter forwards its card, the node that takes a forwarded change takes a
+  is not a voter gets `Error::NoVote`, as `set_home` gives (`laptop.architect`,
+  2026-10-18T05:35:52Z:
+  https://github.com/synnaxlabs/foundation/issues/2283#issuecomment-6246157119). Such
+  a member applies each entry as a learner (#3140), but it forwards no change until
+  B2. The forward rule waits for B2 of #2283 (#3116, which waits on #3140): a member
+  that is not a voter forwards its card, the node that takes a forwarded change takes a
   `Change::Card` from a peer that is not a voter when the card's member has the public
   key that the transport proves for that peer, and each other change from such a peer
   stays `Error::PeerNotVoter`. A member that knows no leader forwards to a voter of its

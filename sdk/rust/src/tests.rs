@@ -1,5 +1,7 @@
+use std::cell::Cell;
 use std::fs::Permissions;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
@@ -8,6 +10,7 @@ use std::time::Duration;
 use tokio::runtime::Builder;
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Dispatch, Event, Metadata, Subscriber};
+use types::time::Span;
 
 use super::*;
 
@@ -15,6 +18,88 @@ use super::*;
 fn a_client_moves_to_and_is_shared_between_threads() {
     fn shared<T: Send + Sync>() {}
     shared::<Client>();
+}
+
+/// The entropy of a simulated node of the default seed: the same bytes each time.
+fn fixed() -> env::entropy::Entropy {
+    let mut sim = sim::Sim::new(sim::Config::default());
+    sim.node(sim::node::Config::default()).entropy()
+}
+
+/// `private_key` reads the OS, so only `drawn` takes fixed bytes; the test pins it as
+/// `laptop.architect-2` ruled (2026-10-19T23:47:10Z,
+/// <https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279865842>).
+#[test]
+fn a_private_key_is_the_first_32_bytes_of_the_entropy() {
+    let mut bytes = [0; 32];
+    fixed().fill(&mut bytes);
+    assert_eq!(drawn(&fixed()).0, bytes);
+}
+
+#[test]
+fn each_private_key_is_new() {
+    assert_ne!(private_key().0, private_key().0);
+}
+
+/// The node sees the close of an answer at once, not at the end of its idle timeout.
+/// Loopback loses no close, which goes out only once.
+#[test]
+fn answering_closes_its_session_with_code_0_on_the_os() {
+    let server_key = PrivateKey([2; 32]);
+    let proved = server_key.public();
+    let (bound, address) = mpsc::channel();
+    let (sent, ended) = mpsc::channel();
+    let shards = os::shards().expect("shards");
+    let config = env::shards::Config {
+        name: "server".into(),
+        core: None,
+    };
+    let _server = shards
+        .start(config, move |tasks| async move {
+            let pool = block::Config::new(1 << 20).expect("the budget fits");
+            let memory = block::Heap::new(pool.reservation());
+            let clock = os::clock();
+            let config = transport::Config {
+                private_key: server_key,
+                message_bytes_max: NonZeroUsize::new(1 << 16).expect("not zero"),
+                window_bytes: 1 << 20,
+                streams_max: NonZeroU32::new(16).expect("not zero"),
+                idle: Span::from_nanos(60 * Span::SECOND.nanos()),
+                clock: clock.clone(),
+                entropy: os::entropy(),
+                tasks,
+                pool: Rc::new(block::Pool::new(pool, memory)),
+            };
+            let at = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+            let bound_port = transport::Port::bind(&os::net(), at).expect("a port");
+            let transport::Address::Udp(at) = bound_port.addresses()[0] else {
+                unreachable!("a UDP port");
+            };
+            let part = bound_port.split(NonZeroUsize::MIN).pop().expect("one part");
+            let transport =
+                transport::Transport::new(config, part).expect("a transport");
+            bound.send(at).expect("the test keeps the receiver");
+            let session = transport.accept().await.expect("a session");
+            let start = clock.now();
+            let error = session.closed().await;
+            sent.send((error, clock.now() - start))
+                .expect("the test keeps the receiver");
+        })
+        .expect("the server starts");
+    #[expect(clippy::disallowed_methods, reason = "the test waits for the server")]
+    let at = address.recv().expect("the server binds");
+    let node = Node::answering(vec![at]).expect("an answer");
+    assert_eq!(node.public_key, proved);
+    #[expect(clippy::disallowed_methods, reason = "the test waits for the server")]
+    let ended = ended.recv_timeout(Duration::from_secs(5));
+    let (error, waited) = ended.expect("the server saw the end");
+    assert_eq!(
+        error,
+        transport::Error::PeerClosed {
+            code: transport::Code(0)
+        }
+    );
+    assert!(waited < Span::SECOND, "{waited:?}");
 }
 
 #[test]
@@ -27,6 +112,60 @@ fn the_pool_holds_a_datagram() {
 fn the_frames_pool_holds_a_frame_of_32_kib() {
     let pool = block::Pool::heap(FRAMES);
     assert!(pool.largest() >= 32 << 10, "{}", pool.largest());
+}
+
+#[test]
+fn the_reads_pool_holds_a_frame_of_7_mib_in_504_mib_of_address_space() {
+    let pool = reads().unwrap();
+    assert_eq!(pool.largest(), 7_340_032);
+    assert_eq!(READS.reservation(), (504 << 20) + 64);
+}
+
+/// The whole pages of the bytes at `range` that are in memory, from
+/// `/proc/self/pagemap`.
+#[cfg(target_os = "linux")]
+fn present(range: std::ops::Range<*const u8>) -> usize {
+    use std::os::unix::fs::FileExt;
+    const PAGE: usize = 4096;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test reads its pages in /proc"
+    )]
+    let pagemap = std::fs::File::open("/proc/self/pagemap").unwrap();
+    (range.start.addr().div_ceil(PAGE)..range.end.addr() / PAGE)
+        .filter(|page| {
+            let mut entry = [0; 8];
+            let at = u64::try_from(page * 8).unwrap();
+            pagemap.read_exact_at(&mut entry, at).unwrap();
+            u64::from_le_bytes(entry) >> 63 == 1
+        })
+        .count()
+}
+
+/// Only Linux: the test counts the pages of a frame in `/proc/self/pagemap`, which
+/// macOS does not have. Frames of one size fill the budget, then frames of another
+/// size need it.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_reads_pool_gives_back_the_pages_of_a_size_that_another_size_needs() {
+    let pool = reads().unwrap();
+    let filled = |len| {
+        let mut frames = Vec::new();
+        while let Ok(mut frame) = pool.alloc(len) {
+            frame.fill(0xa5);
+            frames.push(frame);
+        }
+        frames
+    };
+    let first = filled(1_000_000);
+    let ranges: Vec<_> = first.iter().map(|frame| frame.as_ptr_range()).collect();
+    let pages: Vec<_> = ranges.iter().cloned().map(present).collect();
+    assert_eq!(pages, [243; 7]);
+    drop(first);
+    let second = filled(800_000);
+    assert!(second.len() >= 9, "{}", second.len());
+    let kept: Vec<_> = ranges.into_iter().map(present).collect();
+    assert_eq!(kept, [0; 7]);
 }
 
 #[test]
@@ -52,6 +191,15 @@ fn each_error_names_its_cause() {
         Error::Panicked,
         value,
         Error::Closed,
+        Error::Decode {
+            place: 3,
+            cause: codec::Error::Tag { vector: 1, tag: 9 },
+        },
+        Error::Memory(os::memory::Error::Reserve {
+            len: 4096,
+            code: 12,
+        }),
+        Error::Memory(os::memory::Error::Refused),
     ];
     assert_eq!(
         errors.map(|e| e.to_string()),
@@ -64,6 +212,13 @@ fn each_error_names_its_cause() {
             "the client thread panicked",
             "place 2 holds i64, not f64",
             "the client is closed",
+            "the series of place 3 does not decode: vector 1 has tag 9, which this sample \
+             type does not use",
+            "the client cannot reserve 4096 bytes of address space for the frames of its \
+             readers: Cannot allocate memory (os error 12); raise the address-space limit \
+             of the process",
+            "the OS refused memory for the frames of the client's readers; free memory or \
+             raise the commit limit of the system",
         ]
     );
 }
@@ -230,7 +385,6 @@ fn unreachable(addresses: Vec<SocketAddr>, cause: &transport::Error) {
     let peer = PrivateKey([7; 32]).public();
     let node = Node {
         addresses: addresses.clone(),
-        key: types::node::Key::from_u128(1),
         public_key: peer,
     };
     let subject = Subject {
@@ -244,7 +398,10 @@ fn unreachable(addresses: Vec<SocketAddr>, cause: &transport::Error) {
     let Err(error) = Client::connect(&node, subject) else {
         panic!("a client of an unreachable node connected");
     };
-    let unreachable = transport::Error::Unreachable { peer, attempts };
+    let unreachable = transport::Error::Unreachable {
+        peer: Some(peer),
+        attempts,
+    };
     assert_eq!(
         error,
         Error::Session(program::Error::Transport(unreachable))
@@ -264,6 +421,51 @@ fn a_client_of_port_0_is_unroutable() {
 #[test]
 fn a_client_of_a_node_with_no_address_is_unreachable_with_no_attempt() {
     unreachable(vec![], &transport::Error::Unroutable);
+}
+
+/// Asks for the node at `addresses`, and checks that the error names each one with
+/// `cause`.
+fn none_answering(addresses: Vec<SocketAddr>, cause: &transport::Error) {
+    let attempts = addresses
+        .iter()
+        .map(|&address| (transport::Address::Udp(address), cause.clone()))
+        .collect();
+    let error = Node::answering(addresses).expect_err("no node answers");
+    let unreachable = transport::Error::Unreachable {
+        peer: None,
+        attempts,
+    };
+    assert_eq!(
+        error,
+        Error::Session(program::Error::Transport(unreachable))
+    );
+}
+
+#[test]
+fn answering_of_port_0_is_unroutable() {
+    none_answering(vec![port_0()], &transport::Error::Unroutable);
+}
+
+#[test]
+fn answering_of_no_address_is_unreachable_with_no_attempt() {
+    none_answering(vec![], &transport::Error::Unroutable);
+}
+
+#[test]
+fn a_stream_task_runs_to_its_end_while_the_client_is_open() {
+    let runtime = Builder::new_current_thread().build().unwrap();
+    let (_open, closed) = watch::channel(());
+    let ran = Cell::new(false);
+    runtime.block_on(serve(async { ran.set(true) }, closed));
+    assert!(ran.get());
+}
+
+#[test]
+fn a_stream_task_stops_at_the_close_of_the_client() {
+    let runtime = Builder::new_current_thread().build().unwrap();
+    let (open, closed) = watch::channel(());
+    drop(open);
+    runtime.block_on(serve(std::future::pending(), closed));
 }
 
 #[test]
@@ -321,7 +523,6 @@ fn local_gives_the_node_and_its_admin() {
     let (node, subject) = Node::local(&dir.0).expect("a node runs");
     let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 7400));
     assert_eq!(node.addresses, [loopback]);
-    assert_eq!(node.key, types::node::Key::from_u128(7));
     assert_eq!(node.public_key, PrivateKey([7; 32]).public());
     let subject = subject.expect("an admin");
     assert_eq!(subject.name, spec::founding::admin());

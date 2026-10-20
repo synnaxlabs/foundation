@@ -22,23 +22,27 @@ pub(crate) fn admin(rig: &Rig) -> (Node, Subject) {
     )
 }
 
-/// The channels of the tests of writers: the index `plant.time`, and `plant.a` and
-/// `plant.b` of `i64` on it, and the index `other.time` with `other.a` of `i64`, all
-/// homed at the node `edge`.
+/// The channels of the tests of writers and readers: the index `plant.time`, and
+/// `plant.a` and `plant.b` of `i64` on it, and the index `cell.time` and `cell.c` of
+/// `i64` on it, homed at the node `edge`.
 const CHANNELS: &str = concat!(
     "channel \"plant.time\" { kind = \"index\" }\n",
     "channel \"plant.a\" {\n  data_type = \"i64\"\n  index = \"plant.time\"\n}\n",
     "channel \"plant.b\" {\n  data_type = \"i64\"\n  index = \"plant.time\"\n}\n",
-    "channel \"other.time\" { kind = \"index\" }\n",
-    "channel \"other.a\" {\n  data_type = \"i64\"\n  index = \"other.time\"\n}\n",
+    "channel \"cell.time\" { kind = \"index\" }\n",
+    "channel \"cell.c\" {\n  data_type = \"i64\"\n  index = \"cell.time\"\n}\n",
     "placement \"plant.home\" {\n  select = \"plant.*\"\n  home = \"edge\"\n}\n",
-    "placement \"other.home\" {\n  select = \"other.*\"\n  home = \"edge\"\n}\n",
+    "placement \"cell.home\" {\n  select = \"cell.*\"\n  home = \"edge\"\n}\n",
 );
 
 /// A rig whose node runs with [`CHANNELS`] applied, its node, and its admin. Waits
 /// until the hub of the node knows the channels, which it learns after the apply.
 pub(crate) fn planted() -> (Rig, Node, Subject) {
-    let mut rig = Rig::new();
+    planted_on(Rig::new())
+}
+
+/// [`planted`] on `rig`, which has no node yet.
+pub(crate) fn planted_on(mut rig: Rig) -> (Rig, Node, Subject) {
     rig.config(CHANNELS);
     rig.start();
     rig.apply();
@@ -47,19 +51,23 @@ pub(crate) fn planted() -> (Rig, Node, Subject) {
     rig.wait("the hub knows the channels", || {
         let channels = vec!["plant.a".parse().unwrap(), "plant.b".parse().unwrap()];
         let writer = client.open_writer(Config::new(channels));
+        writer.and_then(Writer::close).map_err(|e| e.to_string())?;
+        let writer = client.open_writer(Config::new(vec!["cell.c".parse().unwrap()]));
         writer.and_then(Writer::close).map_err(|e| e.to_string())
     });
     assert_eq!(client.close(), Ok(()));
     (rig, node, subject)
 }
 
-/// A session with `node` as `subject`, as the client of `sdk` makes it: its pools
-/// have the budgets of `POOL` and `FRAMES` of `sdk/rust/src/lib.rs`, which a change
-/// there must follow.
+/// A session with `node` as `subject`, as the client of `sdk` makes it, with a pool of
+/// `frames` bytes for its drafts: its other pools have the budgets of `POOL` and
+/// `READS` of `sdk/rust/src/lib.rs`, which a change there must follow. `FRAMES` there
+/// is 64 KiB.
 pub(crate) async fn session(
     node: Node,
     subject: Subject,
     tasks: Tasks,
+    frames: u64,
 ) -> program::Session {
     let budget = |bytes| block::Config::new(bytes).unwrap();
     let clock = os::clock();
@@ -73,8 +81,8 @@ pub(crate) async fn session(
         pool: Rc::clone(&pool),
     })
     .unwrap();
+    let frames = Rc::new(block::Pool::heap(budget(frames)));
     let config = program::Config {
-        via: node.key,
         node: node.public_key,
         addresses: node
             .addresses
@@ -87,7 +95,8 @@ pub(crate) async fn session(
         entropy,
         tasks,
         pool,
-        frames: Rc::new(block::Pool::heap(budget(64 << 10))),
+        frames,
+        reads: Rc::new(block::Pool::heap(budget(8 << 20))),
     };
     program::Session::connect(&transport, config).await.unwrap()
 }

@@ -9,7 +9,7 @@ use std::path::Path;
 
 use env::files::Files;
 use secret::seal::Opener;
-use types::ed25519::PrivateKey;
+use types::ed25519::{PrivateKey, PublicKey};
 use types::time::Stamp;
 
 use crate::{Error, directory};
@@ -42,6 +42,18 @@ pub(crate) struct Identity {
 /// for a file call that fails.
 pub(crate) async fn key(files: &Files) -> Result<Option<types::node::Key>, Error> {
     Ok(read(files).await?.map(|bytes| node_key(&bytes)))
+}
+
+/// The public key of the private key in `node.key` of `files`, or `None` when the
+/// file is not there. Opens the file as [`key`] does.
+///
+/// # Errors
+///
+/// As [`key`].
+pub(crate) async fn public_key(files: &Files) -> Result<Option<PublicKey>, Error> {
+    Ok(read(files)
+        .await?
+        .map(|bytes| fields(&bytes).private_key.public()))
 }
 
 /// [`Error::NoCard`] when the file is not there and the data directory has the

@@ -132,9 +132,37 @@ fn a_member_that_is_not_a_voter_sets_no_home() {
     cluster.script(|_| home_to(9));
     cluster.run(seconds(5));
     let board = cluster.board();
-    assert_eq!(board.set, [(3, None, Err(Error::NoVote))]);
+    assert_eq!(board.set, [(3, Some(key(leader)), Err(Error::NoVote))]);
     // The log of the leader got no entry from the call.
     assert_eq!((board.led, board.at), (vec![leader], vec![after(at, 1)]));
+}
+
+// The leader sends a learner each entry again after its restart.
+#[test]
+fn a_learner_that_restarts_applies_the_change_that_it_missed() {
+    let mut cluster = Cluster::new(5);
+    cluster.board.lock().unwrap().learners = [3].into();
+    cluster.script(home_to);
+    cluster.start();
+    cluster.run(seconds(5));
+    let board = cluster.board();
+    let &[leader] = board.led.as_slice() else {
+        panic!("the group took a proposal from each of {:?}", board.led);
+    };
+    let last = |homes: Homes, id| homes.get(&id)?.last().copied();
+    assert_eq!(last(board.homes, 3), Some(Some(key(leader))));
+    let other = 3 - leader;
+    let node = cluster.node(3).clone();
+    cluster.sim.crash(&node, Crash::Process);
+    cluster.script(|_| home_to(other));
+    cluster.run(seconds(5));
+    let homes = cluster.board().homes;
+    assert_eq!(homes.get(&3), None);
+    assert_eq!(last(homes, leader), Some(Some(key(other))));
+    cluster.board.lock().unwrap().learners = [3].into();
+    cluster.start_voter(3);
+    cluster.run(seconds(5));
+    assert_eq!(last(cluster.board().homes, 3), Some(Some(key(other))));
 }
 
 #[test]

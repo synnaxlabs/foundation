@@ -42,7 +42,7 @@ fn reader(
     };
     let main = move |tasks: Tasks| async move {
         let group = Group::new(tasks);
-        let session = session(node, subject, group.tasks().clone()).await;
+        let session = session(node, subject, group.tasks().clone(), 64 << 10).await;
         let mut reader = session.reader(select, Mode::Complete).await.unwrap();
         sender.send(()).unwrap();
         for _ in 0..frames {
@@ -220,11 +220,12 @@ fn a_client_with_a_wrong_public_key_gets_the_error_of_the_handshake() {
     };
     let error = Client::connect(&node, subject).unwrap_err();
     let unreachable = transport::Error::Unreachable {
-        peer,
+        peer: Some(peer),
         attempts: vec![(
             transport::Address::Udp(node.addresses[0]),
             transport::Error::Authentication { expected: peer },
-        )],
+        )]
+        .into_boxed_slice(),
     };
     assert_eq!(
         error,
@@ -259,7 +260,6 @@ fn a_client_of_an_address_that_no_node_reads_is_unreachable() {
     let peer = PrivateKey([7; 32]).public();
     let node = Node {
         addresses: vec![address],
-        key: types::node::Key::from_u128(1),
         public_key: peer,
     };
     let subject = Subject {
@@ -268,8 +268,41 @@ fn a_client_of_an_address_that_no_node_reads_is_unreachable() {
     };
     let error = Client::connect(&node, subject).unwrap_err();
     let unreachable = transport::Error::Unreachable {
-        peer,
-        attempts: vec![(transport::Address::Udp(address), transport::Error::TimedOut)],
+        peer: Some(peer),
+        attempts: vec![(transport::Address::Udp(address), transport::Error::TimedOut)]
+            .into_boxed_slice(),
+    };
+    assert_eq!(
+        error,
+        Error::Session(program::Error::Transport(unreachable))
+    );
+}
+
+#[test]
+fn answering_gives_the_node_that_local_gives_and_a_client_connects_to_it() {
+    let mut rig = Rig::new();
+    rig.start();
+    let (node, subject) = admin(&rig);
+    let answering = Node::answering(node.addresses.clone()).unwrap();
+    assert_eq!(
+        (&answering.addresses, answering.public_key),
+        (&node.addresses, node.public_key)
+    );
+    let client = Client::connect(&answering, subject).unwrap();
+    assert_eq!(client.close(), Ok(()));
+    rig.stop();
+}
+
+#[test]
+fn answering_of_an_address_that_no_node_reads_is_unreachable() {
+    #[expect(clippy::disallowed_methods, reason = "a socket that never reads")]
+    let silent = std::net::UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
+    let address = silent.local_addr().unwrap();
+    let error = Node::answering(vec![address]).unwrap_err();
+    let unreachable = transport::Error::Unreachable {
+        peer: None,
+        attempts: vec![(transport::Address::Udp(address), transport::Error::TimedOut)]
+            .into_boxed_slice(),
     };
     assert_eq!(
         error,
@@ -377,11 +410,11 @@ fn an_open_of_a_writer_of_an_unknown_name_gives_unknown_and_the_client_goes_on()
 fn an_open_of_a_writer_of_two_indexes_gives_malformed_and_the_client_goes_on() {
     let (mut rig, node, subject) = planted();
     let client = Client::connect(&node, subject).unwrap();
-    let channels = vec!["plant.a".parse().unwrap(), "other.a".parse().unwrap()];
+    let channels = vec!["plant.a".parse().unwrap(), "cell.c".parse().unwrap()];
     let opened = client.open_writer(Config::new(channels)).map(drop);
     let malformed = Error::Stream(program::Error::Refused(Refusal::Malformed));
     assert_eq!(opened, Err(malformed));
-    for name in ["plant.a", "other.a"] {
+    for name in ["plant.a", "cell.c"] {
         let mut writer = client.open_writer(Config::new(vec![name.parse().unwrap()]));
         let writer = writer.as_mut().unwrap();
         assert_eq!(writer.write(&[(0, Value::I64(7))]), Ok(taken(0, 1)));
@@ -633,11 +666,12 @@ fn each_call_after_the_node_ended_the_session_gives_the_cause() {
     assert_eq!(client.close(), Err(ended));
 }
 
-/// Only Unix: `counting::Local` names the thread with `pthread_self`. A warm `write`
-/// and `write_series` make no allocation on the caller's thread.
+/// Only Unix: `counting::Local` names the thread with `pthread_self`. A warm `write`,
+/// `write_series`, and `next` make no allocation on the caller's thread. Two calls of
+/// `count` at once panic, so this is the one test of the binary that counts (#3319).
 #[cfg(unix)]
 #[test]
-fn a_warm_write_makes_no_allocation_on_the_thread_of_its_caller() {
+fn a_warm_call_makes_no_allocation_on_the_thread_of_its_caller() {
     const WARMUP: usize = 100;
     const CALLS: usize = 1_000;
     const SAMPLES: u32 = 64;
@@ -676,4 +710,7 @@ fn a_warm_write_makes_no_allocation_on_the_thread_of_its_caller() {
     assert_eq!(writer.close(), Ok(()));
     assert_eq!(client.close(), Ok(()));
     rig.stop();
+    read::a_warm_next_makes_no_allocation();
 }
+
+mod read;

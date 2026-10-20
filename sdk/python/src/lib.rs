@@ -8,8 +8,8 @@ use std::process;
 use std::sync::{Mutex, PoisonError};
 
 use pyo3::exceptions::{
-    PyConnectionError, PyException, PyOSError, PyRuntimeError, PyTypeError,
-    PyValueError,
+    PyConnectionError, PyException, PyMemoryError, PyOSError, PyOverflowError,
+    PyRuntimeError, PyTypeError, PyValueError,
 };
 use pyo3::panic::PanicException;
 use pyo3::prelude::*;
@@ -84,62 +84,59 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
 /// Dials the node at `address` (`ip:port`, UDP), and blocks until it admits the first
 /// hello of `subject`. The client then renews the hello until it closes.
 ///
-/// `node` is the `uuid.UUID` key of the node, `public_key` the 32 bytes of the key
-/// that the node proves, and `private_key` the 32 bytes of a key that the spec lists
-/// for `subject`. Each of `address`, the pair (`node`, `public_key`), and the pair
-/// (`subject`, `private_key`) comes from the arguments, else from the node that runs on
-/// the data directory `data`: that node gives its address and keys, and its first admin
-/// gives the subject. `data` is a `str` or an `os.PathLike`, the `--data` of
-/// `foundation start`, by default `foundation-data`. With an `address`, the data
-/// directory counts only when its node is at that address: `127.0.0.1:p` matches a node
-/// bound on `0.0.0.0:p`. Other Python threads run while it waits.
+/// `public_key` is the 32 bytes of the key that the node proves, and `private_key` the
+/// 32 bytes of a key that the spec lists for `subject`. Each of `address`,
+/// `public_key`, and the pair (`subject`, `private_key`) comes from the arguments, else
+/// from the node that runs on the data directory `data`: that node gives its address
+/// and public key, and its first admin gives the subject. `data` is a `str` or an
+/// `os.PathLike`, the `--data` of `foundation start`, by default `foundation-data`.
+/// With an `address`, the data directory counts only when its node is at that
+/// address: `127.0.0.1:p` matches a node bound on `0.0.0.0:p`. Other Python threads
+/// run while it waits.
 ///
 /// Raises `TypeError` for an argument of a wrong type, `ValueError` for an argument
 /// that does not parse or a pair given in half, `RuntimeError` when a thread of the
 /// client or of the read of `data` cannot start, `OSError` when the local UDP socket
-/// cannot bind, `ConnectionError` when no source gives a value, the data directory
-/// cannot be read, the client cannot reach the node, or the node refuses the subject,
-/// and `PanicException` when a thread of the client or of the read of `data` panicked.
+/// cannot bind, `MemoryError` when the OS refuses the memory of the pool of the frames
+/// of the client's readers, `ConnectionError` when no source gives a value, the data
+/// directory cannot be read, the client cannot reach the node, or the node refuses the
+/// subject, and `PanicException` when a thread of the client or of the read of `data`
+/// panicked.
 #[pyfunction]
 #[pyo3(signature = (
-    address=None, *, node=None, public_key=None, subject=None, private_key=None,
-    data=None,
+    address=None, *, public_key=None, subject=None, private_key=None, data=None,
 ))]
 fn connect(
     py: Python<'_>,
     address: Option<&str>,
-    node: Option<&Bound<'_, PyAny>>,
     public_key: Option<&[u8]>,
     subject: Option<&str>,
     private_key: Option<&[u8]>,
     data: Option<PathBuf>,
 ) -> PyResult<Client> {
-    let keys = pair(["node", "public_key"], node, public_key)?;
     let subject = pair(["subject", "private_key"], subject, private_key)?;
     let address = address.map(parse_address).transpose()?;
     let data = data.map(parse_data).transpose()?;
-    let keys = keys.map(|(node, public_key)| node_keys(node, public_key));
+    let public_key = public_key.map(parse_public_key).transpose()?;
     let subject = subject.map(|(name, key)| parse_subject(name, key));
     let given = Given {
         address,
-        keys: keys.transpose()?,
+        public_key,
         subject: subject.transpose()?,
     };
-    let (address, node, subject) = match given {
+    let (address, public_key, subject) = match given {
         Given {
             address: Some(address),
-            keys: Some((key, public_key)),
+            public_key: Some(public_key),
             subject: Some(subject),
-        } => (address, (key, public_key), subject),
+        } => (address, public_key, subject),
         given => {
             let data = data.unwrap_or_else(|| PathBuf::from("foundation-data"));
             given.sourced(&data, local(py, &data)?)?
         }
     };
-    let (key, public_key) = node;
     let node = sdk::Node {
         addresses: vec![address],
-        key,
         public_key,
     };
     let client = py
@@ -152,24 +149,21 @@ fn connect(
     })
 }
 
-/// The key and the public key of a node.
-type Keys = (types::node::Key, PublicKey);
-
 /// What the arguments of [`connect`] give.
 struct Given {
     address: Option<SocketAddr>,
-    keys: Option<Keys>,
+    public_key: Option<PublicKey>,
     subject: Option<sdk::Subject>,
 }
 
 impl Given {
-    /// The address, the node's keys, and the subject, each from the arguments, else
-    /// from `local`, the node that runs on the data directory `data`, if any.
+    /// The address, the node's public key, and the subject, each from the arguments,
+    /// else from `local`, the node that runs on the data directory `data`, if any.
     fn sourced(
         self,
         data: &Path,
         local: Option<(sdk::Node, Option<sdk::Subject>)>,
-    ) -> PyResult<(SocketAddr, Keys, sdk::Subject)> {
+    ) -> PyResult<(SocketAddr, PublicKey, sdk::Subject)> {
         let (local, other) = match local {
             Some((node, _))
                 if self
@@ -205,12 +199,10 @@ impl Given {
             })
         };
         let (node, admin) = local.unzip();
-        let keys = self
-            .keys
-            .or_else(|| node.map(|node| (node.key, node.public_key)))
-            .ok_or_else(|| {
-                unsourced("the keys of the node", "node= and public_key=")
-            })?;
+        let public_key = self
+            .public_key
+            .or_else(|| node.map(|node| node.public_key))
+            .ok_or_else(|| unsourced("the public key of the node", "public_key="))?;
         let subject = match (self.subject, admin) {
             (Some(subject), _) | (None, Some(Some(subject))) => subject,
             (None, Some(None)) => {
@@ -226,7 +218,7 @@ impl Given {
                 ));
             }
         };
-        Ok((address, keys, subject))
+        Ok((address, public_key, subject))
     }
 }
 
@@ -292,11 +284,10 @@ fn parse_data(data: PathBuf) -> PyResult<PathBuf> {
     Ok(data)
 }
 
-/// The node's keys of the arguments `node` and `public_key`.
-fn node_keys(node: &Bound<'_, PyAny>, public_key: &[u8]) -> PyResult<Keys> {
-    let public_key = PublicKey::new(bytes("public_key", public_key)?)
-        .map_err(|e| PyValueError::new_err(format!("public_key: {e}")))?;
-    Ok((key(node)?, public_key))
+/// The node's public key of the argument `public_key`.
+fn parse_public_key(public_key: &[u8]) -> PyResult<PublicKey> {
+    PublicKey::new(bytes("public_key", public_key)?)
+        .map_err(|e| PyValueError::new_err(format!("public_key: {e}")))
 }
 
 /// The subject of the arguments `subject` and `private_key`.
@@ -363,13 +354,13 @@ impl Client {
     /// logger, `"raise"` raises `DataLost`, and `"ignore"` does nothing. Other Python
     /// threads run while it waits.
     ///
-    /// Raises `TypeError` for an argument of a wrong type; `ValueError` for no
-    /// channel, a name that does not parse, an `authority` outside 0 to 255, a `lease`
-    /// that is not a finite number over 0, or another `on_loss`, with no writer
-    /// opened; `Stopped` when the node refused the open, with a text that names each
-    /// channel of the open for `unknown`; `ConnectionError` when the session failed;
-    /// `RuntimeError` when the client closed or in a process that the program forked;
-    /// and `PanicException` when the client's thread panicked.
+    /// Raises `TypeError` for an argument of a wrong type; `ValueError` for no channel,
+    /// a name that does not parse, an `authority` outside 0 to 255, a `lease` that,
+    /// taken as a `float`, does not round to 1 to 2^63 - 1 nanoseconds, or another
+    /// `on_loss`, with no writer opened; `Stopped` when the node refused the open, with
+    /// a text that names each channel of the open for `unknown`; `ConnectionError` when
+    /// the session failed; `RuntimeError` when the client closed or in a process that
+    /// the program forked; and `PanicException` when the client's thread panicked.
     #[pyo3(
         signature = (
             channels, *, authority=Level(Authority(0)), lease=None, on_loss="warn"
@@ -381,14 +372,14 @@ impl Client {
         py: Python<'_>,
         channels: &Bound<'_, PyAny>,
         authority: Level,
-        lease: Option<f64>,
+        lease: Option<Lease>,
         on_loss: &str,
     ) -> PyResult<write::Writer> {
         let loss = write::Loss::parse(on_loss)?;
         let names = names(channels)?;
         let mut config = sdk::write::Config::new(names.clone());
         config.authority = authority.0;
-        config.lease = lease.map(span).transpose()?;
+        config.lease = lease.map(|lease| lease.0);
         owned(self.process)?;
         // The lock is taken without the GIL, which a closing thread needs to return.
         let writer = py
@@ -501,21 +492,42 @@ impl<'a, 'py> FromPyObject<'a, 'py> for Level {
     }
 }
 
-/// The span of the lease `lease`, in seconds.
-fn span(lease: f64) -> PyResult<Span> {
-    let nanos = (lease * 1e9).round();
-    // The bound is the first f64 past `i64::MAX`, and a NaN fails both tests.
-    #[expect(clippy::cast_precision_loss, reason = "2^63 is exact in an f64")]
-    if !(nanos >= 1.0 && nanos < i64::MAX as f64) {
-        return Err(PyValueError::new_err(format!(
-            "lease is {lease:?} s, not a finite number of seconds over 0"
-        )));
+/// The argument `lease` of `open_writer`: seconds that, taken as an `f64`, round to 1
+/// to 2^63 - 1 nanoseconds.
+struct Lease(Span);
+
+impl<'a, 'py> FromPyObject<'a, 'py> for Lease {
+    type Error = PyErr;
+
+    fn extract(object: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        let refused = |lease: &str| {
+            PyValueError::new_err(format!(
+                "lease is {lease}, which does not round to 1 to 2^63 - 1 ns"
+            ))
+        };
+        let lease = match object.extract::<f64>() {
+            Ok(lease) => lease,
+            Err(e) if e.is_instance_of::<PyOverflowError>(object.py()) => {
+                let lease = object.repr().map_or_else(
+                    |_| "past the range of a float".to_owned(),
+                    |repr| format!("{repr} s"),
+                );
+                return Err(refused(&lease));
+            }
+            Err(e) => return Err(e),
+        };
+        let nanos = (lease * 1e9).round();
+        // The bound is the first f64 past `i64::MAX`, and a NaN fails both tests.
+        #[expect(clippy::cast_precision_loss, reason = "2^63 is exact in an f64")]
+        if !(nanos >= 1.0 && nanos < i64::MAX as f64) {
+            return Err(refused(&format!("{lease:?} s")));
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the test above keeps a whole number of nanoseconds in i64"
+        )]
+        Ok(Self(Span::from_nanos(nanos as i64)))
     }
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "the test above keeps a whole number of nanoseconds in i64"
-    )]
-    Ok(Span::from_nanos(nanos as i64))
 }
 
 impl Drop for Client {
@@ -535,18 +547,6 @@ impl Drop for Client {
             mem::forget(session.take());
         }
     }
-}
-
-/// The node key of the `uuid.UUID` `node`.
-fn key(node: &Bound<'_, PyAny>) -> PyResult<types::node::Key> {
-    let uuid = node.py().import("uuid")?.getattr("UUID")?;
-    if !node.is_instance(&uuid)? {
-        let kind = node.get_type().name()?;
-        return Err(PyTypeError::new_err(format!(
-            "node is {kind}, not uuid.UUID"
-        )));
-    }
-    Ok(types::node::Key::from_u128(node.getattr("int")?.extract()?))
 }
 
 /// The 32 bytes of the argument `name`.
@@ -584,8 +584,10 @@ fn exception(py: Python<'_>, error: &sdk::Error, text: String) -> PyErr {
         ) => PyValueError::new_err(text),
         sdk::Error::Thread { .. } | sdk::Error::Closed => PyRuntimeError::new_err(text),
         sdk::Error::Bind(_) => PyOSError::new_err(text),
+        sdk::Error::Memory(_) => PyMemoryError::new_err(text),
         sdk::Error::Session(_)
         | sdk::Error::Local(_)
+        | sdk::Error::Decode { .. }
         | sdk::Error::Stream(
             program::Error::Transport(_)
             | program::Error::Message(_)

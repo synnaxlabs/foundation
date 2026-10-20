@@ -45,71 +45,125 @@
   leader left past the leave on the node, such as a configuration that makes it a voter
   again. A removed node that answered nothing over a whole quorum check period is
   released at that check instead, and the next configuration releases any that is still
-  a peer. A follower releases the removed nodes when the leave commits. A removed node
-  that missed its release learns it from `mesh`, not `raft`: `mesh` admits a `raft`
-  request only from a voter of the newest configuration that the node knows: the newest
-  in its log, or a newer one that a link of the request's chain proves. A link proves a
-  configuration when the votes it carries elected its leader under a configuration the
-  node already knows, and the leader's signature holds (#881). A configuration entry
-  binds the public key of each voter it adds, under the signature of the leader that
-  writes it. A node answers `removed` only to a sender that a configuration in its own
-  log held, when its committed configuration lacks the sender and the request proves no
-  newer configuration that holds it. Each other sender that is not a voter gets
-  `Error::NotVoter`, and does not stop. The person chose A, 2026-10-07T04:49:33Z
+  a peer. A follower releases the removed nodes when the leave commits. A learner
+  (`Raft::set_learners`, RAFT SURFACE) is the exception: while it is in the set, it gets
+  each entry past the leave, and no release, quorum check, or configuration drops it. A
+  removed node that missed its release learns it from `mesh`, not `raft`: `mesh` admits
+  a `raft` request only from a voter of the newest configuration that the node knows:
+  the newest in its log, or a newer one that a link of the request's chain proves. A
+  link proves a configuration when the votes it carries elected its leader under a
+  configuration the node already knows, and the leader's signature holds (#881). A
+  configuration entry binds the public key of each voter it adds, under the signature of
+  the leader that writes it. A node answers `removed` only to a sender that a
+  configuration in its own
+  log held, when its committed configuration lacks the sender, the request proves no
+  newer configuration that holds it, and the last `Raft::set_learners` left it out. Each
+  other sender that is not a voter gets `Error::NotVoter`, and does not stop. The person
+  chose A, 2026-10-07T04:49:33Z
   (https://github.com/synnaxlabs/foundation/issues/1096#issuecomment-6031153921; the
   text, https://github.com/synnaxlabs/foundation/issues/1096#issuecomment-6031072285).
   Supersedes the first version, which the person approved on 2026-10-06
   (https://github.com/synnaxlabs/foundation/pull/647#issuecomment-6007546638). #1105
   builds the `removed` answer and the held rule, #1106 the key binding, and #1107 the
-  configuration that a chain proves. Until #1107, a request proves no newer
-  configuration. A node answers `removed` only to a sender that `Start.voters` or a
-  committed `Voters` entry held, when the last committed configuration lacks it. A
-  sender that only an uncommitted entry held gets `NotVoter`: the entry can still be
-  truncated, and a node whose commit lags would stop a voter that no committed
-  configuration removed, the failure of #1054 (decided by the architect,
-  2026-10-08T02:21:15Z:
+  configuration that a chain proves. Until #1107, a request shows a newer configuration
+  only with its last position. A node answers `removed` only to a `PreVote` or a `Vote`
+  whose `last.index` is at or below its own commit index, or whose `last.term` is below
+  the term of the entry at that index, from a sender that `Start.voters` or a committed
+  `Voters` entry held, when the last committed configuration lacks it and the last
+  `Raft::set_learners` left it out. A sender that holds entries past the commit of the
+  receiver, at a term at or above the term at that commit, can hold a newer committed
+  configuration that adds it back, and a heartbeat or
+  an append names only entries that the receiver can lack, so each other request of a
+  sender that is not a voter gets `NotVoter`. This supersedes "a request proves no newer
+  configuration" of the interim rule below (decided by the architect,
+  2026-10-08T06:51:45Z:
+  https://github.com/synnaxlabs/foundation/issues/1822#issuecomment-6054242092). The
+  term clause adds to the last-index rule of that comment (`laptop.architect`,
+  2026-10-19T18:56:00Z:
+  https://github.com/synnaxlabs/foundation/pull/3407#issuecomment-6274855859). The
+  learner clause adds a condition inside the "only" of the rule that the person chose: a
+  voter that a `Voters` change removes, and that stays a member, is a learner. It gets
+  `NotVoter`, follows the log, and does not stop. Only a leave that ends its membership
+  (#3355) can stop it (`laptop.architect`, 2026-10-20T02:17:41Z:
+  https://github.com/synnaxlabs/foundation/pull/3411#issuecomment-6281787838). Known
+  gap: a demoted member that missed its change, and whose configuration lacks the
+  leader, gets no log until #1107 (#1096). It sends a `PreVote` to each voter at each
+  election timeout. Before, it stopped. A sender that only an uncommitted entry held
+  gets `NotVoter`: the entry can still be truncated,
+  and a node whose commit lags would stop a voter that no committed configuration
+  removed, the failure of #1054 (decided by the architect, 2026-10-08T02:21:15Z:
   https://github.com/synnaxlabs/foundation/issues/1105#issuecomment-6050855747). `mesh`
-  asks `Raft::removed`, so the log that holds the configurations answers it (decided by
-  `laptop.architect`, 2026-10-08T03:04:33Z:
-  https://github.com/synnaxlabs/foundation/pull/1762#issuecomment-6051316777).
-  `Raft::removed` counts a configuration entry only once the commit index covers it, so
-  a node that opened again answers `NotVoter` until a leader gives it the commit index.
-  A request is a PreVote, a Vote, a heartbeat, or an append. The rule covers requests
-  only, and `raft` decides which replies count (RAFT SURFACE). The coordinator gives the
-  person's words on the first version in its comment on #647, linked above. The removed
-  node takes that answer only from a voter of its own region, and stops its `raft` group
-  for that region. A voter of its region is a voter of the newest configuration in its
-  log, and an answer from any other node drops the stream, as any refusal does (decided
-  by `laptop.architect`, 2026-10-08T02:59:07Z:
-  https://github.com/synnaxlabs/foundation/pull/1762#issuecomment-6051260164). `raft`
-  sends such a node no entries, only answers. A voter with a lease drops its campaign or
-  refuses it with a `PreVoteReply` of `Answer::Refused` at the voter's term. In `raft`
-  alone, the node campaigns. While a voter has a lease, this has no effect. Once no
-  voter has a lease, as after the leader fails, the voters can elect the node: it
-  commits an entry of its term, which commits the leave, and steps down, and the voters
-  follow it until their election timeout. That gap stays in `raft`, pinned by
-  `it::change::the_voters_elect_a_removed_node_once_the_leader_fails`. In `mesh`, the
-  admission check and the `removed` answer close it for each voter whose log holds the
-  leave; a voter whose log lacks the leave entry admits the request until #1107. #483
-  keeps the stop on applying a committed configuration without itself. Keeping readmit
-  until then lost. The person decided on 2026-10-05 ("(a)"), #482. Readmit in `raft`
-  (#414) lost: it sent the log to a sender that `raft` cannot check. The person decided
-  on 2026-10-05 ("Ok B is fine", #193). A leader outside the committed final set sends
-  the commit and steps down. A node may campaign when it is a voter, incoming or
-  outgoing, of the configuration in force, or, while that configuration is not
-  committed, of the configuration before it. No other node campaigns. The rule is exact:
-  a leader appends a configuration entry only after the last one commits, so by Log
-  Matching only the last configuration entry in a log can be truncated, and the one
-  before it is committed. The fallback keeps two cases: a truncation gives the
-  configuration before back, and a removed leader that lost its lead before the leave
-  reached a peer is the only node that can win the election that commits it. A follower
-  whose commit index lags lets the configuration before campaign for longer, which costs
-  liveness, never safety. The `mesh` admission check stays beside this rule:
-  `promotable` decides whether an honest node campaigns, and `mesh` checks a sender that
-  may lie, because `raft` never checks senders (RAFT SURFACE). Neither is a second guard
-  for the other. Decided by the coordinator and the advisor on 2026-10-06 (#659). After
-  compaction a snapshot carries the configuration in force at its index, so the
-  configuration before the last entry stays known (#253).
-  `mesh` keeps the founding voters with the rest of `Config::founding` at each open
-  whose log holds no record, and refuses another set at an open whose log holds a
-  record (MESH DRIVER, #1209).
+  asks `Raft::admission`, so the log that holds the configurations answers it (decided
+  by `laptop.architect`, 2026-10-08T03:04:33Z:
+  https://github.com/synnaxlabs/foundation/pull/1762#issuecomment-6051316777). It gives
+  `Admitted` for a reply or a request of a voter, `Removed`, or `NotVoter`, so the whole
+  rule is in one crate (decided by `laptop.architect`, 2026-10-19T12:57:24Z:
+  https://github.com/synnaxlabs/foundation/issues/1107#issuecomment-6267749373). Lost:
+  `Raft::removed(&Message) -> bool`, which left "request" and "voter" in `mesh`.
+  `Raft::admission` counts a configuration entry only once the commit index covers it,
+  so a node that opened again answers `NotVoter` until a leader gives it the commit
+  index. A request is a PreVote, a Vote, a heartbeat, or an append. The rule covers
+  requests only, and `raft` decides which replies count (RAFT SURFACE). The coordinator
+  gives the person's words on the first version in its comment on #647, linked above.
+  The removed node takes that answer only from a voter of its own region. A voter of its
+  region is a voter of the newest configuration in its log, and an answer from any other
+  node drops the stream, as any refusal does (decided by `laptop.architect`,
+  2026-10-08T02:59:07Z:
+  https://github.com/synnaxlabs/foundation/pull/1762#issuecomment-6051260164). The node
+  stops its `raft` group for that region (`Stopped::Removed`) only when
+  `Raft::removed_by` gives the voters: those that answered `removed` are a majority of
+  the incoming half of the newest configuration in its log, itself not counted. An
+  answer counts for `2 × election_ticks` ticks, so an answer given before a committed
+  add drops. Answers given just before a committed add count for one window after it.
+  The rule is not conclusive for a node that is not a member. Such a node that missed
+  its removal and a later add of itself stops when a majority of the other voters of the
+  incoming half of the newest configuration in its log answer `removed` while they also
+  lack the add. That half can be smaller than the configuration that adds the node back:
+  when it holds one other voter, that voter alone stops the node. The node then needs a
+  join again. A member that missed its removal is a learner and gets `NotVoter`
+  (`laptop.architect`, 2026-10-20T02:17:41Z:
+  https://github.com/synnaxlabs/foundation/pull/3411#issuecomment-6281787838). The leave
+  design (#3355) decides a conclusive rule. A removed node with entries past the commit
+  of a voter, at a term at or above the term at that commit, gets `NotVoter` from it
+  until the voter commits past its last index. The voter cannot tell such a tail from a
+  committed add of the node. The cost is a `PreVote` to each voter at each election
+  timeout. Decided by `laptop.architect`, 2026-10-19T12:57:24Z:
+  https://github.com/synnaxlabs/foundation/issues/1107#issuecomment-6267749373; the
+  place in `raft` and the window 2026-10-19T18:47:21Z:
+  https://github.com/synnaxlabs/foundation/pull/3407#issuecomment-6274691760, which
+  supersedes the stop in `mesh` and its clear on a change of the configuration of
+  https://github.com/synnaxlabs/foundation/issues/1107#issuecomment-6267749373; the term
+  at the commit, the bound, and the deferral to #3355 2026-10-19T18:56:00Z:
+  https://github.com/synnaxlabs/foundation/pull/3407#issuecomment-6274855859. Lost: a
+  removed node that stops only on its own committed leave, which never stops the case
+  of #1105. `raft` sends such a node no entries, only answers. A voter with a lease
+  drops its campaign or refuses it with a `PreVoteReply` of `Answer::Refused` at the
+  voter's term. In `raft` alone, the node campaigns. While a voter has a lease, this has
+  no effect. Once no voter has a lease, as after the leader fails, the voters can elect
+  the node: it commits an entry of its term, which commits the leave, and steps down,
+  and the voters follow it until their election timeout. That gap stays in `raft`,
+  pinned by `it::change::the_voters_elect_a_removed_node_once_the_leader_fails`. In
+  `mesh`, the admission check closes it for each voter whose log
+  holds the leave; a voter whose log lacks the leave entry admits the request until
+  #1107. #483 keeps the stop on applying a committed configuration without itself.
+  Keeping readmit until then lost. The person decided on 2026-10-05 ("(a)"), #482.
+  Readmit in `raft` (#414) lost: it sent the log to a sender that `raft` cannot check.
+  The person decided on 2026-10-05 ("Ok B is fine", #193). A leader outside the
+  committed final set sends the commit and steps down. A node may campaign when it is a
+  voter, incoming or outgoing, of the configuration in force, or, while that
+  configuration is not committed, of the configuration before it. No other node
+  campaigns. The rule is exact: a leader appends a configuration entry only after the
+  last one commits, so by Log Matching only the last configuration entry in a log can be
+  truncated, and the one before it is committed. The fallback keeps two cases: a
+  truncation gives the configuration before back, and a removed leader that lost its
+  lead before the leave reached a peer is the only node that can win the election that
+  commits it. A follower whose commit index lags lets the configuration before campaign
+  for longer, which costs liveness, never safety. The `mesh` admission check stays
+  beside this rule: `promotable` decides whether an honest node campaigns, and `mesh`
+  checks a sender that may lie, because `raft` never checks senders (RAFT SURFACE).
+  Neither is a second guard for the other. Decided by the coordinator and the advisor on
+  2026-10-06 (#659). After compaction a snapshot carries the configuration in force at
+  its index, so the configuration before the last entry stays known (#253). `mesh` keeps
+  the founding voters with the rest of `Config::founding` at each open whose log holds
+  no record, and refuses another set at an open whose log holds a record (MESH DRIVER,
+  #1209).

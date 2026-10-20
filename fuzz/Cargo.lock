@@ -291,6 +291,7 @@ dependencies = [
 name = "config"
 version = "0.0.0"
 dependencies = [
+ "base64ct",
  "connector",
  "document",
  "spec",
@@ -316,6 +317,7 @@ dependencies = [
  "codec",
  "document",
  "env",
+ "estimate",
  "http",
  "http-body",
  "hub",
@@ -728,6 +730,7 @@ dependencies = [
  "access",
  "block",
  "clock",
+ "control",
  "env",
  "home",
  "mesh",
@@ -1004,6 +1007,7 @@ dependencies = [
  "access",
  "clap",
  "config",
+ "config-hcl",
  "connector",
  "document",
  "env",

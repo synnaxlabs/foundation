@@ -32,11 +32,11 @@ pub(crate) const TEST_EDGES: &[(&str, &str)] = &[
     ("access", "document"),
     ("config", "config-hcl"),
     ("config", "connector-influx"),
-    ("ops", "config-hcl"),
     ("ops", "transport"),
     ("ops", "clock"),
     ("node", "sdk"),
     ("sdk-python", "transport"),
+    ("sdk-python", "os"),
 ];
 
 /// Every crate with its layer and the workspace crates it may depend on.
@@ -200,6 +200,7 @@ pub(crate) const CRATES: &[Crate] = &[
         layer: 2,
         deps: Deps::Only(&[
             "access",
+            "control",
             "env",
             "types",
             "block",
@@ -245,6 +246,7 @@ pub(crate) const CRATES: &[Crate] = &[
         layer: 4,
         deps: Deps::Layer1And(&[
             "config",
+            "config-hcl",
             "connector",
             "secret",
             "hub",
@@ -275,6 +277,7 @@ pub(crate) const CRATES: &[Crate] = &[
             "env",
             "types",
             "block",
+            "codec",
         ]),
     },
     Crate {

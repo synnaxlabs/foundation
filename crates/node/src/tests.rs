@@ -1849,8 +1849,11 @@ mod home {
             let now = mesh_now(&clock, &host.clock()).await;
             let key = home
                 .open_writer(writer::Writer {
-                    subject: "a".parse().expect("a name"),
-                    authority: Authority(1),
+                    holder: control::Writer {
+                        subject: "a".parse().expect("a name"),
+                        authority: Authority(1),
+                        via: types::node::Key::from_u128(1),
+                    },
                     lease: None,
                     set: Arc::clone(&set),
                 })
@@ -2638,6 +2641,7 @@ mod hub {
                     interner,
                     tasks: spawn,
                     node: types::node::Key::from_u128(1),
+                    public_key: types::ed25519::PrivateKey([1; 32]).public(),
                     time,
                     entropy,
                     region: None,
@@ -3477,8 +3481,9 @@ pub(crate) mod port {
         assert_eq!(sim.run(), Ok(()));
         let seen = seen.lock().unwrap().take().expect("the peer ran");
         let unreachable = transport::Error::Unreachable {
-            peer: KEY.public(),
-            attempts: vec![(Address::Udp(listen(&host)), transport::Error::TimedOut)],
+            peer: Some(KEY.public()),
+            attempts: vec![(Address::Udp(listen(&host)), transport::Error::TimedOut)]
+                .into_boxed_slice(),
         };
         assert_eq!(seen, Err(unreachable));
         let error = ::buffer::Error::Files(env::files::Error::Io {
@@ -4591,6 +4596,7 @@ pub(crate) mod port {
                 interner,
                 tasks: tasks.clone(),
                 node: key,
+                public_key: transport.public_key(),
                 time: time.clone(),
                 entropy: entropy.clone(),
                 region: Some(::hub::Region {
@@ -4760,11 +4766,12 @@ pub(crate) mod port {
             assert_eq!(node.join(), Ok(()));
             let peer = OTHER.1.public();
             let unreachable = transport::Error::Unreachable {
-                peer,
+                peer: Some(peer),
                 attempts: vec![(
                     Address::Udp(listen(&host)),
                     transport::Error::Authentication { expected: peer },
-                )],
+                )]
+                .into_boxed_slice(),
             };
             let error = ::hub::reader::Error::Transport(unreachable);
             assert_eq!(opened.lock().unwrap().take(), Some(Some(error)));
@@ -4978,14 +4985,14 @@ pub(crate) mod port {
             assert_eq!(sim.run(), Ok(()));
             let limit = ::mesh::Error::Limit {
                 bytes_max: 1472,
-                bytes_min: 50_355,
+                bytes_min: 51_379,
             };
             let refused = node.join().unwrap_err();
             assert_eq!(refused, Error::Mesh(limit));
             assert_eq!(
                 refused.to_string(),
                 "the node's mesh did not open: this node takes messages of at most 1472 \
-                 bytes, below the 50355 bytes of an append of the largest record"
+                 bytes, below the 51379 bytes of an append of the largest record"
             );
         }
 

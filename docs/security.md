@@ -108,8 +108,8 @@ state on `main`.
   session holds at most `window_bytes / 1453` blocks, plus two for each stream. Open:
   #2434 (a session that sends small parts of large blocks, as `hub` does, holds up to
   that many large blocks).
-- Open: #620 (a stop after the peer's reset gives the peer the stream's window twice,
-  so a peer grows the connection's receive memory with no bound).
+- Fixed: #620 (a stop and a reset of one stream each gave the peer its unread bytes
+  of window, so a peer grew the connection's receive memory with no bound).
 - Fixed: #299 (a peer made the node hold certificates that are not valid for a
   session). A chain is one certificate of at most 1 KiB. #298 (datagrams that are
   not valid, from one address, stopped every stateless reset; a small datagram of an
@@ -161,6 +161,11 @@ state on `main`.
   after its deadline or replayed after an outage, and any read or write path that does
   not reach `access`, and a subject key of small order (the check must take
   `PublicKey`).
+- A program that connects with no pinned public key trusts the key that the node
+  proves (`sdk::Node::answering`, #3212). At that first connect, a host in the middle
+  can act as the node to the program, but it cannot act on the node as the program: the
+  hello names the public key that the session of the program proved, and the node
+  refuses a hello that names another with `VIA` (SUBJECT PROOF, #3212).
 
 ### Agent host and CLI to `ops`
 
@@ -183,18 +188,20 @@ state on `main`.
   signed ticket, and voters record membership (BQ11a). Every node checks each `Join`
   change at apply: the card's signature, a name and status channel names that are not
   reserved, under the region, not too long, and not held by a member, a key that is not
-  yet a member, status keys that no member holds, and the ticket's admission, scope,
-  uses, and expiry. The checks of the ticket's admission, scope, and expiry come before
-  the member checks, and the check of its use after them, so a join refusal names a key
-  or a name of the region only to a peer with a good admission (MEMBER RECORD). A status
-  holds at most 64 entries, so decode refuses more, and checks no signature. So a forged
-  card or a body that does not decode in a committed entry is a refused change, not a
-  stopped group. The proposing voter and the join answer are not built (#336). A ticket
-  holder that learns a node key out of band can take it with its own join, when that
-  join gets to the leader first. The real join is refused. A join that apply refuses
-  still binds its node key, so a voter that lies can deny a node key that it learns,
-  with no ticket. The node joins with a new key. The key gives no authority before its
-  join applies (MESH DRIVER).
+  yet a member, a region of fewer than `MEMBERS_MAX` = 128 members, status keys that no
+  member holds, and the ticket's admission, scope, uses, and expiry. The checks of the
+  ticket's admission, scope, and expiry come before the member checks, and the check of
+  its use after them, so a join refusal names a key or a name of the region only to a
+  peer with a good admission (MEMBER RECORD). A status holds at most 64 entries, so
+  decode refuses more, and checks no signature. So a forged card or a body that does not
+  decode in a committed entry is a refused change, not a stopped group. The proposing
+  voter and the join answer are not built (#336). A ticket holder that learns a node key
+  out of band can take it with its own join, when that join gets to the leader first.
+  The real join is refused. A join that apply refuses still binds its node key, so a
+  voter that lies can deny a node key that it learns, with no ticket. The node joins
+  with a new key. The key gives no authority before its join applies (MESH DRIVER). A
+  holder of a reusable ticket can fill a region to `MEMBERS_MAX`. Then each join is
+  refused until a member leaves (#3355).
 - `apply` signs the plan hash, and every node checks every change record (BQ12). So
   a voter that lies can stall its region, and cannot change access, keys, or
   placement. Not built (`spec`). Until #1213, a `Change::Spec` has no signature, and
@@ -207,14 +214,26 @@ state on `main`.
   the index a heartbeat or an append answer names, the order of an append's entries, and
   that no entry is above the append's term. A node that a change removed and that missed
   its release campaigns; a voter whose log holds the leave refuses the request, with
-  `removed` once the leave commits, and the node stops (#1105). A voter whose log lacks
-  the leave entry admits the request until #1107, so in `raft` alone such a node can win
-  an election once no voter has a lease, and lead until it commits the leave.
-- `raft` drops a reply from a node that is not a voter, unless a change removed the node
-  and `raft` still sends to it (#352). It takes a higher term only with a proof that a
-  quorum of its configuration granted the sender, in every message but a `PreVote` and a
-  granted `PreVoteReply` (RAFT SURFACE, #750). A refusal of a lower term carries the
-  proof of the refuser's term, so a node that is behind catches up.
+  `removed` once the leave commits and the last `Raft::set_learners` left the node out,
+  with no join in the log of the voter that the voter has not applied
+  (https://github.com/synnaxlabs/foundation/pull/3411#issuecomment-6282135192), and the
+  node stops once a majority of the other voters of the incoming half of its
+  configuration answer so (#1105). A voter that a change removes and that stays a member
+  is a learner: it gets `NotVoter`, follows the log, and does not stop. Only a leave
+  that ends its membership (#3355) can stop it (`laptop.architect`,
+  https://github.com/synnaxlabs/foundation/pull/3411#issuecomment-6281787838). Such a
+  member that missed its change, and whose configuration lacks the leader, gets no log
+  until #1107, and sends a `PreVote` to each voter at each election timeout. A voter
+  whose log lacks the leave entry admits the request until #1107, so in `raft` alone
+  such a node can win an election once no voter has a lease, and lead until it commits
+  the leave.
+- `raft` drops a reply from a node that is neither a voter nor a learner
+  (`Raft::set_learners`), unless a change removed the node or a later call to
+  `set_learners` left it out, and `raft` has not released it yet (#352). It takes a
+  higher term only with a proof that a quorum of its configuration granted the sender,
+  in every message but a `PreVote` and a granted `PreVoteReply` (RAFT SURFACE, #750). A
+  refusal of a lower term carries the proof of the refuser's term, so a node that is
+  behind catches up.
 - A node that may send to a group and lies could stop the group for good with one
   message in term `u64::MAX`. Now that message needs a quorum of grants of a
   configuration the node holds, or of one that a chain of signed configuration
@@ -228,16 +247,23 @@ state on `main`.
   `crates/raft/tests/it/hostile.rs` pins the gap (architect,
   https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6043096423). `mesh`
   also admits a `raft` request only from a voter of the newest configuration (RAFT
-  VOTERS, #654), and `raft` drops a reply from any other node. `Mesh::receive`
+  VOTERS, #654), and `raft` drops a reply from any node that is not its peer: a voter, a
+  learner, or a node that it has not released yet (RAFT SURFACE). `Mesh::receive`
   refuses such a request (`Error::NotVoter`). It answers `removed` (`Error::Removed`,
-  code 17) only to a sender that a committed configuration removed, so a stranger
-  cannot learn from the answer which nodes the log held, and a sender stops its group
-  only on that answer from a voter of its own configuration (#1105). `node` serves
-  mesh streams when it has a region (NODE MESH).
-  A voter that lies can still break safety, because a false `AppendReply` counts as
-  held, so `raft` trusts its voters (RAFT SURFACE, #352 item 2). A join that a
-  voter that lies writes gives its node the key it names (MESH DRIVER). A signed
-  `AppendReply` is #882.
+  code 17) only to a `PreVote` or a `Vote` at or below its commit index, or below the
+  term at it, from a sender that a committed configuration removed and that is not a
+  member, with no join in the log that this node has not applied, so a stranger cannot
+  learn from the answer which nodes the log held. A former
+  voter can learn the commit index of a voter, and the term at it, from the answers to
+  votes with different last positions. Neither holds data. A sender stops its group
+  only when a majority of the other voters of the incoming half of its own configuration
+  give that answer inside two election timeouts. That configuration can be smaller than
+  the one in force, so a minority of the voters in force that lies can still stop a
+  node that missed its removal and a later add of itself (#1105, #1822, #3355). `node`
+  serves mesh streams when it has a region (NODE MESH). A voter that lies can
+  still break safety, because a false `AppendReply` counts as held, so `raft` trusts its
+  voters (RAFT SURFACE, #352 item 2). A join that a voter that lies writes gives its
+  node the key it names (MESH DRIVER). A signed `AppendReply` is #882.
 - A voter that does not lead cannot make a node follow it: a heartbeat or an
   `Append` of a higher term, or of a term whose leader the node does not know yet,
   needs a quorum of votes for the sender, else `Error::Unproven` and nothing changes.
@@ -528,6 +554,7 @@ seconds on each PR, and `fuzz.yaml` runs each target for 600 seconds each night.
 | `wire_hub_frames` | `wire::hub::Frames::open`, `due`, `decode`, `received`, `draft`, `live`, with a small pool | No input panics; each frame has the path and range of its head; a layout error comes again from the next `due`; a reply of the retired kind 3 gives `Error::Kind { kind: 3 }`; a run that receives each body message in place gives the same steps as a run that gives each whole to `decode`; in a complete session, the lost seqs of each frame (`Frames::lost`) and the ranges of its frames with a sample tile the seqs from the open position on, and a latest session or a frame with no sample loses none; `Frames::live` is the open position, then the end of the last frame with a sample |
 | `wire_hub_write` | `wire::hub::write::Frames::due`, `decode`, `received`, `draft`, `skip`, `finish`, with a small pool | No input panics; a frame that finds the pool full is skipped and the stream goes on; each head that it gives encodes back to its message, so no head that `write::Head::encode` panics on gives a step; each error is one that `decode` lists for the part that was due; each frame has the time and form of its head, a range for each group whose index it holds, in group order, and the counts of its run of counts, which starts in the message of its last end when that message has room, and the rest of which comes after its draft, or 1 for each group of a head that the node stamps, for a set of one group or of two; a layout error comes again from the next `due`; at the end of the input, `finish` gives `Ok` between frames, else `Error::Cut` with the bytes of the frame that came; a run that receives each body message in place gives the same steps as a run that gives each whole to `decode` |
 | `wire_hub_client` | `wire::hub::client::Challenge::decode`, `Signed::decode`, `Request::decode`, `Response::decode`, `First::decode`, `Read::decode`, `Open::decode`, `Reader::decode`, `Places::decode`, `place::decode`, `Body::take`, `Body::end`, `write::Write::decode`, `write::Open::decode`, `write::Opening::decode`, `wire::hub::write::Reply::decode`, `wire::hub::write::Replies::decode`, and the encoders of each message | Each message encodes to the same bytes; each decoder but the two opens, `Reader::decode`, and `write::Opening::decode` refuses another kind with its `Kind` error, and `Reader::decode` and `write::Opening::decode` refuse a first message of another kind with it; `First::decode` gives what the decoder of the kind of the message gives; each body ends at its length and nowhere else, and each refusal of a body is the one that its rest gives; a `Reader` of each mode gives nothing before the last place; a `Places` of 0 or over `PLACES_MAX` gives `Error::Places`; each message of the run holds no more places than remain; with the last place, and at no message before it, the reader gives the start: the places of the run and their key set in place order, with the index of each place, and the `hub::Reader` of their count and the mode, or `Error::Index` or `Error::Unstamped` for the first place in place order that breaks a rule of the indexes, then `Error::Repeated`, then `Error::ManyIndexes` for the first place whose index is not that of place 0; a refused message other than `Error::ManyIndexes`, which ends the reader, leaves the reader as it was, and the end of the stream before the last place gives `Error::Finished`; a `write::Opening` gives for each message what a `Reader` gives, other than `Error::ManyIndexes`, and at the last place the reader's places and key set (a `Reader` holds an `Opening`, so the checks of the `Reader` are the checks of the run of both); a `Reply` that decodes holds a range of at least one sample that ends at or below `u64::MAX`; `Replies` takes or refuses each reply as a model of the order of the replies, by frame and then group, gives, and its predicates agree with the model; each valid message made from the input decodes to itself |
+| `wire_hub_forward` | `wire::hub::forward::Forward::decode`, `places::Run::decode`, `Run::ended`, and the encoders of each | Each forward and each message of a run that decodes encodes to the same bytes; a refused forward has the refusal that its kind, its length, and its count give; each message of the run gives what a model of the run gives: an empty message `Error::Empty`, a message that is not a whole count of places `Error::Length`, a message with more places than remain `Error::Run`, also after the run ended, and else its places when each is after the place before it in the run and below the channels, or `Error::Place` with the first place that is not; the run ends at its last place and at no message before it; each valid forward and run made from the input, in messages, decodes to itself |
 | `transport_hello` | `transport::fuzzing::Hello::decode`, `Hello::encode` (feature `fuzzing`) | Gives the hello, or the refusal, that a second reader of the STREAM WIRE rules gives; its encoding decodes to itself |
 | `transport_certificate` | `transport::fuzzing::peer`: the client verifier and the peer of a node's server, for a dialer's chain of 0 to 3 certificates (feature `fuzzing`) | Gives the peer that a second reader of the rules gives: a client for no certificate, none for a chain of more than one or a certificate over 1024 bytes, and else none or the node whose key follows the Ed25519 key header in the certificate; a certificate that a node issues reads back to its key, and two of it are refused. Not reached: the handshake signature, which fuzzed bytes cannot make |
 | `env_host` | `env::net::host::Host::from_str` and `env::net::host::uri` | A host from either reads back from its text, and a name has no uppercase letter |
@@ -551,11 +578,13 @@ seconds on each PR, and `fuzz.yaml` runs each target for 600 seconds each night.
 | `config_hcl_write` | `config_hcl::write` | Its text reads back as an equal document |
 | `config_plan` | `config::plan::Plan::decode` | Encodes to the same bytes |
 | `config_check` | `config::check` on the documents that `config_hcl::read` reads from up to three files, with the influx kind in the kind table | The same entries or the same problems for the files in either order; with no problem, one entry for each block and one for each status channel of each connector, and no other, unique in any case, each policy and connector decodes to itself, and each edge of a channel names a channel entry; each problem's span is in its file, in the order of the files, then of the source; files that pass alone, with keys that differ in more than case and no subject named as a connector in any ASCII case, pass together and give the union of their entries |
+| `config_profile` | `config::profile::decode` on the document that `config_hcl::read` reads from a profile | A key file only with a subject; the `node` block of each pin decodes alone to that pin; with a problem, each has a message and a fix, in source order, and a private key in the text gives only `config.private-key` |
+| `config_openssh_private_key` | `config::openssh::private_key` on the text of a key file | A key that it reads writes back with `key_file` and reads again as itself; CRLF line ends give the same result |
 | `connector_pem` | `connector::http::Roots::with_pem` on the text of a `ca` | The same error with a UTF-8 byte order mark put at the start; an `Ok` holds a root |
 | `connector_modbus_rtu` | `connector_modbus::rtu::decode_request`, `decode_reply`, `pdu::Request::decode`, `Request::decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `connector_modbus_tcp` | `connector_modbus::tcp::decode`, `pdu::Request::decode`, `decode_reply`, `read::groups`, `read::Group::values` | A request reads back unchanged; a reply has the asked count; reads of each register type that tile a read request group into that request, and give the values of its reply in address order, in each register order |
-| `connector_opcua_decode` | `connector_opcua::fuzz::decode`: `UA_decodeBinary` of open62541, as each type of `UA_TYPES` | No memory fault or leak; a decoded value encodes to its `UA_calcSizeBinary` length, and that encoding decodes, reads exactly its length, and encodes to the same bytes. A decoded `DataValue` gives the same read of its value (`Value::of` of the kind), or the same fault, and the same time (`value::time`), or the same status, from both decodes. Until #435 is fixed, the encoding decodes with as many zeros after it as its length. |
-| `connector_opcua_certificate` | `connector_opcua::fuzz::certificate`: the certificate that a server sends, DER or PEM, as the client of the copy reads it: `verifyCertificate` of a memory group that trusts nothing, `newChannelContext` of each of the three policies, `compareCertificate` with the certificate of a channel; and `UA_CertificateUtils_getApplicationUri`, which the client reads only from its own certificate (feature `sim`) | No memory fault or leak, and no read of the console; the check never gives `Good`. Not reached: a certificate that a trust list holds, which a fuzzed input cannot be |
+| `connector_opcua_decode` | `connector_opcua::fuzz::decode`: `UA_decodeBinary` of open62541, as each type of `UA_TYPES`, with no `calloc` and with the `calloc` of the Publish arena | No memory fault or leak; the decode under the `calloc` gives the same status, length, and encoding, or `BadOutOfMemory` where the decode without it fails; a decoded value encodes to its `UA_calcSizeBinary` length, and that encoding decodes, reads exactly its length, and encodes to the same bytes. A decoded `DataValue` gives the same read of its value (`Value::of` of the kind), or the same fault, and the same time (`value::time`), or the same status, from both decodes. Until #435 is fixed, the encoding decodes with as many zeros after it as its length. |
+| `connector_opcua_certificate` | `connector_opcua::fuzz::certificate`: the certificate that a server sends, DER or PEM, as the client of the copy reads it: `verifyCertificate` of a memory group that trusts nothing, `newChannelContext` of each of the three policies, `compareCertificate` with the certificate of a channel; and `UA_CertificateUtils_getApplicationUri`, which the client reads only from its own certificate (feature `sim`) | No memory fault or leak, and no read of the console; the check never gives `Good`. Not reached: the trust load, under "No target yet" (#3289) |
 | `ops_mcp` | `foundation mcp`, through `ops::cli` | No error, and at most one reply for each line |
 | `types_name` | `Name` | Prints as the text it was read from |
 | `types_selector` | `Pattern`, `Selector` | Agree with a second matcher |
@@ -583,6 +612,8 @@ text of the `opcua` kind
 open62541 reads (`connector_opcua::Kind::parse`, #2523), the readers of the answers of
 a browse and a describe, which the browse of the kind calls (`node_of`, `unit_of`,
 `Answer::browsed`, and `Answer::target` in `connector_opcua::client`, #2914), the
+readers of the answers of a subscription (`Answer::subscription`, `Answer::created`,
+`shim_monitor_result`, and `shim_value_times` in `connector_opcua::client`, #3440), the
 `address` of the
 `modbus` kind (`connector_modbus::Kind::parse`, #2789), the text of a browse path and
 pattern, which no front end reads yet (`connector::browse`, #2827), the file `name` of
@@ -593,4 +624,6 @@ reply of its node (`ops::serve`, #2563), the newest handoff record of each index
 ring (`home::handoff::read`, #2278), the newest named reader entry of each index in
 the ring (`home::named::read`, #2278), the buffer entry that a complete reader reads from
 disk (`home::stored::Decoder::frame`, #2738), the chunk processing of open62541
-(`ua_securechannel.c`, #1990).
+(`ua_securechannel.c`, #1990), the trust load of the open62541 copy
+(`openSSLLoadEachCertificate` through `UA_CertificateUtils_checkTrust`), which no config
+reaches until PR 2d of #2934 (#3289).

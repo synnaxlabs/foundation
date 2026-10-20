@@ -2,6 +2,8 @@
 
 #![expect(unsafe_code, reason = "open62541 is a C library")]
 
+#[cfg(feature = "sim")]
+use std::cell::RefCell;
 use std::ffi::{CStr, c_int};
 use std::future::poll_fn;
 use std::mem::ManuallyDrop;
@@ -20,6 +22,8 @@ use crate::node::{Key, Node, ns0};
 use crate::value::Value;
 #[cfg(test)]
 use types::time::Span;
+#[cfg(feature = "sim")]
+use types::time::Stamp;
 
 /// A started test server of open62541 on the loop of a connection manager.
 /// [`Server::close`] deletes it, and a drop leaks it.
@@ -29,7 +33,7 @@ pub(crate) struct Server {
     events: *mut ffi::EventLoop,
     /// The context of each variable of [`Server::add_source`], until the delete.
     #[cfg(feature = "sim")]
-    sources: Vec<NonNull<Source>>,
+    sources: RefCell<Vec<NonNull<Source>>>,
 }
 
 /// The node context of a variable of [`Server::add_source`]: `shim_source` of
@@ -37,31 +41,44 @@ pub(crate) struct Server {
 #[cfg(feature = "sim")]
 #[repr(C)]
 struct Source {
-    read: unsafe extern "C" fn(*mut Source, *mut ffi::Scalar, *mut u16, *mut u32),
-    answer: Box<dyn FnMut() -> (Value, types::quality::Quality)>,
+    read: unsafe extern "C" fn(
+        *mut Source,
+        *mut ffi::Scalar,
+        *mut u16,
+        *mut u32,
+        *mut i64,
+    ),
+    answer: Box<dyn FnMut() -> Answer>,
     /// False while the add reads the variable to check its type.
     added: bool,
 }
 
-/// Answers a read of the variable of `source` into `value`, `kind`, and `status`.
+/// The answer of a read of a variable of [`Server::add_source`]: the value, its
+/// status, and its source timestamp, or `None` for the time of the read.
+#[cfg(feature = "sim")]
+pub(crate) type Answer = (Value, types::quality::Quality, Option<Stamp>);
+
+/// Answers a read of the variable of `source` into `value`, `kind`, `status`, and
+/// `ticks`, the source timestamp as a `DateTime`, or 0 for none.
 ///
 /// # Safety
 ///
-/// `source` is live, nothing else holds it, and `value`, `kind`, and `status` are
-/// places to write.
+/// `source` is live, nothing else holds it, and `value`, `kind`, `status`, and
+/// `ticks` are places to write.
 #[cfg(feature = "sim")]
 unsafe extern "C" fn read(
     source: *mut Source,
     value: *mut ffi::Scalar,
     kind: *mut u16,
     status: *mut u32,
+    ticks: *mut i64,
 ) {
     // SAFETY: as the caller ensures.
     let source = unsafe { &mut *source };
-    let (answer, quality) = if source.added {
+    let (answer, quality, stamp) = if source.added {
         (source.answer)()
     } else {
-        (Value::F64(0.0), types::quality::Quality::GOOD)
+        (Value::F64(0.0), types::quality::Quality::GOOD, None)
     };
     let (scalar, scalar_kind) = answer.raw();
     // SAFETY: as the caller ensures.
@@ -70,6 +87,9 @@ unsafe extern "C" fn read(
     unsafe { kind.write(scalar_kind) };
     // SAFETY: as the caller ensures.
     unsafe { status.write(quality.0) };
+    let time = stamp.map_or(0, |stamp| stamp.nanos().div_euclid(100) + ffi::UNIX_EPOCH);
+    // SAFETY: as the caller ensures.
+    unsafe { ticks.write(time) };
 }
 
 impl Server {
@@ -163,7 +183,7 @@ impl Server {
             raw,
             events,
             #[cfg(feature = "sim")]
-            sources: Vec::new(),
+            sources: RefCell::default(),
         }
     }
 
@@ -228,17 +248,17 @@ impl Server {
     }
 
     /// Adds the scalar variable `node` of the `DataType` `BaseDataType`, and answers
-    /// each read of a client with the value and the status that `answer` gives, on the
-    /// thread that drives the server.
+    /// each read of a client with the value, the status, and the source timestamp that
+    /// `answer` gives, on the thread that drives the server.
     ///
     /// # Panics
     ///
     /// If open62541 refuses the node, or the key of `node` is the number 0.
     #[cfg(feature = "sim")]
     pub(crate) fn add_source(
-        &mut self,
+        &self,
         node: &Node,
-        answer: impl FnMut() -> (Value, types::quality::Quality) + 'static,
+        answer: impl FnMut() -> Answer + 'static,
     ) {
         let source = self.source(Box::new(answer), false);
         // SAFETY: the server lives, it copies the name of `node`, and the close frees
@@ -263,17 +283,22 @@ impl Server {
     }
 
     /// Makes `answer` answer each later read of the variable `node`, which open62541
-    /// adds, such as the state of the server, as [`Server::add_source`] does.
+    /// adds, such as the state of the server, as [`Server::add_source`] does, with the
+    /// time of the read as the source timestamp.
     ///
     /// # Panics
     ///
     /// If open62541 has no variable `node`, or its key is the number 0.
     #[cfg(test)]
     pub(crate) fn set_source(
-        &mut self,
+        &self,
         node: &Node,
-        answer: impl FnMut() -> (Value, types::quality::Quality) + 'static,
+        mut answer: impl FnMut() -> (Value, types::quality::Quality) + 'static,
     ) {
+        let answer = move || {
+            let (value, quality) = answer();
+            (value, quality, None)
+        };
         let source = self.source(Box::new(answer), true);
         // SAFETY: the server lives, and the close frees `source` after the delete.
         let status = Status(unsafe {
@@ -289,8 +314,8 @@ impl Server {
     /// Makes a [`Source`] of `answer` that the close frees.
     #[cfg(feature = "sim")]
     fn source(
-        &mut self,
-        answer: Box<dyn FnMut() -> (Value, types::quality::Quality)>,
+        &self,
+        answer: Box<dyn FnMut() -> Answer>,
         added: bool,
     ) -> NonNull<Source> {
         let source = NonNull::from(Box::leak(Box::new(Source {
@@ -298,7 +323,7 @@ impl Server {
             answer,
             added,
         })));
-        self.sources.push(source);
+        self.sources.borrow_mut().push(source);
         source
     }
 
@@ -409,8 +434,90 @@ impl Server {
         }
     }
 
-    /// Counts each Browse request that the server processes from now, and the most
-    /// continuation points that one session holds.
+    /// Refuses each `CreateMonitoredItems` of more than `most` items, 0 for none, with
+    /// `BadTooManyOperations`. It adds no variable `ns=0;i=11714`, so a client does
+    /// not know the limit.
+    #[cfg(test)]
+    pub(crate) fn refuse_monitors_past(&self, most: u32) {
+        // SAFETY: the server lives.
+        unsafe { ffi::test::shim_server_monitors(self.raw(), most) };
+    }
+
+    /// Sets the `MaxMonitoredItemsPerCall` of the server to `most`, 0 for none, and
+    /// adds the variable `ns=0;i=11714` that gives it, which the build of open62541
+    /// lacks.
+    ///
+    /// # Panics
+    ///
+    /// On a second call, as open62541 refuses the second add of the variable.
+    #[cfg(test)]
+    pub(crate) fn set_per_monitor(&self, most: u32) {
+        self.refuse_monitors_past(most);
+        let node = Node::ns0(ffi::MAX_MONITORED_ITEMS_PER_CALL);
+        self.add_scalar(&node, Value::U32(most));
+    }
+
+    /// Ends each subscription of the server with `status`, which the server sends in
+    /// a status change notification at the next publishing interval of each.
+    #[cfg(test)]
+    pub(crate) fn end_subscriptions(&self, status: Status) {
+        // SAFETY: the server lives.
+        unsafe { ffi::test::shim_server_end(self.raw(), status.0) };
+    }
+
+    /// Sets the most notifications of a Publish answer that the server grants.
+    #[cfg(feature = "sim")]
+    pub(crate) fn set_per_publish(&self, most: u32) {
+        // SAFETY: the server lives.
+        unsafe { ffi::test::shim_server_publishes(self.raw(), most) };
+    }
+
+    /// Sets the shortest publishing interval that the server grants, in ms.
+    #[cfg(test)]
+    pub(crate) fn set_publishing(&self, ms: f64) {
+        // SAFETY: the server lives.
+        unsafe { ffi::test::shim_server_publishing(self.raw(), ms) };
+    }
+
+    /// Sets the smallest keep-alive count of a subscription that the server grants.
+    #[cfg(test)]
+    pub(crate) fn set_keep_alives(&self, least: u32) {
+        // SAFETY: the server lives.
+        unsafe { ffi::test::shim_server_keep_alives(self.raw(), least) };
+    }
+
+    /// Gives the most Publish requests that one session of the server holds now.
+    #[cfg(test)]
+    pub(crate) fn held(&self) -> u32 {
+        // SAFETY: the server lives.
+        unsafe { ffi::test::shim_server_held(self.raw()) }
+    }
+
+    /// Sets the most Publish requests that the server holds for each session. It
+    /// answers the oldest with `BadTooManyPublishRequests` to take one more.
+    #[cfg(test)]
+    pub(crate) fn set_held(&self, most: u32) {
+        // SAFETY: the server lives.
+        unsafe { ffi::test::shim_server_holds(self.raw(), most) };
+    }
+
+    /// Sets the largest queue of a monitored item that the server grants.
+    #[cfg(test)]
+    pub(crate) fn set_queues(&self, most: u32) {
+        // SAFETY: the server lives.
+        unsafe { ffi::test::shim_server_queues(self.raw(), most) };
+    }
+
+    /// Gives the most notifications of a Publish answer of the first subscription of
+    /// the server, 0 for none.
+    #[cfg(test)]
+    pub(crate) fn per_publish(&self) -> u32 {
+        // SAFETY: the server lives.
+        unsafe { ffi::test::shim_server_per_publish(self.raw()) }
+    }
+
+    /// Counts each Browse, `CreateMonitoredItems`, and Publish request that the server
+    /// processes from now, and the most continuation points that one session holds.
     ///
     /// # Panics
     ///
@@ -717,7 +824,7 @@ impl Server {
         let status = Status(unsafe { ffi::test::UA_Server_delete(self.raw()) });
         assert_eq!(status, Status::GOOD, "open62541 refused the server delete");
         #[cfg(feature = "sim")]
-        for source in self.sources {
+        for source in self.sources.into_inner() {
             // SAFETY: the server that read it is deleted, and nothing else holds it.
             drop(unsafe { Box::from_raw(source.as_ptr()) });
         }
@@ -787,8 +894,9 @@ pub(crate) struct Limits {
     pub(crate) chunks: u32,
 }
 
-/// The count of the Browse requests of a [`Server`], and the most continuation points
-/// that one of its sessions held, from [`Server::count`].
+/// The count of the Browse, `CreateMonitoredItems`, and Publish requests of a
+/// [`Server`], and the most continuation points that one of its sessions held, from
+/// [`Server::count`].
 #[cfg(test)]
 pub(crate) struct Counts<'s> {
     /// Lives until the delete of the server.
@@ -809,6 +917,25 @@ impl Counts<'_> {
     pub(crate) fn points(&self) -> usize {
         // SAFETY: as `browses`.
         unsafe { self.counts.as_ref().points }
+    }
+
+    /// Gives the count of the `CreateMonitoredItems` requests.
+    pub(crate) fn monitors(&self) -> usize {
+        // SAFETY: as `browses`.
+        unsafe { self.counts.as_ref().monitors }
+    }
+
+    /// Gives the count of the Publish requests.
+    pub(crate) fn publishes(&self) -> usize {
+        // SAFETY: as `browses`.
+        unsafe { self.counts.as_ref().publishes }
+    }
+
+    /// Gives the count of the Publish requests answered with
+    /// `BadTooManyPublishRequests`.
+    pub(crate) fn refused(&self) -> usize {
+        // SAFETY: as `browses`.
+        unsafe { self.counts.as_ref().refused }
     }
 }
 

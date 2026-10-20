@@ -10,14 +10,19 @@ use types::authority::Authority;
 use types::channel::Slot;
 use types::frame::Path;
 use types::name::Name;
+use types::node;
 
 use crate::state;
 
 /// The buffer tag of a handoff entry.
 const TAG: NonZeroU8 = NonZeroU8::MIN;
 
-/// The most bytes in the body of a handoff: the authority and the longest subject.
-pub(crate) const MAX_BYTES: usize = 1 + Name::MAX_BYTES;
+/// The bytes of the node key in the body of a handoff.
+const VIA: usize = size_of::<u128>();
+
+/// The most bytes in the body of a handoff: the authority, the node key, and the
+/// longest subject.
+pub(crate) const MAX_BYTES: usize = 1 + VIA + Name::MAX_BYTES;
 const _: () = assert!(
     MAX_BYTES <= Layout::ENTRY_MAX_MIN,
     "a handoff fits one entry of any ring"
@@ -34,8 +39,9 @@ pub(crate) fn append(buffer: &Buffer, handoff: Handoff<'_>, head: state::Head) -
 fn body(handoff: Handoff<'_>) -> Option<Vec<u8>> {
     let holder = handoff.to?;
     let subject = holder.subject.as_str().as_bytes();
-    let mut body = Vec::with_capacity(1 + subject.len());
+    let mut body = Vec::with_capacity(1 + VIA + subject.len());
     body.push(holder.authority.0);
+    body.extend_from_slice(&holder.via.as_u128().to_le_bytes());
     body.extend_from_slice(subject);
     Some(body)
 }
@@ -60,10 +66,13 @@ pub(crate) fn newest(buffer: &Buffer) -> Vec<(Slot, Writer)> {
 ///
 /// # Panics
 ///
-/// If the subject is not a valid name. Bytes from another node must be checked before
-/// they reach `read`.
+/// If the body ends before its subject, or the subject is not a valid name. Bytes
+/// from another node must be checked before they reach `read`.
 fn read(body: &[u8]) -> Option<Writer> {
-    let (&authority, subject) = body.split_first()?;
+    let (&authority, rest) = body.split_first()?;
+    let (via, subject) = rest.split_first_chunk::<VIA>().unwrap_or_else(|| {
+        panic!("the handoff body of {} bytes has no node", body.len())
+    });
     let subject = str::from_utf8(subject)
         .unwrap_or_else(|error| panic!("the handoff subject is not UTF-8: {error}"));
     let subject = subject
@@ -72,6 +81,7 @@ fn read(body: &[u8]) -> Option<Writer> {
     Some(Writer {
         subject,
         authority: Authority(authority),
+        via: node::Key::from_u128(u128::from_le_bytes(*via)),
     })
 }
 
@@ -81,23 +91,34 @@ mod tests {
 
     use super::*;
 
+    /// The node key of each writer of a test, and its bytes in a body.
+    const VIA: u128 = 0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10;
+    const VIA_BYTES: &[u8; 16] =
+        b"\x10\x0f\x0e\x0d\x0c\x0b\x0a\x09\x08\x07\x06\x05\x04\x03\x02\x01";
+
     fn writer(subject: &str, authority: u8) -> Writer {
         Writer {
             subject: subject.parse().expect("a valid name"),
             authority: Authority(authority),
+            via: node::Key::from_u128(VIA),
         }
+    }
+
+    /// The body of a handoff to `subject` at authority 7.
+    fn bytes(subject: &str) -> Vec<u8> {
+        [&[7], &VIA_BYTES[..], subject.as_bytes()].concat()
     }
 
     mod body {
         use super::*;
 
         #[test]
-        fn writes_the_authority_then_the_subject() {
+        fn writes_the_authority_the_node_then_the_subject() {
             let holder = writer("plant.pump-1", 7);
 
             let body = body(Handoff { to: Some(&holder) }).expect("a holder");
 
-            assert_eq!(body, b"\x07plant.pump-1");
+            assert_eq!(body, bytes("plant.pump-1"));
         }
 
         #[test]
@@ -120,7 +141,10 @@ mod tests {
 
         #[test]
         fn reads_the_holder() {
-            assert_eq!(read(b"\x07plant.pump-1"), Some(writer("plant.pump-1", 7)));
+            assert_eq!(
+                read(&bytes("plant.pump-1")),
+                Some(writer("plant.pump-1", 7))
+            );
         }
 
         #[test]
@@ -137,7 +161,7 @@ mod tests {
                                        sequence of 1 bytes from index 1"
             )]
             fn panics_on_a_subject_that_is_not_utf8() {
-                read(&[7, b'a', 0xff]);
+                read(&[&bytes("a")[..], &[0xff]].concat());
             }
 
             #[test]
@@ -146,14 +170,14 @@ mod tests {
                                        valid: \"\" in \"a..b\""
             )]
             fn panics_on_a_subject_that_is_not_a_name() {
-                read(b"\x07a..b");
+                read(&bytes("a..b"));
             }
 
             #[test]
             #[should_panic(expected = "the handoff subject is not a name: a name or \
                                        pattern is empty")]
-            fn panics_on_an_authority_without_a_subject() {
-                read(&[7]);
+            fn panics_on_a_node_without_a_subject() {
+                read(&bytes("")[..]);
             }
         }
     }
@@ -165,9 +189,14 @@ mod tests {
                 "@?[A-Za-z0-9_-]{1,63}(\\.@?[A-Za-z0-9_-]{1,63}){0,3}"
                     .prop_filter("a name", |subject| subject.len() <= Name::MAX_BYTES),
                 any::<u8>(),
+                any::<u128>(),
             ))
         ) {
-            let holder = holder.map(|(subject, authority)| writer(&subject, authority));
+            let holder = holder.map(|(subject, authority, via)| Writer {
+                subject: subject.parse().expect("a valid name"),
+                authority: Authority(authority),
+                via: node::Key::from_u128(via),
+            });
             let body = body(Handoff { to: holder.as_ref() });
             let bytes = body.as_deref().unwrap_or_default();
 

@@ -10,7 +10,9 @@ use std::panic;
 use env::clock::Clock;
 use env::net::Net;
 use env::rng::Rng;
+use types::quality::Quality;
 use types::sample::Scalar;
+use types::time::Span;
 
 use super::PORT;
 use crate::client::Nodes;
@@ -31,6 +33,11 @@ const BYTES: Node = Node {
     namespace: 1,
     key: Key::Number(1002),
 };
+/// The number of the key of the first counter of [`Server::counting`].
+const COUNTERS: u32 = 10_000;
+/// The sampling interval of [`Client::subscribe`]: the shortest publishing interval of
+/// a client, so each counter changes once in each Publish answer.
+const SAMPLING: Span = Span::from_nanos(100_000_000);
 /// The name of the Double variable of a [`Server`] that has a name key.
 const NAME: &str = "SpikeData";
 /// The value of each variable.
@@ -88,16 +95,36 @@ impl Server {
         rng: Rng,
         body: impl AsyncFnOnce(&Self) -> T,
     ) -> T {
-        Self::serve(clock, net, address, rng, DOUBLE, body).await
+        Self::serve(clock, net, address, rng, DOUBLE, 0, body).await
     }
 
-    /// As [`Server::scope`], with `double` as the value of each variable.
+    /// As [`Server::scope`], with `counters` more Double variables for
+    /// [`Client::subscribe`], each of which adds 1 to its value at each sample. The
+    /// server grants each count of changes in a Publish answer that a client asks for.
+    ///
+    /// # Panics
+    ///
+    /// As [`Server::scope`], and if `counters` is past `u32::MAX - COUNTERS`.
+    pub async fn counting<T>(
+        clock: Clock,
+        net: Net,
+        address: IpAddr,
+        rng: Rng,
+        counters: usize,
+        body: impl AsyncFnOnce(&Self) -> T,
+    ) -> T {
+        Self::serve(clock, net, address, rng, DOUBLE, counters, body).await
+    }
+
+    /// As [`Server::counting`], with `double` as the value of each variable other than
+    /// the counters.
     async fn serve<T>(
         clock: Clock,
         net: Net,
         address: IpAddr,
         mut rng: Rng,
         double: f64,
+        counters: usize,
         body: impl AsyncFnOnce(&Self) -> T,
     ) -> T {
         let local = SocketAddr::new(address, PORT);
@@ -120,6 +147,14 @@ impl Server {
             server.add_scalar(&named(), Value::F64(double));
             server.set_per_read(PER_READ);
             server.add_bytes(&BYTES, 7 << 16);
+            server.set_per_publish(u32::MAX);
+            for index in 0..counters {
+                let mut value = 0.0;
+                server.add_source(&counter(index), move || {
+                    value += 1.0;
+                    (Value::F64(value), Quality::GOOD, None)
+                });
+            }
         };
         let body = caught(async { body(&this).await });
         let value = crate::server::Server::serve(manager, SESSIONS, add, body).await;
@@ -155,7 +190,14 @@ impl Server {
         );
         let session = match connect.await {
             Ok(session) => session.expect("a pending wait never ends"),
-            Err(status) => panic!("a connect failed: {status:?}"),
+            Err(crate::client::Error::Failed(status)) => {
+                panic!("a connect failed: {status:?}")
+            }
+            Err(crate::client::Error::Refused(refusal)) => {
+                panic!(
+                    "invariant: a client with no credentials refuses none: {refusal}"
+                )
+            }
         };
         let nodes = |node: Node| {
             let nodes: Vec<Node> = std::iter::repeat_n(node, count).collect();
@@ -179,6 +221,16 @@ impl std::fmt::Debug for Server {
         f.debug_struct("Server")
             .field("url", &self.url)
             .finish_non_exhaustive()
+    }
+}
+
+/// The node of counter `index` of [`Server::counting`].
+fn counter(index: usize) -> Node {
+    let index = u32::try_from(index).ok();
+    let key = index.and_then(|index| index.checked_add(COUNTERS));
+    Node {
+        namespace: 1,
+        key: Key::Number(key.expect("a counter has a key of a u32")),
     }
 }
 
@@ -244,6 +296,46 @@ impl Client {
                 _ => None,
             },
             Err(status) => panic!("a describe failed: {status:?}"),
+        }
+    }
+
+    /// Subscribes to the first `count` counters of [`Server::counting`], each sampled
+    /// at the publishing interval of 100 ms, so each changes once in each Publish
+    /// answer.
+    ///
+    /// # Panics
+    ///
+    /// If the subscription or an item fails, with its status, or on a second call.
+    pub async fn subscribe(&mut self, count: usize) {
+        let nodes: Vec<Node> = (0..count).map(counter).collect();
+        match self.session.subscribe(&nodes, SAMPLING).await {
+            Ok(revised) => {
+                for item in revised.items {
+                    item.unwrap_or_else(|status| panic!("an item failed: {status:?}"));
+                }
+            }
+            Err(status) => panic!("a subscribe failed: {status:?}"),
+        }
+    }
+
+    /// Drives the client until the changes of a Publish answer come, or the changes of
+    /// each answer that it took while it was not driven, and gives their count.
+    ///
+    /// # Panics
+    ///
+    /// If the subscription ends, with its status, or a change is not the Double of a
+    /// counter, which is at least 1.
+    pub async fn changes(&mut self) -> usize {
+        match self.session.changes(future::pending()).await {
+            Ok(changes) => {
+                for change in changes {
+                    let counted =
+                        matches!(change.value, Ok(Value::F64(value)) if value >= 1.0);
+                    assert!(counted, "{change:?}");
+                }
+                changes.len()
+            }
+            Err(status) => panic!("the subscription ended: {status:?}"),
         }
     }
 
@@ -447,7 +539,8 @@ mod tests {
     fn a_read_of_another_value_panics_with_it() {
         let result = run(async |node| {
             let (clock, net, address) = (node.clock(), node.net(), node.addresses()[0]);
-            Server::serve(clock, net, address, node.entropy().rng(), 2.5, read).await;
+            Server::serve(clock, net, address, node.entropy().rng(), 2.5, 0, read)
+                .await;
         });
         assert_eq!(result, panicked("read 2.5"));
     }

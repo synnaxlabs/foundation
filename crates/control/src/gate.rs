@@ -49,8 +49,8 @@ enum Record {
     /// The open writer with this key.
     Open(Key),
     /// A writer with no open claim: it closed after the record, or the gate
-    /// recovered it.
-    Closed(Writer),
+    /// recovered it. Boxed, as it is rare and a `Writer` is large.
+    Closed(Box<Writer>),
 }
 
 #[derive(Debug)]
@@ -69,9 +69,9 @@ enum Seat {
         key: Key,
         expiry: Option<Expiry>,
     },
-    /// The holder from the index log after a restart, not yet reopened.
+    /// The holder from the index log after a restart, not yet reopened. It is the
+    /// `Closed` record of the gate.
     Recovered {
-        writer: Writer,
         until: Monotonic,
     },
 }
@@ -97,10 +97,9 @@ impl Gate {
     pub fn recover(last: Writer, now: Monotonic, grace: Lease) -> Self {
         Self {
             seat: Seat::Recovered {
-                writer: last.clone(),
                 until: deadline(now, grace),
             },
-            record: Some(Record::Closed(last)),
+            record: Some(Record::Closed(Box::new(last))),
             ..Self::default()
         }
     }
@@ -118,10 +117,8 @@ impl Gate {
         let key = Key(self.next);
         self.next += 1;
         let authority = writer.authority;
-        let reopened = matches!(
-            &self.seat,
-            Seat::Recovered { writer: last, .. } if last.subject == writer.subject
-        );
+        let reopened = matches!(self.seat, Seat::Recovered { .. })
+            && self.recovered().subject == writer.subject;
         let outranks = self.holder().is_none_or(|h| authority > h.authority);
         self.claims.push(Claim {
             key,
@@ -152,7 +149,7 @@ impl Gate {
         let i = self.position(key);
         let claim = self.claims.remove(i);
         if matches!(self.record, Some(Record::Open(open)) if open == key) {
-            self.record = Some(Record::Closed(claim.writer));
+            self.record = Some(Record::Closed(Box::new(claim.writer)));
         }
         if matches!(self.seat, Seat::Held { key: held, .. } if held == key) {
             self.elect(now);
@@ -248,7 +245,7 @@ impl Gate {
                 expiry: Some(expiry),
                 ..
             } => Some(expiry.at),
-            Seat::Recovered { until, .. } => Some(*until),
+            Seat::Recovered { until } => Some(*until),
         }
     }
 
@@ -258,14 +255,14 @@ impl Gate {
         match &self.seat {
             Seat::Empty => None,
             Seat::Held { key, .. } => Some(&self.claim(*key).writer),
-            Seat::Recovered { writer, .. } => Some(writer),
+            Seat::Recovered { .. } => Some(self.recovered()),
         }
     }
 
-    /// The holder, when its subject or authority differs from the holder recorded
-    /// last by [`Gate::recorded`] or [`Gate::recover`]. A new gate starts with no
-    /// holder recorded. For n open writers, takes O(1) time when it returns `None`
-    /// and O(log n) when it returns `Some`. Does not allocate.
+    /// The holder, when it is not equal to the holder recorded last by
+    /// [`Gate::recorded`] or [`Gate::recover`]. A new gate starts
+    /// with no holder recorded. For n open writers, takes O(1) time when it returns
+    /// `None` and O(log n) when it returns `Some`. Does not allocate.
     #[must_use]
     pub fn handoff(&self) -> Option<Handoff<'_>> {
         self.unrecorded.then(|| Handoff { to: self.holder() })
@@ -307,13 +304,28 @@ impl Gate {
         self.seat = seat;
         self.checked = None;
         self.unrecorded = self.holder() != self.last();
+        // An equal holder takes the place of the record, so a closed record does not
+        // keep its box for the session of the holder.
+        if !self.unrecorded
+            && let Seat::Held { key, .. } = self.seat
+        {
+            self.record = Some(Record::Open(key));
+        }
+    }
+
+    /// The holder of a recovered seat.
+    fn recovered(&self) -> &Writer {
+        match &self.record {
+            Some(Record::Closed(writer)) => writer,
+            _ => unreachable!("invariant: a recovered seat keeps its closed record"),
+        }
     }
 
     /// The holder named by the newest handoff record.
     fn last(&self) -> Option<&Writer> {
         match self.record.as_ref()? {
             Record::Open(key) => Some(&self.claim(*key).writer),
-            Record::Closed(writer) => Some(writer),
+            Record::Closed(writer) => Some(writer.as_ref()),
         }
     }
 
@@ -348,14 +360,23 @@ fn deadline(now: Monotonic, lease: Lease) -> Monotonic {
 #[cfg(test)]
 mod tests {
     use types::authority::Authority;
+    use types::node;
     use types::time::Span;
 
     use super::*;
 
+    /// The node of each writer that a test opens, unless it says another.
+    const A: node::Key = node::Key::from_u128(0xa);
+
     fn writer(subject: &str, authority: u8) -> Writer {
+        via(subject, authority, A)
+    }
+
+    fn via(subject: &str, authority: u8, via: node::Key) -> Writer {
         Writer {
             subject: subject.parse().expect("valid name"),
             authority: Authority(authority),
+            via,
         }
     }
 
@@ -685,6 +706,24 @@ mod tests {
             let a = gate.open(writer("a", 100), None, at(5));
             assert_eq!(gate.handoff(), None);
             assert_eq!(gate.deadline(), None);
+            assert_eq!(write(&mut gate, a, at(6)), Ok(()));
+        }
+
+        /// Through a private field: only the memory that the gate holds shows that the
+        /// closed record frees its box, and no test of `control` counts that memory.
+        #[test]
+        fn frees_the_record_when_its_holder_reopens() {
+            let mut gate = recovered();
+            let a = gate.open(writer("a", 100), None, at(5));
+            assert!(matches!(gate.record, Some(Record::Open(key)) if key == a));
+        }
+
+        #[test]
+        fn gives_control_back_to_the_same_subject_through_another_node() {
+            let mut gate = recovered();
+            let c = via("a", 100, node::Key::from_u128(0xc));
+            let a = gate.open(c.clone(), None, at(5));
+            assert_eq!(gate.handoff(), Some(to(&c)));
             assert_eq!(write(&mut gate, a, at(6)), Ok(()));
         }
 

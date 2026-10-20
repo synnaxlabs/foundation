@@ -7,7 +7,7 @@ use transport::Address;
 use types::ed25519::PrivateKey;
 
 use crate::agent::{SUBJECT, name};
-use crate::net::{HOME, NODE, own_pool, public_key};
+use crate::net::{HOME, own_pool, public_key};
 
 /// Connects to the home at `at` from `node` as [`SUBJECT`], signing with `key`, with a
 /// session pool that holds a body at the cap while the transport sends it, and a pool
@@ -54,7 +54,6 @@ pub(crate) async fn connect_receiving(
     };
     let transport = transport::Client::new(config).expect("a client");
     let config = Config {
-        via: NODE,
         node: public_key(&HOME),
         addresses: vec![at],
         subject: name(SUBJECT),
@@ -63,7 +62,8 @@ pub(crate) async fn connect_receiving(
         entropy: node.entropy(),
         tasks,
         pool,
-        frames,
+        frames: Rc::clone(&frames),
+        reads: frames,
     };
     Session::connect(&transport, config).await
 }

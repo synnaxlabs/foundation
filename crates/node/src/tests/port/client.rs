@@ -202,8 +202,9 @@ fn reach_after_a_crash_gives_unanswered_at_the_address() {
     let reached = reached(&mut sim, &host);
     let at = listen(&host);
     let error = transport::Error::Unreachable {
-        peer: KEY.public(),
-        attempts: vec![(Address::Udp(at), transport::Error::TimedOut)],
+        peer: Some(KEY.public()),
+        attempts: vec![(Address::Udp(at), transport::Error::TimedOut)]
+            .into_boxed_slice(),
     };
     assert_eq!(reached, Err(client::Error::Unanswered { at, error }));
 }
@@ -242,8 +243,9 @@ fn reach_dials_the_loopback_ip_of_the_family_for_an_unspecified_ip() {
         let reached = reached(&mut sim, &host);
         let at = SocketAddr::new(loopback, PORT);
         let error = transport::Error::Unreachable {
-            peer: KEY.public(),
-            attempts: vec![(Address::Udp(at), transport::Error::TimedOut)],
+            peer: Some(KEY.public()),
+            attempts: vec![(Address::Udp(at), transport::Error::TimedOut)]
+                .into_boxed_slice(),
         };
         assert_eq!(reached, Err(client::Error::Unanswered { at, error }));
         node.stop();
@@ -425,8 +427,8 @@ fn operator(
         let files = host.files();
         let local = sector::local::read(&files).await.expect("a node runs");
         let (transport, pool) = program(&host, tasks.clone());
+        let frames = super::pool();
         let config = program::Config {
-            via: local.key,
             node: local.public_key,
             addresses: vec![Address::Udp(local.address)],
             subject: "plant.operator".parse().unwrap(),
@@ -435,7 +437,8 @@ fn operator(
             entropy: host.entropy(),
             tasks,
             pool,
-            frames: super::pool(),
+            frames: Rc::clone(&frames),
+            reads: frames,
         };
         let client = program::Session::connect(&transport, config).await;
         let reply = match client {

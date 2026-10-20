@@ -23,12 +23,12 @@ use types::time::{Monotonic, Span, Stamp};
 use wire::Protocol;
 use wire::header::MALFORMED;
 use wire::hub::client::{
-    BODY_BYTES_MAX, Challenge, Mode, OPEN_BYTES_MAX, Request, Response, Signed,
+    BODY_BYTES_MAX, Challenge, OPEN_BYTES_MAX, Request, Response, Signed,
 };
 
 pub use read::Reader;
 use turn::{Taken, Turn};
-pub use wire::hub::client::{Place, Refusal};
+pub use wire::hub::client::{Mode, Place, Refusal};
 pub use write::Writer;
 
 /// How long each hello of a [`Session`] lives. The session renews it at half its life.
@@ -42,9 +42,8 @@ const RETRY: Span = Span::from_nanos(10 * Span::MILLISECOND.nanos());
 /// What a [`Session`] is given.
 #[derive(Debug)]
 pub struct Config {
-    /// The key of the node to connect to, which each hello names as `via`.
-    pub via: types::node::Key,
-    /// The public key that the node proves in the handshake.
+    /// The public key that the node proves in the handshake, which each hello names
+    /// as `via`.
     pub node: PublicKey,
     /// Where the node listens, tried as `transport::Client::dial` tries them.
     pub addresses: Vec<Address>,
@@ -64,12 +63,15 @@ pub struct Config {
     /// waits for a block, so a small pool makes the session slower, not fail. The wait
     /// ends when the session closes.
     pub pool: Rc<block::Pool>,
-    /// The pool that the frames of each reader and the drafts of each writer take their
-    /// blocks from. A frame or a draft holds its block until it drops, and a frame that
-    /// finds the pool full makes `Reader::next` or `Writer::draft` wait. Give a pool
-    /// apart from `pool` and from the transport's: frames and drafts that the program
-    /// holds there stop the renewal of the hello.
+    /// The pool that the drafts of each writer take their blocks from. A draft holds
+    /// its block until it drops, and a draft that finds the pool full makes
+    /// `Writer::draft` wait. Give a pool apart from `pool` and from the transport's:
+    /// drafts that the program holds there stop the renewal of the hello.
     pub frames: Rc<block::Pool>,
+    /// The pool that the frames of each reader take their blocks from, as `frames` is
+    /// for drafts. It can be `frames`. Its largest block bounds the encoded bytes of a
+    /// frame that a reader reads.
+    pub reads: Rc<block::Pool>,
 }
 
 /// A program's session with one node, as one subject. It keeps the subject's hello
@@ -96,12 +98,13 @@ struct Shared {
     session: transport::Session,
     pair: Pair,
     subject: Name,
-    via: types::node::Key,
+    via: PublicKey,
     connection: connection::Key,
     clock: env::clock::Clock,
     tasks: env::tasks::Tasks,
     pool: Rc<block::Pool>,
     frames: Rc<block::Pool>,
+    reads: Rc<block::Pool>,
     turn: Rc<Turn>,
     /// The error that ended the renewal.
     ended: RefCell<Option<Error>>,
@@ -124,7 +127,6 @@ impl Session {
         config: Config,
     ) -> Result<Self, Error> {
         let Config {
-            via,
             node,
             addresses,
             subject,
@@ -134,6 +136,7 @@ impl Session {
             tasks,
             pool,
             frames,
+            reads,
         } = config;
         let session = transport.dial(node, &addresses).await?;
         let (mut sender, mut receiver) = session.open(Class::Complete).await?;
@@ -143,12 +146,13 @@ impl Session {
             session,
             pair: Pair::new(&key),
             subject,
-            via,
+            via: node,
             connection: connection::Key(connection),
             clock,
             tasks: tasks.clone(),
             pool,
             frames,
+            reads,
             turn: Rc::default(),
             ended: RefCell::new(None),
         });
@@ -240,8 +244,8 @@ impl Session {
     /// [`Error::Transport`], [`Error::Message`] for places that `wire` refuses or a
     /// stream that ends before the last place, [`Error::Unplaced`] for places that hold
     /// no place of a channel of the open, and [`Error::Pool`] when no block of
-    /// [`Config::pool`] holds the open, or the head and an end of each place of a
-    /// frame, which stops the stream.
+    /// [`Config::pool`] holds the open, or the head, an end of each place, and a count
+    /// of each group of a frame, which stops the stream.
     pub async fn writer(&self, config: write::Config) -> Result<Writer, Error> {
         let shared = &self.0.0;
         let write::Config {
@@ -523,8 +527,9 @@ pub enum Error {
     /// hello stream with no challenge.
     Unanswered,
     /// No block of [`Config::pool`] can hold a message that the session sends, or
-    /// the head and an end of each place of a writer, or no block of
-    /// [`Config::frames`] can hold a frame of a read or a draft of a writer.
+    /// the head, an end of each place, and a count of each group of a writer, or no
+    /// block of [`Config::reads`] can hold a frame of a read, or of [`Config::frames`]
+    /// a draft of a writer.
     Pool(block::Error),
     /// The open of a read or a write is over `OPEN_BYTES_MAX`. Nothing was sent.
     Open {
@@ -539,7 +544,7 @@ pub enum Error {
     /// The series of [`Writer::draft`] break a rule of the frame layout. Nothing was
     /// taken, and the writer goes on.
     Layout(types::frame::Error),
-    /// The config of a writer names no channel. Nothing was sent.
+    /// The config of a stream names no channel. Nothing was sent.
     Unnamed,
     /// The node gave no place for `0`, a channel of the open. The stream stops with
     /// code `MALFORMED`.
@@ -598,7 +603,7 @@ impl fmt::Display for Error {
             Self::Layout(error) => {
                 write!(f, "the series of the draft are not valid: {error}")
             }
-            Self::Unnamed => f.write_str("the writer names no channel"),
+            Self::Unnamed => f.write_str("the stream names no channel"),
             Self::Unplaced(name) => write!(
                 f,
                 "the node gave no place for the channel {name} of the open"
