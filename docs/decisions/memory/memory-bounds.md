@@ -99,7 +99,9 @@
   holds the places of its group with its names, 4 bytes for each channel of its open,
   from that decode, before it reads a place. It holds its ends and counts from its last
   place until the stream ends, for the channels of its group only (#3104 PR 3b, HUB
-  FORWARD). A write open
+  FORWARD; `laptop.architect`, 2026-10-20T02:03:30Z:
+  https://github.com/synnaxlabs/foundation/pull/3480#issuecomment-6281613899). A write
+  open
   is at most `OPEN_BYTES_MAX` (64 KiB), with at least 2 bytes for each channel, so its
   ends and counts are at most 640 KiB, and the budget bounds the places of all write
   streams of a node at 1,677,721. The cost: the writers of a subject hold their ends and
