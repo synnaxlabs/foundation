@@ -355,6 +355,17 @@ impl<'a> Layout<'a> {
         self.body
     }
 
+    /// Each present group, in group order: the group of each index that the frame
+    /// holds. Time is linear in the number of series of the frame.
+    pub fn groups(&self) -> impl Iterator<Item = u32> + '_ {
+        let set = self.set;
+        self.series
+            .iter()
+            .map(|&(entry, _)| entry)
+            .filter(move |&entry| set.index(entry) == entry)
+            .map(move |index| set.entries()[index].group)
+    }
+
     /// Takes a block of [`Layout::block_len`] bytes from `pool`, and writes the
     /// header, ranges, and descriptors. Each range starts at zero, and series bytes
     /// are not cleared. A layout from lengths gets zeros in its padding. A layout from
@@ -384,12 +395,8 @@ impl<'a> Layout<'a> {
         put(head, at::SERIES, &to_u32(series.len()).to_le_bytes());
         head[at::FORM] = form.byte();
         let (ranges, descriptors, body) = parts_mut(&mut block);
-        let indexes = series
-            .iter()
-            .map(|&(entry, _)| entry)
-            .filter(|&entry| set.index(entry) == entry);
-        for (range, index) in ranges.iter_mut().zip(indexes) {
-            put(range, 0, &set.entries()[index].group.to_le_bytes());
+        for (range, group) in ranges.iter_mut().zip(self.groups()) {
+            put(range, 0, &group.to_le_bytes());
             range[at::range::COUNT..].fill(0);
         }
         let mut end = 0_usize;
@@ -463,6 +470,17 @@ impl Draft {
     pub fn iter(&self) -> impl Iterator<Item = (usize, &[u8])> {
         let (_, descriptors, body) = parts(&self.0);
         split(body, descriptor_ends(descriptors))
+    }
+
+    /// The entry and the series bytes of the present series at position `n` in entry
+    /// order, as [`Draft::iter`] gives them, or `None` when `n` is not below the count
+    /// of present series. Time is constant.
+    #[must_use]
+    pub fn nth(&self, n: usize) -> Option<(usize, &[u8])> {
+        let (_, descriptors, body) = parts(&self.0);
+        let entry = to_usize(lead(descriptors.get(n)?));
+        let (start, end) = bounds(descriptors, n);
+        Some((entry, &body[start..end]))
     }
 
     /// The key set the draft's entries number into.
@@ -1627,6 +1645,18 @@ mod tests {
     }
 
     #[test]
+    fn gives_the_group_of_each_index_that_the_frame_holds() {
+        let set = two_groups();
+        let groups = |series: &[(usize, usize)]| -> Vec<u32> {
+            Layout::new(&set, series).unwrap().groups().collect()
+        };
+        assert_eq!(groups(&[(0, 8), (1, 8), (2, 8), (3, 8)]), [0, 1]);
+        assert_eq!(groups(&[(2, 8), (3, 8)]), [1]);
+        assert_eq!(groups(&[(0, 8)]), [0]);
+        assert_eq!(groups(&[]), [0_u32; 0]);
+    }
+
+    #[test]
     fn gives_a_present_range_without_samples() {
         let pool = pool(1 << 16);
         let series = [(0, 8), (2, 0)];
@@ -1860,6 +1890,9 @@ mod tests {
             drafted.push((entry, bytes.to_vec()));
         }
         prop_assert_eq!(&drafted, &written);
+        for n in 0..=series.len() {
+            prop_assert_eq!(draft.nth(n), draft.iter().nth(n));
+        }
         let present: Vec<(u32, Range)> = draft.ranges().collect();
         let frame = draft.freeze(case.path);
 
@@ -1925,6 +1958,20 @@ mod tests {
             let block = draft.0.len();
             let body = draft.freeze(case.path).body().len();
             prop_assert_eq!(sized, Ok((block, body)));
+        }
+
+        #[test]
+        fn gives_the_group_of_each_series_once_in_rising_order(case in cases()) {
+            let (set, series) = shape(&case);
+            let layout = Layout::new(&set, &series).unwrap();
+            let groups: std::collections::BTreeSet<u32> = series
+                .iter()
+                .map(|&(entry, _)| set.entries()[entry].group)
+                .collect();
+            prop_assert_eq!(
+                layout.groups().collect::<Vec<_>>(),
+                groups.into_iter().collect::<Vec<_>>()
+            );
         }
 
         /// Key n has slot n, so shuffled keys give any slot order, and more groups

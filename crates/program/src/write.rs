@@ -137,11 +137,12 @@ impl Writer {
     /// in the raw form, and the home writes a stamp over its index sample: mesh time
     /// now, or 1 ns after the last stamp of this writer when now is not after it.
     /// Behind a later stamp of another writer, the home refuses it with
-    /// [`Refusal::Order`]. A refused or lost frame leaves the writer open. A call
-    /// dropped after it sent its frame loses only its outcome; a call dropped while it
-    /// sends ends the writer. A call takes the draft at its first poll, so after each
-    /// result the writer holds no draft: the next write needs a new call of
-    /// [`Writer::draft`].
+    /// [`Refusal::Order`]. A refused or lost frame leaves the writer open. A removed
+    /// channel or a failed commit of a group gives [`Outcome::Ended`], also for each
+    /// later frame of the group. A call dropped after it sent its frame loses only its
+    /// outcome; a call dropped while it sends ends the writer. A call takes the draft
+    /// at its first poll, so after each result the writer holds no draft: the next
+    /// write needs a new call of [`Writer::draft`].
     ///
     /// # Errors
     ///
@@ -150,11 +151,10 @@ impl Writer {
     /// group, with nothing sent and the draft dropped; the writer goes on. Else the
     /// error that ended the writer, given again at each later call: the error that
     /// ended the renewal, or [`Error::Refused`] when the node stopped the stream
-    /// (`UNKNOWN` when a channel was removed, `FAILED` when the home failed, `BUSY`
-    /// when the home has no block for the outcome of a frame, `MALFORMED` for a frame
-    /// that breaks a rule of the wire), [`Error::Transport`] (a reset of `Code(0)`
-    /// after a call dropped while it sent), and [`Error::Reply`] for a reply that
-    /// `wire` refuses, a reply out of order, or a stream that ends early.
+    /// (`BUSY` when the home has no block for the outcome of a frame, `MALFORMED` for
+    /// a frame that breaks a rule of the wire), [`Error::Transport`] (a reset of
+    /// `Code(0)` after a call dropped while it sent), and [`Error::Reply`] for a reply
+    /// that `wire` refuses, a reply out of order, or a stream that ends early.
     ///
     /// # Panics
     ///

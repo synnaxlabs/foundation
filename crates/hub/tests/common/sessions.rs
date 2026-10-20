@@ -201,6 +201,25 @@ where
     G: FnOnce(sim::node::Node, env::tasks::Tasks, Address) -> P + Send + 'static,
     P: Future<Output = ()> + 'static,
 {
+    serve_session_after(seed, wire, |_, _| {}, rules, open, ready, program)
+}
+
+/// As [`serve_session`], once `before` ran on the simulation and the home's node.
+pub(crate) fn serve_session_after<T, G, P>(
+    seed: u64,
+    wire: sim::link::Config,
+    before: impl FnOnce(&mut sim::Sim, &sim::node::Node),
+    rules: Option<access::Rules>,
+    open: impl AsyncFnOnce(&sim::node::Node, &env::tasks::Tasks) -> (Hub, T)
+    + Send
+    + 'static,
+    ready: impl AsyncFnOnce(&T) + Send + 'static,
+    program: G,
+) -> Home
+where
+    G: FnOnce(sim::node::Node, env::tasks::Tasks, Address) -> P + Send + 'static,
+    P: Future<Output = ()> + 'static,
+{
     let served = Arc::new(Mutex::new(Vec::new()));
     let closed = Arc::new(Mutex::new(None));
     let (kept, ended) = (Arc::clone(&served), Arc::clone(&closed));
@@ -214,7 +233,7 @@ where
         recorded(&node, &kept, accepted.get()).await;
         drop((link, hub, kept_open));
     };
-    run_program_on(seed, wire, home, program);
+    run_program_on(seed, wire, before, home, program);
     let served = std::mem::take(&mut *served.lock().expect("not poisoned"));
     let closed = closed.lock().expect("not poisoned").take();
     Home {
@@ -259,12 +278,15 @@ where
     G: FnOnce(sim::node::Node, env::tasks::Tasks, Address) -> P + Send + 'static,
     P: Future<Output = ()> + 'static,
 {
-    run_program_on(seed, sim::link::Config::default(), home, program);
+    run_program_on(seed, sim::link::Config::default(), |_, _| {}, home, program);
 }
 
+/// As [`run_program`], on `wire`, once `before` ran on the simulation and the home's
+/// node.
 pub(crate) fn run_program_on<F, H, G, P>(
     seed: u64,
     wire: sim::link::Config,
+    before: impl FnOnce(&mut sim::Sim, &sim::node::Node),
     home: F,
     program: G,
 ) where
@@ -279,6 +301,7 @@ pub(crate) fn run_program_on<F, H, G, P>(
         ..sim::Config::default()
     });
     let nodes = [1, 2].map(|_| sim.node(sim::node::Config::default()));
+    before(&mut sim, &nodes[0]);
     let at = Address::Udp(SocketAddr::new(nodes[0].addresses()[0], PORT));
     let shard = |name: &str| env::shards::Config {
         name: name.into(),

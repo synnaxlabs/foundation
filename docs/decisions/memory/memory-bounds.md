@@ -90,23 +90,25 @@
   which supersedes the text of 6202866145 item 2). Outside the pool budget, the request
   bodies, read opens, write opens, and ends and counts of write streams of a hub count
   in its body budget, `BODIES_BYTES_MAX` (32 MiB), and those of one subject in
-  `BODY_BYTES_MAX` (16 MiB) (HUB CLIENT). A write stream holds 20 bytes for each channel
-  of its open and one for its index: 16 of ends and 4 of the counts that come before a
-  draft (`laptop.architect`, 2026-10-19T19:14:38Z:
+  `BODY_BYTES_MAX` (16 MiB) (HUB CLIENT). A write stream holds 20 bytes for each place
+  of its writers, each index and each channel of its groups: 16 of ends and 4 of the
+  counts that come before a draft (`laptop.architect`, 2026-10-19T19:14:38Z:
   https://github.com/synnaxlabs/foundation/pull/3369#issuecomment-6275215145), from the
-  decode of its open until the stream ends. Its decoded names, 16 bytes and the length
-  of each, count from that decode until the stream sends its places. A forward holds the
-  places of its group with its names, 4 bytes for each channel of its open, from that
-  decode, before it reads a place. It holds its ends and counts from its last place
-  until the stream ends, for the channels of its group only (#3104 PR 3b, HUB FORWARD;
+  home of each index until the stream ends (#3283 PR 2,
+  https://github.com/synnaxlabs/foundation/pull/3384). Its decoded names, 16 bytes and
+  the length of each, count from the decode of its open until the stream sends its
+  places. A forward holds the places of its group with its names, 4 bytes for each
+  channel of its open, from that decode, before it reads a place. Its ends and counts
+  are those of the channels of its group only (#3104 PR 3b, HUB FORWARD;
   `laptop.architect`, 2026-10-20T02:03:30Z:
   https://github.com/synnaxlabs/foundation/pull/3480#issuecomment-6281613899). A write
-  open is at most `OPEN_BYTES_MAX` (64 KiB), with at least 2 bytes for each channel, so
-  its ends and counts are at most 640 KiB, and the budget bounds the places of all write
-  streams of a node at 1,677,721. The cost: the writers of a subject hold their ends and
-  counts in its share until their streams end, so wide writers can make the requests and
-  read opens of that subject stop with `BUSY`. Limits: the budget counts only the ends,
-  the counts that come before a draft, the names, and the places of a forward. Other
+  open is at most `OPEN_BYTES_MAX` (64 KiB), with at least 2 bytes for each channel, and
+  each channel adds at most two places, itself and its index, so its ends and counts
+  are at most 1,280 KiB, and the budget bounds the places of all write streams of a
+  node at 1,677,721. The cost: the writers of a subject hold their ends and counts in
+  its share until their streams end, so wide writers can make the requests and read
+  opens of that subject stop with `BUSY`. Limits: the budget counts only the ends, the
+  counts that come before a draft, the names, and the places of a forward. Other
   memory of a write stream that grows with its channels (its key set and the home's
   writer) is not counted (`laptop.architect`, 2026-10-18T07:45:01Z:
   https://github.com/synnaxlabs/foundation/issues/2718#issuecomment-6247275705, item 5,
