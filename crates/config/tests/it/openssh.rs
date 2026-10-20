@@ -228,6 +228,34 @@ fn refuses_an_ecdsa_key_by_its_family() {
     );
 }
 
+/// `ssh-key` 0.6.7 gives the same error for a `none` KDF with options as for an ECDSA
+/// key. OpenSSH reads such a file, which no known writer makes.
+#[test]
+fn refuses_an_ed25519_key_whose_none_kdf_has_options_as_no_key_file() {
+    use base64ct::{Base64, Encoding};
+    let body: String = KEYGEN
+        .lines()
+        .filter(|line| !line.starts_with("-----"))
+        .collect();
+    let mut binary = Base64::decode_vec(&body).unwrap();
+    let options = b"\0\0\0\x04none\0\0\0\x04none\0\0\0\0";
+    let at = binary
+        .windows(20)
+        .position(|bytes| bytes == options)
+        .unwrap()
+        + 19;
+    binary.splice(at..=at, [4, 0, 0, 0, 0]);
+    let text = format!(
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\n",
+        Base64::encode_string(&binary)
+    );
+    let expected = (
+        Unreadable::Format,
+        "the file is not an OpenSSH private key".into(),
+    );
+    assert_eq!(unreadable(&text), expected);
+}
+
 #[test]
 fn refuses_a_key_with_a_passphrase() {
     assert_eq!(

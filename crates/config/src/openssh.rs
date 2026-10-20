@@ -3,6 +3,7 @@
 
 use std::fmt;
 
+use base64ct::{Base64, Encoding};
 use document::diagnostic::{Code, Diagnostic};
 use document::value::{Kind, Value};
 use ssh_key::private::{Ed25519Keypair, Ed25519PrivateKey, KeypairData};
@@ -216,11 +217,11 @@ impl fmt::Display for Unreadable {
 ///
 /// [`Unreadable`] says why the text is not such a file.
 pub fn private_key(text: &str) -> Result<PrivateKey, Unreadable> {
-    let file = match ssh_key::PrivateKey::from_openssh(lines(text)) {
+    let text = lines(text);
+    let file = match ssh_key::PrivateKey::from_openssh(&text) {
         Ok(file) => file,
-        // With no `ecdsa` feature, `ssh-key` reads no ECDSA private key. A `none` KDF
-        // with options, which a corrupt file can hold, also gives this error.
-        Err(ssh_key::Error::AlgorithmUnknown) => {
+        // With no `ecdsa` feature, `ssh-key` reads no ECDSA private key.
+        Err(ssh_key::Error::AlgorithmUnknown) if ecdsa(&text) => {
             return Err(Unreadable::Algorithm("ECDSA"));
         }
         // The error that `ssh-key` gives for a text that is not UTF-8.
@@ -274,6 +275,39 @@ fn lines(text: &str) -> String {
     file.push_str(end);
     file.push('\n');
     file
+}
+
+/// Whether the public key of `file`, as [`lines`] gives it, is an ECDSA key.
+fn ecdsa(file: &str) -> bool {
+    let body: String = file
+        .lines()
+        .filter(|line| !line.starts_with("-----"))
+        .collect();
+    let binary = Base64::decode_vec(&body).unwrap_or_default();
+    algorithm(&binary).is_some_and(|name| {
+        name.starts_with(b"ecdsa-sha2-") || name.starts_with(b"sk-ecdsa-")
+    })
+}
+
+/// The algorithm of the public key of the binary form of a private key file.
+fn algorithm(binary: &[u8]) -> Option<&[u8]> {
+    let mut rest = binary.strip_prefix(b"openssh-key-v1\0")?;
+    // The cipher, the KDF, and its options.
+    for _ in 0..3 {
+        field(&mut rest)?;
+    }
+    let mut keys = rest.get(4..)?;
+    let mut public = field(&mut keys)?;
+    field(&mut public)
+}
+
+/// The next string of `rest`, with its 4-byte length before it.
+fn field<'a>(rest: &mut &'a [u8]) -> Option<&'a [u8]> {
+    let (length, tail) = rest.split_first_chunk::<4>()?;
+    let length = usize::try_from(u32::from_be_bytes(*length)).ok()?;
+    let (field, tail) = tail.split_at_checked(length)?;
+    *rest = tail;
+    Some(field)
 }
 
 /// The OpenSSH private key file of `key` with no passphrase and with `comment`, as
