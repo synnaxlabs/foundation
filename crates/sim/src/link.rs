@@ -20,8 +20,9 @@ pub struct Config {
     /// segments of one direction of a TCP stream. Not negative.
     pub jitter: Span,
     /// The chance, from 0 to 1, that a datagram or a TCP segment is lost. 1 cuts the
-    /// link. A lost TCP segment goes again after a timeout, and the later segments of
-    /// its stream in its direction wait for it.
+    /// link. A lost TCP segment goes again after a timeout, other than the RST of an
+    /// abort. A lost segment other than an ACK or an RST holds the later segments of
+    /// its stream in its direction other than ACKs and RSTs.
     pub loss: f64,
     /// The chance, from 0 to 1, that a datagram arrives twice.
     pub duplication: f64,
