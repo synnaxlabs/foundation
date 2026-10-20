@@ -788,28 +788,26 @@ fn a_plant_starts_before_its_first_read() {
     );
 }
 
-/// `Ok` once `stored` holds the last value of `served`, the reads of one variable by a
-/// subscription. Each stored sample is a value that the server served, after the
-/// sample before it, at a time within [`BOUND`] of the first read of that value.
+/// `Ok` once `stored` holds the values of `served`, the reads of one variable by a
+/// subscription, from the first stored value on, each value once. Each stored sample
+/// is at a time within [`BOUND`] of the first read of its value.
 fn subscribed(served: &[Sample], stored: &[Sample]) -> Result<(), String> {
-    let last = served.last().ok_or("no read")?.value;
-    if stored.last().map(|sample| sample.value) != Some(last) {
-        return Err(format!("no sample of the last value {last} in {stored:?}"));
+    let first = stored.first().ok_or("no sample stored")?;
+    let start = (served.iter())
+        .position(|read| read.value.to_bits() == first.value.to_bits())
+        .ok_or_else(|| format!("{first:?} is no served value"))?;
+    let mut reads = served[start..].to_vec();
+    reads.dedup_by(|b, a| a.value.to_bits() == b.value.to_bits());
+    let values =
+        |samples: &[Sample]| samples.iter().map(|s| s.value).collect::<Vec<_>>();
+    if values(stored) != values(&reads) {
+        return Err(format!("{stored:?} are not the values of {reads:?}"));
     }
-    if let Some(pair) = stored
-        .windows(2)
-        .find(|pair| matches!(pair, [a, b] if a.value >= b.value))
-    {
-        return Err(format!("{pair:?} does not step the value"));
-    }
-    for sample in stored {
-        let first = (served.iter())
-            .find(|read| read.value.to_bits() == sample.value.to_bits())
-            .ok_or_else(|| format!("{sample:?} is no served value"))?;
-        let offset = sample.time.checked_since(first.time);
+    for (sample, read) in stored.iter().zip(&reads) {
+        let offset = sample.time.checked_since(read.time);
         let near = |offset: Span| offset.nanos().abs() <= BOUND.nanos();
         if !offset.is_some_and(near) {
-            return Err(format!("{sample:?} is {offset:?} from its read {first:?}"));
+            return Err(format!("{sample:?} is {offset:?} from its read {read:?}"));
         }
     }
     Ok(())
@@ -817,19 +815,23 @@ fn subscribed(served: &[Sample], stored: &[Sample]) -> Result<(), String> {
 
 #[test]
 fn a_subscribed_plant_stores_each_change_at_its_read() {
-    let mut opcua = Opcua::default();
-    let mut influx = Influx::default();
-    let rig = Rig::new();
-    // A sampling interval equal to the period of the changes lets two changes fall
-    // in one interval.
-    let rate = "  rate    = \"10Hz\"\n";
-    let hcl = plant().replacen(rate, "  rate    = \"20Hz\"\n", 1);
-    assert_ne!(hcl, plant(), "the config has an OPC UA connector at 10 Hz");
-    rig.config(&served(&hcl, opcua.serve(), influx.serve()));
-    let plant = Plant::start(rig, opcua, influx);
-    plant.rig.apply();
+    let plant = create_plant(plant());
     first_stored(&plant, &VARIABLES);
-    plant.opcua.change(TICKS, Quality::GOOD);
+    let value = |tick: usize| f64::from(u32::try_from(tick).expect("a few ticks"));
+    for tick in 1..=TICKS {
+        plant.opcua.change(1, Quality::GOOD);
+        // The next change waits for a read of this one, so that no change replaces
+        // another before the server samples it.
+        plant.rig.wait("the server reads the change", || {
+            let served = plant.opcua.served();
+            VARIABLES.iter().try_for_each(|&(variable, _)| {
+                let last = served[variable].last().map(|read| read.value);
+                let read = last == Some(value(tick));
+                read.then_some(())
+                    .ok_or(format!("{variable}: {last:?} is the last read"))
+            })
+        });
+    }
     plant.rig.wait("InfluxDB holds each change", || {
         let (served, stored) = (plant.opcua.served(), plant.influx.stored());
         VARIABLES.iter().try_for_each(|&(variable, channel)| {
@@ -839,8 +841,10 @@ fn a_subscribed_plant_stores_each_change_at_its_read() {
     });
     let stored = plant.influx.stored();
     for (_, channel) in VARIABLES {
-        let changes = stored[channel].len() - 1;
-        assert!(changes >= TICKS / 2, "{channel}: {changes} changes stored");
+        let values: Vec<_> =
+            stored[channel].iter().map(|sample| sample.value).collect();
+        let changes: Vec<_> = (0..=TICKS).map(value).collect();
+        assert_eq!(values, changes, "{channel}");
     }
 }
 
