@@ -197,7 +197,7 @@ pub fn assert_examples<K>(
         }
     }
     for (body, name, seen) in absent {
-        assert!(seen, "{}: {name}", body.summary);
+        assert!(seen, "{}: {name}: held in each example", body.summary);
     }
     let counts = [optional, defaults, names];
     assert!(
@@ -548,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Cycle.: x")]
+    #[should_panic(expected = "Cycle.: x: held in each example")]
     fn fails_a_when_that_each_example_holds() {
         let example = document(&["b", "x", "y"], Vec::new());
         assert_examples([((), &CYCLE, example)], |(), held| {
@@ -561,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Cycle.: y")]
+    #[should_panic(expected = "Cycle.: y: held in each example")]
     fn fails_each_when_that_each_example_holds() {
         let examples = [&["b", "x", "y"][..], &["b", "y"]]
             .map(|keys| ((), &CYCLE, document(keys, Vec::new())));
