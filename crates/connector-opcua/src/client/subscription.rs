@@ -275,6 +275,7 @@ impl Client {
             ..
         } = (self.subscription.as_ref())
             .expect("invariant: a watch comes after a subscribe");
+        // `sizes` builds requests of at most one node.
         let build = |nodes: &[ffi::Node<'_>]| {
             Request::monitor(id, nodes, &[0][..nodes.len()], sampling, queue)
         };
