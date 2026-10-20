@@ -396,9 +396,8 @@ impl<C> Context<C> {
     /// [`Context::error`], of [`Context::note`], and of the end of the run, until a
     /// later read of `source` in this run gives another value. One `<secret>` takes
     /// the place of each run of chars that values cover. It hides the text form of the
-    /// value (`String::from_utf8_lossy`) with no ASCII white space at its ends, which
-    /// HTTP drops from a header, not a form that the kind makes of it, such as the
-    /// base64 of `user:password`.
+    /// value (`String::from_utf8_lossy`, with no ASCII white space at its ends), not a
+    /// form that the kind makes of it, such as the base64 of `user:password`.
     ///
     /// # Errors
     ///
@@ -413,7 +412,7 @@ impl<C> Context<C> {
         source: &secret::Source,
     ) -> Result<secret::Value, Error> {
         let value = read_secret(&self.inputs.secrets, source).await?;
-        self.status.hide(source, &value);
+        self.status.hold(source, &value);
         Ok(value)
     }
 

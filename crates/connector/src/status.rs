@@ -75,7 +75,8 @@ const NOTE: usize = SUPERVISOR.len();
 const TEXT_MAX: usize = 1024;
 /// The mark in place of the middle of a text that is too long.
 const MARK: &str = "…";
-/// The mark in place of each value that a run read, as `Debug` of `secret::Value`.
+/// The mark in place of each run of chars that the last value of each source that a
+/// run read covers, as `Debug` of `secret::Value` prints.
 const HIDDEN: &str = "<secret>";
 /// The least time between two writes of a change of counts alone.
 const PERIOD: Span = Span::SECOND;
@@ -222,9 +223,9 @@ impl Status {
 
     /// Shows `value` of `source` as [`HIDDEN`] in each text of the run after the call,
     /// in place of the last value of `source`. With no run, it does nothing.
-    pub(crate) fn hide(&self, source: &secret::Source, value: &secret::Value) {
+    pub(crate) fn hold(&self, source: &secret::Source, value: &secret::Value) {
         if let Some(run) = self.values.run.borrow_mut().as_mut() {
-            run.secrets.read(source, value);
+            run.secrets.hold(source, value);
         }
     }
 
@@ -447,9 +448,9 @@ struct Secrets(Vec<(secret::Source, secret::Value)>);
 impl Secrets {
     /// Holds the text form of `value` in place of the last value of `source`: its
     /// `String::from_utf8_lossy` form with no ASCII white space at its ends, which
-    /// HTTP drops from a header. An empty form only drops the last one, as it would
-    /// match at each char of each text.
-    fn read(&mut self, source: &secret::Source, value: &secret::Value) {
+    /// HTTP drops from a header. An empty form only drops the last one, as it covers
+    /// no char.
+    fn hold(&mut self, source: &secret::Source, value: &secret::Value) {
         self.0.retain(|(held, _)| held != source);
         let chunks = value.expose().trim_ascii().utf8_chunks();
         let mark = |chunk: &Utf8Chunk<'_>| match chunk.invalid() {
@@ -474,31 +475,32 @@ impl Secrets {
     /// It finds the values in `text`, not in what it gives, so a value inside
     /// [`HIDDEN`] does not change a mark.
     fn hide<'a>(&self, text: &'a str) -> Cow<'a, str> {
-        if self.0.is_empty() {
-            return Cow::Borrowed(text);
-        }
-        let mut covered = vec![false; text.len()];
-        for at in 0..text.len() {
+        let mut hidden = String::new();
+        // `text[shown..]` is not in `hidden` yet, and the run of covered chars ends
+        // at `end`. Each is 0 until a value matches.
+        let (mut shown, mut end) = (0, 0);
+        // A value is UTF-8 and not empty, so it can match only at a char boundary.
+        for (at, _) in text.char_indices() {
             let rest = &text.as_bytes()[at..];
-            for (_, value) in &self.0 {
-                if rest.starts_with(value.expose()) {
-                    covered[at..at + value.expose().len()].fill(true);
-                }
-            }
-        }
-        if !covered.contains(&true) {
-            return Cow::Borrowed(text);
-        }
-        // A value is UTF-8, so each place that it covers starts and ends at a char
-        // boundary.
-        let mut hidden = String::with_capacity(text.len());
-        for (at, char) in text.char_indices() {
-            if !covered[at] {
-                hidden.push(char);
-            } else if at == 0 || !covered[at - 1] {
+            let Some(cover) = (self.0.iter())
+                .map(|(_, value)| value.expose())
+                .filter(|value| rest.starts_with(value))
+                .map(|value| at + value.len())
+                .max()
+            else {
+                continue;
+            };
+            if end == 0 || at > end {
+                hidden.push_str(&text[shown..at]);
                 hidden.push_str(HIDDEN);
             }
+            end = end.max(cover);
+            shown = end;
         }
+        if end == 0 {
+            return Cow::Borrowed(text);
+        }
+        hidden.push_str(&text[shown..]);
         Cow::Owned(hidden)
     }
 }
@@ -1189,11 +1191,13 @@ mod tests {
     }
 
     /// The secrets of `values`, each read from the source `secret("plant.s<i>")`.
+    /// The tests of `Secrets` call it with no status: it is pure logic, and a
+    /// proptest of it runs far more texts than a run through the supervisor can.
     fn secrets(values: &[&[u8]]) -> Secrets {
         let mut secrets = Secrets::default();
         for (i, value) in values.iter().enumerate() {
             let source = secret::Source::Secret(name(&format!("plant.s{i}")));
-            secrets.read(&source, &secret::Value::new(value.to_vec()));
+            secrets.hold(&source, &secret::Value::new(value.to_vec()));
         }
         secrets
     }
@@ -1205,13 +1209,15 @@ mod tests {
     }
 
     #[test]
-    fn hides_each_char_of_values_that_overlap_with_one_mark() {
+    fn hides_each_char_of_values_that_overlap_or_touch_with_one_mark() {
         let got = [
             secrets(&[b"abc", b"cd"]).hide("abcd."),
             secrets(&[b"aba"]).hide("ababa."),
             secrets(&[b"abcdef", b"defghi"]).hide("abcdefghi."),
+            secrets(&[b"ab", b"cd"]).hide("abcd."),
+            secrets(&[b"abcd", b"b"]).hide("abcd."),
         ];
-        assert_eq!(got, ["<secret>."; 3]);
+        assert_eq!(got, ["<secret>."; 5]);
     }
 
     #[test]
@@ -1233,33 +1239,24 @@ mod tests {
         assert_eq!(format!("{value:?}"), HIDDEN);
     }
 
+    /// It sets and reads the run of the status by hand, to hold a value with no run
+    /// and to see the texts with no write.
     #[test]
     fn hides_only_the_last_value_of_each_source() {
         let status = Status::new(Vec::new(), tracing::Span::none());
         let (first, second) = (secret::Source::Env("A".into()), name("plant.b"));
         let second = secret::Source::Secret(second);
-        status.hide(&first, &secret::Value::new(b"one".to_vec()));
+        status.hold(&first, &secret::Value::new(b"one".to_vec()));
         status.values.run.replace(Some(Run::default()));
-        status.hide(&first, &secret::Value::new(b"two".to_vec()));
-        status.hide(&second, &secret::Value::new(b"x\xffy".to_vec()));
-        status.hide(&first, &secret::Value::new(b"three".to_vec()));
-        status.hide(&second, &secret::Value::new(Vec::new()));
+        status.hold(&first, &secret::Value::new(b"two".to_vec()));
+        status.hold(&second, &secret::Value::new(b"x\xffy".to_vec()));
+        status.hold(&first, &secret::Value::new(b"three".to_vec()));
+        status.hold(&second, &secret::Value::new(Vec::new()));
         status.show(&"one two three x\u{fffd}y");
         status.note(&"three");
         let run = status.values.run.take().expect("a run");
         let want = Shown::Error("one two <secret> x\u{fffd}y".into());
         assert_eq!((run.error, run.note.as_str()), (want, "<secret>"));
-    }
-
-    #[test]
-    fn hides_the_text_form_of_a_value_that_is_not_utf_8() {
-        let status = Status::new(Vec::new(), tracing::Span::none());
-        status.values.run.replace(Some(Run::default()));
-        let source = secret::Source::Env("A".into());
-        status.hide(&source, &secret::Value::new(b"x\xffy".to_vec()));
-        status.note(&"x\u{fffd}y and xy");
-        let run = status.values.run.take().expect("a run");
-        assert_eq!(run.note, "<secret> and xy");
     }
 
     proptest! {
