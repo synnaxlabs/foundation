@@ -1566,6 +1566,8 @@ mod tests {
         closes: BTreeMap<u8, VecDeque<u32>>,
         /// The blob streams that each node served.
         blobs: BTreeMap<u8, usize>,
+        /// The blob streams that each node served to a clean end.
+        clean: BTreeMap<u8, usize>,
         /// Each spec change of `applies` that returned, in order: its node, the
         /// pointer on that node at the return, and what the change gave.
         applied: Vec<(u8, Pointer, Result<Pointer, Error>)>,
@@ -1864,6 +1866,11 @@ mod tests {
                                 std::future::pending::<()>().await;
                             }
                             let served = blob::peer::serve(&mesh.store, incoming).await;
+                            if served.is_ok() {
+                                let mut board = board.lock().unwrap();
+                                let clean = board.clean.entry(id).or_default();
+                                *clean = clean.checked_add(1).unwrap();
+                            }
                             // A test arms each fault of the files.
                             if let Err(error) = served {
                                 let armed = matches!(

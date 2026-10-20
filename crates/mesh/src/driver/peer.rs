@@ -155,8 +155,9 @@ impl Mesh {
                 .map_err(Failed::Call)?;
             *left = rest;
         }
-        drop(step(&self.clock, push.finish()).await);
-        Ok(())
+        match within(&self.clock, DEADLINE, push.finish()).await {
+            Some(Ok(()) | Err(_)) | None => Ok(()),
+        }
     }
 }
 

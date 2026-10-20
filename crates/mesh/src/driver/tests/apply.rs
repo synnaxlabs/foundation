@@ -858,10 +858,10 @@ fn a_voter_that_goes_silent_in_its_put_misses_the_deadline_after_its_last_stored
     assert_eq!(cluster.board().applied, [(1, base(), Err(quorum))]);
 }
 
-// Voter 3 is down, and voter 2 restarts at each of `restarts` in a put of about 41
-// s, over seeds. The put dials voter 2 again after each restart, as the session
-// before each stored a chunk, or lost to the dial of voter 2 at its start. So the
-// apply commits.
+// Voter 3 is down, and voter 2 restarts after each span of `restarts` in turn, in a
+// put of about 41 s, over 16 seeds. The put dials voter 2 again after each restart,
+// as the session before each stored a chunk, or lost to the dial of voter 2 at its
+// start. So the apply commits.
 fn restart_in_put(restarts: &[i64]) {
     const DELAY: Span = Span::from_nanos(300 * Span::MILLISECOND.nanos());
     for seed in 0..16 {
@@ -975,9 +975,9 @@ fn an_apply_redials_a_voter_once_for_a_session_that_ends_with_code_0() {
 }
 
 // Voter 3 is down, and voter 2 closes the sessions of its first two blob streams with
-// `codes`, in order, then serves. Gives whether the apply committed, and the blob
-// streams that each node served.
-fn closes(codes: [u32; 2]) -> (bool, BTreeMap<u8, usize>) {
+// `codes`, in order, then serves. Gives whether the apply committed, the blob streams
+// that each node served, and those served to a clean end.
+fn closes(codes: [u32; 2]) -> (bool, BTreeMap<u8, usize>, BTreeMap<u8, usize>) {
     let mut cluster = Cluster::new(0);
     cluster.start_voter(1);
     cluster.start_voter(2);
@@ -988,30 +988,53 @@ fn closes(codes: [u32; 2]) -> (bool, BTreeMap<u8, usize>) {
     cluster.run(seconds(30));
     let moved = pointer(1, &definitions);
     let board = cluster.board();
-    (board.applied == [(1, moved, Ok(moved))], board.blobs)
+    (
+        board.applied == [(1, moved, Ok(moved))],
+        board.blobs,
+        board.clean,
+    )
 }
 
 // The session that ends with code 0 earns its own redial, so the plain redial is left
-// for the other session, whichever ends first.
+// for the other session, whichever ends first. The put ends the stream that it does
+// not lose.
 #[test]
 fn an_apply_redials_a_voter_for_a_code_0_end_before_or_after_another_end() {
-    assert_eq!(
-        closes([7, 0]),
-        (true, [(2, 3)].into()),
-        "code 7, then code 0"
-    );
-    assert_eq!(
-        closes([0, 7]),
-        (true, [(2, 3)].into()),
-        "code 0, then code 7"
-    );
+    let committed = (true, [(2, 3)].into(), [(2, 1)].into());
+    assert_eq!(closes([7, 0]), committed, "code 7, then code 0");
+    assert_eq!(closes([0, 7]), committed, "code 0, then code 7");
+}
+
+// Voter 3 is down, and voter 2 restarts 1.5 s into the apply, after the last `Stored`
+// of its put and before the end of its stream, so the end fails with an error. Each
+// chunk is durable on voter 2, so it is a holder, and the put opens no second stream
+// to it.
+#[test]
+fn an_apply_counts_a_voter_whose_stream_end_fails_with_an_error_after_each_stored() {
+    let mut cluster = Cluster::new(0);
+    cluster.delay(Span::from_nanos(300 * Span::MILLISECOND.nanos()));
+    cluster.start_voter(1);
+    cluster.start_voter(2);
+    cluster.run(seconds(10));
+    let definitions = create_largest(1);
+    cluster.change(1, base(), &definitions);
+    cluster.run(Span::from_nanos(1500 * Span::MILLISECOND.nanos()));
+    let node = cluster.node(2).clone();
+    cluster.sim.crash(&node, Crash::Power);
+    cluster.start_voter(2);
+    cluster.run(seconds(30));
+    let moved = pointer(1, &definitions);
+    let board = cluster.board();
+    assert_eq!(board.applied, [(1, moved, Ok(moved))]);
+    assert_eq!(board.blobs, [(2, 1)].into());
 }
 
 // Voter 3 is down, and the links of voter 2 break 1.5 s into the apply, after the
-// last `Stored` of its put and before the end of its stream. Each chunk is durable on
-// voter 2, so it is a holder, and the put opens no second stream to it.
+// last `Stored` of its put and before the end of its stream, so the end passes its
+// deadline. Each chunk is durable on voter 2, so it is a holder, and the put opens no
+// second stream to it.
 #[test]
-fn an_apply_counts_a_voter_whose_stream_end_fails_after_each_stored() {
+fn an_apply_counts_a_voter_whose_stream_end_passes_the_deadline_after_each_stored() {
     let mut cluster = Cluster::new(0);
     cluster.delay(Span::from_nanos(300 * Span::MILLISECOND.nanos()));
     cluster.start_voter(1);
