@@ -312,16 +312,24 @@ pub(crate) async fn run(
 ) -> Result<(), Error> {
     let class = incoming.class;
     let (mut receiver, mut sender) = halves(incoming)?;
-    // No async level between this and the reader's serve, which polls once a frame.
+    // No async level between this and the reader's serve, which polls once a frame,
+    // and a forward in a box of its own, so that the reader's poll holds none of it.
     let served = match receiver.recv().await {
         Ok(Some(message)) => match Forward::decode(&message) {
             Ok(forward) => {
+                drop(message);
                 let via = holder.expect("invariant: a forward comes from a member");
-                client::forward::serve(state, via, forward, &mut receiver, &mut sender)
-                    .await
+                let forward = client::forward::serve(
+                    state,
+                    via,
+                    forward,
+                    &mut receiver,
+                    &mut sender,
+                );
+                Box::pin(forward).await
             }
             Err(wire::hub::Error::Kind { .. }) => {
-                serve(state, class, &message, &mut receiver, &mut sender).await
+                serve(state, class, message, &mut receiver, &mut sender).await
             }
             Err(error) => Err(error.into()),
         },
@@ -358,7 +366,7 @@ fn stop(receiver: Receiver, sender: Sender, error: &Error) {
 async fn serve(
     state: &Rc<RefCell<State>>,
     class: Class,
-    message: &[u8],
+    message: Block,
     receiver: &mut Receiver,
     sender: &mut Sender,
 ) -> Result<(), Error> {
@@ -455,12 +463,13 @@ async fn open(
     state: &Rc<RefCell<State>>,
     class: Class,
     home: &mut Home,
-    message: &[u8],
+    message: Block,
     receiver: &mut Receiver,
 ) -> Result<Option<Opened>, Error> {
-    let FromReader::Open(open) = home.decode(message)? else {
+    let FromReader::Open(open) = home.decode(&message)? else {
         unreachable!("invariant: the first message that Home gives is an open");
     };
+    drop(message);
     let wanted = match open.mode {
         Mode::Latest => Class::Latest,
         Mode::Complete { .. } => Class::Complete,

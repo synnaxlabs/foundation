@@ -92,7 +92,10 @@ pub(super) async fn serve(
         }
         Origin::Forward { .. } => {
             let renewal = |message: &[u8]| renewal(admission, state, message);
-            relay::<true>(state, writer, renewal, receiver, sender).await?
+            // A trait object, so that a program's write inlines none of this copy.
+            let relay: Pin<Box<dyn Future<Output = _>>> =
+                Box::pin(relay::<true>(state, writer, renewal, receiver, sender));
+            relay.await?
         }
     };
     replies.finish(state, sender).await

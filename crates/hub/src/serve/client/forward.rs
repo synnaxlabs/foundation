@@ -33,6 +33,7 @@ pub(in crate::serve) async fn serve(
         return Ok(());
     };
     admission.admit(state, Signed::decode(&message)?)?;
+    drop(message);
     let subject = admission
         .subject()
         .expect("invariant: an admitted hello has a subject");
@@ -43,6 +44,7 @@ pub(in crate::serve) async fn serve(
             return Ok(());
         };
         let write = Write::decode(&message)?;
+        drop(message);
         let origin = Origin::Forward { via, forward };
         write::serve(state, &admission, origin, subject, write, receiver, sender).await
     });
