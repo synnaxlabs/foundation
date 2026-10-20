@@ -1390,3 +1390,94 @@ fn a_writer_times_out_from_its_bytes_after_a_power_cut_of_a_peer_whose_bytes_wai
     let at = after(Span::from_nanos(925_162_000_000));
     assert_eq!(take(&client), (at, Net::TimedOut { remote }));
 }
+
+#[test]
+fn a_lost_rst_parked_while_its_peer_stops_waiting_goes_again_at_its_next_send() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    let _server = start(&b, "server", move |node| async move {
+        let tcp = accept(&mut listener).await;
+        node.clock().sleep(Span::from_nanos(10_100_000)).await;
+        drop(tcp);
+    });
+    let remote = at(&b, 4433);
+    let client = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        node.clock().sleep(millis(10)).await;
+        write_all(&mut tcp, &[1]).await.unwrap();
+        node.clock().sleep(secs(1)).await;
+        let wrote = node.clock().now();
+        write_all(&mut tcp, &[2]).await.unwrap();
+        let error = read(&mut tcp, 1).await.unwrap_err();
+        (node.clock().now() - wrote, error)
+    });
+    sim.run_for(Span::from_nanos(10_800_000)).unwrap();
+    sim.link(&b, &a, cut());
+    sim.run_for(millis(50)).unwrap();
+    sim.link(&b, &a, link::Config::default());
+    sim.run_for(Span::from_nanos(939_200_000)).unwrap();
+    sim.link(&a, &b, cut());
+    sim.run_for(millis(100)).unwrap();
+    sim.link(&a, &b, link::Config::default());
+    sim.run().unwrap();
+    // The RST is due while the client waits for nothing. The lost second byte arms
+    // it, and both go again one RTO later: the RST arrives one leg before the RST
+    // that the byte meets at the closed port.
+    let at = Span::from_nanos(200_500_000 + delay().nanos());
+    assert_eq!(take(&client), (at, Net::Reset { remote }));
+}
+
+/// Gives the time and the result of a write that waits for the ACK of a byte from
+/// 10 ms, lost on a link cut from 5 ms that becomes `ack` at 1 s. The link that the
+/// byte goes on becomes `back` at 20 ms.
+fn write_after_a_lost_ack(
+    back: link::Config,
+    ack: link::Config,
+) -> (Monotonic, Result<(), Net>) {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    let _server = start(&b, "server", move |_| async move {
+        let _tcp = accept(&mut listener).await;
+        pending::<()>().await;
+    });
+    let remote = at(&b, 4433);
+    let client = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, one_byte()).await.unwrap();
+        node.clock().sleep(millis(10)).await;
+        write_all(&mut tcp, &[1]).await.unwrap();
+        let written = write_all(&mut tcp, &[2]).await;
+        (node.clock().now(), written)
+    });
+    sim.run_for(millis(5)).unwrap();
+    sim.link(&b, &a, cut());
+    sim.run_for(millis(15)).unwrap();
+    sim.link(&a, &b, back);
+    sim.run_for(millis(980)).unwrap();
+    sim.link(&b, &a, ack);
+    sim.run_for(secs(2_000)).unwrap();
+    take(&client)
+}
+
+#[test]
+fn a_lost_ack_goes_again_when_its_try_crosses_a_link_back_with_loss() {
+    let half = link::Config {
+        loss: 0.5,
+        ..link::Config::default()
+    };
+    let (now, written) = write_after_a_lost_ack(half, link::Config::default());
+    assert_eq!(written, Ok(()));
+    assert!(now < after(secs(100)), "wrote at {now:?}");
+}
+
+#[test]
+fn a_lost_ack_draws_nothing_on_a_link_back_with_no_loss() {
+    let half = link::Config {
+        loss: 0.5,
+        ..link::Config::default()
+    };
+    let (now, written) = write_after_a_lost_ack(link::Config::default(), half);
+    assert_eq!(
+        (now, written),
+        (after(Span::from_nanos(1_414_500_000)), Ok(()))
+    );
+}

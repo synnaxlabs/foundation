@@ -1624,6 +1624,38 @@ mod tests {
     }
 
     #[test]
+    fn a_segment_carries_only_the_lost_ack_of_its_own_stream() {
+        let mut wire = Wire::new(link::Config::default(), Rng::from_seed(0));
+        let mut lanes = Lanes::default();
+        let [local, peer] = [0, 1].map(|node| SocketAddr::new(addresses(node)[0], 1));
+        let tries = Tries {
+            since: Monotonic(0),
+            losses: 1,
+        };
+        let ack = Kind::Ack {
+            received: 1,
+            edge: 1,
+            fin: false,
+        };
+        let lost = Segment {
+            source: local,
+            destination: peer,
+            stream: 1,
+            kind: ack,
+            tries,
+        };
+        lanes.keep(None, lost);
+        // A newer stream of the pair sends after its ports are free again.
+        lanes.send(&mut wire, Monotonic(0), Pair { local, peer }, 2, Kind::Fin);
+        assert!(lanes.arrive(local, peer, 2).is_none());
+        assert_eq!(lanes.answers.len(), 1);
+        lanes.send(&mut wire, Monotonic(0), Pair { local, peer }, 1, Kind::Fin);
+        let carried = lanes.arrive(local, peer, 1);
+        assert!(matches!(carried, Some(Kind::Ack { received: 1, .. })));
+        assert!(lanes.answers.is_empty());
+    }
+
+    #[test]
     fn a_read_from_a_reset_end_sends_nothing() {
         let mut wire = Wire::new(link::Config::default(), Rng::from_seed(0));
         let mut sockets = Sockets::default();
