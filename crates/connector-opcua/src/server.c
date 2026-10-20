@@ -451,23 +451,45 @@ static UA_StatusCode invalid_token(UA_Server *server, UA_AccessControl *ac,
     return UA_STATUSCODE_BADIDENTITYTOKENINVALID;
 }
 
-/* Makes `server` refuse each later session with `BadIdentityTokenInvalid`. */
-void shim_server_invalidate_tokens(UA_Server *server) {
-    UA_Server_getConfig(server)->accessControl.activateSession = invalid_token;
+static UA_StatusCode denied_user(UA_Server *server, UA_AccessControl *ac,
+                                 const UA_EndpointDescription *endpoint,
+                                 const UA_ByteString *certificate,
+                                 const UA_NodeId *session,
+                                 const UA_ExtensionObject *token, void **context) {
+    (void)server;
+    (void)ac;
+    (void)endpoint;
+    (void)certificate;
+    (void)session;
+    (void)token;
+    (void)context;
+    return UA_STATUSCODE_BADUSERACCESSDENIED;
+}
+
+/* Makes `server` refuse each later session with `status`, `BadIdentityTokenInvalid`
+ * or `BadUserAccessDenied`. Returns `BadInvalidArgument` for another status. */
+UA_StatusCode shim_server_refuse_sessions(UA_Server *server, UA_StatusCode status) {
+    UA_AccessControl *ac = &UA_Server_getConfig(server)->accessControl;
+    switch(status) {
+    case UA_STATUSCODE_BADIDENTITYTOKENINVALID:
+        ac->activateSession = invalid_token;
+        return UA_STATUSCODE_GOOD;
+    case UA_STATUSCODE_BADUSERACCESSDENIED:
+        ac->activateSession = denied_user;
+        return UA_STATUSCODE_GOOD;
+    default:
+        return UA_STATUSCODE_BADINVALIDARGUMENT;
+    }
 }
 
 /* Gives each endpoint of `server` one user token policy, a user name with the
  * security policy of the URI `uri`. */
 UA_StatusCode shim_server_token_policy(UA_Server *server, const char *uri) {
-    /* An ActivateSession takes the policy of the token from the end of its key,
-     * after the last `#`. */
-    const char *name = uri + strlen(uri);
-    while(name > uri && *name != '#')
-        name--;
-    if(*name != '#')
+    UA_String postfix = securityPolicyUriPostfix(UA_STRING((char *)uri));
+    if(postfix.length == 0 || postfix.data[0] != '#')
         return UA_STATUSCODE_BADINVALIDARGUMENT;
     const char prefix[] = "open62541-username-policy";
-    size_t length = sizeof prefix - 1 + strlen(name);
+    size_t length = sizeof prefix - 1 + postfix.length;
     UA_ServerConfig *config = UA_Server_getConfig(server);
     for(size_t i = 0; i < config->endpointsSize; i++) {
         UA_EndpointDescription *endpoint = &config->endpoints[i];
@@ -486,7 +508,7 @@ UA_StatusCode shim_server_token_policy(UA_Server *server, const char *uri) {
             return UA_STATUSCODE_BADOUTOFMEMORY;
         policy->policyId.length = length;
         memcpy(policy->policyId.data, prefix, sizeof prefix - 1);
-        memcpy(policy->policyId.data + sizeof prefix - 1, name, strlen(name));
+        memcpy(policy->policyId.data + sizeof prefix - 1, postfix.data, postfix.length);
     }
     return UA_STATUSCODE_GOOD;
 }
