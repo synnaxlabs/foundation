@@ -76,8 +76,8 @@ fn read(clock: Clock, data: &[u8]) -> (Status, Status) {
 /// value, or the same fault, and the same time (`value::time`), or the same status,
 /// from both decodes. A decode under the calloc of the decode of a Publish answer,
 /// with its limit of 128 bytes for each byte of the input, gives the same status,
-/// length, and encoding, or `BadOutOfMemory` when the decode fails. An input of fewer
-/// than 2 bytes decodes nothing.
+/// length, and encoding, or `BadOutOfMemory` where the decode without it fails. An
+/// input of fewer than 2 bytes decodes nothing.
 ///
 /// # Panics
 ///
