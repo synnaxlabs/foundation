@@ -41,6 +41,7 @@ mod away;
 mod definitions;
 mod forward;
 #[path = "../common/forwarded.rs"]
+#[expect(dead_code, reason = "the binary uses only some of the helpers")]
 mod forwarded;
 mod link;
 mod named;
