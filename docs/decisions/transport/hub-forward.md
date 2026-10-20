@@ -125,3 +125,14 @@
   `serve::Error::Limit`, with the stop at the open: `laptop.architect`,
   2026-10-20T07:12:26Z
   (https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6285493756).
+
+  The cost of a forward is the member's serve: the `forward` bench of `hub` (#3484)
+  shows that the home's serve of a forward costs as much as a direct write. It is over
+  the cost limit of P1 (`docs/claude/performance.md`), and accepted: at 1x64 the member
+  costs 23 ns a sample against 48 to 50 ns for the home's write, so a forward never
+  sets the ceiling of a write, and a program that writes at its home pays nothing new
+  (`laptop.architect`, 2026-10-20T11:39:00Z:
+  https://github.com/synnaxlabs/foundation/pull/3579#issuecomment-6289997149). Look
+  again when a measured workload shows the member's forward, not a home's write, limits
+  the rate of a node. These numbers are of the hub's serve on the `sim` driver. #3584
+  measures the carrier work that a forward adds at the member, and the `os` driver.
