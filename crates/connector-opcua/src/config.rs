@@ -21,9 +21,6 @@ mod tests;
 const BAD_ADDRESS: Code = Code::new("opcua.bad-address");
 const BAD_NODE_ID: Code = Code::new("opcua.bad-node-id");
 const BAD_UNENCRYPTED: Code = Code::new("opcua.bad-unencrypted");
-const NO_CERTIFICATE: Code = Code::new("opcua.no-certificate");
-const NO_KEY: Code = Code::new("opcua.no-key");
-const NO_TRUST: Code = Code::new("opcua.no-trust");
 const REPEATED_CHANNEL: Code = Code::new("opcua.repeated-channel");
 
 /// The scheme of each address.
@@ -73,22 +70,23 @@ pub(crate) const BODY: Body = Body {
         schema::Attribute {
             name: "certificate",
             value: "a secret",
-            presence: Presence::Default("no secure channel"),
+            presence: Presence::When(&["key", "trust", "unencrypted"]),
             summary: "The DER or PEM certificate of the node, with an RSA key and its \
                       application URI in the subject alternative name. With it, the \
-                      channel signs and encrypts.",
+                      channel signs and encrypts. Without it, the channel neither \
+                      signs nor encrypts.",
         },
         schema::Attribute {
             name: "key",
             value: "a secret",
-            presence: Presence::Optional,
+            presence: Presence::When(&["certificate"]),
             summary: "The DER or PEM private key of `certificate`, with no password. \
                       A connector with `certificate` needs it.",
         },
         schema::Attribute {
             name: "trust",
             value: "a secret",
-            presence: Presence::Optional,
+            presence: Presence::When(&["certificate"]),
             summary: "The DER certificate, or one or more PEM certificates, of the \
                       server or of the CA that issued it. A connector with \
                       `certificate` needs it.",
@@ -107,7 +105,7 @@ pub(crate) const BODY: Body = Body {
         label: Some("the channel"),
         forms: &[READ],
     }],
-    examples: &[EXAMPLE, SECURE],
+    examples: &[EXAMPLE, SECURE, SIGNED],
 };
 
 /// A connector to one server.
@@ -127,6 +125,16 @@ rate        = \"10Hz\"
 certificate = file(\"/etc/foundation/opcua/node.der\")
 key         = secret(\"plant.opcua_key\")
 trust       = file(\"/etc/foundation/opcua/plc.der\")
+";
+
+/// A connector over a channel that signs and does not encrypt.
+const SIGNED: &str = "\
+address     = \"opc.tcp://plc:4840\"
+rate        = \"10Hz\"
+certificate = file(\"/etc/foundation/opcua/node.der\")
+key         = secret(\"plant.opcua_key\")
+trust       = file(\"/etc/foundation/opcua/plc.der\")
+unencrypted = true
 ";
 
 /// The body of a `read` block.
@@ -185,9 +193,9 @@ pub(crate) fn parse(config: &Document) -> Result<Config, Vec<Diagnostic>> {
 /// # Errors
 ///
 /// Each diagnostic of a source, `opcua.bad-unencrypted` for an `unencrypted` that is
-/// not a bool, `opcua.no-certificate` for each of `key`, `trust`, and `unencrypted`
-/// with no `certificate`, and `opcua.no-key` and `opcua.no-trust` for a
-/// `certificate` with no `key` or no `trust`.
+/// not a bool, a `document.missing-attribute` for `certificate` at each of `key`,
+/// `trust`, and `unencrypted` with no `certificate`, and one at `certificate` for each
+/// of `key` and `trust` that it lacks.
 pub(crate) fn security(config: &Document) -> Result<Option<Security>, Vec<Diagnostic>> {
     let mut diagnostics = Vec::new();
     let attributes = &config.attributes;
@@ -214,27 +222,17 @@ pub(crate) fn security(config: &Document) -> Result<Option<Security>, Vec<Diagno
         .get("certificate")
         .and_then(|attribute| attribute.key_span);
     let needs = [
-        (
-            key.is_none(),
-            NO_KEY,
-            "key",
-            "the private key of the certificate",
-        ),
+        (key.is_none(), "key", "the private key of the certificate"),
         (
             trust.is_none(),
-            NO_TRUST,
             "trust",
             "the certificate of the server or of its CA",
         ),
     ];
-    for (missing, code, name, what) in needs {
+    for (missing, name, what) in needs {
         if missing {
-            diagnostics.push(Diagnostic::new(
-                code,
-                at,
-                format!("the connector has a `certificate` but no `{name}`"),
-                format!("Add a `{name}` with {what}, or remove `certificate`"),
-            ));
+            let fix = format!("Add a `{name}` with {what}, or remove `certificate`");
+            diagnostics.push(read::missing(kind::NOUN, at, &[name], fix));
         }
     }
     match (certificate, key, trust, unencrypted.unwrap_or(Ok(false))) {
@@ -255,23 +253,18 @@ pub(crate) fn security(config: &Document) -> Result<Option<Security>, Vec<Diagno
     }
 }
 
-/// The `opcua.no-certificate` error of each of `key`, `trust`, and `unencrypted` in
-/// `attributes`.
+/// The `document.missing-attribute` for `certificate` at each of `key`, `trust`, and
+/// `unencrypted` in `attributes`.
 fn no_certificate(attributes: &Map) -> Vec<Diagnostic> {
     let present = ["key", "trust", "unencrypted"]
         .into_iter()
         .filter_map(|name| Some((name, attributes.get(name)?)));
     present
         .map(|(name, attribute)| {
-            Diagnostic::new(
-                NO_CERTIFICATE,
-                attribute.key_span,
-                format!("the connector has a `{name}` but no `certificate`"),
-                format!(
-                    "Add a `certificate` with the certificate of the node, or remove \
-                     `{name}`"
-                ),
-            )
+            let fix = format!(
+                "Add a `certificate` with the certificate of the node, or remove `{name}`"
+            );
+            read::missing(kind::NOUN, attribute.key_span, &["certificate"], fix)
         })
         .collect()
 }

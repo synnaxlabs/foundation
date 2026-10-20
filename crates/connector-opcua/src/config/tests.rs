@@ -461,9 +461,9 @@ fn expected(has: impl Fn(u8) -> bool) -> Result<Option<Security>, Vec<Diagnostic
     if !has(0) {
         let refused = |at, key: &str| {
             refused(
-                "opcua.no-certificate",
+                "document.missing-attribute",
                 at,
-                &format!("the connector has a `{key}` but no `certificate`"),
+                "the connector has no `certificate`",
                 &format!(
                     "Add a `certificate` with the certificate of the node, or \
                      remove `{key}`"
@@ -496,18 +496,18 @@ fn expected(has: impl Fn(u8) -> bool) -> Result<Option<Security>, Vec<Diagnostic
         let mut missing = Vec::new();
         if !has(1) {
             missing.push(refused(
-                "opcua.no-key",
+                "document.missing-attribute",
                 20,
-                "the connector has a `certificate` but no `key`",
+                "the connector has no `key`",
                 "Add a `key` with the private key of the certificate, or remove \
                  `certificate`",
             ));
         }
         if !has(2) {
             missing.push(refused(
-                "opcua.no-trust",
+                "document.missing-attribute",
                 20,
-                "the connector has a `certificate` but no `trust`",
+                "the connector has no `trust`",
                 "Add a `trust` with the certificate of the server or of its CA, or \
                  remove `certificate`",
             ));

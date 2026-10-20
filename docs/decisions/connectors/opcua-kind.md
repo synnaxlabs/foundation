@@ -225,20 +225,24 @@
   Secure channel (#2934): `opcua` takes `certificate`, `key`, and `trust`, each a secret
   source (`env(...)`, `file(...)`, or `secret(...)`), and the bool `unencrypted`. With
   `certificate`, the channel is `SignAndEncrypt`, or `Sign` with `unencrypted = true`.
-  With no `certificate`, the mode is None. Four codes split the refusals of the config:
-  `opcua.no-certificate` for each of `key`, `trust`, and `unencrypted` with no
-  `certificate`, `opcua.no-key` for a `certificate` with no `key`, `opcua.no-trust` for
-  a `certificate` with no `trust`, and `opcua.bad-unencrypted` for an `unencrypted` that
-  is not a bool. `opcua.no-trust` is its own code, as a code that names a key for a
-  missing trust tells the wrong cause. `run` and `browse` read the three sources through
-  `Context::secret` at their start, before the connect, so a missing file gives `Retry`
-  and the next run reads it. Lost: a read at `parse`, which is pure and keeps a stale
-  value until the config changes. When the client refuses a credential, a run or a
-  browse gives `Error::Retry` with the text "{source}: {refusal}. {fix}": the source of
-  the credential that the refusal names, and a fix for that credential. The supervisor
-  restarts the run with backoff, and each run reads the sources again, so a replaced
-  file, or a certificate whose validity window opens later, heals with no change of the
-  spec, as INFLUX KIND does for a bad `ca`. Supersedes key choice 7 of the plan
+  With no `certificate`, the mode is None. A `key`, `trust`, or `unencrypted` with no
+  `certificate` gives a `document.missing-attribute` for `certificate` at each of them,
+  and a `certificate` with no `key` or no `trust` gives one for each that it lacks, at
+  the `certificate`. Each fix adds the missing attribute or removes the one that needs
+  it. `opcua.bad-unencrypted` is for an `unencrypted` that is not a bool. Lost: a code
+  of `opcua` for each missing attribute (`opcua.no-certificate`, `opcua.no-key`, and
+  `opcua.no-trust`), as the presence `When` of each makes it a missing attribute.
+  Decided by `laptop.architect-2` (2026-10-20T04:36:45Z:
+  https://github.com/synnaxlabs/foundation/pull/3471#issuecomment-6283486823). `run` and
+  `browse` read the three sources through `Context::secret` at their start, before the
+  connect, so a missing file gives `Retry` and the next run reads it. Lost: a read at
+  `parse`, which is pure and keeps a stale value until the config changes. When the
+  client refuses a credential, a run or a browse gives `Error::Retry` with the text
+  "{source}: {refusal}. {fix}": the source of the credential that the refusal names, and
+  a fix for that credential. The supervisor restarts the run with backoff, and each run
+  reads the sources again, so a replaced file, or a certificate whose validity window
+  opens later, heals with no change of the spec, as INFLUX KIND does for a bad `ca`.
+  Supersedes key choice 7 of the plan
   (https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6230820716), in
   which a bad own certificate or key ended the run with `Error::Config` until a change
   of the spec (the person, through `laptop.monitor`, factory message d9b64c65 at about
