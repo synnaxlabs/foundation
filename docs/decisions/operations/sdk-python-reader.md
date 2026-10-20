@@ -9,8 +9,12 @@
   Python object a sample (below). `laptop.architect-2` approved it at
   2026-10-19T22:22:38Z
   (https://github.com/synnaxlabs/foundation/pull/3436#issuecomment-6278668296). A
-  series of `uuid` to `Writer.write_series` waits on #3464. Only a channel of a type
-  that is not a scalar raises `TypeError` at the open. The reader
+  series of `uuid` to `Writer.write_series`, and one `mod uuid` that holds the class
+  of `uuid.UUID` once for the reader and the writer, wait on #3464. The overloads of
+  `Frame.get` in the stub wait on #3481. `laptop.architect-2` deferred both at
+  2026-10-20T01:33:55Z
+  (https://github.com/synnaxlabs/foundation/pull/3436#issuecomment-6281242356). Only a
+  channel of a type that is not a scalar raises `TypeError` at the open. The reader
   follows the writer (SDK PYTHON WRITER): one `Mutex` taken with
   `MutexExt::lock_py_attached`, a check of the process before the lock, and no Python
   code while a call holds the lock. The plan
