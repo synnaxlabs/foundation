@@ -122,18 +122,21 @@ pub fn needs(body: &Body, key: &str, held: &Document) -> bool {
 /// Asserts that each example holds to its body. At each site of each example,
 /// `problems` finds none in the example, none with an attribute removed that its site
 /// does not need, and none with each attribute with a default of its site removed. Each
-/// name of each `Unless` of a site is an attribute of that site. Each item of
-/// `examples` is a key that `problems` gets, the body, and the example.
+/// `Unless` and `When` of a site names at least one attribute, and each name is another
+/// attribute of that site. Each attribute with an `Unless` or a `When` is not needed at
+/// a site of its body in at least one example. Each item of `examples` is a key that
+/// `problems` gets, the body, and the example.
 ///
 /// # Panics
 ///
 /// When an assert fails, or when no site has an attribute that it does not need, no
-/// site has an attribute with a default, or no site has an `Unless`.
+/// site has an attribute with a default, or no site has an `Unless` or a `When`.
 pub fn assert_examples<K>(
     examples: impl IntoIterator<Item = (K, &'static Body, Document)>,
     problems: impl Fn(&K, &Document) -> Vec<Diagnostic>,
 ) {
     let (mut optional, mut defaults, mut names) = (0_usize, 0_usize, 0_usize);
+    let mut spared: Vec<(&'static Body, &'static str, bool)> = Vec::new();
     for (key, outer, example) in examples {
         assert_eq!(problems(&key, &example), [], "{}", outer.summary);
         for (body, path) in sites(outer, &example) {
@@ -150,14 +153,25 @@ pub fn assert_examples<K>(
                 optional = optional.saturating_add(1);
             }
             for attribute in body.attributes {
-                let Presence::Unless(others) = attribute.presence else {
+                let (Presence::Unless(others) | Presence::When(others)) =
+                    attribute.presence
+                else {
                     continue;
                 };
                 assert!(!others.is_empty(), "{}: {}", body.summary, attribute.name);
                 for other in others {
-                    let stated = body.attributes.iter().any(|key| key.name == *other);
+                    let stated = *other != attribute.name
+                        && body.attributes.iter().any(|key| key.name == *other);
                     assert!(stated, "{}: {}: {other}", body.summary, attribute.name);
                     names = names.saturating_add(1);
+                }
+                let free = !needs(body, attribute.name, at(&example, &path));
+                let site = spared
+                    .iter_mut()
+                    .find(|(site, name, _)| *site == body && *name == attribute.name);
+                match site {
+                    Some((_, _, seen)) => *seen |= free,
+                    None => spared.push((body, attribute.name, free)),
                 }
             }
             let held: Vec<_> = body
@@ -176,6 +190,9 @@ pub fn assert_examples<K>(
             assert_eq!(problems, [], "{}: {held:?}", body.summary);
             defaults = defaults.saturating_add(held.len());
         }
+    }
+    for (body, name, seen) in spared {
+        assert!(seen, "{}: {name}: needed in each example", body.summary);
     }
     let counts = [optional, defaults, names];
     assert!(
@@ -273,6 +290,69 @@ mod tests {
 
     const UNNAMED: Body =
         holding("Unnamed.", &[attribute("u", Presence::Unless(&[]))], &[]);
+
+    const ITSELF: Body = holding(
+        "Itself.",
+        &[
+            attribute("b", Presence::Default("1")),
+            attribute("u", Presence::Unless(&["u"])),
+        ],
+        &[],
+    );
+
+    const CYCLE: Body = holding(
+        "Cycle.",
+        &[
+            attribute("b", Presence::Default("1")),
+            attribute("x", Presence::When(&["y"])),
+            attribute("y", Presence::When(&["x"])),
+        ],
+        &[],
+    );
+
+    const INSTEAD: Body = holding(
+        "Instead.",
+        &[
+            attribute("b", Presence::Default("1")),
+            attribute("a", Presence::Optional),
+            attribute("u", Presence::Unless(&["a"])),
+        ],
+        &[],
+    );
+
+    const NESTED: Body = holding(
+        "Nested.",
+        &[
+            attribute("b", Presence::Default("1")),
+            attribute("x", Presence::When(&["b"])),
+        ],
+        &[schema::Block {
+            keyword: "inner",
+            label: None,
+            forms: &[CYCLE],
+        }],
+    );
+
+    const NOTHING: Body =
+        holding("Nothing.", &[attribute("w", Presence::When(&[]))], &[]);
+
+    const SELF: Body = holding(
+        "Self.",
+        &[
+            attribute("b", Presence::Default("1")),
+            attribute("w", Presence::When(&["w"])),
+        ],
+        &[],
+    );
+
+    const WHEN: Body = holding(
+        "When.",
+        &[
+            attribute("b", Presence::Default("1")),
+            attribute("w", Presence::When(&["z"])),
+        ],
+        &[],
+    );
 
     fn problem() -> Diagnostic {
         Diagnostic::new(
@@ -430,10 +510,109 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "When.: w: z")]
+    fn fails_a_when_that_names_no_attribute_of_its_body() {
+        let example = document(&["b"], Vec::new());
+        assert_examples([((), &WHEN, example)], |(), _| Vec::new());
+    }
+
+    #[test]
+    #[should_panic(expected = "Self.: w: w")]
+    fn fails_a_when_that_names_its_own_attribute() {
+        let example = document(&["b", "w"], Vec::new());
+        assert_examples([((), &SELF, example)], |(), _| Vec::new());
+    }
+
+    #[test]
+    #[should_panic(expected = "Itself.: u: u")]
+    fn fails_an_unless_that_names_its_own_attribute() {
+        let example = document(&["b", "u"], Vec::new());
+        assert_examples([((), &ITSELF, example)], |(), _| Vec::new());
+    }
+
+    #[test]
+    fn takes_a_when_that_an_example_leaves_out() {
+        let examples = [&["b"][..], &["b", "x", "y"]]
+            .map(|keys| ((), &CYCLE, document(keys, Vec::new())));
+        assert_examples(examples, |(), held| {
+            let get = |key| held.attributes.get(key).is_some();
+            if get("x") == get("y") {
+                Vec::new()
+            } else {
+                vec![problem()]
+            }
+        });
+    }
+
+    mod far {
+        #[inline(never)]
+        pub(super) fn cycle() -> &'static super::Body {
+            &super::CYCLE
+        }
+    }
+
+    #[test]
+    fn takes_a_when_left_out_at_another_reference_to_its_body() {
+        let held = ((), &CYCLE, document(&["b", "x", "y"], Vec::new()));
+        let left = ((), far::cycle(), document(&["b"], Vec::new()));
+        assert_examples([held, left], |(), held| {
+            let get = |key| held.attributes.get(key).is_some();
+            if get("x") == get("y") {
+                Vec::new()
+            } else {
+                vec![problem()]
+            }
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "Cycle.: x: needed in each example")]
+    fn fails_a_when_that_each_example_holds() {
+        let example = document(&["b", "x", "y"], Vec::new());
+        assert_examples([((), &CYCLE, example)], |(), held| {
+            if held.attributes.get("x").is_some() {
+                Vec::new()
+            } else {
+                vec![problem()]
+            }
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "Cycle.: x: needed in each example")]
+    fn fails_each_when_that_each_example_holds() {
+        let examples = [&["b", "x", "y"][..], &["b", "y"]]
+            .map(|keys| ((), &CYCLE, document(keys, Vec::new())));
+        assert_examples(examples, |(), _| Vec::new());
+    }
+
+    #[test]
+    #[should_panic(expected = "Instead.: u: needed in each example")]
+    fn fails_an_unless_that_each_example_needs() {
+        let example = document(&["b", "u"], Vec::new());
+        assert_examples([((), &INSTEAD, example)], |(), _| Vec::new());
+    }
+
+    #[test]
+    #[should_panic(expected = "Nested.: x: needed in each example")]
+    fn fails_a_when_of_one_body_beside_one_of_its_name_in_another_body() {
+        let inner = block("inner", document(&["b"], Vec::new()));
+        let example = document(&["b", "x"], vec![inner]);
+        assert_examples([((), &NESTED, example)], |(), _| Vec::new());
+    }
+
+    #[test]
     #[should_panic(expected = "Unnamed.: u")]
     fn fails_an_unless_that_names_nothing() {
         let example = document(&[], Vec::new());
         assert_examples([((), &UNNAMED, example)], |(), _| Vec::new());
+    }
+
+    #[test]
+    #[should_panic(expected = "Nothing.: w")]
+    fn fails_a_when_that_names_nothing() {
+        let example = document(&[], Vec::new());
+        assert_examples([((), &NOTHING, example)], |(), _| Vec::new());
     }
 
     #[test]
