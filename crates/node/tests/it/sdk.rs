@@ -567,10 +567,11 @@ fn a_call_of_two_indexes_that_the_writer_cannot_send_gives_its_error_in_its_plac
 /// Once a channel of one group of two is removed, each write of that group gives
 /// `Partial` with the exact channels written and not written, the other group goes
 /// on, and the close gives no error for the group, which ended after the frame that
-/// the node took of it was on disk.
+/// the node took of it was on disk: a reader gets a frame only after its commit.
 #[test]
 fn a_write_of_a_group_whose_channel_was_removed_gives_partial_and_the_writer_goes_on() {
     let (mut rig, node, subject) = planted();
+    let stored = reader(&node, &subject, "cell.c", 1);
     let client = Client::connect(&node, subject).unwrap();
     let channels = ["cell.c", "plant.a"].map(|n| n.parse().unwrap());
     let mut writer = client.open_writer(Config::new(channels.into())).unwrap();
@@ -578,6 +579,7 @@ fn a_write_of_a_group_whose_channel_was_removed_gives_partial_and_the_writer_goe
     let values = [(c, Value::I64(1)), (a, Value::I64(2))];
     let both = [(cell_time, taken(0, 1)), (plant_time, taken(0, 1))];
     assert_eq!(writer.write(&values), Ok(&both[..]));
+    assert_eq!(wait(&stored)["cell.c"], [1]);
     let cell =
         "channel \"cell.c\" {\n  data_type = \"i64\"\n  index = \"cell.time\"\n}\n";
     rig.config(&crate::plant::CHANNELS.replace(cell, ""));
@@ -862,8 +864,8 @@ fn each_call_after_the_node_ended_the_session_gives_the_cause() {
 }
 
 /// Only Unix: `counting::Local` names the thread with `pthread_self`. A warm `write`
-/// of one index and of two, `write_series`, and `next` make no allocation on the
-/// caller's thread. Two calls of `count` at once panic, so this is the one test of the
+/// of one index and of two, `write_series`, a `write` of far more values than places,
+/// and `next` make no allocation on the caller's thread. Two calls of `count` at once panic, so this is the one test of the
 /// binary that counts (#3319).
 #[cfg(unix)]
 #[test]
@@ -930,10 +932,30 @@ fn a_warm_call_makes_no_allocation_on_the_thread_of_its_caller() {
     (0..WARMUP).for_each(|_| write());
     let ((), allocations) = crate::ALLOCATOR.count(|| (0..CALLS).for_each(|_| write()));
     assert_eq!(allocations, 0, "{CALLS} warm writes of series allocate");
+    a_write_of_more_values_than_places_makes_no_allocation(&mut writer);
     assert_eq!(writer.close(), Ok(()));
     assert_eq!(client.close(), Ok(()));
     rig.stop();
     read::a_warm_next_makes_no_allocation();
+}
+
+/// A `write` of far more values than places, after one of 1,000, makes no allocation:
+/// the writer keeps at most one value more than the places.
+#[cfg(unix)]
+fn a_write_of_more_values_than_places_makes_no_allocation(
+    writer: &mut sdk::write::Writer,
+) {
+    let long = vec![(0, Value::I64(1)); 100_000];
+    let unordered = types::frame::Error::Unordered { entry: 0, last: 0 };
+    let unordered = Err(Error::Stream(program::Error::Layout(unordered)));
+    assert_eq!(writer.write(&long[..1_000]).map(<[_]>::to_vec), unordered);
+    let (written, allocations) =
+        crate::ALLOCATOR.count(|| writer.write(&long).map(<[_]>::to_vec));
+    assert_eq!(written, unordered);
+    assert_eq!(
+        allocations, 0,
+        "a write of more values than places allocates"
+    );
 }
 
 mod read;
