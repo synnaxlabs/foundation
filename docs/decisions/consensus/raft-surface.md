@@ -249,7 +249,9 @@
   each link of the log first; links that the queues share, the deferral "entries that
   the queues share, not copy" below. Decided by `laptop.architect`,
   2026-10-20T00:59:40Z
-  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6280820710).
+  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6280820710), and
+  the two conditions of `fits`, 2026-10-20T01:27:53Z
+  (https://github.com/synnaxlabs/foundation/pull/3478#issuecomment-6281170235).
   `Raft::set_learners` sets the nodes that get the log and have no vote. `raft` keeps
   the set apart from the configuration: a key that the configuration in force holds as
   a voter is a voter. A leader sends each learner the log and the commit index, and
