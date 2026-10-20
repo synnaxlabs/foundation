@@ -17,7 +17,7 @@
 
 #include "shim.h"
 
-/* Gives `server` the policies of `security`, in place of the endpoint in None an
+/* Gives `server` the policies of `security` and, in place of the endpoint in None, an
  * endpoint in each of the `kinds` modes of `modes` for each of the `count` policy URIs
  * of `policies`, in that order, and a channel check that trusts only the certificates
  * that `security` trusts. Gives `BadSecurityPolicyRejected` for a URI that the copy

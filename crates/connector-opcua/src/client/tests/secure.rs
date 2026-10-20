@@ -52,8 +52,8 @@ struct Read {
 }
 
 /// The policy URI and the mode of the channel of `client`, read from C: no call of
-/// `Client` and no server log gives them, and a read alone also passes over None,
-/// which the server offers too.
+/// `Client` and no server log gives them, and a read alone passes over each policy
+/// and mode that the server offers.
 fn channel(client: &Client) -> (String, ffi::Mode) {
     let mut mode = ffi::Mode(0);
     // SAFETY: the client lives, and `mode` is a place to write.
