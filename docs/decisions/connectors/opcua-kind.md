@@ -21,8 +21,8 @@
   types do not match the channel types that the user wants (`laptop.architect-2`,
   2026-10-14T00:36:21Z:
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6158211076). Time:
-  with `polled = true` (OPCUA READ), each frame has the midpoint of the request on mesh
-  time (STAMP) (question:
+  with `polled = true` and the poll that OPCUA SUBSCRIBE falls back to (OPCUA READ),
+  each frame has the midpoint of the request on mesh time (STAMP) (question:
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6150343218). The
   default mode subscribes, and each value has the mesh time of its device time, as OPCUA
   SUBSCRIBE states. The device clock is the server clock. The client reads `CurrentTime`
