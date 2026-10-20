@@ -74,7 +74,7 @@ fn at(place: usize, index: usize) -> Place {
 }
 
 /// The frame and time of each write that a writer sent, until its first close.
-type Sent = Vec<(Frame, Time)>;
+type Sent = Vec<(Kept, Time)>;
 
 /// What a write gives: the place of the index and the outcome of each group.
 type Given<'a> = Result<&'a [(usize, Outcome)], Error>;
@@ -105,7 +105,7 @@ fn writer_of(
         while let Some(call) = calls.blocking_recv() {
             match call {
                 Call::Write { mut frame, time } => {
-                    let kept = Frame {
+                    let kept = Kept {
                         parts: frame.parts.clone(),
                         series: frame.series.clone(),
                         bytes: frame.bytes.clone(),
@@ -132,7 +132,7 @@ fn writer_of(
 
 /// Puts the outcome of each group of `frame` in it, as `program::Writer::write` gives
 /// them, but in the reverse order of the places of the node, which the writer sorts.
-fn answered(frame: &mut Frame, outcome: impl Fn(usize) -> Outcome) {
+fn answered(frame: &mut Kept, outcome: impl Fn(usize) -> Outcome) {
     let entries = places();
     let mut groups: Vec<_> = (frame.series.iter())
         .map(|&(node, ..)| entries[node].index)
@@ -160,7 +160,7 @@ fn opened(channels: &[&str]) -> Writer {
 }
 
 /// The bytes of each series of `frame`, a sorted frame.
-fn series(frame: &Frame) -> Vec<(usize, Vec<u8>)> {
+fn series(frame: &Kept) -> Vec<(usize, Vec<u8>)> {
     let each = frame.each().map(|(place, bytes)| (place, bytes.to_vec()));
     each.collect()
 }

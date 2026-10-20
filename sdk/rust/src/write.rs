@@ -79,7 +79,7 @@ pub struct Writer {
     lost: Option<Error>,
     /// The bytes of the next frame, in the places of the node, which go to the
     /// client's thread and back.
-    frame: Frame,
+    frame: Kept,
     /// The lowest place and count of each group by the place of the node of its
     /// index, for the check of the counts of a frame of series.
     counts: Vec<Option<(usize, u32)>>,
@@ -126,7 +126,7 @@ impl Writer {
             written,
             closed: Arc::clone(closed),
             lost: None,
-            frame: Frame::default(),
+            frame: Kept::default(),
             counts: vec![None; node.len()],
         })
     }
@@ -182,7 +182,7 @@ impl Writer {
         self.frame.bytes.clear();
         let mut stamped = false;
         for &(place, value) in self.bounded(values) {
-            let (node, group, data_type) = self.place(place)?;
+            let (at, data_type) = self.place(place)?;
             let scalar = value.scalar();
             if data_type != Type::Scalar(scalar) {
                 return Err(Error::Value {
@@ -191,9 +191,9 @@ impl Writer {
                     data_type,
                 });
             }
-            stamped |= node == group;
+            stamped |= at.node == at.group;
             let fill = |sample: &mut [u8]| value.write(sample);
-            self.frame.push(node, group, place, scalar.width(), fill);
+            self.frame.push(at, scalar.width(), fill);
         }
         if stamped {
             return self.call(Time::Frame(Path::Live));
@@ -239,8 +239,8 @@ impl Writer {
             bytes,
         } in self.bounded(series)
         {
-            let (node, group, _) = self.place(place)?;
-            self.frame.copy(node, group, place, count, bytes);
+            let (at, _) = self.place(place)?;
+            self.frame.copy(at, count, bytes);
         }
         self.call(Time::Frame(Path::Live))
     }
@@ -281,9 +281,8 @@ impl Writer {
         &items[..items.len().min(self.places.len() + 1)]
     }
 
-    /// The place of the node of `place`, the place of the node of its group's index,
-    /// and its type.
-    fn place(&self, place: usize) -> Result<(usize, usize, Type), Error> {
+    /// Where a series of `place` goes, and its type.
+    fn place(&self, place: usize) -> Result<(At, Type), Error> {
         let past = || {
             let entries = self.places.len();
             let range = frame::Error::OutOfRange {
@@ -296,7 +295,8 @@ impl Writer {
         let Place {
             index, data_type, ..
         } = self.places[place];
-        Ok((node, self.nodes[index], data_type))
+        let group = self.nodes[index];
+        Ok((At { node, group, place }, data_type))
     }
 
     /// Adds an empty stamp at the index of each group of the frame, which holds no
@@ -304,11 +304,18 @@ impl Writer {
     fn stamps(&mut self) {
         let frame = &mut self.frame;
         frame.parts.sort_unstable_by_key(|part| part.group);
-        for at in 0..frame.parts.len() {
-            let group = frame.parts[at].group;
-            if at == 0 || group != frame.parts[at - 1].group {
+        let present = frame.parts.len();
+        for n in 0..present {
+            let group = frame.parts[n].group;
+            if n == 0 || group != frame.parts[n - 1].group {
                 let width = Scalar::Stamp.width();
-                frame.push(group, group, self.firsts[group], width, |_| {});
+                let place = self.firsts[group];
+                let at = At {
+                    node: group,
+                    group,
+                    place,
+                };
+                frame.push(at, width, |_| {});
             }
         }
     }
@@ -442,17 +449,17 @@ pub(crate) struct Open {
 /// A call of a [`Writer`] to its task.
 #[derive(Debug)]
 enum Call {
-    Write { frame: Frame, time: Time },
+    Write { frame: Kept, time: Time },
     Close(SyncSender<Result<(), Error>>),
 }
 
 /// The result of a write, its outcomes in its frame, and its frame to fill again.
-type Written = (Result<(), Error>, Frame);
+type Written = (Result<(), Error>, Kept);
 
 /// The bytes of a frame and the outcomes of its groups, kept between writes so that a
 /// warm write takes no allocation.
 #[derive(Debug, Default)]
-struct Frame {
+struct Kept {
     /// Each series.
     parts: Vec<Part>,
     /// The place, count, and length of each series, in place order, as
@@ -464,17 +471,10 @@ struct Frame {
     outcomes: Vec<(usize, Outcome)>,
 }
 
-impl Frame {
-    /// Adds a series of one sample of `len` bytes at `node` and `place`, in the group
-    /// of `group`, which `fill` writes.
-    fn push(
-        &mut self,
-        node: usize,
-        group: usize,
-        place: usize,
-        len: usize,
-        fill: impl FnOnce(&mut [u8]),
-    ) {
+impl Kept {
+    /// Adds a series of one sample of `len` bytes at `at`, which `fill` writes.
+    fn push(&mut self, at: At, len: usize, fill: impl FnOnce(&mut [u8])) {
+        let At { node, group, place } = at;
         let start = self.bytes.len();
         self.bytes.resize(start + len, 0);
         fill(&mut self.bytes[start..]);
@@ -488,16 +488,9 @@ impl Frame {
         });
     }
 
-    /// Adds `bytes`, a series of `count` samples, at `node` and `place`, in the group
-    /// of `group`.
-    fn copy(
-        &mut self,
-        node: usize,
-        group: usize,
-        place: usize,
-        count: u32,
-        bytes: &[u8],
-    ) {
+    /// Adds `bytes`, a series of `count` samples, at `at`.
+    fn copy(&mut self, at: At, count: u32, bytes: &[u8]) {
+        let At { node, group, place } = at;
         self.parts.push(Part {
             node,
             group,
@@ -510,7 +503,7 @@ impl Frame {
     }
 
     /// The place of the node and bytes of each series, in the order of the pushes, or
-    /// in the order of the node's places after [`Frame::sort`].
+    /// in the order of the node's places after [`Kept::sort`].
     fn each(&self) -> impl Iterator<Item = (usize, &[u8])> {
         let bytes =
             |part: &Part| (part.node, &self.bytes[part.start..part.start + part.len]);
@@ -528,7 +521,18 @@ impl Frame {
     }
 }
 
-/// A series of a [`Frame`].
+/// Where a series of a [`Kept`] goes.
+#[derive(Clone, Copy, Debug)]
+struct At {
+    /// The place of the node.
+    node: usize,
+    /// The place of the node of the index of its group.
+    group: usize,
+    /// The place of the caller.
+    place: usize,
+}
+
+/// A series of a [`Kept`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Part {
     /// The place of the node.
@@ -538,7 +542,7 @@ struct Part {
     /// The place of the caller.
     place: usize,
     count: u32,
-    /// The start of its bytes in `Frame::bytes`.
+    /// The start of its bytes in `Kept::bytes`.
     start: usize,
     len: usize,
 }
@@ -582,7 +586,7 @@ pub(crate) async fn served(session: program::Session, bytes_max: usize, open: Op
 /// outcomes in `frame`.
 async fn sent(
     writer: &mut program::Writer,
-    frame: &mut Frame,
+    frame: &mut Kept,
     time: Time,
 ) -> Result<(), program::Error> {
     let mut draft = writer.draft(Form::Raw, &frame.series).await?;
