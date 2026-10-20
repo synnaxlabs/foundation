@@ -2416,7 +2416,8 @@ fn refuses_a_node_whose_watch_alone_is_past_one_message_of_the_server() {
             None,
             format!(
                 "a CreateMonitoredItems call of the node `{node}` of the channel \
-                 `plant.b` needs 600107 bytes, past the 524047 bytes of one message of the server"
+                 `plant.b` needs 600107 bytes, past the 524047 bytes of one message of \
+                 the server"
             ),
             "Raise the message size of the server".into(),
         )]

@@ -561,6 +561,7 @@ impl<'a> Frames<'a> {
 
 impl Left {
     /// Adds the counts of the values that one frame leaves out.
+    #[inline]
     fn add(&self, bad: u64, uncertain: u64, mistyped: u64) {
         self.bad.add(bad);
         self.uncertain.add(uncertain);

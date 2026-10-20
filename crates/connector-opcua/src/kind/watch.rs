@@ -225,6 +225,9 @@ struct Drive {
     last: Vec<Option<Monotonic>>,
     /// Whether the last change of each read is Bad or Uncertain.
     faulted: Vec<bool>,
+    /// The read of each change of the last drive, whose `last` and `faulted` the next
+    /// drive clears.
+    touched: Vec<usize>,
     /// The device time of the newest server timestamp of the last drive with one.
     newest: Option<Monotonic>,
     /// The count of changes with an overflow.
@@ -258,6 +261,7 @@ impl Drive {
             next: vec![None; reads],
             last: vec![None; reads],
             faulted: vec![false; reads],
+            touched: Vec::new(),
             newest: None,
             overflows: 0,
             bad: 0,
@@ -270,9 +274,9 @@ impl Drive {
     /// of them restarted it, or the newest of them is older than the newest of the
     /// last drive with one, as from a clock that went back. A Bad or Uncertain change
     /// makes no entry and adds to its count, and [`Drive::write`] clears a note of its
-    /// read when it is the last change of that read. The device time of an entry is at least
-    /// that of the entry before it of its read, so each read keeps the order of its
-    /// changes.
+    /// read when it is the last change of that read. The device time of an entry is at
+    /// least that of the entry before it of its read, so each read keeps the order of
+    /// its changes.
     ///
     /// # Errors
     ///
@@ -286,8 +290,9 @@ impl Drive {
         reads: &[Read],
     ) -> Result<bool, Error> {
         self.entries.clear();
-        self.last.fill(None);
-        self.faulted.fill(false);
+        for index in self.touched.drain(..) {
+            (self.last[index], self.faulted[index]) = (None, false);
+        }
         (self.overflows, self.bad, self.uncertain) = (0, 0, 0);
         let (mut unsure, mut newest) = (false, None);
         for (order, change) in changes.iter().enumerate() {
@@ -297,6 +302,7 @@ impl Drive {
                 newest = newest.max(Some(server));
             }
             self.overflows += u64::from(change.overflow);
+            self.touched.push(change.index);
             let faulted = &mut self.faulted[change.index];
             *faulted = true;
             if let Err(fault) = &change.value {
@@ -348,7 +354,9 @@ impl Drive {
     fn order(&mut self, fit: &Fit) {
         let Self { entries, next, .. } = self;
         entries.sort_unstable_by_key(|entry| (entry.at, entry.index, entry.order));
-        next.fill(None);
+        for entry in entries.iter() {
+            next[entry.index] = None;
+        }
         let mut last: Option<(Monotonic, Stamp)> = None;
         for entry in entries.iter_mut().rev() {
             let later = next[entry.index].replace(entry.at);
