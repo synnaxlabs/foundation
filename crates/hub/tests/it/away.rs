@@ -15,6 +15,7 @@ use transport::{Address, Code, Session};
 use types::authority::Authority;
 use types::frame::{Form, Path};
 use types::time::Span;
+use wire::Protocol;
 use wire::header::MALFORMED;
 use wire::hub::client::write::{Open, Write};
 use wire::hub::client::{
@@ -589,13 +590,28 @@ fn stops_the_write_with_the_code_of_the_home_before_its_places() {
 }
 
 /// The member sends each message of the program as it came, so a home that takes
-/// smaller messages than the member fails the write.
+/// smaller messages than the member fails the write at its open: the home gets no
+/// stream of the hub before its session ends.
 #[test]
 fn stops_the_write_as_failed_when_the_home_takes_smaller_messages() {
     let served = away_on(
         12,
         MESSAGE / 2,
-        async |_| {},
+        async |raw| {
+            let ended = loop {
+                let mut incoming = match raw.session.accept().await {
+                    Ok(incoming) => incoming,
+                    Err(error) => break error,
+                };
+                let header = incoming.receiver.recv().await.expect("receives");
+                let header = header.expect("the header comes before the finish");
+                assert!(
+                    matches!(wire::header::decode(&header), Ok((Protocol::Mesh, []))),
+                    "a stream of the mesh"
+                );
+            };
+            assert_eq!(ended, transport::Error::TimedOut);
+        },
         |mut agent, _| async move {
             let mut stream = agent.write(&["value"]).await;
             assert_eq!(stream.recv().await, reset_with(FAILED));
