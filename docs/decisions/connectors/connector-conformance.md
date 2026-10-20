@@ -141,13 +141,18 @@
      secrets, for 5 s. No kind runs the write form yet: `influx` gives no writes, and
      `opcua` comes with #3610. The suite asserts that the marked config differs from the
      setup, that the kind gives at least one secret, and that each value holds the
-     marker. A refused config and the read form stop before a run reads a secret, and a
-     check gets only the name of each secret, so they get no check. A kind with no
-     secret passes with no check. `opcua` is not yet in scenario 7: a certificate needs
-     a secure endpoint of the simulator, which needs a new public surface of
-     `connector_opcua::sim` (#3610). `influx` marks only its `token`: its `ca` needs an
-     `https` simulator (#3612). The status hides each secret value that a run read
-     (ruling of `laptop.architect-2` on #2849 item 4, 2026-10-16T17:54:49Z:
+     marker. `laptop.monitor` accepted that no status and no end of a run shows a secret
+     value, also one that the device sends back, and that only `influx` meets an echo
+     device (2026-10-20T14:53:46Z:
+     https://github.com/synnaxlabs/foundation/pull/3607#issuecomment-6293785716). The
+     crash run replaces the crash form that the same comment names as lost. A refused
+     config and the read form stop before a run reads a secret, and a check gets only
+     the name of each secret, so they get no check. A kind with no secret passes with no
+     check. `opcua` is not yet in scenario 7: a certificate needs a secure endpoint of
+     the simulator, which needs a new public surface of `connector_opcua::sim` (#3610).
+     `influx` marks only its `token`: its `ca` needs an `https` simulator (#3612). The
+     status hides each secret value that a run read (ruling of `laptop.architect-2` on
+     #2849 item 4, 2026-10-16T17:54:49Z:
      https://github.com/synnaxlabs/foundation/issues/2849#issuecomment-6221505945).
      Scenario 7 runs 20.1 s of plant time for `influx` with no echo simulator (box1, at
      2026-10-20).

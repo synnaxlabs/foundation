@@ -72,10 +72,11 @@ pub(crate) mod inputs {
         /// Configs that the kind's check refuses, each with its exact diagnostics.
         pub refused: fn() -> Vec<(Document, Vec<Diagnostic>)>,
         /// Marks `config`, the config of [`Suite::setup`]: each attribute that takes a
-        /// secret reads one, and the value of each holds `marker`. Gives the marked
-        /// config and each secret that it reads, by name and value. `None` for a kind
-        /// that takes no secret, and for each kind that CONNECTOR CONFORMANCE names as
-        /// not yet in scenario 7.
+        /// secret reads one, other than one that CONNECTOR CONFORMANCE names as not yet
+        /// marked, and the value of each holds `marker`. Gives the marked config and
+        /// each secret that it reads, by name and value. `None` for a kind that takes
+        /// no secret, and for each kind that CONNECTOR CONFORMANCE names as not yet in
+        /// scenario 7.
         pub secrets: Option<fn(config: Document, marker: &str) -> Marked>,
         /// A simulator that answers each request with an error whose text holds each
         /// header and value of the request, as a gateway in debug mode does. `None`
