@@ -325,8 +325,12 @@ state on `main`.
   digests still open go again on a new stream, so each refused chunk costs the peer one
   stream. A reply out of order, or an end with digests open, stops the stream with
   `MALFORMED`. `get` and `put` hold at most one chunk of their own. `mesh` bounds each
-  `get` and `put` call on a peer, its dials included, with `peer::DEADLINE`, so a
-  silent peer costs it at most that time for each call.
+  `get` call on a peer, its dials included, with `peer::DEADLINE`, and each step of a
+  put: the dial with the open of the stream, the `Stored` of each chunk, and the end.
+  So a silent peer costs a get that time for each call, and a put that time after its
+  last `Stored`. A slow peer that stores a chunk within each `peer::DEADLINE` holds a
+  put for at most `peer::DEADLINE` for each listed chunk. An end that fails or passes
+  the deadline after each `Stored` fails no put.
 
 ### Time source to `estimate`
 

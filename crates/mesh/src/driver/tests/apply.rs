@@ -789,7 +789,7 @@ fn an_apply_in_a_region_of_two_voters_commits_and_each_uses_the_spec() {
 }
 
 // Voter 2 takes the put and never answers, and voter 3 is down, so the apply ends at
-// the deadline of its call on voter 2.
+// the deadline of the `Stored` of its first chunk on voter 2.
 #[test]
 fn an_apply_whose_one_live_peer_never_answers_gives_quorum_at_the_deadline() {
     let mut cluster = Cluster::new(0);
@@ -827,9 +827,9 @@ fn an_apply_over_links_of_300_ms_commits_as_each_chunk_ends_within_the_deadline(
 }
 
 // Voter 3 is down. Voter 2 stores chunks for 15 s over links of 300 ms, about one a
-// second, and then its links are cut. Its last `Stored` was sent before the cut and
-// comes within 300 ms of it, so its put misses between 10 s and 10.5 s after the cut.
-// A deadline of the whole call would miss at 10 s after its start.
+// second, and then its links are cut. With seed 0, its last `Stored` was sent before
+// the cut and comes within 300 ms of it, so its put misses between 10 s and 10.5 s
+// after the cut. A deadline of the whole call would miss at 10 s after its start.
 #[test]
 fn a_voter_that_goes_silent_in_its_put_misses_the_deadline_after_its_last_stored() {
     let mut cluster = Cluster::new(0);
@@ -1212,8 +1212,8 @@ fn spread_names_a_voter_that_this_node_has_no_record_of() {
     });
 }
 
-// Each chunk takes a round trip of 200 ms, so one call of all 1024 chunks would miss
-// the deadline.
+// Each chunk takes a round trip of 200 ms, so the put of all 1024 chunks on a voter
+// takes more than 200 s, and each `Stored` comes within the deadline.
 #[test]
 fn an_apply_of_the_most_chunks_commits_over_links_of_100_ms() {
     let mut cluster = Cluster::new(0);
