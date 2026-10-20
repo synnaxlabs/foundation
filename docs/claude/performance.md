@@ -91,7 +91,7 @@ A plan whose change can reach the cost limit states its trigger, and the archite
 it with the plan: each bench line, the statistic that decides (the p99 for a latency
 target), and the slowdown that adds the judgment, which is the cost limit in the unit of
 the line. The run compares the base of the PR with its head (BENCH BASELINES,
-`docs/decisions/testing/bench-baselines.md`). A line with no time at the base gives only
+`docs/decisions/testing/bench-baselines.md`). A line that the base cannot run gives only
 its numbers. A result that the amendment of same instructions in BENCH BASELINES
 (2026-10-11) covers needs no judgment. The run then decides, with no new ruling on the
 trigger: under the trigger, the PR gives its numbers; at or over it, the PR adds the P1
