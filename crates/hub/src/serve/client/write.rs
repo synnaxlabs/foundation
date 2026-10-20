@@ -67,8 +67,7 @@ pub(super) async fn serve(
     else {
         return Ok(());
     };
-    let replies =
-        relay::<false>(state, writer, |_| Ok(false), receiver, sender).await?;
+    let replies = relay(state, writer, None, receiver, sender).await?;
     replies.finish(state, sender).await
 }
 
@@ -96,7 +95,7 @@ pub(super) async fn forward(
         return Ok(());
     };
     let renewal = |message: &[u8]| renewal(admission, state, message);
-    let replies = relay::<true>(state, writer, renewal, receiver, sender).await?;
+    let replies = relay(state, writer, Some(&renewal), receiver, sender).await?;
     replies.finish(state, sender).await
 }
 
@@ -289,18 +288,23 @@ async fn start(
     super::places(state, sender, &places).await
 }
 
+/// Takes a message between frames as a renewal of a hello, and gives whether it was
+/// one.
+type Renewal<'a> = &'a dyn Fn(&[u8]) -> Result<bool, Error>;
+
 /// Writes each frame of the program with `writer` and sends its outcome, until the
 /// program finishes the stream. Then drops `writer`, so that control ends, and gives
 /// the commits that are due. The block of each outcome comes before the draft of its
 /// frame, so a pool with no block for it stops the stream before the home takes the
 /// frame. The block of the next `Stored` comes after the body, right before the home
 /// takes the frame, and a frame that finds none is refused as `Full`, as a frame whose
-/// draft finds none is. With `RENEWS`, between frames, a message for which `renewal`
-/// gives `true` is no part of a frame.
-async fn relay<const RENEWS: bool>(
+/// draft finds none is. Between frames, a message for which `renewal` gives `true` is
+/// no part of a frame. One relay serves each origin, so that a forward's renewal adds
+/// no second copy of the frame path.
+async fn relay(
     state: &RefCell<State>,
     mut writer: Writer,
-    renewal: impl Fn(&[u8]) -> Result<bool, Error>,
+    renewal: Option<Renewal<'_>>,
     receiver: &mut Receiver,
     sender: &mut Sender,
 ) -> Result<Replies, Error> {
@@ -317,7 +321,10 @@ async fn relay<const RENEWS: bool>(
                     frames.finish()?;
                     return Ok(replies);
                 };
-                if RENEWS && frames.between() && renewal(&message)? {
+                if let Some(renewal) = renewal
+                    && frames.between()
+                    && renewal(&message)?
+                {
                     continue;
                 }
                 frames.decode(&message)?
