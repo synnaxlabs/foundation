@@ -62,7 +62,7 @@
   (https://github.com/synnaxlabs/foundation/issues/3509). A node whose
   CreateMonitoredItems call alone is past one message of the server ends the run with
   `kind::Error::Config` and `opcua.large-watch`, as `opcua.large-read` does for a
-  Read.
+  Read, unless the server answers with no subscription service, as below.
   When CreateSubscription or CreateMonitoredItems answers `BadServiceUnsupported` or
   `BadNotImplemented`, as a server of the Nano Embedded Device profile can (OPC UA
   Part 7), the kind closes that session and polls on a new session for the rest of
