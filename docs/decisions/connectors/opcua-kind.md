@@ -3,8 +3,8 @@
   OPC UA": https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6154297722).
   Security: with no `certificate`, the kind connects with the mode None and an anonymous
   user, so it is only for an isolated network or a test. With `certificate`, it connects
-  with SignAndEncrypt or Sign (the secure channel paragraph below). User names and
-  passwords come in a later part of #2934, before a release (question:
+  with SignAndEncrypt or Sign (the secure channel paragraph below), and with a user
+  name and password when it has `user` (question:
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6150341828). Tests:
   the tests of the kind and exit test 1 run against the open62541 test server on the
   simulated clock and network. One more test on real I/O against `opc-plc` runs in CI
@@ -277,13 +277,14 @@
   of these five names the certificate of the server and the certificate of the node,
   with the source of each, and the fix of each side. The text of
   `BadCertificateUseNotAllowed` names `basicConstraints = CA:FALSE` as the fix of the
-  certificate of the node. The connector has no `user`, so `BadIdentityTokenRejected`
-  names the mode and the policies that the server must offer with an anonymous user. A
-  server that offers only `Basic128Rsa15` or `Basic256` gives `BadIdentityTokenRejected`
-  and this text, since open62541 finds no endpoint with a policy of the client. With no
-  `certificate`, only `BadIdentityTokenRejected` gains a cause. The text is the variant
-  `Failure::Connect`, apart from the `Failure::Client` of a read, check, or browse
-  (`laptop.architect-2`, 2026-10-20T08:16:10Z, the texts:
+  certificate of the node. `BadIdentityTokenRejected` names the mode and the policies
+  that the server must offer with an anonymous user, or with a user name and password
+  when the connector has `user`. A server that offers only `Basic128Rsa15` or
+  `Basic256` gives `BadIdentityTokenRejected` and this text, since open62541 finds no
+  endpoint with a policy of the client. With no `certificate`, only
+  `BadIdentityTokenRejected` gains a cause. The text is the variant `Failure::Connect`,
+  apart from the `Failure::Client` of a read, check, or browse (`laptop.architect-2`,
+  2026-10-20T08:16:10Z, the texts:
   https://github.com/synnaxlabs/foundation/pull/3545#issuecomment-6286592579;
   2026-10-20T08:56:46Z, the texts of `BadCertificateUntrusted` and
   `BadCertificateIssuerTimeInvalid`, and the five statuses:
@@ -295,3 +296,39 @@
   The fix is a change to the client of the copy that records the source of the
   connect status (#3547; `laptop.architect-2`, 2026-10-20T08:02:50Z, the simple
   version: https://github.com/synnaxlabs/foundation/pull/3545#issuecomment-6286349076).
+  User (#2934, item 5 of the plan): `opcua` takes `user`, a string, and `password`, a
+  secret source. Each needs the other, and both need `certificate`, each as a
+  `document.missing-attribute`. The fix at `user` or `password` with no `certificate`
+  says why: a password never goes in clear, so it needs `certificate` with its `key` and
+  `trust` (`laptop.monitor`, the key choices (3) and (b) accepted with this condition,
+  2026-10-20T13:45:03Z:
+  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6292324991).
+  `opcua.bad-user` is for a `user` that is not a string or is empty. The session sends a
+  `UserNameIdentityToken` with the bytes of the name and the password, so a NUL byte
+  does not cut the password. No password goes in clear: open62541 refuses a user token
+  policy in the policy None on a channel that is not `SignAndEncrypt`, and the connector
+  never turns that off, so the connect gives `BadIdentityTokenRejected`. `run` and
+  `browse` read `password` with the other sources. `BadUserAccessDenied` with a `user`
+  gives "the server refused the user {user} with the password {source}. Check `user` and
+  the password {source}". open62541 sends `BadIdentityTokenInvalid` for a token that it
+  cannot read, and other servers for a wrong password, so with a `user` it gives "the
+  server could not read the user token (its policy or its encryption), or refused the
+  user {user} with the password {source}. Check the user token policies of the server,
+  `user`, and the password {source}". A server can also send `BadIdentityTokenRejected`
+  for a token that it refuses, and the client sends it for a user token in a policy that
+  it does not have, so with a `user` its text names both causes: no endpoint in the mode
+  that lets in a user name and password with a token in a policy that the client takes,
+  or the refusal of the user. In the mode SignAndEncrypt, the client takes a token in
+  the policy None or one of its policies; in the mode Sign, only one of its policies,
+  since a token in the policy None would send the password in clear. The fix names
+  `user`, the password, and a user name token in those policies (`laptop.architect-2`,
+  2026-10-20T12:58:13Z:
+  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6291388946, and the
+  review of the texts, 2026-10-20T13:46:04Z:
+  https://github.com/synnaxlabs/foundation/pull/3597#issuecomment-6292345470). Lost: a
+  block `user "operator" { password = ... }`, a block for one pair, as a later X.509
+  user token would need a second form (plan:
+  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6230820716, and its
+  details:
+  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6291339308). Not yet
+  done: open62541 frees its copies of the key and the password with no clear (#3593).

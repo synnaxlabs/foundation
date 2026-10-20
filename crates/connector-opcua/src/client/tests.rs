@@ -25,7 +25,7 @@ use super::{
     Calls, Client, Flight, GRACE, Large, Nodes, READS, Request, SPLIT, STATE, Slots,
     UNREAD, answer, id_bytes, most,
 };
-use crate::client::{Credentials, Error, Mode};
+use crate::client::{Credentials, Error, Mode, Session};
 use crate::connection::CHUNKS;
 use crate::connection::Manager;
 use crate::event;
@@ -148,13 +148,18 @@ impl Peer<'_> {
     ) -> Result<Client, Error> {
         let time = event::Time::since(Clock::clone(&self.clock), wall);
         let url = CString::new(self.url.clone()).expect("the URL holds no NUL");
+        let session = Session {
+            credentials: *credentials,
+            mode,
+            user: None,
+        };
         let connect = Client::connect(
             time,
             tracing::Span::none(),
             self.net.clone(),
             &mut self.rng,
             &url,
-            Some((credentials, mode)),
+            Some(&session),
             future::pending(),
         );
         Ok(connect.await?.expect("a pending wait never ends"))
