@@ -137,19 +137,19 @@ impl kind::Kind for Kind {
     /// [`Error::Retry`] with the source when the client refuses a credential, so the
     /// next run reads the sources again. The error of [`Context::writer`] and of each
     /// failed write. [`Error::Config`] with `connector.index` for each channel that is
-    /// an index; that error comes alone. Else [`Error::Config`] with `opcua.sample-
-    /// type` for each channel whose sample type is not `bool`, `i8` to `u64`, `f32`, or
-    /// `f64`, and, when it polls (with `polled` or after the fallback), with
-    /// `opcua.large-read` when the Read of one node alone is past one message of the
-    /// server. [`Error::Device`] when the connect, a read, or one check fails: a check
-    /// fails on a bad service result or on no answer in 5 s. Also [`Error::Device`], at
-    /// once, when the client loses its channel or its session between two ticks. With
-    /// no `polled`, also [`Error::Device`] when a read of the current time or the
-    /// subscribe fails, when the server does not watch a node, and when the
-    /// subscription ends, and [`Error::Config`] with `opcua.large-watch` when the
-    /// `CreateMonitoredItems` call of one node alone is past one message of the server,
-    /// and with `opcua.no-timestamp` for a Good change with no timestamp that maps to
-    /// mesh time.
+    /// an index; that error comes alone. Else [`Error::Config`] with
+    /// `opcua.sample-type` for each channel whose sample type is not `bool`, `i8` to
+    /// `u64`, `f32`, or `f64`, and, when it polls (with `polled` or after the
+    /// fallback), with `opcua.large-read` when the Read of one node alone is past one
+    /// message of the server. [`Error::Device`] when the connect, a read, or one check
+    /// fails: a check fails on a bad service result or on no answer in 5 s. Also
+    /// [`Error::Device`], at once, when the client loses its channel or its session
+    /// between two ticks. With no `polled`, also [`Error::Device`] when a read of the
+    /// current time or the subscribe fails, when the server does not watch a node, and
+    /// when the subscription ends, and [`Error::Config`] with `opcua.large-watch` when
+    /// the `CreateMonitoredItems` call of one node alone is past one message of the
+    /// server, and with `opcua.no-timestamp` for a Good change with no timestamp that
+    /// maps to mesh time.
     fn run(&self, ctx: Context<Config>) -> impl Future<Output = Result<(), Error>> {
         run(ctx)
     }
