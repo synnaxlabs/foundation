@@ -94,12 +94,19 @@ fn open(mode: Mode, select: &[&str]) -> Open {
     }
 }
 
-fn place(key: u128, data_type: Type, channel: &str) -> Place {
+/// The place of `channel`, whose group's index is at place `index`.
+fn place(key: u128, data_type: Type, channel: &str, index: usize) -> Place {
     Place {
         key: channel::Key::from_u128(key),
         data_type,
         name: name(channel),
+        index,
     }
+}
+
+/// The place of the index of each place of `run`.
+fn indexes(run: &[Place]) -> Vec<usize> {
+    run.iter().map(|place| place.index).collect()
 }
 
 /// Finishes the hello stream and waits, so the hello stream ends as `Ended`.
@@ -117,8 +124,8 @@ fn sends_the_places_and_each_frame_of_a_complete_read() {
         agent.admit().await;
         let mut stream = agent.read(Mode::Complete, &["value"]).await;
         let (places, run, mut reader) = stream.opened().await;
-        assert_eq!(places, Places { count: 2, index: 1 });
-        assert_eq!(run, [place(2, I64, "value"), place(1, STAMP, "time")]);
+        assert_eq!(places, Places { count: 2 });
+        assert_eq!(run, [place(2, I64, "value", 1), place(1, STAMP, "time", 1)]);
         for value in [10, 20] {
             let got = got(&mut stream.receiver, &mut reader).await;
             assert_eq!(placed(&got), [0, 1]);
@@ -169,8 +176,8 @@ fn sends_a_latest_read_the_index_once_when_its_selector_matches_it() {
         agent.admit().await;
         let mut stream = agent.read(Mode::Latest, &["value", "time"]).await;
         let (places, run, mut reader) = stream.opened().await;
-        assert_eq!(places, Places { count: 2, index: 0 });
-        assert_eq!(run, [place(1, STAMP, "time"), place(2, I64, "value")]);
+        assert_eq!(places, Places { count: 2 });
+        assert_eq!(run, [place(1, STAMP, "time", 0), place(2, I64, "value", 0)]);
         let got = got(&mut stream.receiver, &mut reader).await;
         assert_eq!(placed(&got), [0, 1]);
         assert_eq!(decoded(&got, &[STAMP, I64])[1], [10]);
@@ -281,14 +288,16 @@ fn opens_reads_beside_a_request_and_stops_ones_over_the_share_as_busy() {
             let mut busy = agent.read(Mode::Complete, &["time", "value"]).await;
             assert_eq!(busy.recv().await, reset_with(BUSY));
             let mut stream = agent.read(Mode::Complete, &["value"]).await;
-            let (places, _, _) = stream.opened().await;
-            assert_eq!(places, Places { count: 2, index: 1 });
+            let (places, run, _) = stream.opened().await;
+            assert_eq!(places, Places { count: 2 });
+            assert_eq!(indexes(&run), [1, 1]);
             drop(held);
             agent.sleep(Span::MILLISECOND).await;
             for _ in 0..2 {
                 let mut stream = agent.read(Mode::Complete, &["time", "value"]).await;
-                let (places, _, _) = stream.opened().await;
-                assert_eq!(places, Places { count: 2, index: 0 });
+                let (places, run, _) = stream.opened().await;
+                assert_eq!(places, Places { count: 2 });
+                assert_eq!(indexes(&run), [0, 0]);
             }
         },
     );
@@ -300,9 +309,9 @@ fn opens_reads_beside_a_request_and_stops_ones_over_the_share_as_busy() {
     assert_eq!(home.served[0], Err(share.clone()));
     assert_eq!(
         share.to_string(),
-        "14 bytes of a body or of the ends or names of a write do not fit under the \
-         share of 16777216 bytes of subject ops.agent: its open requests, reads, and \
-         writes hold 16777208 bytes"
+        "14 bytes of a body or of the ends, counts, or names of a write do not fit \
+         under the share of 16777216 bytes of subject ops.agent: its open requests, \
+         reads, and writes hold 16777208 bytes"
     );
 }
 
@@ -321,8 +330,9 @@ fn frees_the_share_of_the_open_of_a_read_once_it_decodes() {
             let mut streams = Vec::new();
             for _ in 0..2 {
                 let mut stream = agent.read(Mode::Complete, &["value"]).await;
-                let (places, _, _) = stream.opened().await;
-                assert_eq!(places, Places { count: 2, index: 1 });
+                let (places, run, _) = stream.opened().await;
+                assert_eq!(places, Places { count: 2 });
+                assert_eq!(indexes(&run), [1, 1]);
                 streams.push(stream);
             }
             drop((held, streams));
@@ -368,8 +378,9 @@ fn frees_the_share_of_the_open_of_a_read_before_its_places_go_out() {
         let mut stream = agent.read(Mode::Complete, &["value"]).await;
         agent.sleep(Span::from_nanos(10_000_000)).await;
         wide.opened().await;
-        let (places, _, _) = stream.opened().await;
-        assert_eq!(places, Places { count: 2, index: 1 });
+        let (places, run, _) = stream.opened().await;
+        assert_eq!(places, Places { count: 2 });
+        assert_eq!(indexes(&run), [1, 1]);
         drop((held, wide, stream));
         finish(&mut agent).await;
     });
@@ -395,13 +406,8 @@ fn opens_a_read_whose_places_pass_the_share() {
         let mut stream = agent.read(Mode::Complete, &["w.**", "value"]).await;
         let (places, run, mut reader) = stream.opened().await;
         let time = u32::try_from(MANY + 1).expect("fits");
-        assert_eq!(
-            places,
-            Places {
-                count: time + 1,
-                index: time
-            }
-        );
+        assert_eq!(places, Places { count: time + 1 });
+        assert_eq!(indexes(&run), vec![MANY + 1; MANY + 2]);
         let bytes: usize = run
             .iter()
             .map(|place| size_of::<Place>() + place.name.as_str().len())
@@ -457,7 +463,7 @@ fn stops_a_read_whose_places_are_over_the_cap_as_malformed() {
             "the read over the cap polled"
         );
         let mut stream = agent.read(Mode::Complete, &["w.**"]).await;
-        let (places, _, _) = stream.opened().await;
+        let (places, run, _) = stream.opened().await;
         agent.sleep(QUIET).await;
         assert_eq!(
             polls.load(Ordering::Relaxed),
@@ -465,12 +471,11 @@ fn stops_a_read_whose_places_are_over_the_cap_as_malformed() {
             "the new carry polled once"
         );
         ended.store(true, Ordering::Relaxed);
+        assert_eq!(places, Places { count: PLACES_MAX });
+        let (index, count) = (usize::try_from(MANY), usize::try_from(PLACES_MAX));
         assert_eq!(
-            places,
-            Places {
-                count: PLACES_MAX,
-                index: MANY
-            }
+            indexes(&run),
+            vec![index.expect("fits"); count.expect("fits")]
         );
         stream.sender.finish().expect("finishes");
         assert_eq!(stream.recv().await, Ok(None));
@@ -637,8 +642,9 @@ fn ends_a_read_that_is_open_at_the_finish_of_its_session_as_closed() {
         |mut agent| async move {
             agent.admit().await;
             let mut stream = agent.read(Mode::Complete, &["value"]).await;
-            let (places, _, _) = stream.opened().await;
-            assert_eq!(places, Places { count: 2, index: 1 });
+            let (places, run, _) = stream.opened().await;
+            assert_eq!(places, Places { count: 2 });
+            assert_eq!(indexes(&run), [1, 1]);
             finish(&mut agent).await;
             drop(stream);
         },
@@ -859,8 +865,9 @@ fn holds_the_share_of_the_open_of_a_read_while_it_waits_for_a_home() {
             let mut streams = Vec::new();
             for _ in 0..2 {
                 let mut stream = agent.read(Mode::Complete, &["value"]).await;
-                let (places, _, _) = stream.opened().await;
-                assert_eq!(places, Places { count: 2, index: 1 });
+                let (places, run, _) = stream.opened().await;
+                assert_eq!(places, Places { count: 2 });
+                assert_eq!(indexes(&run), [1, 1]);
                 streams.push(stream);
             }
             drop((held, streams));
@@ -985,8 +992,9 @@ fn a_client_read_opens_on_a_channel_that_a_spec_in_use_adds() {
                 .sleep(Span::from_nanos(10 * Span::SECOND.nanos()))
                 .await;
             let mut stream = agent.read(Mode::Latest, &["added"]).await;
-            let (places, _, _) = stream.opened().await;
-            assert_eq!(places, Places { count: 2, index: 1 });
+            let (places, run, _) = stream.opened().await;
+            assert_eq!(places, Places { count: 2 });
+            assert_eq!(indexes(&run), [1, 1]);
             drop(stream);
             finish(&mut agent).await;
         },
@@ -1004,8 +1012,9 @@ fn ends_a_read_that_is_open_at_the_close_of_its_session_as_closed() {
         |mut agent| async move {
             agent.admit().await;
             let mut stream = agent.read(Mode::Latest, &["value"]).await;
-            let (places, _, _) = stream.opened().await;
-            assert_eq!(places, Places { count: 2, index: 1 });
+            let (places, run, _) = stream.opened().await;
+            assert_eq!(places, Places { count: 2 });
+            assert_eq!(indexes(&run), [1, 1]);
             finish(&mut agent).await;
             drop(stream);
         },

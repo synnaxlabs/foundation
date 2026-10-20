@@ -26,6 +26,7 @@ fn around() -> [Place; 3] {
         key: channel::Key::from_u128(at),
         data_type,
         name: name(channel),
+        index: 1,
     };
     let i64 = Type::Scalar(Scalar::I64);
     [
@@ -104,7 +105,7 @@ fn lost(
     by_hand(
         seed,
         move |session, node| async move {
-            let mut read = opened_at(&session, &around(), 1, live).await;
+            let mut read = opened_at(&session, &around(), live).await;
             for &(seq, count, places) in sent {
                 let len = 8 * count;
                 let run: Vec<_> =

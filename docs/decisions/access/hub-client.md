@@ -96,8 +96,9 @@
   `Frames::open` takes the end of the stream as `None` (`laptop.architect`,
   2026-10-16T06:47:02Z,
   https://github.com/synnaxlabs/foundation/issues/2808#issuecomment-6209795527). So
-  does the decoder, and a message that the decoder refuses leaves it as it was
-  (`laptop.architect`, 2026-10-16T07:19:58Z,
+  does the decoder, and a message that the decoder refuses leaves it as it was,
+  other than `Error::ManyIndexes`, after which the decoder is done (Amended (#3283)
+  below) (`laptop.architect`, 2026-10-16T07:19:58Z,
   https://github.com/synnaxlabs/foundation/pull/2839#issuecomment-6210275086). The plan
   (https://github.com/synnaxlabs/foundation/issues/1749#issuecomment-6204280445) was
   approved by `laptop.architect` at 2026-10-15T23:19:38Z
@@ -213,13 +214,14 @@
   (https://github.com/synnaxlabs/foundation/issues/2718#issuecomment-6246212678).
   Amended (#2718 PR 2): the node serves a write stream at the home of its index. The
   open holds its `length` in the hub's body budget until it decodes. Then the stream
-  holds 16 bytes for each channel of the open and one for its index until the stream
-  ends, and its decoded names, 16 bytes and the length of each, until it sends its
-  places. Ends or names that do not fit stop with `BUSY` before the writer opens (MEMORY
-  BOUNDS). A write whose channels are on more than one index stops with `MALFORMED`
-  before the node waits for a home, so a refused open takes no control at the gate. A
-  frame of `Time::Node` gets mesh time, or 1 ns after the last stamp that the node gave
-  a frame of the stream that the home took or lost, when mesh time is not after it.
+  holds 20 bytes for each place of the open (16 for its ends and 4 for its count), as
+  PR 1b states, until the stream ends, and its decoded names, 16 bytes and the length
+  of each, until it sends its places. Ends or names that do not fit stop with `BUSY`
+  before the writer opens (MEMORY BOUNDS). A write whose channels are on more than one
+  index stops with `MALFORMED` before the node waits for a home, so a refused open
+  takes no control at the gate. A frame of `Time::Node` gets mesh time, or 1 ns after
+  the last stamp that the node gave a frame of the stream that the home took or lost,
+  when mesh time is not after it.
   After each commit, the node sends `Stored { frames }` with the count of frames of the
   stream through the last frame that it took before it called the commit. Refused and
   lost frames count, and frames of both paths count in the one count, so a program drops
@@ -266,9 +268,10 @@
   (https://github.com/synnaxlabs/foundation/issues/2718#issuecomment-6250930232). When
   `sdk` wraps `Writer` (#2177), its write with no draft gives an error, not this panic.
   `Error::Unnamed` refuses a config of no channel, and `Error::Unsent { count, form }` a
-  frame of no sample or a frame of `Time::Node` that is encoded or holds more than one
-  sample; each sends nothing. `Session::writer` gives `Error::Pool` when no block of
-  `Config::pool` holds the head and an end of each place, so a write waits for a block
+  frame of no series or with a group of no sample, or a frame of `Time::Node` that is
+  encoded or holds more than one sample in a group; each sends nothing (PR 1b).
+  `Session::writer` gives `Error::Pool` when no block of `Config::pool` holds the head,
+  an end of each place, and a count of each group, so a write waits for a block
   and never gives `Pool`. A `write` dropped after its sends loses only its outcome; one
   dropped inside its sends ends the writer with a reset of `Code(0)`, and each later
   call gives that error, so no head lands in a cut body. A dropped `stored` loses
@@ -350,3 +353,110 @@
   changes `wire` for one fact of the stream. Decided by `laptop.architect` at
   2026-10-18T20:58:27Z
   (https://github.com/synnaxlabs/foundation/issues/3266#issuecomment-6255066811).
+  Amended (#3283): the node splits a write by index, not the client. The person, at
+  2026-10-19T12:27:44Z
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267198734):
+  "Decision of the person on #3283 (2026-10-19, about 06:45 MDT): the node splits a
+  write by index, not the client. The client opens one write stream with channels of
+  any index; the node groups each frame by index and writes each group at its home
+  (forwarding the parts through the BQ12 forward of #3104 when the home is another
+  node). Prior art the person named: the CockroachDB gateway splits a batch by range;
+  the Synnax Core splits a frame by index. A write call may hold channels of more than
+  one index: check names, types, and lengths before anything is sent, and when a group
+  fails after that, the error names the channels written and not written. An error of
+  one index group does not end the others." This ends the client split that
+  `laptop.architect-2` approved at 2026-10-19T12:32:48Z
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267292269). The
+  plan: https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267483536.
+  PR 1: each `Place` holds `index`, the place of the index of its group, an index its
+  own place, approved by `laptop.architect` at 2026-10-19T13:10:34Z
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268011114), and
+  `Places` holds only `count`, from 1 to `PLACES_MAX`. A read has one index, so each of
+  its places names it. `Opening` builds the key set with `KeySet::ordered`, and at the
+  last place gives, for the first place in place order that breaks a rule,
+  `Error::Index` when its index is not a place whose index is itself, or
+  `Error::Unstamped` when it is an index that is not `Stamp`, then `Error::Repeated`.
+  `KeySet::ordered` checks these rules and gives `key_set::Error`, which `Opening`
+  maps to them. When `Opening` gives the start, `client::Reader` gives
+  `Error::ManyIndexes` in its place for the first place whose index is not that of
+  place 0, and is then done. This is a step: #3356 makes the node merge the reads of
+  many indexes, so that no user sees `Error::ManyIndexes` (`laptop.monitor`,
+  2026-10-19T12:29:43Z, https://github.com/synnaxlabs/foundation/issues/3356). Ruled
+  by `laptop.architect` at 2026-10-19T15:10:51Z
+  (https://github.com/synnaxlabs/foundation/pull/3365#issuecomment-6270542720).
+  `Place::index` is a `usize`, as the other places of the crate are, not the `u32` of
+  the plan; the wire holds a `u32`. This replaces the lost flag of #3266 above: the
+  index is now a fact of each group, not of the stream. Lost: a `Places` with a run of
+  the index places, whose length is not fixed and which can pass a message. The format
+  is key choice (f), sent to `laptop.monitor` with the plan.
+  PR 1b: a write frame is `Head { time, form, series }`, the run of its ends, a run of
+  counts, and its body. The run of counts holds one `u32` of at least 1 for each group
+  whose index entry is among the ends, in group order. After the head, each message
+  holds whole ends, then whole counts, so the run of counts starts in the message of
+  the last end when that message has room. `Frames` keeps the counts that come before
+  the draft, at most 4 bytes for each place, and sets them into the draft when it
+  comes. A head of `Time::Node` has no run of counts, and each of its groups holds one
+  sample. So the wire holds no count of counts and no node count, and neither can be
+  wrong. A series of a group whose index the ends do not hold gets the layout error
+  `IndexAbsent`. Each outcome holds `group` (`u32`) after `frame`, and the outcomes of a
+  frame come in group order: `Replies::sent` takes the groups of each frame, and an
+  outcome of that frame for another group gives `Error::Group { frame, group, next }`,
+  also for a group that the frame does not hold. `Outcome::Ended(End)` (kind 5,
+  `End::Removed` or `End::Failed`) answers a group whose writer ended. The node makes
+  the draft due at the last end, and sets each count of the run into the draft, so a
+  write stream holds 20 bytes for each place: 16 of ends and 4 of counts (MEMORY
+  BOUNDS). Decided by `laptop.architect` at 2026-10-19T13:14:46Z
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268096380), on the
+  revision https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267978917.
+  `Error::Group` with `next`, a unit `Error::Stamp`, and PR 1c, where `Reply::Stored {
+  group, frames }` and `Reply::Ended { group, end }` come and which merges before PR 2,
+  are by `laptop.architect` at 2026-10-19T13:54:38Z
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268910604). Until
+  PR 2, `hub` never gives `Outcome::Ended`. Key choice (f), the revised plan
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267978917), went
+  to `laptop.monitor` in a factory message, which has no link.
+  Supersedes the head `{ time, form, count, series }` and the one `Outcome` for each
+  frame of Amended (#2718). Lost: a count of each group in the head, which no message
+  of a small `message_bytes_max` holds for many groups. `wire::hub::write::Lead`
+  encodes the head, the ends, and the counts of one frame, and gives its messages for
+  a `bytes_max`. The run of counts is private to it. Approved by `laptop.architect` at
+  2026-10-19T17:45:52Z
+  (https://github.com/synnaxlabs/foundation/pull/3369#issuecomment-6273514088).
+  Lost: counts in messages of their own (6268096380), because each message costs the
+  node about 270 ns of a frame of 2 samples (`relay` `live 1x2`, box1). Lost: counts in
+  the first message of the body, because that message then comes from two blocks.
+  Decided by `laptop.architect`, 2026-10-19T19:14:38Z
+  (https://github.com/synnaxlabs/foundation/pull/3369#issuecomment-6275215145).
+  PR 1c: `Reply::Stored { group, frames }` (kind 4, 13 bytes) counts the frames of one
+  group on disk, and `Reply::Ended { group, end }` (kind 6, 6 bytes) ends the write of
+  one group before each later outcome of that group, which is `Outcome::Ended`.
+  `Replies::new` takes the count of groups. The write is stored when each group ended or
+  has each taken frame on disk, and `Replies::unstored` gives each group that ended with
+  a taken frame whose `Stored` did not come. A `Stored` or an `Ended` that names no
+  group of the write gives `Error::Groups`, a reply of an ended group other than
+  `Outcome::Ended` of its end gives `Error::Ended`, and an `Outcome::Ended` of a group
+  that did not end gives `Error::Unended`. In `program`, `Writer::stored` never waits on
+  an ended group: it gives `Error::Unstored` with the index place and the end of each
+  such group, and the writer goes on. `Writer::finish` gives it after `Finished`. Until
+  PR 2, `hub` sends only `Stored` of group 0 and never ends a group. A frame that the
+  home took after the last `Stored` of an ended group may not be on disk: a commit due
+  at the end can still reach the disk, and its `Stored` drops. `Writer::stored` gives
+  `Error::Unstored` once each other group is stored, and again at each later call. Plan
+  by `laptop.architect` at 2026-10-19T13:10:34Z
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268011114), and
+  plan of PR 1c by `box1.builder-4`
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6269218439). OK by
+  `laptop.architect` at 2026-10-19T14:40:13Z
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6269891329), with
+  two doc changes: the doc of `Reply::Ended` states that a frame taken after the last
+  `Stored` of its group may not be on disk, and the doc of `Error::Unstored` states when
+  `stored` and `finish` give it. The end of one group in place of the end of the stream
+  (kind 9) and the meaning of `Unstored` (d) went to `laptop.monitor` as key choices in
+  a factory message, which has no link. Supersedes `Stored { frames }`, a count of the
+  frames of the stream
+  (https://github.com/synnaxlabs/foundation/pull/3161#issuecomment-6248601265), and the
+  `Ok` of `Writer::finish` once the last `Stored` covers each taken frame
+  (https://github.com/synnaxlabs/foundation/pull/3201#issuecomment-6251244519). Lost: a
+  `Stored` of the whole write, which a group that ends can hold back for ever. Lost: a
+  `Stored` bound for each group (the oldest frame whose outcome of that group is due),
+  which needs a walk of the queue of outcomes at each `Stored`.

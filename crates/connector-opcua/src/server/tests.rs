@@ -102,7 +102,7 @@ fn a_crash_while_a_stream_is_open_frees_the_server() {
         let add = |server: &mut Server| {
             server.add_source(&source, move || {
                 let () = *served;
-                (Value::I32(1), types::quality::Quality::GOOD)
+                (Value::I32(1), types::quality::Quality::GOOD, None)
             });
         };
         let served = Server::serve(manager, 1, add, pending::<()>());
@@ -238,8 +238,9 @@ fn a_source_is_a_variable_of_the_data_type_base_data_type() {
         .expect("the port is free");
         let source: Node = "ns=1;i=7".parse().expect("a node");
         let add = |server: &mut Server| {
-            server
-                .add_source(&source, || (Value::I32(1), types::quality::Quality::GOOD));
+            server.add_source(&source, || {
+                (Value::I32(1), types::quality::Quality::GOOD, None)
+            });
             assert_eq!(server.data_type(&source), ns0::BASE_DATA_TYPE);
         };
         let served = Server::serve(manager, 1, add, async {});

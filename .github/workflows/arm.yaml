@@ -12,6 +12,7 @@ on:
       - 'xtask/**'
       - 'sdk/**'
       - 'oracles/**'
+      - 'patches/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.cargo/**'
@@ -57,6 +58,7 @@ jobs:
               - 'xtask/**'
               - 'sdk/**'
               - 'oracles/**'
+              - 'patches/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
@@ -67,13 +69,25 @@ jobs:
               - 'docs/quickstart.md'
               - '.github/workflows/**'
 
-  test:
+  # The two parts of `cargo xtask test`, at the same time.
+  parts:
     needs: changes
     if: "!cancelled() && needs.changes.outputs.code != 'false'"
+    name: ${{ matrix.part }} arm
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [nextest, serial]
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.part }}
+      - if: matrix.part == 'nextest'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.146
       # As in `check` of `ci.yaml`.
       - uses: actions/setup-python@v5
         with:
@@ -83,4 +97,18 @@ jobs:
           echo "PYO3_PYTHON=$(command -v python)" >> "$GITHUB_ENV"
           echo "FOUNDATION_NODE=$PWD/target/debug/foundation" >> "$GITHUB_ENV"
       - name: Test
-        run: cargo test --workspace
+        run: cargo xtask test ${{ matrix.part }}
+
+  # The required check `test`, which passes when both parts passed. It skips, and so
+  # passes, when `parts` skips for no change of code.
+  test:
+    needs: [changes, parts]
+    if: "!cancelled() && needs.changes.outputs.code != 'false'"
+    runs-on: ubuntu-24.04
+    steps:
+      - name: The result of the parts
+        env:
+          RESULT: ${{ needs.parts.result }}
+        run: |
+          [ "$RESULT" = success ] ||
+            { echo "::error::A part of test ended in $RESULT."; exit 1; }

@@ -25,7 +25,11 @@ use crate::serve::{Error, alloc, unless};
 use crate::writer::{self, Failure, Homed, Writer};
 
 /// The bytes of the block of a `Stored` reply.
-const STORED_BYTES: usize = Reply::Stored { frames: 0 }.encoded_len();
+const STORED_BYTES: usize = Reply::Stored {
+    group: 0,
+    frames: 0,
+}
+.encoded_len();
 
 /// Serves the write of `subject` that `write` starts: verifies its open, opens its
 /// writer, and sends its places, then writes each frame of the program and sends its
@@ -123,7 +127,6 @@ async fn start(
     names: Vec<Name>,
 ) -> Result<(), Error> {
     let set = writer.set();
-    let index = set.groups()[0];
     let places: Vec<Place> = {
         let channels = &state.borrow().channels;
         let entries = set.entries();
@@ -131,17 +134,20 @@ async fn start(
         for (&n, name) in writer.entries().iter().zip(&names) {
             of[n] = Some(name);
         }
-        of[index].get_or_insert_with(|| channels.index(entries[index].key).0);
-        let place = |(entry, name): (&Entry, Option<&Name>)| Place {
+        for &index in set.groups() {
+            of[index].get_or_insert_with(|| channels.index(entries[index].key).0);
+        }
+        let place = |(at, (entry, name)): (usize, (&Entry, Option<&Name>))| Place {
             key: entry.key,
             data_type: channels.known(entry.key).sample(),
             name: name
                 .expect("invariant: each entry is a channel of the open or its index")
                 .clone(),
+            index: set.index(at),
         };
-        entries.iter().zip(of).map(place).collect()
+        entries.iter().zip(of).enumerate().map(place).collect()
     };
-    super::places(state, sender, index, &places).await
+    super::places(state, sender, &places).await
 }
 
 /// Writes each frame of the program with `writer` and sends its outcome, until the
@@ -387,7 +393,16 @@ impl Replies {
         } else if self.taken.is_none() {
             self.next = None;
         }
-        (block, Reply::Outcome { frame, outcome })
+        // The set of a write stream is one group.
+        let group = 0;
+        (
+            block,
+            Reply::Outcome {
+                frame,
+                group,
+                outcome,
+            },
+        )
     }
 
     /// Calls a commit for the taken frames when none is due.
@@ -439,7 +454,9 @@ impl Replies {
     ) -> Result<(), Error> {
         let (_, frames, block) = self.due.take().expect("invariant: a commit is due");
         self.call(state);
-        send(sender, block, Reply::Stored { frames }).await
+        // The set of a write stream is one group.
+        let reply = Reply::Stored { group: 0, frames };
+        send(sender, block, reply).await
     }
 
     /// Waits for the commit of each taken frame, sends its `Stored`, and finishes the

@@ -58,6 +58,7 @@ impl Value {
     /// # Safety
     ///
     /// `value` is a live `UA_DataValue`.
+    #[inline]
     pub(crate) unsafe fn of(value: *const ffi::DataValue) -> Result<Self, Fault> {
         let mut scalar = ffi::Scalar { uint64: 0 };
         let mut kind = 0;
@@ -225,7 +226,7 @@ pub(crate) unsafe fn time(value: *const ffi::DataValue) -> Result<Stamp, Status>
 }
 
 /// The stamp of a `DateTime` of `ticks`, or `None` when a [`Stamp`] cannot hold it.
-fn stamp(ticks: i64) -> Option<Stamp> {
+pub(crate) fn stamp(ticks: i64) -> Option<Stamp> {
     (ticks.checked_sub(ffi::UNIX_EPOCH))
         .and_then(|since| since.checked_mul(100))
         .map(Stamp::from_nanos)

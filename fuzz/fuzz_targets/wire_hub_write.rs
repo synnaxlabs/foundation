@@ -1,14 +1,17 @@
 //! `wire::hub::write::Frames`, driven as a caller drives it by `Frames::due`, never
 //! panics. Each head that it gives encodes back to its message, so it gives no head
 //! that `Head::encode` panics on. Each error is one that `decode` lists for the part
-//! that was due, and each body is as long as its layout says. Each frame has the time,
-//! form, and count of its head. A frame that finds the pool full is skipped, and the
-//! stream goes on. At the end of the input, `finish` gives `Ok` between frames, else
-//! `Error::Cut` with the bytes of the frame that came. A run that receives each body
-//! message in place gives the same steps as a run that gives it whole to `decode`.
+//! that was due, and each body is as long as its layout says. Each frame has the time
+//! and form of its head, a range for each group whose index it holds, in group order,
+//! and the counts of its run of counts, or 1 for each group of a head that the node
+//! stamps. A frame that finds the pool full is skipped, and the stream goes on. At the
+//! end of the input, `finish` gives `Ok` between frames, else `Error::Cut` with the
+//! bytes of the frame that came. A run that receives each body message in place gives
+//! the same steps as a run that gives it whole to `decode`.
 //!
-//! Input: one byte, whose low 3 bits are the places of the stream less 1, then the
-//! messages from the program (`fuzz::messages`).
+//! Input: one byte, whose low 3 bits are the places of the stream less 1, and whose
+//! bit 3 splits a stream of at least 2 places into two groups, then the messages from
+//! the program (`fuzz::messages`).
 
 #![no_main]
 #![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
@@ -23,15 +26,23 @@ use types::sample::{Scalar, Type};
 use wire::hub::Error;
 use wire::hub::write::{Due, Frames, Head, Step, Time};
 
+/// The bytes of one count of a run of counts.
+const COUNT: usize = 4;
+
+/// The bytes of one end of a run of ends.
+const END: usize = 8;
+
 /// What one step gave, with a frame's series copied out.
 #[derive(Debug, PartialEq)]
 enum Seen {
     Head(Head),
     More,
+    /// A message of the run of counts, with its counts.
+    Counts(Vec<u32>),
     Frame {
         time: Time,
         form: Form,
-        range: Option<Range>,
+        ranges: Vec<(u32, Range)>,
         series: Vec<Option<Vec<u8>>>,
     },
     /// The error of `decode` or `received`, which stops the stream.
@@ -44,13 +55,26 @@ enum Seen {
     Finished(Result<(), Error>),
 }
 
-/// An index, then `places - 1` channels of `I64`, in place order.
-fn set(places: u8) -> Arc<KeySet> {
-    let channels = (1..=places).map(|n| {
-        let data = if n == 1 { Scalar::Stamp } else { Scalar::I64 };
-        (channel::Key::from_u128(u128::from(n)), Type::Scalar(data))
+/// An index, then `places - 1` channels of `I64`, in place order. With `two` and at
+/// least 2 places, the second half of the places is a second group, whose index is
+/// its first place.
+fn set(places: u8, two: bool) -> Arc<KeySet> {
+    let split = if two && places > 1 {
+        usize::from(places.div_ceil(2))
+    } else {
+        usize::MAX
+    };
+    let channels = (0..usize::from(places)).map(|entry| {
+        let index = if entry >= split { split } else { 0 };
+        let data = if entry == index {
+            Scalar::Stamp
+        } else {
+            Scalar::I64
+        };
+        let key = u128::try_from(entry).expect("at most 8 places") + 1;
+        (channel::Key::from_u128(key), Type::Scalar(data), index)
     });
-    Arc::new(KeySet::ordered(channels, 0).expect("no key repeats"))
+    Arc::new(KeySet::ordered(channels).expect("a valid set"))
 }
 
 fn pool() -> block::Pool {
@@ -66,12 +90,12 @@ impl Seen {
             Step::More => Self::More,
             Step::Frame { draft, time } => {
                 let form = draft.form();
-                let range = draft.range(0);
+                let ranges = draft.ranges().collect();
                 let frame = draft.freeze(Path::Live);
                 Self::Frame {
                     time,
                     form,
-                    range,
+                    ranges,
                     series: (0..usize::from(places))
                         .map(|entry| frame.series(entry).map(<[u8]>::to_vec))
                         .collect(),
@@ -86,7 +110,14 @@ impl Seen {
 enum Part {
     Head,
     Ends,
-    /// The body, with its bytes that remain, skipped when the pool had no block.
+    /// The run of counts, with the counts that remain, then the bytes of the body.
+    /// Skipped when the pool had no block.
+    Counts {
+        remain: usize,
+        body: usize,
+        skipped: bool,
+    },
+    /// The body, with its bytes that remain.
     Body {
         remain: usize,
         skipped: bool,
@@ -103,14 +134,17 @@ fn check_error(error: Error, part: Part) {
                 | Error::Length { .. }
                 | Error::Path { .. }
                 | Error::Form { .. }
-                | Error::Samples
                 | Error::Series
-                | Error::Stamp { .. }
+                | Error::Stamp
                 | Error::Places { .. }
         ),
         Part::Ends => matches!(
             error,
-            Error::Empty | Error::Length { .. } | Error::Run { .. }
+            Error::Empty | Error::Length { .. } | Error::Run { .. } | Error::Samples
+        ),
+        Part::Counts { .. } => matches!(
+            error,
+            Error::Empty | Error::Length { .. } | Error::Run { .. } | Error::Samples
         ),
         Part::Body { .. } => matches!(error, Error::Empty | Error::Body { .. }),
     };
@@ -122,6 +156,21 @@ fn after(step: &Step, part: Part, len: usize) -> Part {
     match (step, part) {
         (Step::Head(_), Part::Head) => Part::Ends,
         (Step::More, Part::Ends) => Part::Ends,
+        (
+            step,
+            Part::Counts {
+                remain,
+                body,
+                skipped,
+            },
+        ) => {
+            let remain = remain
+                .checked_sub(len / COUNT)
+                .expect("a message of counts fits its run");
+            let next = counted(remain, body, skipped);
+            check_frame(step, next, skipped);
+            next
+        }
         (Step::More, Part::Body { remain, skipped }) => {
             let remain = remain
                 .checked_sub(len)
@@ -146,18 +195,71 @@ fn after(step: &Step, part: Part, len: usize) -> Part {
     }
 }
 
-/// The steps of a stream of `places` that reads `bytes`, each body message received
-/// in place when `in_place` and it fits the body.
-fn run(places: u8, bytes: &[u8], in_place: bool) -> Vec<Seen> {
+/// The part after a draft or a skip, or a message of the run of counts, with the
+/// `remain` counts of the run and the `body` bytes that are due.
+fn counted(remain: usize, body: usize, skipped: bool) -> Part {
+    match (remain, body) {
+        (0, 0) => Part::Head,
+        (0, remain) => Part::Body { remain, skipped },
+        _ => Part::Counts {
+            remain,
+            body,
+            skipped,
+        },
+    }
+}
+
+/// Checks that `step` gives a frame when its frame ends at `next` and was not
+/// `skipped`, and no frame else.
+fn check_frame(step: &Step, next: Part, skipped: bool) {
+    assert_eq!(
+        matches!(step, Step::Frame { .. }),
+        next == Part::Head && !skipped,
+        "{next:?} came with {step:?}"
+    );
+}
+
+/// The counts of the run of a frame of `time` whose ends hold `entries` of `set`:
+/// one for each index, or none for a head that the node stamps.
+fn counts(set: &KeySet, time: Time, entries: &[usize]) -> usize {
+    match time {
+        Time::Frame(_) => entries
+            .iter()
+            .filter(|entry| set.groups().contains(entry))
+            .count(),
+        Time::Node => 0,
+    }
+}
+
+/// The items of `message`, `N` bytes each, with each first `u32`.
+fn items<const N: usize>(message: &[u8]) -> impl Iterator<Item = u32> + '_ {
+    message.as_chunks::<N>().0.iter().map(|item| {
+        let first = item.first_chunk().expect("an item holds a u32");
+        u32::from_le_bytes(*first)
+    })
+}
+
+/// The steps of a stream of `set` that reads `bytes`, each body message received in
+/// place when `in_place` and it fits the body.
+fn run(set: &Arc<KeySet>, bytes: &[u8], in_place: bool) -> Vec<Seen> {
+    let places = u8::try_from(set.entries().len()).expect("at most 8 places");
     let pool = pool();
-    let mut frames = Frames::new(set(places));
+    let mut frames = Frames::new(Arc::clone(set));
     let mut messages = fuzz::messages(bytes);
     let mut seen = Vec::new();
     let mut part = Part::Head;
+    let mut time = Time::Node;
+    // The entries of the ends of the frame that came, and the ends still due.
+    let mut entries = Vec::new();
+    let mut ends = 0;
+    // The counts that came after the last end, before the draft.
+    let mut early = 0;
     // The bytes of the frame that came.
     let mut received = 0;
     loop {
-        let mut len = 0;
+        let len;
+        // The counts of a message of the run of counts.
+        let mut given = None;
         let step = match frames.due() {
             Err(error) => {
                 assert_eq!(
@@ -170,29 +272,27 @@ fn run(places: u8, bytes: &[u8], in_place: bool) -> Vec<Seen> {
             }
             Ok(Due::Draft { layout, form }) => {
                 assert_eq!(part, Part::Ends, "a draft is due outside the ends");
-                let remain = layout.body_len();
-                part = Part::Body {
-                    remain,
-                    skipped: false,
-                };
+                let body = layout.body_len();
+                let remain = counts(set, time, &entries)
+                    .checked_sub(early)
+                    .expect("no more counts came than are due");
                 match layout.draft(&pool, form) {
-                    Ok(draft) => frames.draft(draft),
+                    Ok(draft) => {
+                        part = counted(remain, body, false);
+                        let step = frames.draft(draft);
+                        check_frame(&step, part, false);
+                        seen.push(Seen::of(step, places));
+                    }
                     Err(_) => {
+                        part = counted(remain, body, true);
                         frames.skip();
                         seen.push(Seen::Skipped);
-                        part = match remain {
-                            0 => Part::Head,
-                            _ => Part::Body {
-                                remain,
-                                skipped: true,
-                            },
-                        };
-                        if part == Part::Head {
-                            received = 0;
-                        }
-                        continue;
                     }
                 }
+                if part == Part::Head {
+                    received = 0;
+                }
+                continue;
             }
             Ok(Due::Body(rest)) => {
                 let Part::Body {
@@ -231,13 +331,43 @@ fn run(places: u8, bytes: &[u8], in_place: bool) -> Vec<Seen> {
                 };
                 len = message.len();
                 match frames.decode(message) {
-                    Ok(Step::Head(given)) => {
+                    Ok(Step::Head(head)) => {
                         let mut out = [0; Head::LEN];
-                        given.encode(&mut out);
+                        head.encode(&mut out);
                         assert_eq!(&out[..], message, "the head changed");
-                        Step::Head(given)
+                        time = head.time;
+                        entries.clear();
+                        ends = usize::try_from(head.series).expect("a u32 fits");
+                        early = 0;
+                        Step::Head(head)
                     }
-                    Ok(step) => step,
+                    Ok(step) => {
+                        match part {
+                            Part::Ends => {
+                                let at = (ends * END).min(message.len());
+                                let (run, after) = message.split_at(at);
+                                entries.extend(items::<END>(run).map(|entry| {
+                                    usize::try_from(entry).expect("a u32 fits")
+                                }));
+                                ends -= run.len() / END;
+                                if !after.is_empty() {
+                                    assert!(
+                                        matches!(time, Time::Frame(_)),
+                                        "a head that the node stamps took counts"
+                                    );
+                                    let counts: Vec<_> =
+                                        items::<COUNT>(after).collect();
+                                    early = counts.len();
+                                    given = Some(counts);
+                                }
+                            }
+                            Part::Counts { .. } => {
+                                given = Some(items::<COUNT>(message).collect());
+                            }
+                            _ => {}
+                        }
+                        step
+                    }
                     Err(error) => return stopped(seen, error, part),
                 }
             }
@@ -248,6 +378,9 @@ fn run(places: u8, bytes: &[u8], in_place: bool) -> Vec<Seen> {
         } else {
             received + len
         };
+        if let Some(counts) = given {
+            seen.push(Seen::Counts(counts));
+        }
         seen.push(Seen::of(step, places));
     }
 }
@@ -277,27 +410,49 @@ fn finished(frames: &Frames, received: usize) -> Seen {
     Seen::Finished(finish)
 }
 
-/// Checks that each frame of `seen` has the time, form, and count of the head before
-/// it.
-fn check(seen: &[Seen]) {
-    let mut head = None;
+/// Checks that each frame of `seen` has the time and form of the head before it, a
+/// range for each group of `set` whose index it holds, in group order, and the counts
+/// of its run of counts, or 1 for each group of a head that the node stamps.
+fn check(set: &KeySet, seen: &[Seen]) {
+    let (mut head, mut counts) = (None, Vec::new());
     for step in seen {
         match step {
-            Seen::Head(next) => head = Some(*next),
+            Seen::Head(next) => {
+                head = Some(*next);
+                counts.clear();
+            }
+            Seen::Counts(given) => counts.extend_from_slice(given),
             Seen::Skipped => {
                 head.take().expect("a skipped frame came with no head");
             }
             Seen::Frame {
-                time, form, range, ..
+                time,
+                form,
+                ranges,
+                series,
             } => {
                 let head = head.take().expect("a frame came with no head");
                 assert_eq!(*time, head.time, "the frame changed its time");
                 assert_eq!(*form, head.form, "the frame changed its form");
-                let count = Some(Range {
-                    seq: 0,
-                    count: head.count,
-                });
-                assert_eq!(*range, count, "the frame changed its count");
+                let groups: Vec<u32> = set
+                    .groups()
+                    .iter()
+                    .zip(0..)
+                    .filter(|&(&index, _)| {
+                        series.get(index).is_some_and(Option::is_some)
+                    })
+                    .map(|(_, group)| group)
+                    .collect();
+                let counts = match head.time {
+                    Time::Frame(_) => counts.clone(),
+                    Time::Node => vec![1; groups.len()],
+                };
+                let want: Vec<(u32, Range)> = groups
+                    .into_iter()
+                    .zip(counts)
+                    .map(|(group, count)| (group, Range { seq: 0, count }))
+                    .collect();
+                assert_eq!(*ranges, want, "the frame changed its ranges");
             }
             _ => {}
         }
@@ -308,8 +463,8 @@ fuzz_target!(|bytes: &[u8]| {
     let Some((&first, bytes)) = bytes.split_first() else {
         return;
     };
-    let places = (first & 0b111) + 1;
-    let whole = run(places, bytes, false);
-    check(&whole);
-    assert_eq!(run(places, bytes, true), whole, "the two runs differ");
+    let set = set((first & 0b111) + 1, first & 0b1000 != 0);
+    let whole = run(&set, bytes, false);
+    check(&set, &whole);
+    assert_eq!(run(&set, bytes, true), whole, "the two runs differ");
 });

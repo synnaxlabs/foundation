@@ -342,6 +342,17 @@
   2026-10-08 17:47 UTC; the release path,
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6066098798,
   2026-10-08 18:08 UTC).
+  `shim.c` also includes `client/ua_client_internal.h` of the copy and calls
+  `__Client_Subscriptions_backgroundPublish`, so the Publish requests go out at once
+  when `subscribe` sets their count, and when `changes` takes the changes that stopped
+  them. The function asserts the client lock, which the build with `UA_MULTITHREADING` 0
+  does not take, so `shim.c` fails to compile at 100 or more. Each release update checks
+  that it still sends the Publish requests that the count lacks. Lost: the housekeeping
+  timer of open62541, which sends them within 1 s, so a `changes` at a publishing
+  interval of 100 ms can wait 1 s for its next answer. While a change waits and a read
+  drives the loop, the housekeeping of open62541 logs the warning "Inactivity for
+  Subscription <id>." once each publishing interval times the keep-alive count plus the
+  request timeout. This is the stop of the client, not a failed server.
   The copy, `shim.c`, and `server.c` allocate through the global allocator of the
   binary. `src/alloc.h` is the `UA_ARCH_HEADER` of both builds: it declares the 4
   functions of `src/alloc.rs` and defines `UA_malloc`, `UA_calloc`, `UA_realloc`, and

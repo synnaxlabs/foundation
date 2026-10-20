@@ -29,7 +29,16 @@ fn pt(key: u128, data_type: &str, name: &str) -> Place {
         key: channel::Key::from_u128(key),
         data_type: data_type.parse().unwrap(),
         name: name.parse().unwrap(),
+        index: 0,
     }
+}
+
+/// `places`, each on the index at place `index`.
+fn on<const N: usize>(index: usize, mut places: [Place; N]) -> [Place; N] {
+    for place in &mut places {
+        place.index = index;
+    }
+    places
 }
 
 fn encode_read(read: Read) -> Vec<u8> {
@@ -119,15 +128,18 @@ mod pins {
 
     #[test]
     fn the_places() {
-        let places = Places { count: 3, index: 2 };
-        assert_eq!(encode_places(places), [6, 3, 0, 0, 0, 2, 0, 0, 0]);
+        assert_eq!(encode_places(Places { count: 3 }), [6, 3, 0, 0, 0]);
     }
 
     #[test]
     fn the_place() {
-        let place = pt(0x0102, "f32[3]", "site_a.pt");
+        let place = Place {
+            index: 0x0304,
+            ..pt(0x0102, "f32[3]", "site_a.pt")
+        };
         let mut bytes = vec![0x02, 0x01];
         bytes.extend([0; 14]);
+        bytes.extend([0x04, 0x03, 0, 0]);
         bytes.push(6);
         bytes.extend(b"f32[3]");
         bytes.push(9);
@@ -301,57 +313,40 @@ mod places {
     use super::*;
 
     #[test]
-    fn decodes_places_with_the_index_at_each_place() {
-        for index in 0..3 {
-            let places = Places { count: 3, index };
+    fn decodes_places_of_one_place_and_at_the_cap() {
+        for count in [1, 3, PLACES_MAX] {
+            let places = Places { count };
             assert_eq!(Places::decode(&encode_places(places)), Ok(places));
         }
     }
 
     #[test]
-    fn decodes_places_at_the_cap() {
-        let places = Places {
-            count: PLACES_MAX,
-            index: PLACES_MAX - 1,
-        };
-        assert_eq!(Places::decode(&encode_places(places)), Ok(places));
+    fn refuses_places_of_no_place_or_over_the_cap() {
+        for count in [0, PLACES_MAX + 1] {
+            let mut bytes = encode_places(Places { count: 1 });
+            bytes[1..5].copy_from_slice(&count.to_le_bytes());
+            assert_eq!(
+                Places::decode(&bytes),
+                Err(Error::Places {
+                    count,
+                    cap: PLACES_MAX,
+                })
+            );
+        }
     }
 
     #[test]
-    fn refuses_places_over_the_cap_before_the_index() {
-        let mut bytes = encode_places(Places { count: 1, index: 0 });
-        bytes[1..5].copy_from_slice(&(PLACES_MAX + 1).to_le_bytes());
-        bytes[5..9].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert_eq!(
-            Places::decode(&bytes),
-            Err(Error::Places {
-                count: PLACES_MAX + 1,
-                cap: PLACES_MAX,
-            })
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "65537 places are over the cap of 65536")]
+    #[should_panic(expected = "65537 places are not from 1 to the cap of 65536")]
     fn panics_on_an_encode_over_the_cap() {
         encode_places(Places {
             count: PLACES_MAX + 1,
-            index: 0,
         });
     }
 
     #[test]
-    fn refuses_an_index_that_is_not_below_the_count() {
-        let mut bytes = encode_places(Places { count: 3, index: 0 });
-        bytes[5] = 3;
-        assert_eq!(
-            Places::decode(&bytes),
-            Err(Error::Index { index: 3, count: 3 })
-        );
-        assert_eq!(
-            Places::decode(&zeros(6, Places::LEN)),
-            Err(Error::Index { index: 0, count: 0 })
-        );
+    #[should_panic(expected = "0 places are not from 1 to the cap of 65536")]
+    fn panics_on_an_encode_of_no_place() {
+        encode_places(Places { count: 0 });
     }
 
     #[test]
@@ -371,7 +366,7 @@ mod places {
 
     #[test]
     fn refuses_each_wrong_length() {
-        for len in [1, 8, 10] {
+        for len in [1, 4, 6, 9] {
             assert_eq!(Places::decode(&zeros(6, len)), Err(Error::Length { len }));
         }
     }
@@ -391,7 +386,7 @@ mod run {
         assert_eq!(place::decode(&[]), Err(Error::Empty));
     }
 
-    /// Each place of `u8` named `a` is 21 bytes.
+    /// Each place of `u8` named `a` is 25 bytes.
     #[test]
     fn cuts_a_run_into_messages_of_as_many_whole_places_as_fit() {
         let places = [pt(1, "u8", "a"), pt(2, "u8", "a"), pt(3, "u8", "a")];
@@ -400,10 +395,10 @@ mod run {
                 .map(|message| decode_message(message).len())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(cut(21), vec![1, 1, 1]);
-        assert_eq!(cut(41), vec![1, 1, 1]);
-        assert_eq!(cut(42), vec![2, 1]);
-        assert_eq!(cut(63), vec![3]);
+        assert_eq!(cut(25), vec![1, 1, 1]);
+        assert_eq!(cut(49), vec![1, 1, 1]);
+        assert_eq!(cut(50), vec![2, 1]);
+        assert_eq!(cut(75), vec![3]);
         assert_eq!(place::messages(&[], 0).count(), 0);
     }
 
@@ -423,19 +418,19 @@ mod run {
     fn refuses_a_sample_type_or_a_name_that_does_not_read() {
         let cases: [(usize, u8, Error); 4] = [
             (
-                17,
+                21,
                 b'x',
                 Error::Sample(text::Error::Parse(sample::Error::Syntax)),
             ),
-            (17, 0xff, Error::Sample(not_utf8(&[0xff, b'8']))),
+            (21, 0xff, Error::Sample(not_utf8(&[0xff, b'8']))),
             (
-                20,
+                24,
                 b'*',
                 Error::Name(text::Error::Parse(Box::new(name::Error::Wildcard {
                     input: "*".into(),
                 }))),
             ),
-            (20, 0xff, Error::Name(not_utf8(&[0xff]))),
+            (24, 0xff, Error::Name(not_utf8(&[0xff]))),
         ];
         for (at, byte, error) in cases {
             let mut bytes = encode_run(&[pt(1, "u8", "a")]);
@@ -447,8 +442,8 @@ mod run {
     #[test]
     fn gives_the_first_defect_in_the_order_of_the_bytes() {
         let mut bytes = encode_run(&[pt(1, "u8", "a")]);
-        bytes[17] = b'x';
-        bytes[19] = 5;
+        bytes[21] = b'x';
+        bytes[23] = 5;
         assert_eq!(
             place::decode(&bytes),
             Err(Error::Sample(text::Error::Parse(sample::Error::Syntax)))
@@ -458,8 +453,8 @@ mod run {
     #[test]
     fn gives_a_bad_sample_type_before_a_missing_name() {
         let mut bytes = encode_run(&[pt(1, "u8", "a")]);
-        bytes[17] = b'x';
-        bytes.truncate(19);
+        bytes[21] = b'x';
+        bytes.truncate(23);
         assert_eq!(
             place::decode(&bytes),
             Err(Error::Sample(text::Error::Parse(sample::Error::Syntax)))
@@ -469,7 +464,7 @@ mod run {
     #[test]
     fn gives_a_bad_name_before_a_cut_place_after_it() {
         let mut bytes = encode_run(&[pt(1, "u8", "a")]);
-        bytes[20] = 0xff;
+        bytes[24] = 0xff;
         bytes.extend_from_slice(&[0; 3]);
         assert_eq!(place::decode(&bytes), Err(Error::Name(not_utf8(&[0xff]))));
     }
@@ -487,12 +482,12 @@ mod reader {
         encode_reply(Reply::Opened { live })
     }
 
-    /// A place of `u8` named `a`: 21 bytes.
+    /// A place of `u8` named `a`: 25 bytes.
     fn byte(key: u128) -> Place {
         pt(key, "u8", "a")
     }
 
-    /// A place of `timestamp` named `a`: 28 bytes.
+    /// A place of `timestamp` named `a`: 32 bytes.
     fn stamp(key: u128) -> Place {
         pt(key, "timestamp", "a")
     }
@@ -571,9 +566,9 @@ mod reader {
 
     #[test]
     fn decodes_the_places_then_the_run_then_gives_the_replies() {
-        let places = Places { count: 3, index: 1 };
-        let run = [byte(1), stamp(2), byte(3)];
-        let messages = messages(&run, 49);
+        let places = Places { count: 3 };
+        let run = on(1, [byte(1), stamp(2), byte(3)]);
+        let messages = messages(&run, 57);
         assert_eq!(messages.len(), 2);
         let mut reader = Reader::new(Mode::Complete);
         assert_eq!(event(&mut reader, &encode_places(places)), Ok(Event::More));
@@ -621,19 +616,22 @@ mod reader {
         );
         assert_eq!(
             reader.decode(Some(&zeros(6, Places::LEN))).err(),
-            Some(Error::Index { index: 0, count: 0 })
+            Some(Error::Places {
+                count: 0,
+                cap: PLACES_MAX
+            })
         );
-        let places = Places { count: 1, index: 0 };
+        let places = Places { count: 1 };
         assert_eq!(event(&mut reader, &encode_places(places)), Ok(Event::More));
     }
 
     #[test]
     fn reads_a_second_places_or_a_reply_in_the_run_as_run_bytes() {
-        let places = Places { count: 1, index: 0 };
+        let places = Places { count: 1 };
         let mut reader = in_run(Mode::Complete, places);
         assert_eq!(
             reader.decode(Some(&encode_places(places))).err(),
-            Some(Error::Length { len: 9 })
+            Some(Error::Length { len: 5 })
         );
         assert_eq!(
             reader.decode(Some(&[OPENED])).err(),
@@ -648,7 +646,7 @@ mod reader {
 
     #[test]
     fn refuses_a_message_with_more_places_than_remain() {
-        let places = Places { count: 2, index: 0 };
+        let places = Places { count: 2 };
         let mut reader = in_run(Mode::Complete, places);
         let three = [stamp(1), byte(2), byte(3)];
         assert_eq!(
@@ -677,7 +675,7 @@ mod reader {
 
     #[test]
     fn checks_the_count_before_the_index_place() {
-        let places = Places { count: 1, index: 0 };
+        let places = Places { count: 1 };
         let mut reader = in_run(Mode::Complete, places);
         assert_eq!(
             reader.decode(Some(&encode_run(&[byte(1), byte(2)]))).err(),
@@ -688,27 +686,24 @@ mod reader {
         );
     }
 
-    /// A run of 4 places in 2 messages of 2, each `u8`: the message that holds the
-    /// index place gives `Unstamped`, and each before it decodes.
+    /// A run of 4 places of `u8` in 2 messages of 2, on the index at each place: the
+    /// first message decodes, and the last gives `Unstamped`. The run stays as it was,
+    /// so a last message with a stamp at the index then gives the start.
     #[test]
-    fn refuses_an_index_place_that_is_not_a_stamp_in_the_message_that_holds_it() {
-        let run = [byte(1), byte(2), byte(3), byte(4)];
-        let messages = messages(&run, 42);
-        assert_eq!(messages.len(), 2);
-        let unstamped = Error::Unstamped {
-            sample: "u8".parse().unwrap(),
-        };
+    fn refuses_an_index_place_that_is_not_a_stamp_at_the_last_message() {
         for index in 0..4 {
-            let mut reader = in_run(Mode::Complete, Places { count: 4, index });
-            let held = usize::try_from(index / 2).unwrap();
-            for message in &messages[..held] {
-                reader
-                    .decode(Some(message))
-                    .expect("a message before the index decodes");
-            }
+            let run = on(index, [byte(1), byte(2), byte(3), byte(4)]);
+            let messages = messages(&run, 50);
+            assert_eq!(messages.len(), 2);
+            let mut reader = in_run(Mode::Complete, Places { count: 4 });
+            assert_eq!(event(&mut reader, &messages[0]), Ok(Event::More), "{index}");
+            let unstamped = Error::Unstamped {
+                place: u32::try_from(index).unwrap(),
+                sample: "u8".parse().unwrap(),
+            };
             assert_eq!(
-                reader.decode(Some(&messages[held])).err(),
-                Some(unstamped.clone()),
+                reader.decode(Some(&messages[1])).err(),
+                Some(unstamped),
                 "{index}"
             );
             assert_eq!(
@@ -716,7 +711,110 @@ mod reader {
                 Some(Error::Length { len: 1 }),
                 "the reader is still in the run"
             );
+            if let Some(at) = index.checked_sub(2) {
+                let mut fixed = run.clone();
+                fixed[index].data_type = Type::Scalar(Scalar::Stamp);
+                let mut end = run[2..].to_vec();
+                end[at].data_type = Type::Scalar(Scalar::Stamp);
+                assert_eq!(
+                    event(&mut reader, &encode_run(&end)),
+                    Ok(Event::Start(fixed.to_vec())),
+                    "{index}"
+                );
+            }
         }
+    }
+
+    /// Each run of 2 places gives the error of its first place, in place order, whose
+    /// index is not an index place, before `Unstamped` of a later place and before
+    /// `Repeated`. Each refusal leaves the run as it was.
+    #[test]
+    fn refuses_an_index_that_is_not_an_index_place_at_the_last_message() {
+        let at = |index, place| Place { index, ..place };
+        let index = |place, index| Error::Index { place, index };
+        let max = usize::try_from(u32::MAX).unwrap();
+        let unstamped = Error::Unstamped {
+            place: 1,
+            sample: "u8".parse().unwrap(),
+        };
+        let cases = [
+            ([stamp(1), at(2, byte(2))], index(1, 2)),
+            ([stamp(1), at(max, byte(2))], index(1, u32::MAX)),
+            ([at(1, byte(1)), byte(2)], index(0, 1)),
+            ([at(5, stamp(1)), at(1, byte(2))], index(0, 5)),
+            ([stamp(1), at(7, stamp(1))], index(1, 7)),
+            ([stamp(1), at(1, byte(2))], unstamped),
+        ];
+        let mut reader = in_run(Mode::Complete, Places { count: 2 });
+        for (run, error) in cases {
+            assert_eq!(
+                reader.decode(Some(&encode_run(&run))).err(),
+                Some(error),
+                "{run:?}"
+            );
+        }
+        assert_eq!(
+            event(&mut reader, &encode_run(&[stamp(1), byte(2)])),
+            Ok(Event::Start(vec![stamp(1), byte(2)]))
+        );
+    }
+
+    /// A read has one index. The places give `ManyIndexes` for the first place, in
+    /// place order, whose index is not that of place 0, after each other error of the
+    /// places. Places that all name a later index give the start.
+    #[test]
+    fn refuses_places_of_two_indexes_at_the_last_message() {
+        let at = |index, place| Place { index, ..place };
+        let unstamped = Error::Unstamped {
+            place: 0,
+            sample: "u8".parse().unwrap(),
+        };
+        let repeated = Error::Repeated {
+            key: channel::Key::from_u128(1),
+        };
+        let cases = [
+            (
+                vec![stamp(1), at(1, stamp(2))],
+                Error::ManyIndexes { place: 1, index: 1 },
+            ),
+            (
+                vec![stamp(1), byte(2), at(2, stamp(3)), at(2, byte(4))],
+                Error::ManyIndexes { place: 2, index: 2 },
+            ),
+            (vec![stamp(1), at(1, stamp(1))], repeated),
+            (vec![byte(1), at(1, stamp(2))], unstamped),
+        ];
+        for (run, error) in cases {
+            let places = Places {
+                count: u32::try_from(run.len()).unwrap(),
+            };
+            let mut reader = in_run(Mode::Complete, places);
+            assert_eq!(
+                reader.decode(Some(&encode_run(&run))).err(),
+                Some(error),
+                "{run:?}"
+            );
+        }
+        let run = [at(1, byte(1)), at(1, stamp(2))];
+        let mut reader = in_run(Mode::Complete, Places { count: 2 });
+        assert_eq!(
+            event(&mut reader, &encode_run(&run)),
+            Ok(Event::Start(run.to_vec()))
+        );
+    }
+
+    /// `ManyIndexes` ends the reader.
+    #[test]
+    #[should_panic(expected = "a stream is decoded after the decoder gave its start")]
+    fn panics_on_a_decode_after_many_indexes() {
+        let at = |index, place| Place { index, ..place };
+        let mut reader = in_run(Mode::Complete, Places { count: 2 });
+        let run = encode_run(&[stamp(1), at(1, stamp(2))]);
+        assert_eq!(
+            reader.decode(Some(&run)).err(),
+            Some(Error::ManyIndexes { place: 1, index: 1 })
+        );
+        drop(reader.decode(None));
     }
 
     /// The messages of a fuzz input, as `fuzz::messages` cuts them: each a length byte
@@ -785,7 +883,7 @@ mod reader {
     fn reads_each_run_input_of_the_fuzz_target_to_its_last_place() {
         let cases: [(&[u8], Vec<Step>); 5] = [
             (
-                corpus!("reader_behind"),
+                corpus!("reader_behind_indexed"),
                 vec![
                     more(),
                     Step::Event(Ok(Event::Start(vec![stamp(1), pt(2, "f64", "b")]))),
@@ -794,7 +892,7 @@ mod reader {
                 ],
             ),
             (
-                corpus!("reader_place"),
+                corpus!("reader_place_indexed"),
                 vec![
                     more(),
                     Step::Event(Ok(Event::Start(vec![
@@ -804,20 +902,19 @@ mod reader {
                 ],
             ),
             (
-                corpus!("reader_run"),
+                corpus!("reader_run_indexed"),
                 vec![
                     more(),
                     more(),
-                    Step::Event(Ok(Event::Start(vec![
-                        byte(1),
-                        pt(2, "timestamp", "a.time"),
-                    ]))),
+                    Step::Event(Ok(Event::Start(
+                        on(1, [byte(1), pt(2, "timestamp", "a.time")]).to_vec(),
+                    ))),
                     Step::Reply(Err(hub::Error::Length { len: 1 })),
                     Step::Reply(Err(hub::Error::Unopened { kind: 2 })),
                 ],
             ),
             (
-                corpus!("reader_behind_live"),
+                corpus!("reader_behind_live_indexed"),
                 vec![
                     more(),
                     Step::Event(Ok(Event::Start(vec![stamp(1), pt(2, "f64", "b")]))),
@@ -826,14 +923,13 @@ mod reader {
                 ],
             ),
             (
-                corpus!("reader_run_live"),
+                corpus!("reader_run_live_indexed"),
                 vec![
                     more(),
                     more(),
-                    Step::Event(Ok(Event::Start(vec![
-                        byte(1),
-                        pt(2, "timestamp", "a.time"),
-                    ]))),
+                    Step::Event(Ok(Event::Start(
+                        on(1, [byte(1), pt(2, "timestamp", "a.time")]).to_vec(),
+                    ))),
                     Step::Reply(Ok(Home::Opened(0))),
                     Step::Reply(Ok(Home::Head(2))),
                 ],
@@ -849,7 +945,7 @@ mod reader {
     #[test]
     fn reads_the_input_with_a_last_place_after_a_repeat() {
         assert_eq!(
-            steps(corpus!("reader_repeated_last")),
+            steps(corpus!("reader_repeated_last_indexed")),
             vec![
                 more(),
                 refused(Error::Repeated {
@@ -867,7 +963,7 @@ mod reader {
     #[test]
     fn refuses_the_places_over_input_of_the_fuzz_target() {
         assert_eq!(
-            steps(corpus!("places_over")),
+            steps(corpus!("places_over_indexed")),
             [refused(Error::Places {
                 count: PLACES_MAX + 1,
                 cap: PLACES_MAX,
@@ -879,81 +975,108 @@ mod reader {
     /// messages, the last a refusal.
     #[test]
     fn refuses_each_other_run_input_of_the_fuzz_target() {
-        let cases: [(&[u8], Vec<Step>); 9] = [
+        let cases: [(&[u8], Error); 11] = [
             (
-                corpus!("reader_place_cut"),
-                vec![more(), refused(Error::Length { len: 21 })],
+                corpus!("reader_index_indexed"),
+                Error::Index { place: 0, index: 1 },
             ),
             (
-                corpus!("reader_place_name"),
-                vec![
-                    more(),
-                    refused(Error::Name(text::Error::Parse(Box::new(
-                        name::Error::Segment {
-                            input: "!".into(),
-                            segment: "!".into(),
-                        },
-                    )))),
-                ],
+                corpus!("reader_index_past_indexed"),
+                Error::Index { place: 0, index: 5 },
             ),
             (
-                corpus!("reader_place_name_text"),
-                vec![more(), refused(Error::Name(not_utf8(&[0xff])))],
+                corpus!("reader_groups_indexed"),
+                Error::ManyIndexes { place: 2, index: 2 },
             ),
             (
-                corpus!("reader_place_text"),
-                vec![more(), refused(Error::Sample(not_utf8(&[0xff])))],
+                corpus!("reader_place_cut_indexed"),
+                Error::Length { len: 25 },
             ),
             (
-                corpus!("reader_place_type"),
-                vec![
-                    more(),
-                    refused(Error::Sample(text::Error::Parse(sample::Error::Syntax))),
-                ],
+                corpus!("reader_place_name_indexed"),
+                Error::Name(text::Error::Parse(Box::new(name::Error::Segment {
+                    input: "!".into(),
+                    segment: "!".into(),
+                }))),
             ),
             (
-                corpus!("reader_repeated"),
-                vec![
-                    more(),
-                    refused(Error::Repeated {
-                        key: channel::Key::from_u128(1),
-                    }),
-                ],
+                corpus!("reader_place_name_text_indexed"),
+                Error::Name(not_utf8(&[0xff])),
             ),
             (
-                corpus!("reader_run_empty"),
-                vec![more(), refused(Error::Empty)],
+                corpus!("reader_place_text_indexed"),
+                Error::Sample(not_utf8(&[0xff])),
             ),
             (
-                corpus!("reader_run_over"),
-                vec![
-                    more(),
-                    refused(Error::Run {
-                        items: 2,
-                        remain: 1,
-                    }),
-                ],
+                corpus!("reader_place_type_indexed"),
+                Error::Sample(text::Error::Parse(sample::Error::Syntax)),
             ),
             (
-                corpus!("reader_unstamped"),
-                vec![
-                    more(),
-                    more(),
-                    refused(Error::Unstamped {
-                        sample: "u8".parse().unwrap(),
-                    }),
-                ],
+                corpus!("reader_repeated_indexed"),
+                Error::Repeated {
+                    key: channel::Key::from_u128(1),
+                },
+            ),
+            (corpus!("reader_run_empty_indexed"), Error::Empty),
+            (
+                corpus!("reader_run_over_indexed"),
+                Error::Run {
+                    items: 2,
+                    remain: 1,
+                },
             ),
         ];
-        for (bytes, expected) in cases {
-            assert_eq!(steps(bytes), expected, "{bytes:?}");
+        for (bytes, error) in cases {
+            assert_eq!(steps(bytes), [more(), refused(error)], "{bytes:?}");
+        }
+        assert_eq!(
+            steps(corpus!("reader_unstamped_indexed")),
+            [
+                more(),
+                more(),
+                refused(Error::Unstamped {
+                    place: 1,
+                    sample: "u8".parse().unwrap(),
+                }),
+            ]
+        );
+    }
+
+    /// Each input of the fuzz target with a `Places` of 9 bytes, from before a place
+    /// held its index, is refused at its first message.
+    #[test]
+    fn refuses_each_input_with_the_places_of_9_bytes() {
+        let inputs: [&[u8]; 16] = [
+            corpus!("places_over"),
+            corpus!("reader_behind"),
+            corpus!("reader_behind_live"),
+            corpus!("reader_place"),
+            corpus!("reader_place_cut"),
+            corpus!("reader_place_name"),
+            corpus!("reader_place_name_text"),
+            corpus!("reader_place_text"),
+            corpus!("reader_place_type"),
+            corpus!("reader_repeated"),
+            corpus!("reader_repeated_last"),
+            corpus!("reader_run"),
+            corpus!("reader_run_empty"),
+            corpus!("reader_run_live"),
+            corpus!("reader_run_over"),
+            corpus!("reader_unstamped"),
+        ];
+        for bytes in inputs {
+            assert_eq!(
+                steps(bytes).first(),
+                Some(&refused(Error::Length { len: 9 })),
+                "{bytes:?}"
+            );
         }
     }
 
     /// After the last place, the session reads a `Places` or a run message as a reply.
     #[test]
     fn refuses_places_or_a_run_after_the_last_place() {
-        let places = Places { count: 1, index: 0 };
+        let places = Places { count: 1 };
         let mut home = after_run(Mode::Complete, places, &[stamp(1)]);
         assert_eq!(
             home.decode(Some(&encode_places(places))).err(),
@@ -969,7 +1092,7 @@ mod reader {
     #[test]
     #[should_panic(expected = "a stream is decoded after the decoder gave its start")]
     fn panics_on_a_decode_after_the_last_place() {
-        let places = Places { count: 1, index: 0 };
+        let places = Places { count: 1 };
         let mut reader = in_run(Mode::Complete, places);
         last(&mut reader, &encode_run(&[stamp(1)]));
         drop(reader.decode(Some(&[OPENED])));
@@ -978,7 +1101,7 @@ mod reader {
     #[test]
     #[should_panic(expected = "a stream is decoded after the decoder gave its start")]
     fn panics_on_the_end_after_the_last_place() {
-        let mut reader = in_run(Mode::Complete, Places { count: 1, index: 0 });
+        let mut reader = in_run(Mode::Complete, Places { count: 1 });
         last(&mut reader, &encode_run(&[stamp(1)]));
         drop(reader.decode(None));
     }
@@ -989,7 +1112,7 @@ mod reader {
     fn refuses_the_end_before_the_last_place() {
         let mut reader = Reader::new(Mode::Complete);
         assert_eq!(reader.decode(None).err(), Some(Error::Finished));
-        let places = Places { count: 2, index: 0 };
+        let places = Places { count: 2 };
         assert_eq!(event(&mut reader, &encode_places(places)), Ok(Event::More));
         assert_eq!(
             event(&mut reader, &encode_run(&[stamp(1)])),
@@ -1011,7 +1134,7 @@ mod reader {
     /// so a later last message gives the start.
     #[test]
     fn leaves_the_decoder_as_it_was_after_a_repeat() {
-        let mut reader = in_run(Mode::Complete, Places { count: 4, index: 0 });
+        let mut reader = in_run(Mode::Complete, Places { count: 4 });
         assert_eq!(
             event(&mut reader, &encode_run(&[stamp(1), byte(2)])),
             Ok(Event::More)
@@ -1031,10 +1154,10 @@ mod reader {
     #[test]
     fn takes_an_index_place_of_a_stamp_at_each_place() {
         for index in 0..4 {
-            let mut run = [byte(1), byte(2), byte(3), byte(4)];
-            run[usize::try_from(index).unwrap()] = stamp(9);
-            let mut reader = in_run(Mode::Complete, Places { count: 4, index });
-            let messages = messages(&run, 49);
+            let mut run = on(index, [byte(1), byte(2), byte(3), byte(4)]);
+            run[index].data_type = Type::Scalar(Scalar::Stamp);
+            let mut reader = in_run(Mode::Complete, Places { count: 4 });
+            let messages = messages(&run, 57);
             let (end, before) = messages.split_last().unwrap();
             for message in before {
                 assert!(event(&mut reader, message) == Ok(Event::More), "{index}");
@@ -1049,9 +1172,9 @@ mod reader {
     #[test]
     fn refuses_a_repeated_channel_at_the_last_place() {
         let run = [stamp(3), byte(2), byte(3), byte(2)];
-        let messages = messages(&run, 49);
+        let messages = messages(&run, 57);
         assert_eq!(messages.len(), 2);
-        let mut reader = in_run(Mode::Complete, Places { count: 4, index: 0 });
+        let mut reader = in_run(Mode::Complete, Places { count: 4 });
         assert_eq!(event(&mut reader, &messages[0]), Ok(Event::More));
         let error = reader.decode(Some(&messages[1])).expect_err("a repeat");
         assert_eq!(
@@ -1071,19 +1194,20 @@ mod reader {
 
     #[test]
     fn refuses_an_array_of_stamps_as_the_index() {
-        let mut reader = in_run(Mode::Complete, Places { count: 1, index: 0 });
+        let mut reader = in_run(Mode::Complete, Places { count: 1 });
         let error = reader
             .decode(Some(&encode_run(&[pt(1, "timestamp[2]", "a")])))
             .expect_err("an array is not a stamp");
         assert_eq!(
             error,
             Error::Unstamped {
+                place: 0,
                 sample: "timestamp[2]".parse().unwrap()
             }
         );
         assert_eq!(
             error.to_string(),
-            "the index place has sample type timestamp[2], not timestamp"
+            "the index place 0 has sample type timestamp[2], not timestamp"
         );
     }
 
@@ -1091,8 +1215,8 @@ mod reader {
     fn opens_a_session_of_the_count_of_places() {
         let mut home = after_run(
             Mode::Complete,
-            Places { count: 2, index: 1 },
-            &[byte(1), stamp(2)],
+            Places { count: 2 },
+            &on(1, [byte(1), stamp(2)]),
         );
         home.decode(Some(&opened_at(0))).expect("the session opens");
         assert_eq!(
@@ -1107,7 +1231,7 @@ mod reader {
 
     /// The seqs that a session of `mode`, opened at 5, lost before a first frame at 9.
     fn lost_before_a_frame(mode: Mode) -> std::ops::Range<u64> {
-        let mut reader = in_run(mode, Places { count: 1, index: 0 });
+        let mut reader = in_run(mode, Places { count: 1 });
         let Ok(Some(start)) = reader.decode(Some(&encode_run(&[stamp(1)]))) else {
             panic!("the run gives a start");
         };
@@ -1157,7 +1281,7 @@ fn panics_on_the_body_of_a_read_over_the_cap() {
 }
 
 /// Each sample type at its largest counts. The matches fail to compile when a scalar
-/// or a shape is added, so that a new one cannot pass the 300-byte bound unchecked.
+/// or a shape is added, so that a new one cannot pass the 304-byte bound unchecked.
 fn largest_types() -> Vec<Type> {
     use Scalar::{
         Bool, F32, F64, I8, I16, I32, I64, Span, Stamp, U8, U16, U32, U64, Uuid,
@@ -1204,7 +1328,7 @@ fn largest_types() -> Vec<Type> {
 }
 
 #[test]
-fn fits_the_largest_place_in_300_bytes() {
+fn fits_the_largest_place_in_304_bytes() {
     let name: Name = "a".repeat(Name::MAX_BYTES).parse().unwrap();
     let places: Vec<_> = largest_types()
         .into_iter()
@@ -1212,36 +1336,31 @@ fn fits_the_largest_place_in_300_bytes() {
             key: channel::Key::from_u128(1),
             data_type,
             name: name.clone(),
+            index: usize::try_from(u32::MAX).unwrap(),
         })
         .collect();
     for place in &places {
         let one = std::slice::from_ref(place);
-        let runs: Vec<_> = place::messages(one, 300).map(decode_message).collect();
+        let runs: Vec<_> = place::messages(one, 304).map(decode_message).collect();
         assert_eq!(runs, [one], "{}", place.data_type);
     }
-    assert_eq!(places.iter().map(place_len).max(), Some(300));
+    assert_eq!(places.iter().map(place_len).max(), Some(304));
 }
 
 #[test]
-#[should_panic(expected = "out has 22 bytes, and the message has 21")]
+#[should_panic(expected = "out has 26 bytes, and the message has 25")]
 fn panics_on_a_message_into_out_of_another_length() {
     let places = [pt(1, "u8", "a")];
-    let [message] = place::messages(&places, 21).collect::<Vec<_>>()[..] else {
+    let [message] = place::messages(&places, 25).collect::<Vec<_>>()[..] else {
         panic!("one place is one message");
     };
-    message.encode(&mut [0; 22]);
+    message.encode(&mut [0; 26]);
 }
 
 #[test]
-#[should_panic(expected = "the index is at place 2 of 2")]
-fn panics_on_places_with_the_index_at_the_count() {
-    Places { count: 2, index: 2 }.encode(&mut [0; Places::LEN]);
-}
-
-#[test]
-#[should_panic(expected = "a place of 21 bytes is over a message of 20")]
+#[should_panic(expected = "a place of 25 bytes is over a message of 24")]
 fn panics_on_a_place_over_a_message() {
-    place::messages(&[pt(1, "u8", "a")], 20).for_each(drop);
+    place::messages(&[pt(1, "u8", "a")], 24).for_each(drop);
 }
 
 fn selector() -> impl Strategy<Value = Selector> {
@@ -1295,6 +1414,7 @@ fn places() -> impl Strategy<Value = Vec<Place>> {
             key: channel::Key::from_u128(key),
             data_type,
             name: name.parse().unwrap(),
+            index: 0,
         });
     proptest::collection::vec(place, 1..8)
 }
@@ -1319,19 +1439,15 @@ proptest! {
     }
 
     #[test]
-    fn round_trips_places(
-        (count, index) in (1..=PLACES_MAX)
-            .prop_flat_map(|count| (Just(count), 0..count)),
-    ) {
-        let places = Places { count, index };
+    fn round_trips_places(count in 1..=PLACES_MAX) {
+        let places = Places { count };
         prop_assert_eq!(Places::decode(&encode_places(places)), Ok(places));
     }
 
     #[test]
-    fn refuses_each_count_over_the_cap(count in PLACES_MAX + 1..=u32::MAX, index: u32) {
+    fn refuses_each_count_over_the_cap(count in PLACES_MAX + 1..=u32::MAX) {
         let mut bytes = vec![6];
         bytes.extend(count.to_le_bytes());
-        bytes.extend(index.to_le_bytes());
         prop_assert_eq!(
             Places::decode(&bytes),
             Err(Error::Places { count, cap: PLACES_MAX })
@@ -1340,7 +1456,7 @@ proptest! {
 
     /// The reader gives with the last place, and at no message before it, the start:
     /// each place of the run, and the decoder of the replies. When the index place is
-    /// not a stamp, the message that holds it gives `Unstamped`.
+    /// not a stamp, the last message gives `Unstamped`.
     #[test]
     fn decodes_a_run_cut_into_messages_of_whole_places(
         (mut places, index) in places().prop_flat_map(|places| {
@@ -1351,6 +1467,9 @@ proptest! {
         complete in any::<bool>(),
         stamp in any::<bool>(),
     ) {
+        for place in &mut places {
+            place.index = index;
+        }
         if stamp {
             places[index].data_type = "timestamp".parse().unwrap();
         }
@@ -1359,25 +1478,23 @@ proptest! {
         let mode = if complete { Mode::Complete } else { Mode::Latest };
         let mut reader = Reader::new(mode);
         let count = u32::try_from(places.len()).unwrap();
-        let reply = Places { count, index: u32::try_from(index).unwrap() };
-        let first = encode_places(reply);
+        let first = encode_places(Places { count });
         prop_assert!(matches!(reader.decode(Some(&first)), Ok(None)));
         let messages: Vec<_> = place::messages(&places, max).collect();
-        let mut sent = 0_usize;
         let mut last = None;
         for (at, message) in messages.iter().enumerate() {
-            let bytes = encode_message(*message);
-            let len = place::decode(&bytes)?.len();
-            let held = (sent..sent.saturating_add(len)).contains(&index);
-            sent = sent.saturating_add(len);
-            match reader.decode(Some(&bytes)) {
+            let end = at.saturating_add(1) == messages.len();
+            match reader.decode(Some(&encode_message(*message))) {
                 Ok(start) => {
-                    let end = at.saturating_add(1) == messages.len();
                     prop_assert_eq!(start.is_some(), end);
                     last = start;
                 }
-                Err(error) if held && !stamped => {
-                    prop_assert_eq!(error, Error::Unstamped { sample: index_type });
+                Err(error) if end && !stamped => {
+                    let unstamped = Error::Unstamped {
+                        place: u32::try_from(index).unwrap(),
+                        sample: index_type,
+                    };
+                    prop_assert_eq!(error, unstamped);
                     return Ok(());
                 }
                 Err(error) => prop_assert!(false, "{error:?}"),
@@ -1386,6 +1503,7 @@ proptest! {
         prop_assert!(stamped);
         let start = last.expect("the last place gives the start");
         prop_assert_eq!(&start.places, &places);
+        prop_assert_eq!(start.set.groups(), [index]);
         let mut home = start.home;
         let opened = crate::hub::Reply::Opened { live: 7 };
         let opened = crate::hub::tests::encode_reply(opened);
@@ -1409,7 +1527,7 @@ proptest! {
     ) {
         places[0].data_type = "timestamp".parse().unwrap();
         let count = u32::try_from(places.len()).unwrap();
-        let reply = Places { count, index: 0 };
+        let reply = Places { count };
         let mut reader = Reader::new(Mode::Complete);
         reader.decode(Some(&encode_places(reply)))?;
         let messages: Vec<_> = place::messages(&places, max).collect();

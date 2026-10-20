@@ -163,13 +163,15 @@ enum Read {
 }
 
 /// Shows the answer `status` with `body` of InfluxDB at `at` as the run's error.
-/// Gives whether the token is the cause.
+/// Gives [`Read::Token`] when the token is the cause.
 fn answered(
     ctx: &Context<Config>,
     at: &Authority,
     status: StatusCode,
     body: &[u8],
-) -> bool {
+) -> Option<Read> {
+    // An empty port names no port.
+    let at = at.as_str().strip_suffix(':').unwrap_or(at.as_str());
     let text = String::from_utf8_lossy(body);
     let text = text.trim();
     let token = matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN);
@@ -177,13 +179,13 @@ fn answered(
         ctx.error(&format_args!(
             "InfluxDB at {at} answered {status}. Check the token {source}: {text}"
         ));
-        return true;
+        return Some(Read::Token);
     }
     ctx.error(&format_args!(
         "InfluxDB at {at} answered {status}: {text}{}",
         fix(status)
     ));
-    false
+    None
 }
 
 /// Sends `body` until InfluxDB answers 204. Shows each other answer as the run's
@@ -236,7 +238,7 @@ async fn send(
                 Some((status, body)) => {
                     let at =
                         uri.authority().expect("invariant: a write URI has a host");
-                    answered(ctx, at, status, &body).then_some(Read::Token)
+                    answered(ctx, at, status, &body)
                 }
                 None => read,
             }
