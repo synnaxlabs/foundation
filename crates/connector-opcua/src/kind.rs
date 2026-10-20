@@ -100,13 +100,14 @@ impl kind::Kind for Kind {
     /// source timestamp, or its server timestamp when that is earlier or the source
     /// timestamp is absent. The run maps the clock of the server to mesh time from a
     /// read of its current time at the start, each 10 s, and at once when a server
-    /// timestamp is after the arrival of its change. One frame holds the changes of one
-    /// device time, one value per channel. The queue of each node in the server holds
-    /// the samples of two publishing intervals, or of two round trips of the first
-    /// read when they are longer. A change after values that the server dropped from
-    /// a full queue adds 1 to `missed`. When the server answers the subscribe with
-    /// `BadServiceUnsupported` or `BadNotImplemented`, the run polls as `polled` does
-    /// until the connect ends, and the note says so.
+    /// timestamp is after the arrival of its change, or the newest server timestamp of
+    /// the changes is older than that of the changes before. One frame holds the
+    /// changes of one device time, one value per channel. The queue of each node in the
+    /// server holds the samples of two publishing intervals, or of two round trips of
+    /// the first read when they are longer. A change after values that the server
+    /// dropped from a full queue adds 1 to `missed`. When the server answers the
+    /// subscribe with `BadServiceUnsupported` or `BadNotImplemented`, the run polls as
+    /// `polled` does until the connect ends, and the note says so.
     ///
     /// Each tick of `polled` writes one frame stamped at the midpoint of the read.
     /// When 10 s pass with no read, the run reads the state of the server to check

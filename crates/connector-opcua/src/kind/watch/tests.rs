@@ -81,7 +81,7 @@ fn the_device_time_is_the_source_timestamp_unless_it_is_absent_or_later() {
         change(1, Some(5 * S), None),
     ];
     let fitted = drive.take(&changes, &mut exact(), stamp(1_000 * S), &reads());
-    assert_eq!(fitted.expect("each has a timestamp"), Fitted::Kept);
+    assert!(!fitted.expect("each has a timestamp"));
     let at: Vec<_> = drive.entries.iter().map(|entry| entry.at).collect();
     let device = |seconds| device(stamp(seconds * S)).expect("in the map");
     assert_eq!(at, [5, 6, 6, 6, 5].map(device));
@@ -134,7 +134,26 @@ fn a_server_timestamp_after_the_arrival_restarts_the_fit() {
     let mut fit = exact();
     let late = [change(0, Some(S), Some(2_000 * S))];
     let fitted = drive.take(&late, &mut fit, stamp(1_001 * S), &reads());
-    assert_eq!(fitted.expect("has a timestamp"), Fitted::Restarted);
+    assert!(fitted.expect("has a timestamp"));
+}
+
+#[test]
+fn a_newest_server_timestamp_older_than_the_last_asks_for_a_read() {
+    let mut drive = Drive::new(2);
+    let mut fit = exact();
+    let mut take = |server: &[Option<i64>]| {
+        let changes: Vec<_> = (server.iter().enumerate())
+            .map(|(index, &server)| change(index, Some(S), server))
+            .collect();
+        let taken = drive.take(&changes, &mut fit, stamp(1_000 * S), &reads());
+        taken.expect("each has a timestamp")
+    };
+    assert!(!take(&[Some(5 * S), Some(3 * S)]));
+    assert!(!take(&[None, None]));
+    assert!(!take(&[Some(2 * S), Some(5 * S)]));
+    assert!(take(&[Some(4 * S), Some(2 * S)]));
+    assert!(!take(&[Some(4 * S), None]));
+    assert!(!take(&[Some(6 * S), Some(6 * S)]));
 }
 
 #[test]
@@ -143,7 +162,7 @@ fn each_overflow_counts() {
     let mut changes = [change(0, Some(S), Some(S)), change(1, Some(S), Some(S))];
     changes[1].overflow = true;
     let taken = drive.take(&changes, &mut exact(), stamp(1_000 * S), &reads());
-    assert_eq!(taken.expect("each has a timestamp"), Fitted::Kept);
+    assert!(!taken.expect("each has a timestamp"));
     assert_eq!(drive.overflows, 1);
 }
 

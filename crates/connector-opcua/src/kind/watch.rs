@@ -25,10 +25,10 @@ const READ: Span = Span::from_nanos(10 * Span::SECOND.nanos());
 /// The offset of the map of [`device`]: 2^62 ns, about 146 years.
 const OFFSET: i64 = 1 << 62;
 
-/// Subscribes to each node of the reads of `ctx` at the rate of `ctx`, and writes
-/// each change until the cancel. It reads the current time of the server first, then
-/// each [`READ`], and at once when a server timestamp disagrees with the fit. When
-/// the server answers the subscribe with `BadServiceUnsupported` or
+/// Subscribes to each node of the reads of `ctx` at the rate of `ctx`, and writes each
+/// change until the cancel. It reads the current time of the server first, then each
+/// [`READ`], and at once when a server timestamp disagrees with the fit or goes back.
+/// When the server answers the subscribe with `BadServiceUnsupported` or
 /// `BadNotImplemented`, it polls as `polled = true` does, with a note.
 ///
 /// # Errors
@@ -87,9 +87,9 @@ pub(super) async fn run(
             }
         };
         let arrived = clock.mesh.now();
-        let fitted = drive.take(changes, &mut clock.fit, arrived, reads)?;
+        let unsure = drive.take(changes, &mut clock.fit, arrived, reads)?;
         missed.add(drive.overflows);
-        if fitted == Fitted::Restarted || ctx.clock().now() >= due {
+        if unsure || ctx.clock().now() >= due {
             clock.read(client).await?;
             due = ctx.clock().now() + READ;
         }
@@ -201,6 +201,8 @@ struct Drive {
     slots: Vec<Option<usize>>,
     /// The device time of the next value of each read, in the order of `entries`.
     next: Vec<Option<Monotonic>>,
+    /// The device time of the newest server timestamp of the last drive with one.
+    newest: Option<Monotonic>,
     /// The count of changes with an overflow.
     overflows: u64,
 }
@@ -227,12 +229,15 @@ impl Drive {
             entries: Vec::new(),
             slots: vec![None; reads],
             next: vec![None; reads],
+            newest: None,
             overflows: 0,
         }
     }
 
     /// Takes `changes`, which arrived before mesh time `arrived`, and adds each server
-    /// timestamp to `fit`. Gives [`Fitted::Restarted`] when one of them restarted it.
+    /// timestamp to `fit`. Gives whether `fit` needs a read of the current time: one
+    /// of them restarted it, or the newest of them is older than the newest of the
+    /// last drive with one, as from a clock that went back.
     ///
     /// # Errors
     ///
@@ -244,16 +249,15 @@ impl Drive {
         fit: &mut Fit,
         arrived: Stamp,
         reads: &[Read],
-    ) -> Result<Fitted, Error> {
+    ) -> Result<bool, Error> {
         self.entries.clear();
         self.overflows = 0;
-        let mut fitted = Fitted::Kept;
+        let (mut unsure, mut newest) = (false, None);
         for (order, change) in changes.iter().enumerate() {
             let server = timestamp(change.server);
-            if let Some(server) = server
-                && fit.before(server, arrived) == Fitted::Restarted
-            {
-                fitted = Fitted::Restarted;
+            if let Some(server) = server {
+                unsure |= fit.before(server, arrived) == Fitted::Restarted;
+                newest = newest.max(Some(server));
             }
             let at = match (timestamp(change.source), server) {
                 (Some(source), Some(server)) => source.min(server),
@@ -274,7 +278,11 @@ impl Drive {
                 held: Stamp::EPOCH,
             });
         }
-        Ok(fitted)
+        if newest.is_some() {
+            unsure |= newest < self.newest;
+            self.newest = newest;
+        }
+        Ok(unsure)
     }
 
     /// Sorts the entries by device time, then read, then arrival, and sets the hold

@@ -2024,11 +2024,11 @@ fn writes_each_change_at_its_time_after_the_server_clock_jumps_ahead() {
     assert_at_their_time(&outcome, offset.load(Ordering::Relaxed));
 }
 
-/// A server clock that jumps 1 min back: the change before the next read of the
-/// current time maps before the last stamp, so it takes the stamp 1 ns after it, and
-/// the change after that read is at its true time.
+/// A server clock that jumps 1 min back between two changes: the server timestamp of
+/// the second is older than that of the first, so the kind reads the current time at
+/// once, and each change stays at its true time, not 1 ns after the last stamp.
 #[test]
-fn writes_a_change_after_the_last_stamp_once_the_server_clock_jumps_back() {
+fn writes_each_change_at_its_time_after_the_server_clock_jumps_back() {
     let offset = Arc::new(AtomicI64::new(0));
     let mesh = Arc::clone(&offset);
     let outcome = watch(Setup::three(), |scene| async move {
@@ -2050,13 +2050,9 @@ fn writes_a_change_after_the_last_stamp_once_the_server_clock_jumps_back() {
     assert_eq!(keys(frames), vec![vec![1, 2, 3, 4]; 4]);
     let stamps: Vec<_> = frames.iter().map(|frame| stamp(frame, 1)).collect();
     let first = changed(&outcome, A, offset.load(Ordering::Relaxed));
-    for at in [0, 1, 3] {
-        assert!(
-            (stamps[at] - first[at].1).abs() <= FIT,
-            "{stamps:?} {first:?}"
-        );
+    for (stamp, (_, at)) in stamps.iter().zip(&first) {
+        assert!((stamp - at).abs() <= FIT, "{stamps:?} {first:?}");
     }
-    assert_eq!(stamps[2], stamps[1] + 1);
 }
 
 /// A first value whose source timestamp is 1 h old takes the stamp 1 ns after the
