@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use document::diagnostic::{Code, Diagnostic, Note};
 use document::schema::{self, Body, Presence};
 use document::value::{Kind, Value};
-use document::{Attribute, Block, Document, Label, Map, read};
+use document::{Block, Document, read};
 use types::ed25519::PublicKey;
 use types::name::Name;
 
@@ -209,33 +209,10 @@ fn alarms(document: &Document) -> Vec<Diagnostic> {
 /// The `node` block that pins `public_key` at `address`. [`decode`] reads it back, with
 /// the flow label of a V6 address as 0.
 #[must_use]
-#[expect(
-    clippy::missing_panics_doc,
-    reason = "a map of one attribute has no repeated key"
-)]
 pub fn node(address: SocketAddr, public_key: PublicKey) -> Block {
-    let attribute = Attribute {
-        key: "public_key".into(),
-        key_span: None,
-        value: Value {
-            kind: Kind::String(openssh::line(public_key).into()),
-            span: None,
-        },
-    };
-    Block {
-        keyword: NODE.keyword.into(),
-        keyword_span: None,
-        labels: vec![Label {
-            text: address.to_string().into(),
-            span: None,
-        }],
-        body: Document {
-            attributes: Map::new(vec![attribute])
-                .expect("invariant: each key is written once"),
-            blocks: Vec::new(),
-        },
-        span: None,
-    }
+    let key = crate::string(&openssh::line(public_key));
+    let address = address.to_string();
+    crate::block(NODE.keyword, &address, vec![("public_key", key)])
 }
 
 /// The address and the public key of a `node` block, or `None` with each problem in
