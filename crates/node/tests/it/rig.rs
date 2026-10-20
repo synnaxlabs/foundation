@@ -151,6 +151,27 @@ impl Rig {
         node.exit(&self.clock, PATIENCE, "the node exits at SIGTERM")
     }
 
+    /// Stops the node of [`Rig::start`] with SIGSTOP, as a loaded host stalls it, until
+    /// [`Rig::resume`]. Panics when no node runs.
+    #[cfg(unix)]
+    pub(crate) fn pause(&self) {
+        self.node
+            .as_ref()
+            .expect("a node runs")
+            .process
+            .signal("STOP");
+    }
+
+    /// Lets the node of [`Rig::pause`] go on with SIGCONT. Panics when no node runs.
+    #[cfg(unix)]
+    pub(crate) fn resume(&self) {
+        self.node
+            .as_ref()
+            .expect("a node runs")
+            .process
+            .signal("CONT");
+    }
+
     /// Kills the node of [`Rig::start`] with SIGKILL, as a crash ends it, and waits
     /// for it to exit. Panics when no node runs.
     pub(crate) fn kill(&mut self) {
@@ -650,9 +671,16 @@ impl Process {
     /// Sends SIGTERM to the command. Panics when `kill` fails.
     #[cfg(unix)]
     pub(crate) fn term(&self) {
+        self.signal("TERM");
+    }
+
+    /// Sends the signal `name`, such as `STOP`, to the command. Panics when `kill`
+    /// fails.
+    #[cfg(unix)]
+    fn signal(&self, name: &str) {
         let pid = self.0.id().to_string();
-        let sent = Command::new("kill").arg(&pid).status().expect("run kill");
-        assert!(sent.success(), "send SIGTERM to {pid}");
+        let sent = Command::new("kill").args(["-s", name, &pid]).status();
+        assert!(sent.expect("run kill").success(), "send SIG{name} to {pid}");
     }
 
     /// Only Linux: only tests on Linux call it. The exit status of the command, or

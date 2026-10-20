@@ -89,14 +89,18 @@ fn with_token(source: &str) -> String {
     hcl
 }
 
-/// A running node on the config that `hcl` gives, with `INFLUX_TOKEN` set to `t0ken`,
-/// which pushes to an InfluxDB that takes only `t0ken`. No config applies yet.
-fn create_token_plant(hcl: impl FnOnce(&Rig) -> String) -> Plant {
+/// A running node on `edit` of the config with the token that `source` gives, with
+/// `INFLUX_TOKEN` set to `t0ken`, which pushes to an InfluxDB that takes only
+/// `t0ken`. No config applies yet.
+fn create_token_plant(
+    source: impl FnOnce(&Rig) -> String,
+    edit: fn(&str) -> String,
+) -> Plant {
     let mut opcua = Opcua::default();
     let mut influx = Influx::taking("t0ken");
     let mut rig = Rig::new();
     rig.var("INFLUX_TOKEN", "t0ken");
-    let hcl = hcl(&rig);
+    let hcl = edit(&with_token(&source(&rig)));
     rig.config(&served(&hcl, opcua.serve(), influx.serve()));
     Plant::start(rig, opcua, influx)
 }
@@ -864,49 +868,101 @@ fn a_polled_bad_value_is_left_out_and_counted() {
 }
 
 /// A subscription leaves out each change that is Bad or Uncertain, and counts it in
-/// `bad` or `uncertain`, or in `missed` when the queue of the server drops it.
+/// `bad` or `uncertain`.
 #[test]
 fn a_bad_value_is_left_out_and_counted() {
+    left_out_and_counted(false);
+}
+
+/// As [`a_bad_value_is_left_out_and_counted`], with the node stopped for most of the
+/// Bad changes, so that the queue of the server drops changes and `missed` counts each
+/// overflow, which holds more than one change.
+#[test]
+fn a_bad_value_is_counted_after_a_stall() {
+    left_out_and_counted(true);
+}
+
+/// The reads of `served` whose value differs from the read before, with `quality`.
+fn changes_to(served: &[Sample], quality: Quality) -> u64 {
+    let steps = (served.windows(2)).filter(|pair| {
+        matches!(pair, [a, b] if a.value.to_bits() != b.value.to_bits()
+            && b.quality == Some(quality))
+    });
+    u64::try_from(steps.count()).expect("a few")
+}
+
+/// Changes the value 20 times Bad, 10 times Uncertain, and once Good, with the node
+/// stopped for the last 17 Bad changes when `stalled`, and asserts the counts of `plc`
+/// and the samples that InfluxDB holds.
+fn left_out_and_counted(stalled: bool) {
     let plant = create_plant(QUALITY);
     let [(variable, channel)] = VARIABLES[..1] else {
         panic!("one variable");
     };
     first_stored(&plant, &VARIABLES[..1]);
-    // Unequal steps, so that a swap of the two counts fails.
-    plant.opcua.change(TICKS, BAD);
+    // An overflow keeps the newest change, so a wait for a count after each phase holds
+    // with a correct kind. Unequal steps, so that a swap of the two counts fails.
+    let counted = |key: &str| {
+        plant.rig.wait("`plc` counts the phase", || {
+            match count(&plant.rig.status(), "plc", key) {
+                Some(counted) if counted > 0 => Ok(()),
+                counted => Err(format!("{key} {counted:?}")),
+            }
+        });
+    };
+    if stalled {
+        plant.opcua.change(3, BAD);
+        plant.rig.pause();
+        plant.opcua.change(TICKS - 3, BAD);
+        plant.rig.resume();
+    } else {
+        plant.opcua.change(TICKS, BAD);
+    }
+    counted("bad");
     plant.opcua.change(TICKS / 2, UNCERTAIN);
-    let last = f64::from(u32::try_from(TICKS + TICKS / 2).expect("a few"));
-    // The status comes before the reads, so that the reads hold each counted change.
+    counted("uncertain");
+    // A Good last step, so that InfluxDB holds it only after each change before it.
+    plant.opcua.change(1, Quality::GOOD);
+    let last = f64::from(u32::try_from(TICKS + TICKS / 2 + 1).expect("a few"));
     let (counts, steps) = plant.rig.wait("`plc` counts each change", || {
+        let stored = plant.influx.stored().remove(channel).unwrap_or_default();
         let status = plant.rig.status();
         let counts = ["bad", "uncertain", "missed"]
             .map(|key| count(&status, "plc", key).unwrap_or_default());
         let served = &plant.opcua.served()[variable];
-        let steps = [BAD, UNCERTAIN].map(|quality| {
-            let steps = (served.windows(2)).filter(|pair| {
-                matches!(pair, [a, b] if a.value.to_bits() != b.value.to_bits()
-                    && b.quality == Some(quality))
-            });
-            u64::try_from(steps.count()).expect("a few")
-        });
+        let steps = [BAD, UNCERTAIN].map(|quality| changes_to(served, quality));
         let [bad, uncertain, missed] = counts;
-        let sampled = served
+        let held = stored
             .last()
-            .is_some_and(|read| read.value.to_bits() == last.to_bits());
-        if sampled && bad + uncertain + missed >= steps.iter().sum() {
+            .is_some_and(|sample| sample.value.to_bits() == last.to_bits());
+        if held && (missed > 0 || bad + uncertain >= steps.iter().sum()) {
             Ok((counts, steps))
         } else {
-            Err(format!("{counts:?} of the steps {steps:?}"))
+            Err(format!(
+                "{counts:?} of the steps {steps:?}, last held: {held}"
+            ))
         }
     });
     let [bad, uncertain, missed] = counts;
     assert!(
-        bad <= steps[0] && uncertain <= steps[1],
+        !stalled || missed > 0,
+        "the stall drops changes: {counts:?}"
+    );
+    let message = format!(
         "bad {bad} and uncertain {uncertain} of the steps {steps:?}, missed {missed}"
     );
+    if missed == 0 {
+        assert_eq!([bad, uncertain], steps, "{message}");
+    } else {
+        assert!(bad <= steps[0] && uncertain <= steps[1], "{message}");
+    }
     let stored = plant.influx.stored().remove(channel).unwrap_or_default();
     let values: Vec<_> = stored.iter().map(|sample| sample.value).collect();
-    assert_eq!(values, [0.0], "InfluxDB holds only the first value");
+    assert_eq!(
+        values,
+        [0.0, last],
+        "InfluxDB holds the first and the last value"
+    );
 }
 
 #[test]
@@ -1004,14 +1060,16 @@ fn a_wrong_endpoint_shows_in_status_and_heals() {
 
 #[test]
 fn a_token_from_the_environment_of_the_node_reaches_influxdb() {
-    let plant = create_token_plant(|_| with_token("env(\"INFLUX_TOKEN\")"));
+    let plant =
+        create_token_plant(|_| "env(\"INFLUX_TOKEN\")".to_owned(), str::to_owned);
     plant.rig.apply();
     first_stored(&plant, &VARIABLES);
 }
 
 #[test]
 fn a_plan_refuses_a_token_from_a_variable_that_the_node_does_not_set() {
-    let plant = create_token_plant(|_| with_token("env(\"PLANT_TOKEN\")"));
+    let plant =
+        create_token_plant(|_| "env(\"PLANT_TOKEN\")".to_owned(), str::to_owned);
     refuses_the_token(
         &plant.rig,
         "the secret env(\"PLANT_TOKEN\"): the environment variable PLANT_TOKEN of the \
@@ -1023,7 +1081,7 @@ fn a_plan_refuses_a_token_from_a_variable_that_the_node_does_not_set() {
 fn a_token_file_shows_its_fix_until_it_holds_the_token() {
     for named in [false, true] {
         let mut given = None;
-        let plant = create_token_plant(|rig| {
+        let source = |rig: &Rig| {
             let (source, path) = if named {
                 let path = rig.dir.join("foundation-data/data/secrets/plant.token");
                 ("secret(\"plant.token\")".to_owned(), path)
@@ -1031,10 +1089,10 @@ fn a_token_file_shows_its_fix_until_it_holds_the_token() {
                 let path = rig.dir.join("token");
                 (format!("file({:?})", path.display().to_string()), path)
             };
-            let hcl = polled(&with_token(&source));
-            given = Some((source, path));
-            hcl
-        });
+            given = Some((source.clone(), path));
+            source
+        };
+        let plant = create_token_plant(source, polled);
         let (source, path) = given.expect("the plant names its source");
         let shown = path.display();
         let hidden = if named {
