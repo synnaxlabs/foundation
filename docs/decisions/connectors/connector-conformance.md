@@ -99,7 +99,10 @@
      seed. The plan's duplication is not drawn: the sim never duplicates a TCP
      segment, so it reaches no kind of this suite. No run of the three kinds gives an
      error text near the bound (112 bytes at most, box1, at 2026-10-20): the check
-     holds each kind to the cut of 1024 bytes that the supervisor makes.
+     holds each kind to the cut of 1024 bytes that the supervisor makes. Until #3553,
+     a seed whose links fill the backlog of the device fails with the panic of the sim
+     at a full backlog, not for a defect of the connector. #3554 adds the nightly
+     range and the replay of a failed seed in CI.
 
   Scenario 7 (no secret in a status) comes in #2642. The
   numbers are tunable by the architect of `connector`. Plan of `laptop.architect-2` at
