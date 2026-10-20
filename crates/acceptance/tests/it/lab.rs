@@ -973,8 +973,9 @@ impl Lab {
     }
 
     /// What the Influx store at `address` holds for the samples of the [`Lab::write`]
-    /// to `channel`, folded by [`influx::stored`]. It runs the simulation until a read
-    /// of the spec at the node of the write ends.
+    /// to `channel`, folded by [`influx::stored`]. It runs the simulation in steps of
+    /// 100 ms until a read of the spec at the node of the write ends, so a live write
+    /// moves ahead by at least 100 ms.
     ///
     /// # Panics
     ///
@@ -1761,6 +1762,10 @@ fn a_write_at_the_last_host_started_stamps_true_time() {
     lab.stop();
 }
 
+/// Reads the clocks through the private `members`. With both offsets of `Truth::host`
+/// removed, `truth` of a write at a later host lags true time by the time the adds
+/// took, under 1 ms for three hosts. The open of a writer varies by more than that
+/// (-850 µs to +677 µs over seeds 0 to 15, box1), so no lab call shows the lag.
 #[test]
 fn each_host_clock_reads_the_same_time() {
     let mut lab = Lab::new(1);
