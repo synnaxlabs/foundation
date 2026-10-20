@@ -278,6 +278,38 @@ fn a_client_of_an_address_that_no_node_reads_is_unreachable() {
     );
 }
 
+#[test]
+fn answering_gives_the_node_that_local_gives_and_a_client_connects_to_it() {
+    let mut rig = Rig::new();
+    rig.start();
+    let (node, subject) = admin(&rig);
+    let answering = Node::answering(node.addresses.clone()).unwrap();
+    assert_eq!(
+        (&answering.addresses, answering.public_key),
+        (&node.addresses, node.public_key)
+    );
+    let client = Client::connect(&answering, subject).unwrap();
+    assert_eq!(client.close(), Ok(()));
+    rig.stop();
+}
+
+#[test]
+fn answering_of_an_address_that_no_node_reads_is_unreachable() {
+    #[expect(clippy::disallowed_methods, reason = "a socket that never reads")]
+    let silent = std::net::UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
+    let address = silent.local_addr().unwrap();
+    let error = Node::answering(vec![address]).unwrap_err();
+    let unreachable = transport::Error::Unreachable {
+        peer: None,
+        attempts: vec![(transport::Address::Udp(address), transport::Error::TimedOut)]
+            .into_boxed_slice(),
+    };
+    assert_eq!(
+        error,
+        Error::Session(program::Error::Transport(unreachable))
+    );
+}
+
 /// A writer of the defaults writes values with the node's stamp, values with their own
 /// stamp, and series with their stamps, in any order of places, and a reader gets each
 /// frame in order once the close returns. Its places are its channels in their order,

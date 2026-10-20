@@ -100,6 +100,69 @@ impl Node {
         });
         Ok((node, subject))
     }
+
+    /// The node that answers first at `addresses`, dialed in this order with a
+    /// stagger, with the public key that it proves. Blocks until a node answers.
+    /// Trust on first use: nothing proves that it is the node the caller means, so the
+    /// caller pins the result and gives it to each later [`Client::connect`]. It sends
+    /// no hello, so it needs no subject.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Thread`] when the thread that dials cannot start, [`Error::Bind`] when
+    /// the local UDP socket cannot bind, [`Error::Session`] with
+    /// [`program::Error::Transport`] when the dial or the handshake fails, and
+    /// [`Error::Panicked`]. No address is unreachable with no attempt.
+    #[expect(
+        clippy::missing_panics_doc,
+        clippy::unwrap_in_result,
+        reason = "a shard that did not panic sent its key"
+    )]
+    pub fn answering(addresses: Vec<SocketAddr>) -> Result<Self, Error> {
+        let dialed: Vec<_> = addresses
+            .iter()
+            .copied()
+            .map(transport::Address::Udp)
+            .collect();
+        let (sender, key) = mpsc::channel();
+        let shard = shard(move |tasks| async move {
+            sender
+                .send(answered(&dialed, tasks).await)
+                .expect("invariant: `answering` keeps the receiver");
+        })?;
+        shard.join().map_err(|_panicked| Error::Panicked)?;
+        let public_key = key
+            .try_recv()
+            .expect("invariant: a shard that did not panic sent its key")?;
+        Ok(Self {
+            addresses,
+            public_key,
+        })
+    }
+}
+
+/// The public key of the node that answers first at `addresses`, on the drivers of
+/// `os` and `tasks`. Closes the session with code 0 and waits for its end.
+async fn answered(
+    addresses: &[transport::Address],
+    tasks: Tasks,
+) -> Result<PublicKey, Error> {
+    let transport = transport::Client::new(transport::client::Config {
+        net: os::net(),
+        clock: os::clock(),
+        entropy: os::entropy(),
+        tasks,
+        pool: Rc::new(block::Pool::heap(POOL)),
+    })
+    .map_err(Error::Bind)?;
+    let session = transport.dial_any(addresses).await;
+    let session = session.map_err(|e| Error::Session(program::Error::Transport(e)))?;
+    let transport::Peer::Node(public_key) = session.peer() else {
+        unreachable!("invariant: the dialed side always proves a node key");
+    };
+    session.close(transport::Code(0));
+    session.closed().await;
+    Ok(public_key)
 }
 
 /// The error of [`Node::local`] whose `os::stored` failed.
@@ -160,6 +223,19 @@ pub struct Subject {
     pub name: Name,
     /// A private key that the spec lists for the subject.
     pub private_key: PrivateKey,
+}
+
+/// Gives a new Ed25519 private key, from the randomness of the OS.
+#[must_use]
+pub fn private_key() -> PrivateKey {
+    drawn(&os::entropy())
+}
+
+/// A private key of 32 bytes of `entropy`.
+fn drawn(entropy: &env::entropy::Entropy) -> PrivateKey {
+    let mut bytes = [0; 32];
+    entropy.fill(&mut bytes);
+    PrivateKey(bytes)
 }
 
 /// A program's session with one node. It can move to and be shared between threads:

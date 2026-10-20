@@ -18,6 +18,24 @@ fn a_client_moves_to_and_is_shared_between_threads() {
     shared::<Client>();
 }
 
+/// The entropy of a simulated node of the default seed: the same bytes each time.
+fn fixed() -> env::entropy::Entropy {
+    let mut sim = sim::Sim::new(sim::Config::default());
+    sim.node(sim::node::Config::default()).entropy()
+}
+
+#[test]
+fn a_private_key_is_the_first_32_bytes_of_the_entropy() {
+    let mut bytes = [0; 32];
+    fixed().fill(&mut bytes);
+    assert_eq!(drawn(&fixed()).0, bytes);
+}
+
+#[test]
+fn each_private_key_is_new() {
+    assert_ne!(private_key().0, private_key().0);
+}
+
 #[test]
 fn the_pool_holds_a_datagram() {
     let pool = block::Pool::heap(POOL);
@@ -337,6 +355,34 @@ fn a_client_of_port_0_is_unroutable() {
 #[test]
 fn a_client_of_a_node_with_no_address_is_unreachable_with_no_attempt() {
     unreachable(vec![], &transport::Error::Unroutable);
+}
+
+/// Asks for the node at `addresses`, and checks that the error names each one with
+/// `cause`.
+fn none_answering(addresses: Vec<SocketAddr>, cause: &transport::Error) {
+    let attempts = addresses
+        .iter()
+        .map(|&address| (transport::Address::Udp(address), cause.clone()))
+        .collect();
+    let error = Node::answering(addresses).expect_err("no node answers");
+    let unreachable = transport::Error::Unreachable {
+        peer: None,
+        attempts,
+    };
+    assert_eq!(
+        error,
+        Error::Session(program::Error::Transport(unreachable))
+    );
+}
+
+#[test]
+fn answering_of_port_0_is_unroutable() {
+    none_answering(vec![port_0()], &transport::Error::Unroutable);
+}
+
+#[test]
+fn answering_of_no_address_is_unreachable_with_no_attempt() {
+    none_answering(vec![], &transport::Error::Unroutable);
 }
 
 #[test]
