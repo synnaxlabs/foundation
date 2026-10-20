@@ -179,9 +179,9 @@ mod tests {
         testing::run(1, |shard| {
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
             pair.dial(pair::SERVER_KEY.public());
-            // The client connects at 47 ms, after a retry. Its first MTU probe
-            // returns at 67 ms.
-            pair.run(Duration::from_millis(50));
+            // The pacer sends the second Initial of the ClientHello at 8 ms. The client
+            // connects at 28 ms, and its first MTU probe returns at 48 ms.
+            pair.run(Duration::from_millis(40));
             let mut client = datagrams(&mut pair.client);
             // The first MTU, less a short header (1 + 8 + 4 + 16) and the frame
             // header (9).

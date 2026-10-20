@@ -182,9 +182,11 @@ pub fn line(key: PublicKey) -> String {
 /// other parts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unreadable {
-    /// It is not an OpenSSH private key file as `ssh-keygen` writes it: it does not
-    /// start `-----BEGIN OPENSSH PRIVATE KEY-----`, or it breaks the format in a way
-    /// that OpenSSH reads, as [`private_key`] says.
+    /// It is not an OpenSSH private key file as `ssh-keygen` writes it: its first line
+    /// that starts `-----BEGIN ` at the start of the text or after a `\n` is not
+    /// `-----BEGIN OPENSSH PRIVATE KEY-----`, the text before that line holds a NUL, no
+    /// end mark follows that line, or it breaks the format in a way that OpenSSH reads,
+    /// as [`private_key`] says.
     Format,
     /// The key is of another algorithm: its name, or `ECDSA` for an ECDSA key.
     Algorithm(&'static str),
@@ -254,22 +256,20 @@ impl fmt::Display for Unreadable {
 
 /// Reads the OpenSSH private key file of an Ed25519 key with no passphrase, as
 /// `ssh-keygen -t ed25519 -N ""` and [`key_file`] write it. It reads each such file
-/// that starts with the begin mark and that `ssh-key` 0.6.7 reads, also one with a body
-/// of any width or with white space, any bytes on the lines after the end mark, CRLF
-/// line ends, or no line end after the end mark. It refuses some files that OpenSSH
-/// reads: a comment that is not UTF-8 ([`Unreadable::Comment`]), and, as
-/// [`Unreadable::Format`], padding of a block or more, options of the `none` KDF, and a
-/// NUL in the body. The comment is not kept.
+/// that `ssh-key` 0.6.7 reads, also one with a body of any width or with white space,
+/// any bytes on the lines after the end mark, CRLF line ends, or no line end after the
+/// end mark. It refuses some files that OpenSSH reads: a comment that is not UTF-8
+/// ([`Unreadable::Comment`]), and, as [`Unreadable::Format`], padding of a block or
+/// more, options of the `none` KDF, and a NUL in the body. The comment is not kept.
 ///
 /// # Errors
 ///
 /// [`Unreadable`] says why `file` is not such a file. A byte up to the line end of the
 /// end mark that is not UTF-8 gives [`Unreadable::Format`].
 pub fn private_key(file: &[u8]) -> Result<PrivateKey, Unreadable> {
-    let Ok(text) = std::str::from_utf8(marked(file)) else {
+    let Some(text) = std::str::from_utf8(marked(file)).ok().and_then(lines) else {
         return Err(Unreadable::Format);
     };
-    let text = lines(text);
     let file = match ssh_key::PrivateKey::from_openssh(&text) {
         Ok(file) => file,
         // With no `ecdsa` feature, `ssh-key` reads no ECDSA private key.
@@ -307,10 +307,22 @@ pub fn private_key(file: &[u8]) -> Result<PrivateKey, Unreadable> {
     Ok(key)
 }
 
-/// `file` up to the end of the line of its end mark, or all of `file` with no end mark.
+/// `file` up to the end of the line of the end mark that [`lines`] takes, or all of
+/// `file` with no begin mark or no end mark.
 fn marked(file: &[u8]) -> &[u8] {
-    let mut start = 0;
-    for line in file.split(|byte| *byte == b'\n') {
+    let begin = if file.starts_with(b"-----BEGIN ") {
+        0
+    } else {
+        match file
+            .windows(12)
+            .position(|window| window == b"\n-----BEGIN ")
+        {
+            Some(newline) => newline + 1,
+            None => return file,
+        }
+    };
+    let mut start = begin;
+    for line in file[begin..].split(|byte| *byte == b'\n' || *byte == b'\r') {
         start += line.len();
         if line.starts_with(b"-----END") {
             return &file[..start];
@@ -320,18 +332,33 @@ fn marked(file: &[u8]) -> &[u8] {
     file
 }
 
-/// `text` up to its end mark as `ssh-key` takes it: the body with no white space, in
-/// lines of 70 characters, and each line end as `\n`. `ssh-key` 0.6.7 reads only lines
-/// of 70, as `ssh-keygen` writes them, and OpenSSH reads any width, skips white space
-/// in the body as C `isspace` finds it, and skips the text after the end mark.
-fn lines(text: &str) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    let end = lines.iter().position(|line| line.starts_with("-----END"));
-    let Some([begin, body @ .., end]) = end.map(|end| &lines[..=end]) else {
-        return text.to_owned();
+/// `text` from its begin mark to its end mark as `ssh-key` takes it: the body with no
+/// white space, in lines of 70 characters, and each line end (`\n`, `\r\n`, or `\r`)
+/// as `\n`. `ssh-key` 0.6.7 takes a begin mark only at the start of the text or after
+/// a `\n`, skips the text before it when it holds no NUL, and reads only lines of 70,
+/// as `ssh-keygen` writes them. OpenSSH reads any width, skips white space in the body
+/// as C `isspace` finds it, and skips the text after the end mark. `None` when the text
+/// before the begin mark holds a NUL, or no end mark follows a begin mark.
+fn lines(text: &str) -> Option<String> {
+    let start = if text.starts_with("-----BEGIN ") {
+        0
+    } else {
+        text.find("\n-----BEGIN ")? + 1
     };
+    if text[..start].contains('\0') {
+        return None;
+    }
+    let mut lines = text[start..].split(['\n', '\r']);
+    let begin = lines.next()?;
     let space = |c: &char| c.is_ascii_whitespace() || *c == '\x0b';
-    let body: Vec<char> = body.concat().chars().filter(|c| !space(c)).collect();
+    let mut body = Vec::new();
+    let end = loop {
+        let line = lines.next()?;
+        if line.starts_with("-----END") {
+            break line;
+        }
+        body.extend(line.chars().filter(|c| !space(c)));
+    };
     let mut file = format!("{begin}\n");
     for line in body.chunks(70) {
         file.extend(line);
@@ -339,7 +366,7 @@ fn lines(text: &str) -> String {
     }
     file.push_str(end);
     file.push('\n');
-    file
+    Some(file)
 }
 
 /// Whether the public key of `file`, as [`lines`] gives it, is an ECDSA key.
