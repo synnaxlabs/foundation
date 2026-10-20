@@ -92,6 +92,11 @@ class Stamps:
         self.next = time.time_ns() + 1_000_000_000
         self.dtype = dtype
 
+    def one(self) -> int:
+        """The next stamp."""
+        self.next += 1
+        return self.next - 1
+
     def take(self, samples: int) -> np.ndarray:
         """The next `samples` stamps."""
         stamps = np.arange(self.next, self.next + samples, dtype=np.int64)
@@ -163,17 +168,23 @@ def round_trips(client: foundation.Client) -> None:
 
 def indexes(client: foundation.Client) -> None:
     """Prints the round trip and the part of `write` and of `write_series` of one place
-    in each of two indexes."""
+    in each of two indexes. Each call gives the stamps of both groups: the node refuses
+    a stamp of `w.time` that is not after the stamps that `round_trips` gave."""
     random = np.random.default_rng(3320)
     with client.open_writer([channel(0), "v.a"], on_loss="ignore") as writer:
-        values = {channel(0): 1.5, "v.a": 2.5}
-        times = timed(lambda: writer.write(values), SENDS)
-        part = ranged(writer, lambda: writer.write(values))
+        w, v = Stamps(), Stamps()
+
+        def write() -> None:
+            writer.write(
+                {channel(0): 1.5, "w.time": w.one(), "v.a": 2.5, "v.time": v.one()}
+            )
+
+        times = timed(write, SENDS)
+        part = ranged(writer, write)
         print(
             f"write, 2 indexes: round trip p50 {p50(times):.1f}, p99 "
             f"{p99(times):.1f}; before the send {part}"
         )
-        w, v = Stamps(), Stamps()
         for samples in SAMPLES:
             if 4 * samples * 8 > LARGEST:
                 continue
