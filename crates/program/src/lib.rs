@@ -553,14 +553,27 @@ pub enum Error {
     /// The node gave no place for `0`, a channel of the open. The stream stops with
     /// code `MALFORMED`.
     Unplaced(Name),
-    /// [`Writer::write`] cannot send a frame: it holds no sample, or it is of
-    /// [`write::Time::Node`] and is encoded or holds more than one sample. Nothing was
-    /// sent, and the writer goes on.
+    /// [`Writer::write`] cannot send a frame: it holds no series, a group of it holds no
+    /// sample, or it is of [`write::Time::Node`] and is encoded or a group of it holds
+    /// more than one sample. Nothing was sent, and the writer goes on.
     Unsent {
-        /// The samples of each series of the frame.
+        /// The samples of each series of the first group that it refuses, or 0 for a
+        /// frame of no series.
         count: u32,
         /// The form of the frame.
         form: Form,
+    },
+    /// Two series of one group of [`Writer::draft`] hold two counts. Nothing was taken,
+    /// and the writer goes on.
+    Count {
+        /// The lowest place of the group's series.
+        place: usize,
+        /// Its count.
+        count: u32,
+        /// The lowest place of the group whose count is not `count`.
+        other: usize,
+        /// Its count.
+        other_count: u32,
     },
     /// Each group that it names ended with a frame that its home took and whose
     /// `Stored` did not come, so that frame may not be on disk. Each item is the place
@@ -612,13 +625,23 @@ impl fmt::Display for Error {
                 f,
                 "the node gave no place for the channel {name} of the open"
             ),
-            Self::Unsent { count: 0, .. } => {
-                f.write_str("the frame holds no sample, so it was not sent")
-            }
+            Self::Unsent { count: 0, .. } => f.write_str(
+                "the frame or a group of it holds no sample, so it was not sent",
+            ),
             Self::Unsent { count, form } => write!(
                 f,
                 "a frame that the node stamps holds 1 sample in the raw form, not \
                  {count} in the {form:?} form, so it was not sent"
+            ),
+            Self::Count {
+                place,
+                count,
+                other,
+                other_count,
+            } => write!(
+                f,
+                "places {place} and {other} are of one index but hold {count} and \
+                 {other_count} samples"
             ),
             Self::Unstored(groups) => {
                 f.write_str(

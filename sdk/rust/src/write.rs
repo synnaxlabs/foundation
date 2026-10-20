@@ -327,8 +327,9 @@ struct Frame {
     count: u32,
     /// The places, start in `bytes`, and length of each series.
     parts: Vec<(Part, usize, usize)>,
-    /// The place and length of each series, in place order, as `Layout` takes them.
-    series: Vec<(usize, usize)>,
+    /// The place, count, and length of each series, in place order, as
+    /// `Writer::draft` takes them.
+    series: Vec<(usize, u32, usize)>,
     bytes: Vec<u8>,
 }
 
@@ -369,7 +370,8 @@ impl Frame {
         self.parts
             .sort_unstable_by_key(|&(part, _, _)| (part.node, part.place));
         self.series.clear();
-        let series = self.parts.iter().map(|&(part, _, len)| (part.node, len));
+        let count = self.count;
+        let series = (self.parts.iter()).map(|&(part, _, len)| (part.node, count, len));
         self.series.extend(series);
     }
 }
@@ -402,7 +404,7 @@ pub(crate) async fn served(session: program::Session, bytes_max: usize, open: Op
         }
     };
     // The writer stamps only the group of `index`, so it writes one group.
-    let index = writer.index();
+    let index = writer.places()[0].index;
     if writer.places().iter().any(|place| place.index != index) {
         let malformed = program::Error::Refused(program::Refusal::Malformed);
         drop(opened.try_send(Err(failed(malformed))));
@@ -431,12 +433,19 @@ async fn sent(
     frame: &Frame,
     time: Time,
 ) -> Result<Outcome, program::Error> {
-    let draft = writer.draft(Form::Raw, frame.count, &frame.series).await?;
+    let mut draft = writer.draft(Form::Raw, &frame.series).await?;
     // The draft holds the series of the frame, both in place order.
     for ((_, to), (_, bytes)) in draft.iter_mut().zip(frame.each()) {
         to.copy_from_slice(bytes);
     }
-    writer.write(time).await
+    let outcomes = writer.write(time).await?;
+    let &[(_, outcome)] = outcomes else {
+        panic!(
+            "invariant: a frame of one index has one group, not {}",
+            outcomes.len()
+        );
+    };
+    Ok(outcome)
 }
 
 #[cfg(test)]
