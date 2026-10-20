@@ -1,7 +1,8 @@
 - **STAMP (#435)** `connector::stamp::Writer`, crate-private, stamps the frames of one
   writer: the `poll::Writer` of a kind and the status writer of the supervisor each
-  hold one, and no other code gives a stamp. It keeps the rule in a private value with
-  no hub, so the tests of the rule need no node (`laptop.architect-2`,
+  hold one, and no other code computes a stamp. A kind writes each frame at the last
+  stamp that its `poll::Writer` gave. It keeps the rule in a private value with no
+  hub, so the tests of the rule need no node (`laptop.architect-2`,
   2026-10-20T13:14:36Z:
   https://github.com/synnaxlabs/foundation/issues/2527#issuecomment-6291709126). Lost:
   the rule merged into `stamp::Writer` (each case of the property tests then opens a sim

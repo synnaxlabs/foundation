@@ -23,16 +23,8 @@ struct Stamps {
 }
 
 impl Stamps {
-    /// Gives the stamp of a sample whose true mesh time is within `time`, with its ends
-    /// in either order, and whose value holds until at least `held`, with the error of
-    /// that stamp. The stamp is the midpoint of `time`, or 1 ns after the last stamp
-    /// when that is later. The error is half the width of `time`, rounded up, plus how
-    /// far the stamp is past the later of the midpoint and `held`, and stops at
-    /// `i64::MAX` ns.
-    ///
-    /// # Panics
-    ///
-    /// When the last stamp is `i64::MAX` ns.
+    /// Gives the stamp of a sample and its error, as [`crate::poll::Writer::sample`]
+    /// states.
     fn sample(&mut self, time: Interval, held: Stamp) -> (Stamp, Span) {
         let midpoint = midpoint(time.earliest, time.latest);
         let stamp = self.next(midpoint);
@@ -145,13 +137,7 @@ impl Writer {
         &self.hub
     }
 
-    /// Runs `request`, and gives its output with its stamp: the midpoint of the mesh
-    /// times of the hub's writer before and after it, or 1 ns after the last stamp
-    /// when that is later.
-    ///
-    /// # Panics
-    ///
-    /// When the last stamp is `i64::MAX` ns.
+    /// As [`crate::poll::Writer::request`], with the mesh time of the hub's writer.
     pub(crate) async fn request<T>(
         &mut self,
         request: impl Future<Output = T>,
@@ -167,7 +153,7 @@ impl Writer {
         self.stamps.next(stamp)
     }
 
-    /// As [`Stamps::sample`].
+    /// As [`crate::poll::Writer::sample`].
     pub(crate) fn sample(&mut self, time: Interval, held: Stamp) -> (Stamp, Span) {
         self.stamps.sample(time, held)
     }
