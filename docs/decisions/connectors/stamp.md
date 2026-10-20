@@ -43,10 +43,12 @@
   plan https://github.com/synnaxlabs/foundation/issues/2527#issuecomment-6287263795).
   Lost: a `write` that takes only the data series and adds the index of each present
   group, so that only `stamp` knows which entries are indexes. It merges the series of
-  each frame: 3.3 ns for a frame of one series and 24 ns for 256 on box2, over the cost
-  limit of P1 for a frame of one series on a path that counts as once per sample
+  each frame, a cost that grows with its series: 3.3 ns for a frame of one series and
+  24 ns for 256 on box2. The search of each index grows only with the present groups
   (`laptop.architect-2`, 2026-10-20T10:19:11Z,
-  https://github.com/synnaxlabs/foundation/pull/3556#issuecomment-6288704204).
+  https://github.com/synnaxlabs/foundation/pull/3556#issuecomment-6288704204; the
+  reason: `laptop.architect-2`, 2026-10-20T10:44:46Z,
+  https://github.com/synnaxlabs/foundation/pull/3556#issuecomment-6289116900).
   The status writer of the supervisor stamps its frames with `Stamps::next`
   of its one read of mesh time, so one module holds the stamp rule
   (`laptop.architect-2`, 2026-10-13T01:38:13Z, item 2:
