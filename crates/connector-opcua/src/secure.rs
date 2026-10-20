@@ -86,7 +86,7 @@ const HIGH_KEY: [u8; CLIENT_PEM.key.len() + 1] = with_high_byte(CLIENT_PEM.key);
 ///
 /// # Panics
 ///
-/// When `LENGTH` is not one past the length of `pem`.
+/// When `pem` has fewer than two `\n`, or `LENGTH` is not one past its length.
 const fn with_high_byte<const LENGTH: usize>(pem: &[u8]) -> [u8; LENGTH] {
     let mut out = [0; LENGTH];
     let (mut from, mut to, mut lines) = (0, 0, 0);
@@ -101,18 +101,21 @@ const fn with_high_byte<const LENGTH: usize>(pem: &[u8]) -> [u8; LENGTH] {
         out[to] = pem[from];
         (from, to) = (from + 1, to + 1);
     }
-    assert!(to == LENGTH, "the PEM has two lines");
+    assert!(
+        to == LENGTH,
+        "the PEM has two lines, and LENGTH is one past its length"
+    );
     out
 }
 
-/// [`CLIENT`] with its key in a PKCS #8 whose one attribute holds [`PAD`] bytes, past
-/// the 100 KiB that a DER read through a BIO takes.
+/// [`CLIENT`] with its key in a PKCS #8 whose one attribute holds [`PAD`] bytes, so the
+/// key is past the 100 KiB that a DER read through a BIO takes.
 pub(crate) const LONG_KEY: Identity = Identity {
     certificate: CLIENT.certificate,
     key: &LONG_KEY_DER,
 };
 
-const PAD: usize = (100 << 10) + 1;
+const PAD: usize = 100 << 10;
 
 static LONG_KEY_DER: [u8; CLIENT.key.len() + PAD + 58] = long_key(CLIENT.key);
 
@@ -151,10 +154,10 @@ const fn long_key<const LENGTH: usize>(key: &[u8]) -> [u8; LENGTH] {
 /// Writes at `at` the DER header of `tag` with the `length` of 256 to 2^24 - 1 bytes,
 /// and gives the index after it.
 const fn header(out: &mut [u8], at: usize, tag: u8, length: usize) -> usize {
-    let (count, form) = if length > 0xFFFF {
-        (3, 0x83)
-    } else {
+    let (count, form) = if length >> 16 == 0 {
         (2, 0x82)
+    } else {
+        (3, 0x83)
     };
     let be = length.to_be_bytes();
     out[at] = tag;
