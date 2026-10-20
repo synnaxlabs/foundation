@@ -321,3 +321,33 @@ fn a_foreign_node_key_is_refused() {
         "Fix the cause that the message states, then run the command again",
     );
 }
+
+/// Only Unix: the test sets a file mode. A data directory that this user cannot open
+/// gives `node.unreadable`, not `node.unstarted`.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_data_directory_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let rig = Rig::new();
+    let data = rig.dir.join("plant/data");
+    std::fs::create_dir_all(&data).expect("make the directory");
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o000))
+        .expect("chmod");
+    let output = rig.run(&["profile", "--data", "plant", "10.0.0.5:7400"], b"");
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700))
+        .expect("chmod");
+    assert_eq!(
+        (
+            output.status.code(),
+            text(&output.stdout),
+            text(&output.stderr)
+        ),
+        (
+            Some(1),
+            "",
+            "error[node.unreadable]: cannot read the data directory plant: \
+             Permission denied (os error 13)\nfix: Run the command as the user that \
+             started the node\n"
+        )
+    );
+}
