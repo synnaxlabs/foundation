@@ -591,9 +591,8 @@ mod tests {
         decode(&data);
     }
 
-    /// An array of 1000 empty `DataValue` values, the worst case that the decoder knows,
-    /// takes 80 bytes for each byte and decodes under the calloc of the decode of a
-    /// Publish answer.
+    /// An array of 1000 empty `DataValue` values takes 80 bytes for each byte and
+    /// decodes under the calloc of the decode of a Publish answer.
     #[test]
     fn empty_data_values_decode_at_80_bytes_for_each_byte() {
         let mut data = vec![0x97];
@@ -641,7 +640,8 @@ mod tests {
     }
 
     /// A `Variant` of 127 values and no bytes after the length passes the length check
-    /// of the decoder, which then gives `BadDecodingError` under each calloc.
+    /// of the decoder, which then gives `BadDecodingError`, and `BadOutOfMemory` under
+    /// the calloc of the decode of a Publish answer.
     #[test]
     fn a_long_array_with_no_bytes_decodes_the_same_under_each_calloc() {
         decode(&[0x17, 0x00, 0x97, 0x7f, 0x00, 0x00, 0x00]);
