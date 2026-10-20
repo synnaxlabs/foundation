@@ -2144,9 +2144,9 @@ fn a_ca_certificate_of_the_node_names_the_certificate() {
     secure.credentials[0] = Some(CA_CLIENT);
     secure.server.trust = CA_CLIENT;
     let cause = "the certificate of the server, or the certificate of the node \
-                 secret(\"plant.opcua_certificate\"), is the certificate of a CA. Check \
-                 the trust secret(\"plant.opcua_trust\") and the certificate \
-                 secret(\"plant.opcua_certificate\")";
+                 secret(\"plant.opcua_certificate\"), is the certificate of a CA. \
+                 Check the trust secret(\"plant.opcua_trust\"), and make the \
+                 certificate of the node with `basicConstraints = CA:FALSE`";
     connect_fails(secure, "BadCertificateUseNotAllowed", cause);
 }
 
@@ -2207,27 +2207,27 @@ fn a_refused_certificate_names_the_trust_and_the_certificate_of_the_node() {
         (
             Status::BAD_CERTIFICATE_TIME_INVALID,
             format!(
-                "the mesh time is outside the validity window of the certificate of the \
-                 server, or the clock of the server is outside the window of the \
-                 certificate of the node {certificate}. Check the trust {trust} and the \
-                 clock of the server"
+                "the mesh time is outside the validity window of the certificate of \
+                 the server, or the clock of the server is outside the window of the \
+                 certificate of the node {certificate}. Check the trust {trust} and \
+                 the clock of the server"
             ),
         ),
         (
             Status::BAD_CERTIFICATE_ISSUER_TIME_INVALID,
             format!(
-                "the mesh time is outside the validity window of the CA that issued the \
-                 certificate of the server, or the clock of the server is outside the \
-                 window of the CA that issued the certificate of the node \
+                "the mesh time is outside the validity window of the CA that issued \
+                 the certificate of the server, or the clock of the server is outside \
+                 the window of the CA that issued the certificate of the node \
                  {certificate}. Check the trust {trust} and the clock of the server"
             ),
         ),
         (
             Status::BAD_CERTIFICATE_URI_INVALID,
             format!(
-                "the URI of the certificate of the server is not the application URI of \
-                 its endpoint, or the server refused the URI of the certificate of the \
-                 node {certificate}. Check the trust {trust} and the certificate \
+                "the URI of the certificate of the server is not the application URI \
+                 of its endpoint, or the server refused the URI of the certificate of \
+                 the node {certificate}. Check the trust {trust} and the certificate \
                  {certificate}"
             ),
         ),
@@ -2235,8 +2235,9 @@ fn a_refused_certificate_names_the_trust_and_the_certificate_of_the_node() {
             Status::BAD_CERTIFICATE_USE_NOT_ALLOWED,
             format!(
                 "the certificate of the server, or the certificate of the node \
-                 {certificate}, is the certificate of a CA. Check the trust {trust} and \
-                 the certificate {certificate}"
+                 {certificate}, is the certificate of a CA. Check the trust {trust}, \
+                 and make the certificate of the node with `basicConstraints = \
+                 CA:FALSE`"
             ),
         ),
     ] {

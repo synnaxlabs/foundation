@@ -426,8 +426,8 @@ fn cause(status: Status, secured: Option<&Secured<'_>>) -> Option<String> {
         ),
         Status::BAD_CERTIFICATE_USE_NOT_ALLOWED => format!(
             "the certificate of the server, or the certificate of the node \
-             {certificate}, is the certificate of a CA. Check the trust {trust} and the \
-             certificate {certificate}"
+             {certificate}, is the certificate of a CA. Check the trust {trust}, and \
+             make the certificate of the node with `basicConstraints = CA:FALSE`"
         ),
         _ => return None,
     };

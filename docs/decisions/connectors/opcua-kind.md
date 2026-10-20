@@ -269,13 +269,20 @@
   server also sends `BadCertificateTimeInvalid`, `BadCertificateIssuerTimeInvalid`,
   `BadCertificateUriInvalid`, and `BadCertificateUseNotAllowed` about the certificate
   of the node, so the text of each names the certificate of the server and the
-  certificate of the node, with the source of each. The connector has no `user`, so
+  certificate of the node, with the source of each. The text of
+  `BadCertificateUseNotAllowed` names `basicConstraints = CA:FALSE` as the fix of the
+  certificate of the node. The connector has no `user`, so
   `BadIdentityTokenRejected` names the mode and the policies that the server must offer
   with an anonymous user. A server that offers only `Basic128Rsa15` or `Basic256` gives
   `BadIdentityTokenRejected` and this text, since open62541 finds no endpoint with a
   policy of the client. With no `certificate`, only `BadIdentityTokenRejected` gains a
   cause. The text is the variant `Failure::Connect`, apart from the `Failure::Client`
-  of a read, check, or browse. Lost: the cause in `client::Error`, which does not know
-  the sources; and a text for each side, which needs the client to tell its own check
-  from a refusal of the server, and open62541 gives the same status for both
-  (https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6285525305).
+  of a read, check, or browse (`laptop.architect-2`, 2026-10-20T08:16:10Z, the texts:
+  https://github.com/synnaxlabs/foundation/pull/3545#issuecomment-6286592579). Lost:
+  the cause in `client::Error`, which does not know the sources
+  (https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6285525305); and
+  a text for each side. The node cannot tell its own check of the certificate of the
+  server from a status that the server sent: open62541 gives the same status for both.
+  The fix is a change to the client of the copy that records the source of the
+  connect status (#3547; `laptop.architect-2`, 2026-10-20T08:02:50Z, the simple
+  version: https://github.com/synnaxlabs/foundation/pull/3545#issuecomment-6286349076).
