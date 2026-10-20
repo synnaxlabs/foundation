@@ -119,6 +119,13 @@ impl Status {
     #[cfg(test)]
     pub(crate) const BAD_NO_DATA: Self = Self(0x809B_0000);
     pub(crate) const BAD_SESSION_CLOSED: Self = Self(0x8026_0000);
+    pub(crate) const BAD_SECURITY_CHECKS_FAILED: Self = Self(0x8013_0000);
+    pub(crate) const BAD_CERTIFICATE_TIME_INVALID: Self = Self(0x8014_0000);
+    pub(crate) const BAD_CERTIFICATE_ISSUER_TIME_INVALID: Self = Self(0x8015_0000);
+    pub(crate) const BAD_CERTIFICATE_URI_INVALID: Self = Self(0x8017_0000);
+    pub(crate) const BAD_CERTIFICATE_USE_NOT_ALLOWED: Self = Self(0x8018_0000);
+    pub(crate) const BAD_CERTIFICATE_UNTRUSTED: Self = Self(0x801A_0000);
+    pub(crate) const BAD_IDENTITY_TOKEN_REJECTED: Self = Self(0x8021_0000);
     #[cfg(test)]
     pub(crate) const BAD_SESSION_ID_INVALID: Self = Self(0x8025_0000);
     #[cfg(test)]
@@ -139,10 +146,6 @@ impl Status {
     pub(crate) const BAD_SECURITY_MODE_REJECTED: Self = Self(0x8054_0000);
     #[cfg(test)]
     pub(crate) const BAD_DECODING_ERROR: Self = Self(0x8007_0000);
-    #[cfg(test)]
-    pub(crate) const BAD_CERTIFICATE_TIME_INVALID: Self = Self(0x8014_0000);
-    #[cfg(test)]
-    pub(crate) const BAD_CERTIFICATE_UNTRUSTED: Self = Self(0x801A_0000);
 
     /// Whether the code is of the severity Uncertain.
     pub(crate) fn uncertain(self) -> bool {
@@ -813,6 +816,11 @@ unsafe extern "C" {
         mode: Mode,
         security: *const Security<'_>,
         refusal: *mut Refusal,
+    ) -> u32;
+    pub(crate) fn shim_certificate_names(
+        certificate: *const Bytes,
+        thumbprint: *mut [u8; 40],
+        subject: *mut Bytes,
     ) -> u32;
     pub(crate) fn shim_client_timeout(client: *mut Client) -> u32;
     pub(crate) fn shim_client_publish_count(client: *mut Client, count: u16);

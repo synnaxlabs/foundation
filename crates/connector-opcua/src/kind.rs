@@ -393,6 +393,34 @@ impl<'a> Secured<'a> {
         };
         Error::Retry(format!("{source}: {refusal}. {fix}").into())
     }
+
+    /// The cause of a server that refused the secure channel, with the names of the
+    /// certificate to install.
+    fn distrusted(&self) -> String {
+        format!(
+            "the server refused the secure channel; most likely it does not trust the \
+             certificate of the node. Install the certificate {}{} in the trust list of \
+             the server",
+            self.security.certificate,
+            self.names()
+        )
+    }
+
+    /// The thumbprint and the subject of the certificate, as ` (SHA-1 thumbprint ...,
+    /// subject ...)`, with no subject when it is empty, or empty when the certificate
+    /// gives no names.
+    fn names(&self) -> String {
+        match client::names(self.certificate.expose()) {
+            None => String::new(),
+            Some(names) if names.subject.is_empty() => {
+                format!(" (SHA-1 thumbprint {})", names.thumbprint)
+            }
+            Some(names) => format!(
+                " (SHA-1 thumbprint {}, subject {})",
+                names.thumbprint, names.subject
+            ),
+        }
+    }
 }
 
 /// Connects to `address` with `time`, `span`, `net`, `rng`, and the credentials of
@@ -421,7 +449,11 @@ async fn session<T>(
     let connected =
         Client::connect(time, span, net, rng, address, security, until).await;
     let connected = connected.map_err(|error| match error {
-        client::Error::Failed(status) => failed(address, Call::Connect, status),
+        client::Error::Failed(status) => device(Failure::Connect {
+            address: address.to_string_lossy().into_owned(),
+            status,
+            cause: cause(status, secured),
+        }),
         client::Error::Refused(refusal) => {
             let secured =
                 secured.expect("invariant: a client with no credentials refuses none");
@@ -434,6 +466,83 @@ async fn session<T>(
     let done = work(&mut client).await;
     client.close().await;
     Ok(Some(done))
+}
+
+/// The likely cause, which ends with its fix, of a connect over `secured`, or in the
+/// mode None when it is `None`, that failed with `status`. `None` when the status names
+/// no cause. A server can send the trust, time, URI, and use statuses about the
+/// certificate of the node too, so their causes name both certificates. The connector
+/// has no `user`, so `BadIdentityTokenRejected` names the endpoints of an anonymous
+/// user.
+fn cause(status: Status, secured: Option<&Secured<'_>>) -> Option<String> {
+    if status == Status::BAD_IDENTITY_TOKEN_REJECTED {
+        return Some(unoffered(secured.map(|secured| secured.security.mode)));
+    }
+    let secured = secured?;
+    let (certificate, trust) = (&secured.security.certificate, &secured.security.trust);
+    let cause = match status {
+        Status::BAD_SECURITY_CHECKS_FAILED => secured.distrusted(),
+        Status::BAD_CERTIFICATE_UNTRUSTED => format!(
+            "the trust holds neither the certificate of the server nor the CA that \
+             issued it, or the server does not trust the certificate of the node \
+             {certificate}. Check the trust {trust}, and install the certificate \
+             {certificate}{} in the trust list of the server",
+            secured.names()
+        ),
+        Status::BAD_CERTIFICATE_TIME_INVALID => format!(
+            "the mesh time is outside the validity window of the certificate of the \
+             server, or the clock of the server is outside the window of the \
+             certificate of the node {certificate}. Check the trust {trust} and the \
+             clock of the server"
+        ),
+        Status::BAD_CERTIFICATE_ISSUER_TIME_INVALID => format!(
+            "the mesh time is outside the validity window of the CA that issued the \
+             certificate of the server, or the clock of the server is outside the \
+             window of the CA that issued the certificate of the node {certificate}. \
+             Check the trust {trust}, the clock of the server, and the window of the \
+             CA that issued the certificate {certificate}"
+        ),
+        Status::BAD_CERTIFICATE_URI_INVALID => format!(
+            "the URI of the certificate of the server is not the application URI of \
+             its endpoint, or the server refused the URI of the certificate of the \
+             node {certificate}. Check the trust {trust} and the certificate \
+             {certificate}"
+        ),
+        Status::BAD_CERTIFICATE_USE_NOT_ALLOWED => format!(
+            "the certificate of the server, or the certificate of the node \
+             {certificate}, is the certificate of a CA. Check the trust {trust}, and \
+             make the certificate of the node with `basicConstraints = CA:FALSE`"
+        ),
+        _ => return None,
+    };
+    Some(cause)
+}
+
+/// The cause of a server that offers no endpoint in `mode`, or in the mode None when it
+/// is `None`, with an anonymous user and a policy of the client.
+fn unoffered(mode: Option<client::Mode>) -> String {
+    let (mode, fix) = match mode {
+        None => {
+            return "the server offers no endpoint in the mode None that lets in an \
+                    anonymous user. For a server with only secure endpoints, give \
+                    `certificate`, `key`, and `trust`"
+                .into();
+        }
+        Some(client::Mode::SignAndEncrypt) => (
+            "SignAndEncrypt",
+            "For a server with only Sign endpoints, set `unencrypted = true`; else \
+             turn on one of these policies on the server",
+        ),
+        Some(client::Mode::Sign) => (
+            "Sign",
+            "Turn on one of these policies in the mode Sign on the server",
+        ),
+    };
+    let [first, second, third] = client::POLICIES;
+    format!(
+        "the server offers no endpoint in the mode {mode} with the policy {first}, \
+         {second}, or {third} that lets in an anonymous user. {fix}"
+    )
 }
 
 /// Reads each node once per tick until the cancel, and writes the frame of each tick.
@@ -781,7 +890,6 @@ fn too_large(
 /// A call to the server that a [`Failure::Client`] names.
 #[derive(Debug)]
 pub(crate) enum Call {
-    Connect,
     Read,
     Check,
     Browse,
@@ -791,6 +899,13 @@ pub(crate) enum Call {
 /// Why a run ended with [`Error::Device`].
 #[derive(Debug)]
 pub(crate) enum Failure {
+    /// The connect to the server at `address` failed with `status`, for `cause`, which
+    /// ends with its fix, when the status names one.
+    Connect {
+        address: String,
+        status: Status,
+        cause: Option<String>,
+    },
     /// `call` to the server at `address` failed with `status`.
     Client {
         address: String,
@@ -815,13 +930,23 @@ pub(crate) enum Failure {
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Connect {
+                address,
+                status,
+                cause,
+            } => {
+                write!(f, "the connect to {address} failed with {}", status.name())?;
+                match cause {
+                    Some(cause) => write!(f, ": {cause}"),
+                    None => Ok(()),
+                }
+            }
             Self::Client {
                 address,
                 call,
                 status,
             } => {
                 let call = match call {
-                    Call::Connect => "the connect to",
                     Call::Read => "the read from",
                     Call::Check => "the connectivity check of",
                     Call::Browse => "the browse of",

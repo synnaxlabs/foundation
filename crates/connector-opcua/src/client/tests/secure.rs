@@ -11,14 +11,16 @@ use aws_lc_sys::{
 use types::time::{Span, Stamp};
 
 use super::{Client, PORT, VALUE, fits, fitting, long, run, serve_on};
-use crate::client::{Credential, Credentials, Error, Large, Mode, Refusal};
+use crate::client::{
+    Credential, Credentials, Error, Large, Mode, Names, Refusal, names,
+};
 use crate::event;
 use crate::ffi::{self, Status};
 use crate::secure::{
     ANONYMOUS, BROKEN_TRUST, CLIENT, CLIENT_ONLY_SERVER, CLIENT_PEM, EC, EMPTY_URI,
-    END, HEADED_TRUST, HIGH_PEM, Identity, LASTING, LINE_TRUST, LONG_BLOCK_TRUST,
-    LONG_KEY, ONE_BLOCK_TRUST, OTHER, Policy, REJECTED_SERVER, SERVER, START, TRUST,
-    TWO_URIS, UNNAMED,
+    END, HEADED_TRUST, HIGH_PEM, HUGE_SUBJECT, Identity, LASTING, LINE_TRUST,
+    LONG_BLOCK_TRUST, LONG_ENTRY, LONG_KEY, LONG_SUBJECT, NAMELESS, ONE_BLOCK_TRUST,
+    OTHER, Policy, REJECTED_SERVER, SERVER, START, TRUST, TWO_URIS, UNNAMED,
 };
 use crate::server::Limits;
 use crate::value::{Fault, Value};
@@ -1253,4 +1255,51 @@ fn the_key_pair_is_checked_before_the_window() {
         refused_at(own, SERVER.certificate, END),
         Err(Error::Refused(Refusal::Mismatch))
     );
+}
+
+#[test]
+fn names_give_the_thumbprint_and_subject_of_a_der_or_pem_certificate() {
+    let client = Some(Names {
+        thumbprint: "6D839E838DCC3C47E59D1B56282B18B9CB3DE453".into(),
+        subject: "/CN=client".into(),
+    });
+    assert_eq!(names(CLIENT.certificate), client);
+    assert_eq!(names(CLIENT_PEM.certificate), client);
+    let server = Names {
+        thumbprint: "FC419E65813818DCCA261BFEBFFBED34056E7262".into(),
+        subject: "/CN=server".into(),
+    };
+    assert_eq!(names(SERVER.certificate), Some(server));
+    let nameless = Names {
+        thumbprint: "DDF83009BCDA4C82FF4E1091B8D318DC52B9BD3F".into(),
+        subject: String::new(),
+    };
+    assert_eq!(names(NAMELESS), Some(nameless));
+    assert_eq!(names(b"no certificate"), None);
+    assert_eq!(names(b""), None);
+}
+
+#[test]
+fn names_give_the_whole_of_a_subject_past_1024_bytes() {
+    let units = (0..18)
+        .map(|i| format!("/OU={i:02}{}", "x".repeat(58)))
+        .collect::<Vec<_>>()
+        .concat();
+    let long = Names {
+        thumbprint: "4F26D153E01B0F222E188BCDFE717BBBEE37CFEC".into(),
+        subject: format!("/CN=client{units}"),
+    };
+    assert_eq!(names(LONG_SUBJECT), Some(long));
+    let entry = Names {
+        thumbprint: "6E0DF71E5F904D1DE160A94D8C296977ACE53D27".into(),
+        subject: format!("/description={}/CN=client", "d".repeat(1100)),
+    };
+    assert_eq!(names(LONG_ENTRY), Some(entry));
+}
+
+/// Each of the 300 000 bytes of the unit of [`HUGE_SUBJECT`] takes 4 characters in the
+/// one-line form, past the 1 MiB that aws-lc writes.
+#[test]
+fn names_give_none_for_a_subject_past_1_mib_in_the_one_line_form() {
+    assert_eq!(names(HUGE_SUBJECT), None);
 }
