@@ -76,8 +76,8 @@
   `--exact --skip`. In queue run 39308250221, `check` took 32 min, `macos` 35 min,
   `windows` 28 min, and the `test` of ARM 22 min, and on Linux `cargo test` ran 173 test
   binaries and 40 doc-test sets one after another.
-  Amended (`laptop.monitor`, recorded in #3448 at 2026-10-19T22:59:03Z,
-  https://github.com/synnaxlabs/foundation/issues/3448; the jobs `parts` and `test` and
+  Amended (`laptop.monitor`, recorded at 2026-10-20T01:31:43Z,
+  https://github.com/synnaxlabs/foundation/issues/3448#issuecomment-6281216123; the jobs `parts` and `test` and
   their skip, the plan, 2026-10-20T00:42:23Z,
   https://github.com/synnaxlabs/foundation/issues/3448#issuecomment-6280595198): ARM
   runs the two parts at the same time. The matrix job `parts` of `arm.yaml` runs `cargo xtask test nextest` and
