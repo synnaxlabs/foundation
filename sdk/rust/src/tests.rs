@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::fs::Permissions;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
@@ -9,6 +10,7 @@ use std::time::Duration;
 use tokio::runtime::Builder;
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Dispatch, Event, Metadata, Subscriber};
+use types::time::Span;
 
 use super::*;
 
@@ -16,6 +18,189 @@ use super::*;
 fn a_client_moves_to_and_is_shared_between_threads() {
     fn shared<T: Send + Sync>() {}
     shared::<Client>();
+}
+
+/// The entropy of a simulated node of the default seed: the same bytes each time.
+fn fixed() -> env::entropy::Entropy {
+    let mut sim = sim::Sim::new(sim::Config::default());
+    sim.node(sim::node::Config::default()).entropy()
+}
+
+/// `private_key` reads the OS, so only `drawn` takes fixed bytes; the test pins it as
+/// `laptop.architect-2` ruled (2026-10-19T23:47:10Z,
+/// <https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279865842>).
+#[test]
+fn a_private_key_is_the_first_32_bytes_of_the_entropy() {
+    let mut bytes = [0; 32];
+    fixed().fill(&mut bytes);
+    assert_eq!(drawn(&fixed()).0, bytes);
+}
+
+#[test]
+fn each_private_key_is_new() {
+    assert_ne!(private_key().0, private_key().0);
+}
+
+/// A transport of the node of `private_key` at `at` on `net`, `clock`, `entropy`, and
+/// `tasks`, with an idle timeout of 60 s, and the address where it is bound.
+fn listening(
+    private_key: PrivateKey,
+    at: SocketAddr,
+    net: &env::net::Net,
+    clock: env::clock::Clock,
+    entropy: env::entropy::Entropy,
+    tasks: Tasks,
+) -> (transport::Transport, SocketAddr) {
+    let pool = block::Config::new(1 << 20).expect("the budget fits");
+    let memory = block::Heap::new(pool.reservation());
+    let config = transport::Config {
+        private_key,
+        message_bytes_max: NonZeroUsize::new(1 << 16).expect("not zero"),
+        window_bytes: 1 << 20,
+        streams_max: NonZeroU32::new(16).expect("not zero"),
+        idle: Span::from_nanos(60 * Span::SECOND.nanos()),
+        clock,
+        entropy,
+        tasks,
+        pool: Rc::new(block::Pool::new(pool, memory)),
+    };
+    let bound_port = transport::Port::bind(net, at).expect("a port");
+    let transport::Address::Udp(at) = bound_port.addresses()[0] else {
+        unreachable!("a UDP port");
+    };
+    let part = bound_port.split(NonZeroUsize::MIN).pop().expect("one part");
+    let transport = transport::Transport::new(config, part).expect("a transport");
+    (transport, at)
+}
+
+/// The node sees the close of an answer at once, not at the end of its idle timeout.
+#[test]
+fn answering_closes_its_session_with_code_0_on_the_os() {
+    let server_key = PrivateKey([2; 32]);
+    let proved = server_key.public();
+    let (bound, address) = mpsc::channel();
+    let (sent, ended) = mpsc::channel();
+    let shards = os::shards().expect("shards");
+    let config = env::shards::Config {
+        name: "server".into(),
+        core: None,
+    };
+    let _server = shards
+        .start(config, move |tasks| async move {
+            let clock = os::clock();
+            let at = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+            let (transport, at) = listening(
+                server_key,
+                at,
+                &os::net(),
+                clock.clone(),
+                os::entropy(),
+                tasks,
+            );
+            bound.send(at).expect("the test keeps the receiver");
+            let session = transport.accept().await.expect("a session");
+            let start = clock.now();
+            let error = session.closed().await;
+            sent.send((error, clock.now() - start))
+                .expect("the test keeps the receiver");
+        })
+        .expect("the server starts");
+    #[expect(clippy::disallowed_methods, reason = "the test waits for the server")]
+    let at = address.recv().expect("the server binds");
+    let node = Node::answering(vec![at]).expect("an answer");
+    assert_eq!(node.public_key, proved);
+    #[expect(clippy::disallowed_methods, reason = "the test waits for the server")]
+    let ended = ended.recv_timeout(Duration::from_secs(5));
+    let (error, waited) = ended.expect("the server saw the end");
+    assert_eq!(
+        error,
+        transport::Error::PeerClosed {
+            code: transport::Code(0)
+        }
+    );
+    assert!(waited < Span::SECOND, "{waited:?}");
+}
+
+/// Starts a shard named `name`, with no core, on `node` that runs `main`.
+fn start<F: Future<Output = ()> + 'static>(
+    node: &sim::node::Node,
+    name: &str,
+    main: impl FnOnce(Tasks) -> F + Send + 'static,
+) {
+    let config = env::shards::Config {
+        name: name.into(),
+        core: None,
+    };
+    drop(node.shards().start(config, main).expect("a shard"));
+}
+
+/// In each run where the links lose 10% of datagrams, a node that accepted the
+/// session of an answer sees its close within a second, not at the end of its idle
+/// timeout: while the close drains, a packet of the node makes the answer send the
+/// close again. The answer gives the key of the node. A run with a lost client Finished
+/// has no accept, as the close ends the handshake of the node.
+#[test]
+fn a_node_that_accepted_an_answer_sees_its_close_when_a_close_is_lost() {
+    let link = sim::link::Config {
+        loss: 0.1,
+        ..sim::link::Config::default()
+    };
+    let mut accepts = 0;
+    for value in 0..64 {
+        let mut sim = sim::Sim::new(sim::Config {
+            seed: value,
+            ..sim::Config::default()
+        });
+        let program = sim.node(sim::node::Config::default());
+        let node = sim.node(sim::node::Config::default());
+        sim.link(&program, &node, link);
+        sim.link(&node, &program, link);
+        let at = SocketAddr::new(node.addresses()[0], 4100);
+        // `Some(None)` from the accept to the end.
+        let ended = Arc::new(Mutex::new(None));
+        let (slot, own) = (Arc::clone(&ended), node.clone());
+        start(&node, "node", move |tasks| async move {
+            let clock = own.clock();
+            let key = PrivateKey([2; 32]);
+            let (transport, _) =
+                listening(key, at, &own.net(), clock.clone(), own.entropy(), tasks);
+            let session = transport.accept().await.expect("a session");
+            *slot.lock().expect("no panic under the lock") = Some(None);
+            let start = clock.now();
+            let error = session.closed().await;
+            let end = Some((error, clock.now() - start));
+            *slot.lock().expect("no panic under the lock") = Some(end);
+        });
+        let answer = Arc::new(Mutex::new(None));
+        let (slot, own) = (Arc::clone(&answer), program.clone());
+        start(&program, "program", move |tasks| async move {
+            let config = transport::client::Config {
+                net: own.net(),
+                clock: own.clock(),
+                entropy: own.entropy(),
+                tasks,
+                pool: Rc::new(block::Pool::heap(POOL)),
+            };
+            let key = answered(&[transport::Address::Udp(at)], config).await;
+            *slot.lock().expect("no panic under the lock") = Some(key);
+        });
+        let run = sim.run_for(Span::from_nanos(10 * Span::SECOND.nanos()));
+        run.expect("the run ends");
+        let accepted = ended.lock().expect("no panic under the lock").take();
+        if let Some(end) = accepted {
+            accepts += 1;
+            let (error, waited) = end.unwrap_or_else(|| panic!("run {value}: no end"));
+            let closed = transport::Error::PeerClosed {
+                code: transport::Code(0),
+            };
+            assert_eq!(error, closed, "run {value}");
+            assert!(waited < Span::SECOND, "run {value}: {waited:?}");
+            let key = answer.lock().expect("no panic under the lock").take();
+            let public_key = PrivateKey([2; 32]).public();
+            assert_eq!(key, Some(Ok(public_key)), "run {value}");
+        }
+    }
+    assert!(accepts >= 48, "{accepts} of 64 runs accepted");
 }
 
 #[test]
@@ -301,7 +486,6 @@ fn unreachable(addresses: Vec<SocketAddr>, cause: &transport::Error) {
     let peer = PrivateKey([7; 32]).public();
     let node = Node {
         addresses: addresses.clone(),
-        key: types::node::Key::from_u128(1),
         public_key: peer,
     };
     let subject = Subject {
@@ -315,7 +499,10 @@ fn unreachable(addresses: Vec<SocketAddr>, cause: &transport::Error) {
     let Err(error) = Client::connect(&node, subject) else {
         panic!("a client of an unreachable node connected");
     };
-    let unreachable = transport::Error::Unreachable { peer, attempts };
+    let unreachable = transport::Error::Unreachable {
+        peer: Some(peer),
+        attempts,
+    };
     assert_eq!(
         error,
         Error::Session(program::Error::Transport(unreachable))
@@ -335,6 +522,34 @@ fn a_client_of_port_0_is_unroutable() {
 #[test]
 fn a_client_of_a_node_with_no_address_is_unreachable_with_no_attempt() {
     unreachable(vec![], &transport::Error::Unroutable);
+}
+
+/// Asks for the node at `addresses`, and checks that the error names each one with
+/// `cause`.
+fn none_answering(addresses: Vec<SocketAddr>, cause: &transport::Error) {
+    let attempts = addresses
+        .iter()
+        .map(|&address| (transport::Address::Udp(address), cause.clone()))
+        .collect();
+    let error = Node::answering(addresses).expect_err("no node answers");
+    let unreachable = transport::Error::Unreachable {
+        peer: None,
+        attempts,
+    };
+    assert_eq!(
+        error,
+        Error::Session(program::Error::Transport(unreachable))
+    );
+}
+
+#[test]
+fn answering_of_port_0_is_unroutable() {
+    none_answering(vec![port_0()], &transport::Error::Unroutable);
+}
+
+#[test]
+fn answering_of_no_address_is_unreachable_with_no_attempt() {
+    none_answering(vec![], &transport::Error::Unroutable);
 }
 
 #[test]
@@ -409,7 +624,6 @@ fn local_gives_the_node_and_its_admin() {
     let (node, subject) = Node::local(&dir.0).expect("a node runs");
     let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 7400));
     assert_eq!(node.addresses, [loopback]);
-    assert_eq!(node.key, types::node::Key::from_u128(7));
     assert_eq!(node.public_key, PrivateKey([7; 32]).public());
     let subject = subject.expect("an admin");
     assert_eq!(subject.name, spec::founding::admin());

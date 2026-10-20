@@ -31,10 +31,11 @@ pub enum Role {
 pub enum Admission {
     /// A reply, or a request from a voter of the newest configuration in the log.
     Admitted,
-    /// A `PreVote` or a `Vote` from a node that a committed configuration removed:
-    /// the configuration before the entries or a committed `Voters` entry held it,
-    /// the last committed configuration lacks it, and its last index is at or below
-    /// the commit, or its last term is below the term at the commit.
+    /// A `PreVote` or a `Vote` from a node that a committed configuration removed and
+    /// that the last [`Raft::set_learners`] left out: the configuration before the
+    /// entries or a committed `Voters` entry held it, the last committed configuration
+    /// lacks it, and its last index is at or below the commit, or its last term is
+    /// below the term at the commit.
     Removed,
     /// Each other request from a node that is not a voter.
     NotVoter,
@@ -394,7 +395,11 @@ impl Raft {
             last.index <= commit || last.term < at.term
         };
         match last {
-            Some(last) if behind(last) && self.log.removed(message.from) => {
+            Some(last)
+                if behind(last)
+                    && self.log.removed(message.from)
+                    && !self.learners.contains(&message.from) =>
+            {
                 Admission::Removed
             }
             Some(_) | None => Admission::NotVoter,
@@ -1062,7 +1067,6 @@ impl Raft {
         let commit = self.log.committed();
         let (log_end, removed_end) = (self.log.last().index, self.removed_end());
         let (key, term, votes) = (self.key, self.term, &self.votes);
-        let mut links = None;
         for (&to, peer) in self.peers.range_mut(range) {
             if peer
                 .progress
@@ -1087,10 +1091,6 @@ impl Raft {
                 Some(votes) if !peer.answered => Some(votes.clone()),
                 _ => None,
             };
-            let chain = match proof {
-                Some(_) => links.get_or_insert_with(|| self.log.links(term)).clone(),
-                None => Vec::new(),
-            };
             let mut message = Message {
                 from: key,
                 to,
@@ -1101,9 +1101,9 @@ impl Raft {
                     commit,
                 },
                 proof,
-                chain,
+                chain: Vec::new(),
             };
-            fit(self.fits, &mut message);
+            fit(self.fits, &self.log, &mut message);
             let entries = message.body.entries();
             let last = entries.last().map_or(prev.index, |entry| entry.at.index);
             peer.progress.sent(last);
@@ -1596,7 +1596,6 @@ impl Raft {
 
     // Sends `body` to each peer that is not a learner, with `proof`.
     fn broadcast(&mut self, term: Term, body: &Body, proof: Option<&Proof>) {
-        let chain = self.chain(term, proof);
         for &to in self.peers.keys() {
             if self.learner(to) {
                 continue;
@@ -1607,41 +1606,53 @@ impl Raft {
                 term,
                 body: body.clone(),
                 proof: proof.cloned(),
-                chain: chain.clone(),
+                chain: Vec::new(),
             };
-            fit(self.fits, &mut message);
+            fit(self.fits, &self.log, &mut message);
             self.outbox.push(message);
         }
     }
 
     // Sends `body` to `to`, with `proof`.
     fn send(&mut self, to: node::Key, term: Term, body: Body, proof: Option<Proof>) {
-        let chain = self.chain(term, proof.as_ref());
         let mut message = Message {
             from: self.key,
             to,
             term,
             body,
             proof,
-            chain,
+            chain: Vec::new(),
         };
-        fit(self.fits, &mut message);
+        fit(self.fits, &self.log, &mut message);
         self.outbox.push(message);
-    }
-
-    // The chain of a message of `term`: this node's configuration entries below
-    // `term` when the message carries a proof, else none.
-    fn chain(&self, term: Term, proof: Option<&Proof>) -> Vec<Link> {
-        match proof {
-            Some(_) => self.log.links(term),
-            None => Vec::new(),
-        }
     }
 }
 
-// Drops what `message` can lose until it fits: the last entries of an append, down
-// to one with no proof and to none with a proof, then the oldest links.
-fn fit(fits: fn(&Message) -> bool, message: &mut Message) {
+// Gives `message`, when it carries a proof, the newest links of `log` below its term
+// that fit with no entry, and clones no other but the first that does not fit. Then
+// drops the last entries of an append until it fits, down to one with no proof and to
+// none with a proof. An append with a proof keeps its entries only when the whole
+// chain fits with no entry.
+fn fit(fits: fn(&Message) -> bool, log: &Log, message: &mut Message) {
+    if message.proof.is_some() {
+        let mut entries = Vec::new();
+        if let Body::Append { entries: all, .. } = &mut message.body {
+            std::mem::swap(all, &mut entries);
+        }
+        let mut whole = true;
+        for link in log.links(message.term) {
+            message.chain.push(link);
+            if !fits(message) {
+                message.chain.pop();
+                whole = false;
+                break;
+            }
+        }
+        message.chain.reverse();
+        if whole && let Body::Append { entries: kept, .. } = &mut message.body {
+            *kept = entries;
+        }
+    }
     let least = usize::from(message.proof.is_none());
     while !fits(message) {
         if let Body::Append { entries, .. } = &mut message.body
@@ -1650,8 +1661,7 @@ fn fit(fits: fn(&Message) -> bool, message: &mut Message) {
             entries.pop();
             continue;
         }
-        assert!(
-            !message.chain.is_empty(),
+        panic!(
             "invariant: `Config::fits` holds an append of one entry with no proof, \
              and each message with no entry and no link; to {:?}, term {:?}, {} \
              entries, {}",
@@ -1664,7 +1674,6 @@ fn fit(fits: fn(&Message) -> bool, message: &mut Message) {
                 "no proof"
             },
         );
-        message.chain.remove(0);
     }
 }
 
@@ -6373,6 +6382,19 @@ mod tests {
         }
 
         #[test]
+        fn a_removed_node_is_not_a_voter_until_the_learners_leave_it_out() {
+            let mut raft = removed_3();
+            let admission = |raft: &Raft| {
+                let pre_vote = raft.admission(&message(3, 2, pre_vote(3)));
+                [pre_vote, raft.admission(&message(3, 2, vote(3)))]
+            };
+            raft.set_learners([key(3)]);
+            assert_eq!(admission(&raft), [Admission::NotVoter; 2]);
+            raft.set_learners(Vec::new());
+            assert_eq!(admission(&raft), [Admission::Removed; 2]);
+        }
+
+        #[test]
         fn a_vote_past_the_commit_is_not_a_voter() {
             let raft = removed_3();
             let admission = |body| raft.admission(&message(3, 2, body));
@@ -6697,6 +6719,113 @@ mod tests {
             raft.step(message(3, 2, Body::HeartbeatReply)).unwrap();
             tick_times(&mut raft, 10);
             assert_eq!(raft.role(), Role::Follower);
+        }
+    }
+
+    // These tests call the private `fit`: a `Config::fits` is a `fn` and cannot take
+    // a random budget for each case, so `fits` here reads it from the commit index.
+    mod fit {
+        use proptest::prelude::*;
+
+        use super::*;
+
+        // The `fit` of a message that holds every link, oldest first: it drops one
+        // entry or link at a time.
+        fn dropping(fits: fn(&Message) -> bool, message: &mut Message) {
+            let least = usize::from(message.proof.is_none());
+            while !fits(message) {
+                if let Body::Append { entries, .. } = &mut message.body
+                    && entries.len() > least
+                {
+                    entries.pop();
+                    continue;
+                }
+                assert!(!message.chain.is_empty());
+                message.chain.remove(0);
+            }
+        }
+
+        // The size of each entry and link from its index, and of the proof, against the
+        // budget in `commit`.
+        fn fits(message: &Message) -> bool {
+            let entries = message.body.entries().iter();
+            let entries: u64 = entries.map(|entry| entry.at.index % 7 + 1).sum();
+            let links: u64 =
+                message.chain.iter().map(|link| link.at.index % 5 + 1).sum();
+            let proof = if message.proof.is_some() { 3 } else { 0 };
+            let (Body::Append { commit, .. } | Body::Heartbeat { commit }) =
+                message.body
+            else {
+                unreachable!()
+            };
+            entries + links + proof <= commit
+        }
+
+        fn message(
+            entries: u64,
+            budget: u64,
+            proved: bool,
+            appending: bool,
+        ) -> Message {
+            let body = if appending {
+                let positions: Vec<_> = (1..=entries).map(|index| (2, index)).collect();
+                append(position(1, 0), super::entries(&positions), budget)
+            } else {
+                Body::Heartbeat { commit: budget }
+            };
+            Message {
+                from: key(1),
+                to: key(2),
+                term: Term(2),
+                body,
+                proof: proved.then(|| Proof {
+                    grant: Grant::Vote,
+                    candidate: key(1),
+                    voters: [(key(1), None)].into(),
+                }),
+                chain: Vec::new(),
+            }
+        }
+
+        // A log of `links` configuration entries in term 1.
+        fn log(links: u64) -> Log {
+            let voters = Voters {
+                incoming: [key(1)].into(),
+                ..Voters::default()
+            };
+            let entries = (1..=links)
+                .map(|index| Entry {
+                    at: position(1, index),
+                    data: change(1, voters.clone()),
+                })
+                .collect();
+            Log::new(voters, entries, 0).unwrap()
+        }
+
+        proptest! {
+            // `fit` keeps the same entries and links as one that drops one at a time
+            // from a message that holds every link.
+            #[test]
+            fn keeps_what_one_at_a_time_keeps(
+                entries in 0..40_u64,
+                links in 0..40_u64,
+                proved: bool,
+                appending: bool,
+                budget in 0..200_u64,
+            ) {
+                let log = log(links);
+                let first = u64::from(!proved && entries > 0 && appending) * 2;
+                let least = first + if proved { 3 } else { 0 };
+                let mut got = message(entries, budget.max(least), proved, appending);
+                let mut want = got.clone();
+                if proved {
+                    want.chain = log.links(want.term).collect();
+                    want.chain.reverse();
+                }
+                dropping(fits, &mut want);
+                fit(fits, &log, &mut got);
+                prop_assert_eq!(got, want);
+            }
         }
     }
 }

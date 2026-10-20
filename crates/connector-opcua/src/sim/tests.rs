@@ -1,5 +1,5 @@
 use std::ffi::{CStr, CString};
-use std::future::poll_fn;
+use std::future::{self, poll_fn};
 use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::mpsc;
@@ -14,12 +14,14 @@ use super::{Served, Variables, during, serve, tree};
 use crate::client::browse::{
     Base, Cause, Class, Description, Foreign, Page, Reference, Unit,
 };
-use crate::client::{self, Client};
+use crate::client::subscription::Change;
+use crate::client::{self, Client, Credentials, Mode};
 use crate::connection::OPTIONS;
 use crate::event;
 use crate::ffi::Status;
 use crate::node::Node;
 use crate::node::ns0::{self, HAS_COMPONENT, ORGANIZES};
+use crate::secure::{CLIENT, Policy, SERVER, START};
 use crate::value::{Fault, Type, Value};
 
 const SPIKE: &str = "ns=3;s=SpikeData";
@@ -28,6 +30,7 @@ const BAD: Quality = Quality(0x8000_0000);
 const CLAMPED: Quality = Quality(0x0030_0000);
 const UNCERTAIN: Quality = Quality(0x4090_0000);
 const BAD_USER_ACCESS_DENIED: Status = Status(0x801F_0000);
+const BAD_IDENTITY_TOKEN_REJECTED: Status = Status(0x8021_0000);
 const QUALITIES: [Quality; 4] = [Quality::GOOD, CLAMPED, UNCERTAIN, BAD];
 /// The reads of a variable with each of [`QUALITIES`] in turn.
 const READS: [Result<Value, Fault>; 4] = [
@@ -828,4 +831,191 @@ fn a_failed_accept_wins_over_a_cancel_in_the_same_step() {
         until.cancel();
     });
     assert_eq!(out, Err(net::Error::Io { code: 5 }));
+}
+
+/// Runs `body` on a server of [`SPIKE`] whose wall stays at `fixed`, or is the wall
+/// time of the node for `None`, and whose clock `set_clock` puts `ahead`, with its
+/// URL, and gives its output.
+fn on_spike<T: Send + 'static>(
+    fixed: Option<Stamp>,
+    ahead: Span,
+    body: impl AsyncFnOnce(&node::Node, &CStr, &Variables) -> T + Send + 'static,
+) -> T {
+    let mut sim = Sim::new(::sim::Config::default());
+    let node = sim.node(node::Config::default());
+    sim.run_on(&node, move |node, _| async move {
+        let listener = listen(&node);
+        let url =
+            CString::new(format!("opc.tcp://{}", listener.local())).expect("no NUL");
+        let variables = Variables::new(&[SPIKE]);
+        variables.set_clock(ahead);
+        let wall: Box<dyn Fn() -> Stamp> = match fixed {
+            Some(wall) => Box::new(move || wall),
+            None => Box::new(event::Time::monotonic(node.clock()).wall),
+        };
+        let mut served = node.entropy().rng();
+        let serving = |stop| {
+            serve(
+                node.clock(),
+                wall,
+                node.net(),
+                listener,
+                &mut served,
+                &variables,
+                stop,
+            )
+        };
+        during(serving, body(&node, &url, &variables)).await
+    })
+    .expect("the run ends")
+}
+
+/// Subscribes `client` to [`SPIKE`], and gives its first changes.
+async fn subscribe_spike(client: &mut Client) -> Vec<Change> {
+    let spike = SPIKE.parse::<Node>().expect("a node");
+    let revised = client.subscribe(&[spike], Span::SECOND).await;
+    assert!(revised.is_ok(), "{revised:?}");
+    client
+        .changes(future::pending())
+        .await
+        .expect("a change")
+        .to_vec()
+}
+
+/// A change gives the source timestamp of `change_at`, or the server clock at the
+/// first read of a value with none, also after a `change_at`, and the server
+/// timestamp on that clock.
+#[test]
+fn a_change_gives_the_source_timestamp_of_change_at_and_the_server_clock() {
+    let wall = Stamp::from_nanos(1_767_225_600 * Span::SECOND.nanos());
+    let ahead = Span::from_nanos(5 * Span::MINUTE.nanos());
+    let (earlier, later) = (wall - Span::HOUR, wall + Span::MINUTE);
+    let changes = on_spike(Some(wall), ahead, async move |node, url, variables| {
+        let mut rng = node.entropy().rng();
+        let mut client = connect(node, &mut rng, url).await.expect("connect");
+        let mut changes = vec![Ok(subscribe_spike(&mut client).await)];
+        variables.change_at(Quality::GOOD, earlier);
+        changes.push(client.changes(future::pending()).await.map(<[_]>::to_vec));
+        variables.set_clock(later - wall);
+        variables.change(Quality::GOOD);
+        changes.push(client.changes(future::pending()).await.map(<[_]>::to_vec));
+        client.close().await;
+        changes
+    });
+    let at = |value, source, server| {
+        Ok(vec![Change {
+            index: 0,
+            value: Ok(Value::F64(value)),
+            source: Some(source),
+            server: Some(server),
+            overflow: false,
+        }])
+    };
+    let now = wall + ahead;
+    assert_eq!(
+        changes,
+        [
+            at(0.0, now, now),
+            at(1.0, earlier, now),
+            at(2.0, later, later)
+        ]
+    );
+}
+
+/// After `change`, each read of the value gives the source timestamp of the first,
+/// so a client that subscribes 3 s later gets the same one.
+#[test]
+fn each_read_of_a_value_gives_the_source_timestamp_of_the_first() {
+    let (early, late) = on_spike(None, Span::ZERO, async |node, url, variables| {
+        let mut rng = node.entropy().rng();
+        variables.change(Quality::GOOD);
+        let mut first = connect(node, &mut rng, url).await.expect("connect");
+        let early = subscribe_spike(&mut first).await;
+        node.clock()
+            .sleep(Span::from_nanos(3 * Span::SECOND.nanos()))
+            .await;
+        let mut second = connect(node, &mut rng, url).await.expect("connect");
+        let late = subscribe_spike(&mut second).await;
+        first.close().await;
+        second.close().await;
+        (early[0].clone(), late[0].clone())
+    });
+    assert_eq!((&late.value, late.source), (&early.value, early.source));
+    let (early, late) = (early.server.expect("a time"), late.server.expect("a time"));
+    assert!(
+        late - early >= Span::from_nanos(3 * Span::SECOND.nanos()),
+        "{early} then {late}"
+    );
+}
+
+/// A connect with no security, in `Sign`, then in `SignAndEncrypt`, to a server that
+/// offers only [`Policy::Basic256Sha256`] in `SignAndEncrypt`.
+fn secure_connects() -> (Option<Status>, Option<client::Error>, Result<Value, Fault>) {
+    let mut sim = Sim::new(::sim::Config::default());
+    let node = sim.node(node::Config::default());
+    sim.run_on(&node, move |node, _| async move {
+        let listener = listen(&node);
+        let url =
+            CString::new(format!("opc.tcp://{}", listener.local())).expect("no NUL");
+        let mut rng = node.entropy().rng();
+        let variables = Variables::new(&[SPIKE]);
+        let served = Credentials {
+            certificate: SERVER.certificate,
+            key: SERVER.key,
+            trust: CLIENT.certificate,
+        };
+        variables.secure(served, Policy::Basic256Sha256, Mode::SignAndEncrypt);
+        let own = Credentials {
+            certificate: CLIENT.certificate,
+            key: CLIENT.key,
+            trust: SERVER.certificate,
+        };
+        let mut out = (None, None, Ok(Value::I32(0)));
+        let until = async {
+            out.0 = connect(&node, &mut rng, &url).await.err();
+            let mut secure = async |mode| {
+                Client::connect(
+                    event::Time::since(node.clock(), START),
+                    tracing::Span::none(),
+                    node.net(),
+                    &mut rng,
+                    &url,
+                    Some((&own, mode)),
+                    future::pending(),
+                )
+                .await
+                .map(|client| client.expect("a pending wait never ends"))
+            };
+            out.1 = secure(Mode::Sign).await.err();
+            let mut client = secure(Mode::SignAndEncrypt).await.expect("connect");
+            out.2 = client.read_one(&SPIKE.parse().expect("a node")).await;
+            client.close().await;
+        };
+        let mut rng = node.entropy().rng();
+        let serving = |stop| {
+            serve(
+                node.clock(),
+                || START,
+                node.net(),
+                listener,
+                &mut rng,
+                &variables,
+                stop,
+            )
+        };
+        during(serving, until).await;
+        out
+    })
+    .expect("the run ends")
+}
+
+#[test]
+fn a_secure_server_offers_only_its_policy_in_its_mode() {
+    let (none, sign, read) = secure_connects();
+    assert_eq!(none, Some(BAD_IDENTITY_TOKEN_REJECTED));
+    assert_eq!(
+        sign,
+        Some(client::Error::Failed(BAD_IDENTITY_TOKEN_REJECTED))
+    );
+    assert_eq!(read, Ok(Value::F64(0.0)));
 }

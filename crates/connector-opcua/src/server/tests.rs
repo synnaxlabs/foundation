@@ -31,7 +31,7 @@ fn an_add_of_a_node_of_the_number_0_panics_and_frees_the_port() {
         .expect("the port is free");
         let zero: Node = "ns=1;i=0".parse().expect("a node");
         let add = |server: &mut Server| server.add_scalar(&zero, Value::F64(1.0));
-        let panic = caught(Server::serve(manager, 1, add, async {}))
+        let panic = caught(Server::serve(manager, 1, None, add, async {}))
             .await
             .expect_err("the serve panics");
         assert_eq!(
@@ -67,7 +67,8 @@ fn a_drop_of_a_serve_that_waits_closes_the_server_and_frees_the_port() {
             )
         };
         let manager = listen(&mut rng).expect("the port is free");
-        let mut serve = Box::pin(Server::serve(manager, 1, |_| {}, pending::<()>()));
+        let mut serve =
+            Box::pin(Server::serve(manager, 1, None, |_| {}, pending::<()>()));
         let waits = poll_fn(|cx| Poll::Ready(serve.as_mut().poll(cx).is_pending()));
         assert!(waits.await, "the serve waits on its end");
         drop(serve);
@@ -102,10 +103,10 @@ fn a_crash_while_a_stream_is_open_frees_the_server() {
         let add = |server: &mut Server| {
             server.add_source(&source, move || {
                 let () = *served;
-                (Value::I32(1), types::quality::Quality::GOOD)
+                (Value::I32(1), types::quality::Quality::GOOD, None)
             });
         };
-        let served = Server::serve(manager, 1, add, pending::<()>());
+        let served = Server::serve(manager, 1, None, add, pending::<()>());
         served.await.expect("the listener does not fail");
     });
     drop(started.expect("the shard starts"));
@@ -146,7 +147,7 @@ fn the_end_of_a_serve_closes_each_open_stream() {
         )
         .expect("the port is free");
         let served =
-            Server::serve(manager, 1, |_| {}, node.clock().sleep(Span::SECOND));
+            Server::serve(manager, 1, None, |_| {}, node.clock().sleep(Span::SECOND));
         served.await.expect("the listener does not fail");
     });
     drop(started.expect("the shard starts"));
@@ -204,7 +205,7 @@ fn an_add_of_a_value_that_is_not_a_variant_panics() {
                     value: Some(value),
                 };
                 let add = |server: &mut Server| server.add_variable(&variable);
-                let panic = caught(Server::serve(manager, 1, add, async {}))
+                let panic = caught(Server::serve(manager, 1, None, add, async {}))
                     .await
                     .expect_err("the serve panics");
                 panic.downcast_ref::<String>().cloned()
@@ -238,11 +239,12 @@ fn a_source_is_a_variable_of_the_data_type_base_data_type() {
         .expect("the port is free");
         let source: Node = "ns=1;i=7".parse().expect("a node");
         let add = |server: &mut Server| {
-            server
-                .add_source(&source, || (Value::I32(1), types::quality::Quality::GOOD));
+            server.add_source(&source, || {
+                (Value::I32(1), types::quality::Quality::GOOD, None)
+            });
             assert_eq!(server.data_type(&source), ns0::BASE_DATA_TYPE);
         };
-        let served = Server::serve(manager, 1, add, async {});
+        let served = Server::serve(manager, 1, None, add, async {});
         served.await.expect("the listener does not fail");
     })
     .expect("the run ends");

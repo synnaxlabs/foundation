@@ -9,22 +9,27 @@
   the rest. `connector::reader` gives `SELECT` and `BLOCK`, which the body of each kind
   that reads lists, and `reader::read` takes that body. Each `schema::Attribute` has a
   `Presence`: `Required`; `Unless`, required unless the body holds each attribute that
-  it names in its place; `Default`, whose absence gives a value; or `Optional`, whose
-  absence gives none, and the body summary states each rule that ties it to other
-  attributes. `Presence::needed` states, from the attributes of a body, when it needs
-  it. Each form of `config::SCHEMA` holds examples, which pin which attributes it takes
-  and which it needs: the check takes each with no diagnostic, still with an attribute
-  removed that it does not need, with a `document.missing-attribute` that names one that
-  it needs when that one is removed, still with each attribute with a default removed at
-  once, and with one `document.unknown-attribute` for a name that the body does not
-  state. Each `Unless` names at least one attribute, and each name is an attribute of
-  its body. Without the `kind` that picks its form, a block reads as the form whose
-  `kind` has a default. No test reads the text of `value` or of a `Default`. The first
-  block of an example is of its body, and of a block with more than one form, it holds
-  only attributes of its form. Each attribute and block of a body is in at least one,
-  or, for the body of a block inside another body, in an example of that outer body.
-  `foundation docs` states each form of each core block, with no filter, and a test
-  asserts that each has an example. A body that it does not state, such as
+  it names in its place; `When`, required when the body holds any attribute that it
+  names; `Default`, whose absence gives a value; or `Optional`, whose absence gives
+  none, and a rule that needs it when the body holds another attribute is `When`. The
+  summary of the body states each other rule that ties an `Optional` attribute to other
+  attributes, such as a `placement` that names at least one of `home`, `standby`, and
+  `copies`.
+  `Presence::needed` states, from the attributes of a body, when it needs it. Each form
+  of `config::SCHEMA` holds examples, which pin which attributes it takes and which it
+  needs: the check takes each with no diagnostic, still with an attribute removed that
+  it does not need, with a `document.missing-attribute` that names one that it needs
+  when that one is removed, still with each attribute with a default removed at once,
+  and with one `document.unknown-attribute` for a name that the body does not state.
+  Each `Unless` and each `When` names at least one attribute, and each name is another
+  attribute of its body. Each attribute with an `Unless` or a `When` is not needed in
+  at least one example. Without the `kind` that picks its form, a block reads as the
+  form whose `kind` has a default. No test reads the text of `value` or of a `Default`.
+  The first block of an example is of its body, and of a block with more than one form,
+  it holds only attributes of its form. Each attribute and block of a body is in at
+  least one, or, for the body of a block inside another body, in an example of that
+  outer body. `foundation docs` states each form of each core block, with no filter, and
+  a test asserts that each has an example. A body that it does not state, such as
   `channel::ANY` or the file level, may have none. `foundation docs` gives each block of
   `config::SCHEMA` with its label and each form: its summary, one line for each
   attribute with its value, its `Presence` in words, and its summary, each example, and
@@ -44,20 +49,21 @@
   those of each kind in `node`, over `kinds()`. Both run
   `document::testing::assert_examples`, behind `sim`, which checks each example, the
   example without each attribute that it does not need, the example without each
-  attribute with a default, and each name of each `Unless`. The check that each
-  attribute and block of a body is in an example, and the check of an example without an
-  attribute that it needs, stay in each crate until #3349. `foundation docs` gives each
-  kind example inside a whole `connector` block, labeled with the name of the kind, with
-  `kind` and `node = "edge"`, so a copy is a block that a config takes. An example that
-  holds `<<` keeps its lines with no indent, so a heredoc keeps its value. A test of the
-  binary asserts that the body of each block, without `kind` and `node`, is the example,
-  and a test in `ops` asserts that `config::check` takes as a file each such block of a
-  table of test kinds, and #3350 adds the kinds of the binary. A test asserts that the
-  fix of an unknown attribute or block at each site of each kind is the fix that
-  `read::unknown` gives with the body of that site, so each kind refuses unknown items
-  with the names that its `SCHEMA` states. Whether the check reads `SCHEMA` itself waits
-  on #3334. `ops` gives the table to each run as an argument. `Scope` holds only what
-  picks the files that a run reaches.
+  attribute with a default, each name of each `Unless` and `When`, and, for each
+  attribute with an `Unless` or a `When`, an example that does not need it. The check
+  that each attribute and block of a body is in an example, and the check of an example
+  without an attribute that it needs, stay in each crate until #3349. `foundation docs`
+  gives each kind example inside a whole `connector` block, labeled with the name of the
+  kind, with `kind` and `node = "edge"`, so a copy is a block that a config takes. An
+  example that holds `<<` keeps its lines with no indent, so a heredoc keeps its value.
+  A test of the binary asserts that the body of each block, without `kind` and `node`,
+  is the example, and a test in `ops` asserts that `config::check` takes as a file each
+  such block of a table of test kinds, and #3350 adds the kinds of the binary. A test
+  asserts that the fix of an unknown attribute or block at each site of each kind is the
+  fix that `read::unknown` gives with the body of that site, so each kind refuses
+  unknown items with the names that its `SCHEMA` states. Whether the check reads
+  `SCHEMA` itself waits on #3334. `ops` gives the table to each run as an argument.
+  `Scope` holds only what picks the files that a run reaches.
   Lost: the body alone in the output, which a person must wrap.
   Lost: a hand-written `reference.md` with a test that compares its names, whose values
   and defaults drift with no test; a `fn reference(&self) -> String` on each check,
@@ -106,3 +112,22 @@
   When a third table of the binary reaches `ops`, the tables go into one value of `ops`,
   by `laptop.architect-2` at 2026-10-19T03:05:26Z
   (https://github.com/synnaxlabs/foundation/pull/3332#issuecomment-6258753211).
+  Lost: a check that skips each `Optional` attribute, which no longer finds one that the
+  check needs; a `secure` block inside the `opcua` body, which changes its decided
+  schema. Decided by `laptop.architect-2` (2026-10-20T04:23:29Z:
+  https://github.com/synnaxlabs/foundation/pull/3471#issuecomment-6283332456). The
+  Lost without codes, by `laptop.architect-2` at 2026-10-20T04:38:00Z
+  (https://github.com/synnaxlabs/foundation/pull/3505#issuecomment-6283501391). The
+  summary of the body states each other rule that ties an `Optional` attribute, by
+  `laptop.architect-2` at 2026-10-20T04:47:17Z
+  (https://github.com/synnaxlabs/foundation/pull/3505#issuecomment-6283610345), with
+  its `placement` example only in this record, at 2026-10-20T04:57:48Z
+  (https://github.com/synnaxlabs/foundation/pull/3505#issuecomment-6283734442). Each
+  name is another attribute, by `laptop.architect-2` at 2026-10-20T04:54:13Z
+  (https://github.com/synnaxlabs/foundation/pull/3505#issuecomment-6283692312). Each
+  attribute with an `Unless` or a `When` is not needed in at least one example, by
+  `laptop.architect-2` at 2026-10-20T05:09:52Z
+  (https://github.com/synnaxlabs/foundation/pull/3505#issuecomment-6283877244). It
+  supersedes the rule that each attribute with a `When` is absent in at least one
+  example, of 2026-10-20T05:01:36Z
+  (https://github.com/synnaxlabs/foundation/pull/3505#issuecomment-6283779355).

@@ -38,6 +38,7 @@ mod net;
 #[path = "../common/agent.rs"]
 mod agent;
 mod definitions;
+mod forward;
 mod link;
 mod named;
 #[path = "../common/node.rs"]
@@ -161,6 +162,7 @@ impl Test {
                 pause: Rc::clone(&pause),
             }),
             node: key,
+            public_key: net::public_key(&net::HOME),
             time: mesh.clone(),
             entropy: node.entropy(),
             region: region.as_ref().map(|region| hub::Region {

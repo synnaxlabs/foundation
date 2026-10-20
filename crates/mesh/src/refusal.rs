@@ -26,6 +26,7 @@ const UNSYNCED: u8 = 15;
 const NO_VOTE: u8 = 16;
 const STOPPED: u8 = 17;
 const UNLED: u8 = 18;
+const FULL: u8 = 19;
 
 /// Why a voter admits no node that asks to join. The node gets it in the answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -96,6 +97,7 @@ impl Refusal {
             REUSED => unfit(Unfit::Reused {
                 key: take_channel(bytes)?,
             }),
+            FULL => unfit(Unfit::Full),
             UNKNOWN => Some(Self::Refused(region::Refused::Unknown {
                 public_key: take_public_key(bytes)?,
             })),
@@ -174,6 +176,7 @@ fn put_unfit(unfit: &Unfit, out: &mut Vec<u8>) {
             out.push(REUSED);
             put_channel(*key, out);
         }
+        Unfit::Full => out.push(FULL),
     }
 }
 
@@ -231,6 +234,7 @@ pub(crate) mod tests {
             id().prop_map(|id| Unfit::Held { key: key(id) }),
             (name(), id()).prop_map(|(name, id)| Unfit::Taken { name, key: key(id) }),
             any::<u128>().prop_map(|bits| Unfit::Reused { key: index(bits) }),
+            Just(Unfit::Full),
         ];
         let ticket = prop_oneof![
             (id(), id()).prop_map(|(node, holder)| ticket::Refused::Forged {
@@ -285,7 +289,8 @@ pub(crate) mod tests {
         }));
         let mut key_3 = vec![3];
         key_3.extend([0; 15]);
-        let cases: [(Refusal, Vec<u8>); 7] = [
+        let full = Refusal::Refused(region::Refused::Unfit(Unfit::Full));
+        let cases: [(Refusal, Vec<u8>); 8] = [
             (unknown, [&[9][..], &public(2).to_bytes()].concat()),
             (taken, [&[7, 5][..], b"plant", &key_3].concat()),
             (Refusal::Contested, vec![14]),
@@ -293,12 +298,13 @@ pub(crate) mod tests {
             (Refusal::NoVote, vec![16]),
             (Refusal::Stopped, vec![17]),
             (Refusal::Unled, vec![18]),
+            (full, vec![19]),
         ];
         for (refusal, expected) in cases {
             assert_eq!(encoded(&refusal), expected, "{refusal:?}");
             assert_eq!(Refusal::decode(&mut expected.as_slice()), Some(refusal));
         }
-        for kind in [0, 19, 255] {
+        for kind in [0, 20, 255] {
             assert_eq!(Refusal::decode(&mut [kind].as_slice()), None, "{kind}");
         }
     }

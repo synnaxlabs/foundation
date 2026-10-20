@@ -46,7 +46,7 @@ impl Config {
 /// index, which the client's thread holds. It can move between threads. Each call
 /// blocks until the node answers, and the node applies the frames in the order of the
 /// calls. Dropping it stops the stream, and the node ends the writer;
-/// [`Writer::close`] first waits until each frame is on disk.
+/// [`Writer::close`] first waits until each frame is on disk, or its group ended.
 ///
 /// Place `n` of each call is `Config::channels[n]`, and the index is place
 /// `channels.len()` when `channels` does not name it.
@@ -221,13 +221,15 @@ impl Writer {
         self.call(Time::Frame(Path::Live))
     }
 
-    /// Finishes the stream, and blocks until each frame that the node took is on disk
-    /// and the node finished the stream. Control ends then.
+    /// Finishes the stream, and blocks until each frame that the node took is on disk,
+    /// or its group ended, and the node finished the stream. Control ends then.
     ///
     /// # Errors
     ///
     /// [`Error::Closed`], [`Error::Panicked`], [`Error::Session`], and
-    /// [`Error::Stream`] as [`Writer::write`] gives them.
+    /// [`Error::Stream`] as [`Writer::write`] gives them. [`Error::Stream`] with
+    /// [`program::Error::Unstored`] when the write of the group ended with a frame that
+    /// the node took and that may not be on disk.
     pub fn close(self) -> Result<(), Error> {
         if let Some(error) = self.lost {
             return Err(error);

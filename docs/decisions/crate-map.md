@@ -26,9 +26,6 @@ Rules:
    `config` may take `config-hcl` and `connector-influx`, so its tests check a real file
    with a real kind (`laptop.architect-2`, 2026-10-08T03:02Z:
    https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152), and
-   `ops` may take `config-hcl`, so its plan tests read a real file
-   (`laptop.architect-2`, 2026-10-08T16:00:18Z:
-   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6063892745), and
    `ops` may take `transport`, so its tests open a real `Mesh` (`laptop.architect-2`,
    2026-10-08T23:21:45Z:
    https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6070995340), and
@@ -54,7 +51,12 @@ Rules:
    error and a memory error (`transport`: `laptop.architect-2`, 2026-10-17T21:48:03Z,
    https://github.com/synnaxlabs/foundation/pull/3061#issuecomment-6241731905; `os`:
    `laptop.architect-2`, 2026-10-19T14:39:03Z,
-   https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6269865289).
+   https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6269865289), and
+   `block`, so its test of `read::raised` builds an error of the pool of a reader
+   (`laptop.architect-2`, 2026-10-19T20:40:10Z,
+   https://github.com/synnaxlabs/foundation/issues/3321#issuecomment-6276835432, and
+   `laptop.architect`, 2026-10-19T20:41:03Z,
+   https://github.com/synnaxlabs/foundation/issues/3321#issuecomment-6276852399).
    A crate may also take itself, so its tests and benches build with its own `sim`
    feature (STORED BENCH; `laptop.architect`, 2026-10-08T01:01:28Z:
    https://github.com/synnaxlabs/foundation/pull/1568#issuecomment-6049989224). A
@@ -129,12 +131,12 @@ layer 2 (`os`, `sector`) -> (`transport`, `buffer`) -> (`clock`, `blob`, `sim`,
 | 3 | `connector-<kind>` | Translates one protocol, device family, store, or the calculation engine into channels. | layer 1, `hub`, `connector`; vendor libraries behind build flags, except a library loaded at run time, which links nothing |
 | 3 | `daqmx-stub` | Stands in for NI's `libnidaqmx.so` in the tests of `connector-ni`, built as a shared library and as a Rust library. A dev-dependency of `connector-ni` only. | none |
 | 4 | `config-hcl` | Reads and writes HCL files as Documents. | `types`, `document` |
-| 4 | `config` | Checks core definitions in Documents, expands templates, hands connector blocks to kinds, and computes plans, explains, and exports. | layer 1, `connector`; `config-hcl` and `connector-influx` as dev-dependencies only |
-| 4 | `ops` | Holds the operation table and handlers, generates the CLI, MCP tools, and docs, and runs each operation on the node that must run it. | `config`, `connector`, `secret`, `hub`, `mesh`, `blob`, `sim`, layer 1 |
+| 4 | `config` | Checks core definitions in Documents, expands templates, hands connector blocks to kinds, and computes plans, explains, and exports. Decodes the profile of a program's host, and reads and writes the text of an OpenSSH Ed25519 key file, with no file I/O. | layer 1, `connector`; `config-hcl` and `connector-influx` as dev-dependencies only |
+| 4 | `ops` | Holds the operation table and handlers, generates the CLI, MCP tools, and docs, and runs each operation on the node that must run it. | `config`, `config-hcl` (`foundation profile` writes its block with it: `laptop.architect-2`, 2026-10-20T01:34:49Z, https://github.com/synnaxlabs/foundation/pull/3479#issuecomment-6281253212), `connector`, `secret`, `hub`, `mesh`, `blob`, `sim`, layer 1 |
 | 4 | `acceptance` | Runs the MVP acceptance scenarios against whole meshes built from `node`. Test-only. | all crates |
 | 4 | `node` | Is the composition root: real seams, pools and shards, all tables (kinds, front ends, time sources, secret stores), the status collector, process lifecycle, and upgrades. | all crates |
 | 4 | `sdk` | Is the Rust client of a program, outside the binary: it runs a `program::Session` on a shard of `os`, reads the node and its first admin from a data directory with `sector`, and the Python SDK wraps it. | `program`, `transport`, `os`, `sector`, `spec`, `env`, `types`, `block`, `codec` (`codec`: laptop.architect, item 2 of https://github.com/synnaxlabs/foundation/issues/3265#issuecomment-6256109116; `sector`: https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6252501317; `spec`: laptop.architect-2, item 2 of https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6252530569) |
-| 4 | `sdk-python` | Is the Python SDK, outside the binary: a PyO3 module that wraps `sdk::Client` for Python programs. Holds one `unsafe` read in `write::raw`, of each sample of a `numpy` array that is not aligned or not contiguous (laptop.architect-2, 2026-10-19T13:03:37Z, https://github.com/synnaxlabs/foundation/pull/3325#issuecomment-6267870899). | `sdk`, `program`, `sector`, `types` (`program`: laptop.architect-2, item 2 of https://github.com/synnaxlabs/foundation/issues/3320#issuecomment-6257620825, and laptop.architect, https://github.com/synnaxlabs/foundation/issues/3320#issuecomment-6257630032; `sector`: laptop.architect-2, https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6252530569, and laptop.architect, https://github.com/synnaxlabs/foundation/pull/3231#issuecomment-6252972067); `transport` and `os` as dev-dependencies only (https://github.com/synnaxlabs/foundation/pull/3061#issuecomment-6241731905, https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6269865289) |
+| 4 | `sdk-python` | Is the Python SDK, outside the binary: a PyO3 module that wraps `sdk::Client` for Python programs. Holds one `unsafe` read in `write::raw`, of each sample of a `numpy` array that is not aligned or not contiguous (laptop.architect-2, 2026-10-19T13:03:37Z, https://github.com/synnaxlabs/foundation/pull/3325#issuecomment-6267870899). | `sdk`, `program`, `sector`, `types` (`program`: laptop.architect-2, item 2 of https://github.com/synnaxlabs/foundation/issues/3320#issuecomment-6257620825, and laptop.architect, https://github.com/synnaxlabs/foundation/issues/3320#issuecomment-6257630032; `sector`: laptop.architect-2, https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6252530569, and laptop.architect, https://github.com/synnaxlabs/foundation/pull/3231#issuecomment-6252972067); `transport`, `os`, and `block` as dev-dependencies only (https://github.com/synnaxlabs/foundation/pull/3061#issuecomment-6241731905, https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6269865289; `block`: laptop.architect-2, 2026-10-19T20:40:10Z, https://github.com/synnaxlabs/foundation/issues/3321#issuecomment-6276835432, and laptop.architect, 2026-10-19T20:41:03Z, https://github.com/synnaxlabs/foundation/issues/3321#issuecomment-6276852399) |
 
 `fuzz` holds the fuzz targets, outside the workspace. It is test-only, builds on the
 pinned nightly, may depend on any crate, and no crate depends on it (#252;

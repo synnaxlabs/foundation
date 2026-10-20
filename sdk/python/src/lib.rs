@@ -1,8 +1,10 @@
 //! The native module `foundation._native` of the Python SDK: the Rust SDK `sdk`, for
 //! Python.
 
+use std::fmt::Display;
 use std::mem;
 use std::net::SocketAddr;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::{Mutex, PoisonError};
@@ -13,12 +15,13 @@ use pyo3::exceptions::{
 };
 use pyo3::panic::PanicException;
 use pyo3::prelude::*;
-use pyo3::types::{PyInt, PyString};
+use pyo3::types::{PyDict, PyInt, PyRange, PyString, PyTuple};
 use types::authority::Authority;
 use types::ed25519::{PrivateKey, PublicKey};
 use types::name::Name;
 use types::time::Span;
 
+mod read;
 #[cfg(feature = "sim")]
 mod sim;
 #[cfg(test)]
@@ -45,9 +48,10 @@ pyo3::create_exception!(
      channels of more than one index or a lease that the home refuses, `failed` when \
      the home cannot open the write, `refused` when the access check of the node \
      refuses the write, and `busy` when the node has no room for the open. Later: \
-     `unknown` when a channel was removed, `failed` when the home failed, `busy` when \
-     the home has no room for the outcome of a frame, and `malformed` for a frame that \
-     breaks a rule of the wire."
+     `unknown` when a channel was removed, `failed` when the home failed, `refused` \
+     when the home refuses the program's proof, such as a renewal of its hello, `busy` \
+     when the home has no room for the outcome of a frame, and `malformed` for a frame \
+     that breaks a rule of the wire."
 );
 pyo3::create_exception!(
     foundation,
@@ -61,9 +65,12 @@ pyo3::create_exception!(
     foundation,
     DataLost,
     PyException,
-    "The node found no room for a live frame, so its samples are a gap in the log. \
-     `seqs` is a `dict` from the name of each channel of the frame to the `range` of \
-     the seqs of its lost samples. The writer goes on, as a later frame can find room."
+    "Samples were lost. A writer with `on_loss=\"raise\"` raises it when the node \
+     found no room for a live frame, so its samples are a gap in the log, and goes \
+     on, as a later frame can find room: `seqs` is a `dict` from the name of each \
+     channel of the frame to the `range` of the seqs of its lost samples, and `frame` \
+     is `None`. A reader with `on_loss=\"raise\"` raises it for a frame after a loss, \
+     and closes: `seqs` is `Frame.lost` of that frame, and `frame` is the frame."
 );
 
 #[pymodule]
@@ -72,6 +79,11 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(connect, module)?)?;
     module.add_class::<Client>()?;
     module.add_class::<write::Writer>()?;
+    module.add_class::<read::Reader>()?;
+    module.add_class::<read::Frame>()?;
+    py.import("collections.abc")?
+        .getattr("Mapping")?
+        .call_method1("register", (py.get_type::<read::Frame>(),))?;
     module.add("Refused", py.get_type::<Refused>())?;
     module.add("Stopped", py.get_type::<Stopped>())?;
     module.add("Rejected", py.get_type::<Rejected>())?;
@@ -84,15 +96,15 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
 /// Dials the node at `address` (`ip:port`, UDP), and blocks until it admits the first
 /// hello of `subject`. The client then renews the hello until it closes.
 ///
-/// `node` is the `uuid.UUID` key of the node, `public_key` the 32 bytes of the key
-/// that the node proves, and `private_key` the 32 bytes of a key that the spec lists
-/// for `subject`. Each of `address`, the pair (`node`, `public_key`), and the pair
-/// (`subject`, `private_key`) comes from the arguments, else from the node that runs on
-/// the data directory `data`: that node gives its address and keys, and its first admin
-/// gives the subject. `data` is a `str` or an `os.PathLike`, the `--data` of
-/// `foundation start`, by default `foundation-data`. With an `address`, the data
-/// directory counts only when its node is at that address: `127.0.0.1:p` matches a node
-/// bound on `0.0.0.0:p`. Other Python threads run while it waits.
+/// `public_key` is the 32 bytes of the key that the node proves, and `private_key` the
+/// 32 bytes of a key that the spec lists for `subject`. Each of `address`,
+/// `public_key`, and the pair (`subject`, `private_key`) comes from the arguments, else
+/// from the node that runs on the data directory `data`: that node gives its address
+/// and public key, and its first admin gives the subject. `data` is a `str` or an
+/// `os.PathLike`, the `--data` of `foundation start`, by default `foundation-data`.
+/// With an `address`, the data directory counts only when its node is at that
+/// address: `127.0.0.1:p` matches a node bound on `0.0.0.0:p`. Other Python threads
+/// run while it waits.
 ///
 /// Raises `TypeError` for an argument of a wrong type, `ValueError` for an argument
 /// that does not parse or a pair given in half, `RuntimeError` when a thread of the
@@ -104,44 +116,39 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
 /// panicked.
 #[pyfunction]
 #[pyo3(signature = (
-    address=None, *, node=None, public_key=None, subject=None, private_key=None,
-    data=None,
+    address=None, *, public_key=None, subject=None, private_key=None, data=None,
 ))]
 fn connect(
     py: Python<'_>,
     address: Option<&str>,
-    node: Option<&Bound<'_, PyAny>>,
     public_key: Option<&[u8]>,
     subject: Option<&str>,
     private_key: Option<&[u8]>,
     data: Option<PathBuf>,
 ) -> PyResult<Client> {
-    let keys = pair(["node", "public_key"], node, public_key)?;
     let subject = pair(["subject", "private_key"], subject, private_key)?;
     let address = address.map(parse_address).transpose()?;
     let data = data.map(parse_data).transpose()?;
-    let keys = keys.map(|(node, public_key)| node_keys(node, public_key));
+    let public_key = public_key.map(parse_public_key).transpose()?;
     let subject = subject.map(|(name, key)| parse_subject(name, key));
     let given = Given {
         address,
-        keys: keys.transpose()?,
+        public_key,
         subject: subject.transpose()?,
     };
-    let (address, node, subject) = match given {
+    let (address, public_key, subject) = match given {
         Given {
             address: Some(address),
-            keys: Some((key, public_key)),
+            public_key: Some(public_key),
             subject: Some(subject),
-        } => (address, (key, public_key), subject),
+        } => (address, public_key, subject),
         given => {
             let data = data.unwrap_or_else(|| PathBuf::from("foundation-data"));
             given.sourced(&data, local(py, &data)?)?
         }
     };
-    let (key, public_key) = node;
     let node = sdk::Node {
         addresses: vec![address],
-        key,
         public_key,
     };
     let client = py
@@ -154,24 +161,21 @@ fn connect(
     })
 }
 
-/// The key and the public key of a node.
-type Keys = (types::node::Key, PublicKey);
-
 /// What the arguments of [`connect`] give.
 struct Given {
     address: Option<SocketAddr>,
-    keys: Option<Keys>,
+    public_key: Option<PublicKey>,
     subject: Option<sdk::Subject>,
 }
 
 impl Given {
-    /// The address, the node's keys, and the subject, each from the arguments, else
-    /// from `local`, the node that runs on the data directory `data`, if any.
+    /// The address, the node's public key, and the subject, each from the arguments,
+    /// else from `local`, the node that runs on the data directory `data`, if any.
     fn sourced(
         self,
         data: &Path,
         local: Option<(sdk::Node, Option<sdk::Subject>)>,
-    ) -> PyResult<(SocketAddr, Keys, sdk::Subject)> {
+    ) -> PyResult<(SocketAddr, PublicKey, sdk::Subject)> {
         let (local, other) = match local {
             Some((node, _))
                 if self
@@ -207,12 +211,10 @@ impl Given {
             })
         };
         let (node, admin) = local.unzip();
-        let keys = self
-            .keys
-            .or_else(|| node.map(|node| (node.key, node.public_key)))
-            .ok_or_else(|| {
-                unsourced("the keys of the node", "node= and public_key=")
-            })?;
+        let public_key = self
+            .public_key
+            .or_else(|| node.map(|node| node.public_key))
+            .ok_or_else(|| unsourced("the public key of the node", "public_key="))?;
         let subject = match (self.subject, admin) {
             (Some(subject), _) | (None, Some(Some(subject))) => subject,
             (None, Some(None)) => {
@@ -228,7 +230,7 @@ impl Given {
                 ));
             }
         };
-        Ok((address, keys, subject))
+        Ok((address, public_key, subject))
     }
 }
 
@@ -294,11 +296,10 @@ fn parse_data(data: PathBuf) -> PyResult<PathBuf> {
     Ok(data)
 }
 
-/// The node's keys of the arguments `node` and `public_key`.
-fn node_keys(node: &Bound<'_, PyAny>, public_key: &[u8]) -> PyResult<Keys> {
-    let public_key = PublicKey::new(bytes("public_key", public_key)?)
-        .map_err(|e| PyValueError::new_err(format!("public_key: {e}")))?;
-    Ok((key(node)?, public_key))
+/// The node's public key of the argument `public_key`.
+fn parse_public_key(public_key: &[u8]) -> PyResult<PublicKey> {
+    PublicKey::new(bytes("public_key", public_key)?)
+        .map_err(|e| PyValueError::new_err(format!("public_key: {e}")))
 }
 
 /// The subject of the arguments `subject` and `private_key`.
@@ -386,35 +387,51 @@ impl Client {
         lease: Option<Lease>,
         on_loss: &str,
     ) -> PyResult<write::Writer> {
-        let loss = write::Loss::parse(on_loss)?;
+        let loss = Loss::parse(on_loss)?;
         let names = names(channels)?;
         let mut config = sdk::write::Config::new(names.clone());
         config.authority = authority.0;
         config.lease = lease.map(|lease| lease.0);
-        owned(self.process)?;
-        // The lock is taken without the GIL, which a closing thread needs to return.
-        let writer = py
-            .detach(|| {
-                let client =
-                    self.session.lock().unwrap_or_else(PoisonError::into_inner);
-                client
-                    .as_ref()
-                    .ok_or(sdk::Error::Closed)?
-                    .open_writer(config)
-            })
-            .map_err(|e| {
-                if !matches!(
-                    e,
-                    sdk::Error::Stream(program::Error::Refused(
-                        program::Refusal::Unknown
-                    ))
-                ) {
-                    return error(py, &e);
-                }
-                let names: Vec<_> = names.iter().map(Name::as_str).collect();
-                exception(py, &e, format!("{e}: the open names {}", names.join(", ")))
-            })?;
+        let writer = self.open(py, &names, |client| client.open_writer(config))?;
         Ok(write::Writer::new(writer, self.process, loss))
+    }
+
+    /// Opens a reader of `channels` at the home of their index, and blocks until the
+    /// node opened it. The reader gives only the frames written after its open, so open
+    /// it before the writer writes. `channels` is one channel name or an iterable of
+    /// names, all of one index. Place `n` is `channels[n]`, and the index is place
+    /// `len(channels)` when `channels` does not name it. `mode` is `"complete"`: each
+    /// frame from the open on, in order, past a loss of the node's buffer; or
+    /// `"latest"`: the newest frame, which skips each frame that a newer one replaced
+    /// before the node sent it, and loses nothing. `on_loss` is what the reader does
+    /// with a frame after a loss: `"warn"` logs a warning on the `foundation` logger,
+    /// `"raise"` raises `DataLost` and closes the reader, and `"ignore"` does nothing.
+    /// `Frame.lost` holds the loss in each case. A channel of `uuid` reads as an
+    /// `object` array, which costs one `uuid.UUID` for each sample. Other Python
+    /// threads run while it waits.
+    ///
+    /// Raises `TypeError` for an argument of a wrong type, or for a channel of a type
+    /// that is not a scalar; `ValueError` for no channel, a name that does not parse,
+    /// or another `mode` or `on_loss`, with no reader opened; `Stopped` when
+    /// the node refused the open, with a text that names each channel of the open for
+    /// `unknown`; `ConnectionError` when the session failed; `RuntimeError` when the
+    /// client closed or in a process that the program forked; and `PanicException`
+    /// when the client's thread panicked.
+    #[pyo3(signature = (channels, *, mode="complete", on_loss="warn"))]
+    fn open_reader(
+        &self,
+        py: Python<'_>,
+        channels: &Bound<'_, PyAny>,
+        mode: &str,
+        on_loss: &str,
+    ) -> PyResult<read::Reader> {
+        let mode = read::mode(mode)?;
+        let loss = Loss::parse(on_loss)?;
+        let names = names(channels)?;
+        let mut config = sdk::read::Config::new(names.clone());
+        config.mode = mode;
+        let reader = self.open(py, &names, |client| client.open_reader(config))?;
+        read::Reader::new(py, reader, self.process, loss)
     }
 
     fn __enter__(this: Py<Self>) -> Py<Self> {
@@ -433,6 +450,147 @@ impl Client {
     ) -> PyResult<()> {
         exit(self.close(py), raised)
     }
+}
+
+impl Client {
+    /// Calls `open` on the client with the GIL released, and gives what it opened of
+    /// the channels `names`. Raises as `error` does, with a text that names each of
+    /// `names` for `unknown`, and `RuntimeError` in a process that the program forked.
+    fn open<T: Send>(
+        &self,
+        py: Python<'_>,
+        names: &[Name],
+        open: impl FnOnce(&sdk::Client) -> Result<T, sdk::Error> + Send,
+    ) -> PyResult<T> {
+        owned(self.process)?;
+        // The lock is taken without the GIL, which a closing thread needs to return.
+        py.detach(|| {
+            let client = self.session.lock().unwrap_or_else(PoisonError::into_inner);
+            open(client.as_ref().ok_or(sdk::Error::Closed)?)
+        })
+        .map_err(|e| {
+            if !matches!(
+                e,
+                sdk::Error::Stream(program::Error::Refused(program::Refusal::Unknown))
+            ) {
+                return error(py, &e);
+            }
+            let names: Vec<_> = names.iter().map(Name::as_str).collect();
+            exception(py, &e, format!("{e}: the open names {}", names.join(", ")))
+        })
+    }
+}
+
+/// What a writer or a reader does with a frame after a loss.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Loss {
+    /// Log a warning on the `foundation` logger.
+    Warn,
+    /// Raise `DataLost`.
+    Raise,
+    /// Do nothing.
+    Ignore,
+}
+
+impl Loss {
+    /// Does what `self` says with `lost`, each name with the seqs that it lost, which
+    /// `what` names: nothing; a warning `<what>: <name> (<count>), ...` on the
+    /// `foundation` logger; or `DataLost` of that text, with `seqs`, a `dict` from each
+    /// name to the `range` of its seqs, and `frame`.
+    fn act<'py, N>(
+        self,
+        py: Python<'py>,
+        what: &str,
+        lost: impl Iterator<Item = (N, Range<u128>)> + Clone,
+        frame: &Bound<'py, PyAny>,
+    ) -> PyResult<()>
+    where
+        N: Display + IntoPyObject<'py>,
+    {
+        if self == Self::Ignore {
+            return Ok(());
+        }
+        let named: Vec<_> = lost
+            .clone()
+            .map(|(name, seqs)| format!("{name} ({})", seqs.end - seqs.start))
+            .collect();
+        let text = format!("{what}: {}", named.join(", "));
+        if self == Self::Warn {
+            py.import("logging")?
+                .call_method1("getLogger", ("foundation",))?
+                .call_method1("warning", (text,))?;
+            return Ok(());
+        }
+        let raised = DataLost::new_err(text);
+        raised.value(py).setattr("seqs", seqs(py, lost)?)?;
+        raised.value(py).setattr("frame", frame)?;
+        Err(raised)
+    }
+
+    /// The loss of the argument `on_loss`.
+    fn parse(on_loss: &str) -> PyResult<Self> {
+        match on_loss {
+            "warn" => Ok(Self::Warn),
+            "raise" => Ok(Self::Raise),
+            "ignore" => Ok(Self::Ignore),
+            other => Err(PyValueError::new_err(format!(
+                "on_loss is {other:?}, not \"warn\", \"raise\", or \"ignore\""
+            ))),
+        }
+    }
+}
+
+/// A `dict` from each name of `lost` to the Python `range` of its seqs.
+fn seqs<'py, N>(
+    py: Python<'py>,
+    lost: impl Iterator<Item = (N, Range<u128>)>,
+) -> PyResult<Bound<'py, PyDict>>
+where
+    N: IntoPyObject<'py>,
+{
+    let seqs = PyDict::new(py);
+    for (name, lost) in lost {
+        let range = py.get_type::<PyRange>().call1((lost.start, lost.end))?;
+        seqs.set_item(name, range)?;
+    }
+    Ok(seqs)
+}
+
+/// The bytes of `object` as a sample of `uuid`, the `int` of a `uuid.UUID` in
+/// big-endian order, or `None` when `object` is not a `uuid.UUID`.
+fn uuid_sample(object: &Bound<'_, PyAny>) -> PyResult<Option<[u8; 16]>> {
+    let class = object.py().import("uuid")?.getattr("UUID")?;
+    if !object.is_instance(&class)? {
+        return Ok(None);
+    }
+    Ok(Some(
+        object.getattr("int")?.extract::<u128>()?.to_be_bytes(),
+    ))
+}
+
+/// The `uuid.UUID` of each of `samples`, the bytes that [`uuid_sample`] gives, made by
+/// `class`, the class `uuid.UUID`.
+fn uuids(class: &Bound<'_, PyAny>, samples: Vec<[u8; 16]>) -> PyResult<Vec<Py<PyAny>>> {
+    let int = PyDict::new(class.py());
+    samples
+        .into_iter()
+        .map(|sample| {
+            int.set_item("int", u128::from_be_bytes(sample))?;
+            Ok(class.call((), Some(&int))?.unbind())
+        })
+        .collect()
+}
+
+/// The name and the type of each of `places`, in order, the type as the spec writes it
+/// (`f64`, `timestamp`).
+fn places<'py>(
+    py: Python<'py>,
+    places: &[sdk::Place],
+) -> PyResult<Bound<'py, PyTuple>> {
+    let places = places
+        .iter()
+        .map(|place| (place.name.as_str(), place.data_type.to_string()));
+    PyTuple::new(py, places)
 }
 
 /// The outcome of a `__exit__` whose close gave `closed`: when the block raised
@@ -560,18 +718,6 @@ impl Drop for Client {
     }
 }
 
-/// The node key of the `uuid.UUID` `node`.
-fn key(node: &Bound<'_, PyAny>) -> PyResult<types::node::Key> {
-    let uuid = node.py().import("uuid")?.getattr("UUID")?;
-    if !node.is_instance(&uuid)? {
-        let kind = node.get_type().name()?;
-        return Err(PyTypeError::new_err(format!(
-            "node is {kind}, not uuid.UUID"
-        )));
-    }
-    Ok(types::node::Key::from_u128(node.getattr("int")?.extract()?))
-}
-
 /// The 32 bytes of the argument `name`.
 fn bytes(name: &str, value: &[u8]) -> PyResult<[u8; 32]> {
     value.try_into().map_err(|_short| {
@@ -592,6 +738,10 @@ fn exception(py: Python<'_>, error: &sdk::Error, text: String) -> PyErr {
         }
         sdk::Error::Stream(program::Error::Refused(refusal)) => {
             coded(py, Stopped::new_err(text), *refusal)
+        }
+        sdk::Error::Stream(program::Error::Unstored(groups)) => {
+            let (_, end) = groups.first().expect("invariant: Unstored names a group");
+            coded(py, Stopped::new_err(text), stop(*end))
         }
         sdk::Error::Stream(
             program::Error::Layout(_)
@@ -625,6 +775,15 @@ fn coded(py: Python<'_>, error: PyErr, refusal: program::Refusal) -> PyErr {
     match error.value(py).setattr("code", code(refusal)) {
         Ok(()) => error,
         Err(e) => e,
+    }
+}
+
+/// The refusal with which the node stops a stream for the cause of `end`.
+fn stop(end: program::write::End) -> program::Refusal {
+    match end {
+        program::write::End::Removed => program::Refusal::Unknown,
+        program::write::End::Failed => program::Refusal::Failed,
+        program::write::End::Refused => program::Refusal::Refused,
     }
 }
 

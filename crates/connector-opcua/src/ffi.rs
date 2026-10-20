@@ -109,6 +109,7 @@ impl Status {
     pub(crate) const BAD_NODE_ID_UNKNOWN: Self = Self(0x8034_0000);
     pub(crate) const BAD_CONTINUATION_POINT_INVALID: Self = Self(0x804A_0000);
     pub(crate) const BAD_NO_CONTINUATION_POINTS: Self = Self(0x804B_0000);
+    pub(crate) const BAD_NO_SUBSCRIPTION: Self = Self(0x8079_0000);
     #[cfg(test)]
     pub(crate) const BAD_USER_ACCESS_DENIED: Self = Self(0x801F_0000);
     #[cfg(test)]
@@ -250,13 +251,36 @@ impl DataType {
     }
 }
 
-/// `UA_DecodeBinaryOptions`, all null but the length that the decoder sets.
+/// `UA_DecodeBinaryOptions`, all null but the calloc and the length that the decoder
+/// sets.
 #[repr(C)]
-#[derive(Default)]
 pub(crate) struct DecodeOptions {
-    pointers: [usize; 4],
+    pointers: [usize; 2],
+    /// The first argument of each call of `calloc`.
+    pub(crate) context: *mut c_void,
+    /// Takes the memory of the decoded value in place of `UA_calloc`, which then frees
+    /// none of it.
+    pub(crate) calloc: Option<Calloc>,
     pub(crate) decoded: usize,
 }
+
+impl Default for DecodeOptions {
+    fn default() -> Self {
+        Self {
+            pointers: [0; 2],
+            context: ptr::null_mut(),
+            calloc: None,
+            decoded: 0,
+        }
+    }
+}
+
+/// The `calloc` of [`DecodeOptions`]: gives `count` zeroed elements of `size` bytes.
+pub(crate) type Calloc = unsafe extern "C" fn(
+    context: *mut c_void,
+    count: usize,
+    size: usize,
+) -> *mut c_void;
 
 /// `UA_TYPES_COUNT`.
 pub(crate) const TYPES: usize = 388;
@@ -296,6 +320,11 @@ const _: () = {
         "UA_DecodeBinaryOptions changed"
     );
     assert!(
+        offset_of!(DecodeOptions, context) == 16,
+        "callocContext moved"
+    );
+    assert!(offset_of!(DecodeOptions, calloc) == 24, "calloc moved");
+    assert!(
         offset_of!(DecodeOptions, decoded) == 32,
         "decodedLength moved"
     );
@@ -326,6 +355,11 @@ pub(crate) fn types() -> &'static [DataType; TYPES] {
 /// `UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERREAD`, the node of
 /// the most nodes of one Read request of a server, a `UInt32`. `shim.c` asserts it.
 pub(crate) const MAX_NODES_PER_READ: u32 = 11705;
+
+/// `UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXMONITOREDITEMSPERCALL`, the
+/// node of the most items of one `CreateMonitoredItems` request of a server, a `UInt32`.
+/// `shim.c` asserts it.
+pub(crate) const MAX_MONITORED_ITEMS_PER_CALL: u32 = 11714;
 
 /// `UA_DATETIME_UNIX_EPOCH`, the 100 ns ticks of a `DateTime` from 1601 to the Unix
 /// epoch. `shim.c` asserts it.
@@ -537,7 +571,8 @@ pub(crate) struct Security<'a> {
 }
 
 /// `shim_refusal` of `shim.c`: the kind of a refusal of the credentials and the number
-/// of the certificate or line of the trust that it names.
+/// of the certificate of the trust or the line that it names, or of the certificates
+/// before a damaged block.
 #[repr(C)]
 pub(crate) struct Refusal {
     pub(crate) kind: c_int,
@@ -554,7 +589,10 @@ impl Refusal {
     pub(crate) const EMPTY: c_int = 6;
     pub(crate) const INVALID: c_int = 7;
     pub(crate) const TRAILING: c_int = 8;
-    pub(crate) const LINE: c_int = 9;
+    pub(crate) const TRUST_LINE: c_int = 9;
+    pub(crate) const CERTIFICATE_LINE: c_int = 10;
+    pub(crate) const KEY_LINE: c_int = 11;
+    pub(crate) const DAMAGED: c_int = 12;
 }
 
 /// `UA_MessageSecurityMode`, the modes of a channel that signs.
@@ -632,7 +670,42 @@ impl Service {
     pub(crate) const BROWSE_NEXT: Self = Self(1);
     pub(crate) const TRANSLATE: Self = Self(2);
     pub(crate) const READ: Self = Self(3);
+    pub(crate) const SUBSCRIBE: Self = Self(4);
+    pub(crate) const MONITOR: Self = Self(5);
 }
+
+/// `shim_watch`: the callbacks of a subscription, which each get the `data` of its
+/// `CreateSubscription` as `context`, and of each of its monitored items.
+#[repr(C)]
+pub(crate) struct Watch {
+    /// `UA_Client_DataChangeNotificationCallback`. `item` is the client handle of
+    /// the item in its request.
+    pub(crate) changed: unsafe extern "C" fn(
+        client: *mut Client,
+        subscription: u32,
+        context: *mut c_void,
+        monitor: u32,
+        item: *mut c_void,
+        value: *mut DataValue,
+    ),
+    /// `UA_Client_StatusChangeNotificationCallback`.
+    pub(crate) ended: unsafe extern "C" fn(
+        client: *mut Client,
+        subscription: u32,
+        context: *mut c_void,
+        change: *mut StatusChange,
+    ),
+    /// `UA_Client_DeleteSubscriptionCallback`.
+    pub(crate) deleted: unsafe extern "C" fn(
+        client: *mut Client,
+        subscription: u32,
+        context: *mut c_void,
+    ),
+}
+
+/// `UA_StatusChangeNotification`, which Rust holds only by pointer.
+#[repr(C)]
+pub(crate) struct StatusChange([u8; 0]);
 
 /// `UA_ClientAsyncServiceCallback`.
 pub(crate) type Served = unsafe extern "C" fn(
@@ -728,6 +801,7 @@ unsafe extern "C" {
         el: *mut EventLoop,
         chunks: u32,
         queued: u32,
+        watch: *const Watch,
     ) -> *mut Client;
     pub(crate) fn UA_Client_run_iterate(client: *mut Client, timeout_ms: u32) -> u32;
     pub(crate) fn UA_Client_delete(client: *mut Client);
@@ -739,6 +813,10 @@ unsafe extern "C" {
         refusal: *mut Refusal,
     ) -> u32;
     pub(crate) fn shim_client_timeout(client: *mut Client) -> u32;
+    pub(crate) fn shim_client_publish_count(client: *mut Client, count: u16);
+    pub(crate) fn shim_client_publish_stop(client: *mut Client);
+    pub(crate) fn shim_client_publish_resume(client: *mut Client);
+    pub(crate) fn shim_client_reserve(client: *mut Client, changes: usize) -> u32;
     pub(crate) fn shim_client_limits(
         client: *mut Client,
         limits: *mut [usize; 5],
@@ -792,6 +870,7 @@ unsafe extern "C" {
         service: Service,
     ) -> *mut c_void;
     pub(crate) fn shim_answer_count(answer: *const c_void) -> usize;
+    pub(crate) fn shim_answer_result(answer: *const c_void, service: Service) -> u32;
     pub(crate) fn shim_answer_free(answer: *mut c_void, service: Service);
     pub(crate) fn shim_request_free(request: *mut c_void, service: Service);
     pub(crate) fn shim_request_bytes(
@@ -807,6 +886,9 @@ unsafe extern "C" {
     pub(crate) safe fn shim_item_path() -> usize;
     pub(crate) safe fn shim_item_result() -> usize;
     pub(crate) safe fn shim_item_reference() -> usize;
+    pub(crate) safe fn shim_item_created() -> usize;
+    pub(crate) safe fn shim_item_change() -> usize;
+    pub(crate) safe fn shim_publish_bytes() -> usize;
     #[cfg(test)]
     pub(crate) fn shim_service_type(service: Service, answer: bool) -> *const DataType;
     pub(crate) fn shim_browse_new(
@@ -852,6 +934,36 @@ unsafe extern "C" {
         count: usize,
     ) -> *mut c_void;
     pub(crate) fn shim_value_node(value: *const DataValue, out: *mut Node<'_>) -> u32;
+    pub(crate) fn shim_subscribe_new(
+        interval: f64,
+        keep_alive: u32,
+        most: u32,
+    ) -> *mut c_void;
+    pub(crate) fn shim_monitor_new(
+        subscription: u32,
+        nodes: *const Node<'_>,
+        count: usize,
+        first: u32,
+        sampling: f64,
+        queue: u32,
+    ) -> *mut c_void;
+    pub(crate) fn shim_subscription(
+        answer: *const c_void,
+        interval: *mut f64,
+        keep_alive: *mut u32,
+    ) -> u32;
+    pub(crate) fn shim_monitor_result(
+        answer: *const c_void,
+        index: usize,
+        sampling: *mut f64,
+        queue: *mut u32,
+    ) -> u32;
+    pub(crate) fn shim_status_change(change: *const StatusChange) -> u32;
+    pub(crate) fn shim_value_times(
+        value: *const DataValue,
+        source: *mut i64,
+        server: *mut i64,
+    ) -> bool;
     pub(crate) fn shim_value_time(value: *const DataValue, out: *mut i64) -> u32;
     pub(crate) fn shim_value_unit(
         value: *const DataValue,

@@ -6879,31 +6879,51 @@ mod tests {
         true
     }
 
-    /// Gives each datagram that `from` has at `now` to `to`, one at a time, and reads
-    /// `receivers` and each stream `to` accepts after each. Gives, for each datagram
-    /// after which messages are whole at `to`, the class of each of them.
+    /// Gives each datagram that `from` sends to `to`, one at a time from `now`, and
+    /// reads `receivers` and each stream `to` accepts after each. When `from` has no
+    /// datagram, gives each of `to` back and moves time to the next deadline of
+    /// either. Gives, for each datagram after which messages are whole at `to`, the
+    /// class of each of them, once `messages` are whole.
+    ///
+    /// # Panics
+    ///
+    /// When `messages` are not whole within 1000 steps.
     fn arrivals(
         from: &mut Side,
         to: &mut Side,
-        now: Monotonic,
+        mut now: Monotonic,
         mut receivers: Vec<(Class, Receiver)>,
+        messages: usize,
     ) -> Vec<Vec<Class>> {
         let key = key(to);
-        let mut arrivals = Vec::new();
-        while step(from, to, now) {
+        let mut arrivals: Vec<Vec<Class>> = Vec::new();
+        for _ in 0..1000 {
+            if arrivals.iter().map(Vec::len).sum::<usize>() == messages {
+                return arrivals;
+            }
+            if !step(from, to, now) {
+                while step(to, from, now) {}
+                if !step(from, to, now) {
+                    let next = [from.endpoint.deadline(), to.endpoint.deadline()];
+                    now = next.into_iter().flatten().min().expect("a deadline");
+                    from.endpoint.timeout(now);
+                    to.endpoint.timeout(now);
+                    continue;
+                }
+            }
             let accepted = iter::from_fn(|| to.endpoint.accept(key));
             receivers
                 .extend(accepted.map(|incoming| (incoming.class, incoming.receiver)));
             let mut whole = Vec::new();
             for (class, receiver) in &mut receivers {
-                let (messages, _) = drain(to, now, receiver);
-                whole.extend(messages.iter().map(|_| *class));
+                let (drained, _) = drain(to, now, receiver);
+                whole.extend(drained.iter().map(|_| *class));
             }
             if !whole.is_empty() {
                 arrivals.push(whole);
             }
         }
-        arrivals
+        panic!("{messages} messages are not whole: {arrivals:?}");
     }
 
     #[test]
@@ -6925,7 +6945,8 @@ mod tests {
                     &[shard.block(&[0; BULK])],
                 );
             }
-            let whole = arrivals(&mut pair.client, &mut pair.server, now, Vec::new());
+            let whole =
+                arrivals(&mut pair.client, &mut pair.server, now, Vec::new(), 4);
             let expected = [
                 [Class::Command],
                 [Class::Latest],
@@ -6947,7 +6968,8 @@ mod tests {
             let bulk = shard.block(&[0; BULK]);
             write(&mut pair.client, now, &mut latest, slice::from_ref(&bulk));
             write(&mut pair.client, now, &mut command, &[bulk]);
-            let whole = arrivals(&mut pair.client, &mut pair.server, now, Vec::new());
+            let whole =
+                arrivals(&mut pair.client, &mut pair.server, now, Vec::new(), 2);
             assert_eq!(whole, [[Class::Command], [Class::Latest]]);
         });
     }
@@ -7015,7 +7037,7 @@ mod tests {
             write(&mut pair.server, now, &mut latest, slice::from_ref(&bulk));
             write(&mut pair.server, now, &mut reply, &[bulk]);
             let receivers = vec![(Class::Command, receiver)];
-            let whole = arrivals(&mut pair.server, &mut pair.client, now, receivers);
+            let whole = arrivals(&mut pair.server, &mut pair.client, now, receivers, 2);
             assert_eq!(whole, [[Class::Command], [Class::Latest]]);
         });
     }
@@ -7038,7 +7060,7 @@ mod tests {
             write(&mut pair.server, now, &mut reply, slice::from_ref(&bulk));
             write(&mut pair.server, now, &mut complete, &[bulk]);
             let receivers = vec![(Class::CatchUp, receiver)];
-            let whole = arrivals(&mut pair.server, &mut pair.client, now, receivers);
+            let whole = arrivals(&mut pair.server, &mut pair.client, now, receivers, 2);
             assert_eq!(whole, [[Class::Complete], [Class::CatchUp]]);
         });
     }
@@ -8637,8 +8659,8 @@ mod tests {
         }
 
         #[test]
-        fn complete_after_latest_sends_exactly_one_window_alone_goes_one_window_ahead()
-        {
+        fn complete_after_latest_sends_one_window_alone_leads_by_its_credit_and_one_step()
+         {
             testing::run(1, |shard| {
                 let mut pair = narrow(shard);
                 let (mut receivers, mut read) = (Vec::new(), [0; 4]);
@@ -8678,11 +8700,18 @@ mod tests {
                 pair.run(RUN);
                 take(&mut pair, &mut receivers, &mut read);
                 let resumed = owed(&mut pair);
+                assert_eq!(
+                    resumed,
+                    NARROW.cast_signed(),
+                    "`Latest` sent {alone} alone; owed {stopped} at the stop"
+                );
                 let sample = shard.block(&[2; 1000]);
                 let mut pending = Some(sample.clone());
                 let message = shard.block(&vec![1; MESSAGE_MAX / 4]);
                 let mut ahead = refill(&mut pair, &mut complete, &message);
                 ahead -= held(&mut pair, complete.key());
+                // The lead before the step in which the credit ends, and that step.
+                let mut ended = None;
                 loop {
                     send(&mut pair, &mut latest, &mut pending);
                     pair.run(STEP);
@@ -8691,15 +8720,18 @@ mod tests {
                     {
                         break;
                     }
+                    assert_eq!(ended, None, "`Latest` waits after the credit ends");
                     let before = held(&mut pair, complete.key());
                     let taken = refill(&mut pair, &mut complete, &message);
-                    ahead += before + taken - held(&mut pair, complete.key());
+                    let step = before + taken - held(&mut pair, complete.key());
+                    if owed(&mut pair) <= 0 {
+                        ended = Some((ahead, step));
+                    }
+                    ahead += step;
                 }
-                assert!(
-                    ahead <= NARROW,
-                    "{ahead} of {NARROW}; `Latest` sent {alone} alone; owed {stopped} \
-                     at the stop, {resumed} later"
-                );
+                let (credit, step) = ended.expect("the credit ends");
+                assert!(credit <= NARROW, "{credit} of {NARROW}");
+                assert!(step <= NARROW, "{step} of {NARROW}");
             });
         }
 
@@ -8809,7 +8841,8 @@ mod tests {
             });
         }
 
-        /// The bytes that `Complete` is owed on the client's connection.
+        /// The bytes that `Complete` is owed on the client's connection. No read count
+        /// shows the credit, so it reads the share.
         fn owed(pair: &mut Pair) -> isize {
             let key = key(&pair.client);
             let connection =
@@ -9131,7 +9164,7 @@ mod tests {
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
             pair.foreign = Some(foreign);
             let (now, peer) = (pair.now(), pair::FOREIGN_KEY.public());
-            let key = pair.client.endpoint.connect(now, peer, pair::FOREIGN);
+            let key = pair.client.endpoint.connect(now, Some(peer), pair::FOREIGN);
             pair.client.key = Some(key);
             pair.run(RUN);
             pair

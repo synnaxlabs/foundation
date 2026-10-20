@@ -15,10 +15,10 @@ use crate::{Address, Error, quic};
 /// How long the newest attempt runs before the next one starts.
 const STAGGER: Span = Span::from_nanos(250 * Span::MILLISECOND.nanos());
 
-/// Dials `peer` at each of `addresses`: UDP first, then TCP, then relays, in the
-/// given order within a kind. It starts the next address [`STAGGER`] after the
-/// newest, or at once when the newest fails, and gives the first session that
-/// connects. Dropping the others closes their dials.
+/// Dials `peer`, or any node for `None`, at each of `addresses`: UDP first, then TCP,
+/// then relays, in the given order within a kind. It starts the next address
+/// [`STAGGER`] after the newest, or at once when the newest fails, and gives the first
+/// session that connects. Dropping the others closes their dials.
 ///
 /// # Errors
 ///
@@ -28,7 +28,7 @@ const STAGGER: Span = Span::from_nanos(250 * Span::MILLISECOND.nanos());
 /// started, when none connects.
 pub(crate) async fn dial(
     carrier: &quic::Handle,
-    peer: PublicKey,
+    peer: Option<PublicKey>,
     addresses: &[Address],
 ) -> Result<quic::Session, Error> {
     let mut addresses = addresses.to_vec();
@@ -55,7 +55,7 @@ pub(crate) async fn dial(
 struct Dial<'a> {
     carrier: &'a quic::Handle,
     clock: Clock,
-    peer: PublicKey,
+    peer: Option<PublicKey>,
     addresses: Vec<Address>,
     /// Why each attempt started so far failed, by its index in `addresses`. `None`
     /// while it is in flight.
@@ -247,12 +247,18 @@ mod tests {
     fn unreachable(
         node: &Node,
         addresses: Vec<Address>,
-        attempts: Vec<(Address, Error)>,
+        attempts: Box<[(Address, Error)]>,
     ) {
         testing::transport(node, CLIENT, move |transport, _| async move {
             let peer = SERVER.public();
             let dialed = transport.dial(peer, &addresses).await;
-            assert_eq!(dialed.err(), Some(Error::Unreachable { peer, attempts }));
+            assert_eq!(
+                dialed.err(),
+                Some(Error::Unreachable {
+                    peer: Some(peer),
+                    attempts
+                })
+            );
         });
     }
 
@@ -479,7 +485,8 @@ mod tests {
             testing::carrier(&client, CLIENT, move |carrier, node| async move {
                 let clock = node.clock();
                 let handle = carrier.handle();
-                let mut dial = pin!(super::dial(&handle, SERVER.public(), &addresses));
+                let mut dial =
+                    pin!(super::dial(&handle, Some(SERVER.public()), &addresses));
                 let after_stagger =
                     super::STAGGER.nanos() + Span::MILLISECOND.nanos() * 10;
                 for wait in [Span::ZERO, Span::from_nanos(after_stagger)] {
@@ -583,7 +590,8 @@ mod tests {
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
             let addresses = [Address::Udp(other), Address::Udp(PORT_ZERO)];
             let handle = carrier.handle();
-            let mut dial = pin!(super::dial(&handle, SERVER.public(), &addresses));
+            let mut dial =
+                pin!(super::dial(&handle, Some(SERVER.public()), &addresses));
             let started =
                 poll_fn(|cx| Poll::Ready(dial.as_mut().poll(cx).is_pending()));
             assert!(started.await);
@@ -607,7 +615,8 @@ mod tests {
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
             let addresses = [Address::Udp(PORT_ZERO), Address::Udp(other)];
             let handle = carrier.handle();
-            let mut dial = pin!(super::dial(&handle, SERVER.public(), &addresses));
+            let mut dial =
+                pin!(super::dial(&handle, Some(SERVER.public()), &addresses));
             let started =
                 poll_fn(|cx| Poll::Ready(dial.as_mut().poll(cx).is_pending()));
             assert!(started.await);
@@ -659,7 +668,8 @@ mod tests {
             (Address::Udp(other), Error::Authentication { expected }),
             (Address::Udp(PORT_ZERO), Error::Unroutable),
             (Address::Tcp(other), Error::Unroutable),
-        ];
+        ]
+        .into_boxed_slice();
         unreachable(&client, addresses, attempts);
         assert_eq!(sim.run(), Ok(()));
     }
@@ -691,7 +701,8 @@ mod tests {
             (Address::Tcp(b), Error::Unroutable),
             (Address::Tcp(a), Error::Unroutable),
             (relay, Error::Unroutable),
-        ];
+        ]
+        .into_boxed_slice();
         unreachable(&client, addresses, attempts);
         assert_eq!(sim.run(), Ok(()));
     }
@@ -722,7 +733,8 @@ mod tests {
                 }
             }
             let handle = carrier.handle();
-            let mut dial = pin!(super::dial(&handle, SERVER.public(), &addresses));
+            let mut dial =
+                pin!(super::dial(&handle, Some(SERVER.public()), &addresses));
             let count = Arc::new(Count(AtomicUsize::new(0)));
             let waker = Waker::from(Arc::clone(&count));
             let poll = dial.as_mut().poll(&mut Context::from_waker(&waker));
@@ -740,14 +752,87 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
+    /// With an idle of 1 s and no loss, 3 PTO before the first answer is under the
+    /// idle, so a dial waits the idle for it: on a link of 800 ms RTT it connects, and
+    /// on one of 1.2 s RTT it times out.
+    #[test]
+    fn a_dial_waits_the_idle_timeout_for_the_first_answer() {
+        assert_eq!(IDLE, Span::SECOND);
+        first_answer(IDLE, spans(Span::MILLISECOND, 400), true);
+        first_answer(IDLE, spans(Span::MILLISECOND, 600), false);
+    }
+
+    /// With an idle of 2 ms, the 1 ms floor of the PTO makes 3 PTO before the first
+    /// answer 3.6 ms: on a link of 3 ms RTT a dial connects, and on one of 4 ms RTT it
+    /// times out.
+    #[test]
+    fn a_dial_with_an_idle_of_4_ms_or_less_waits_3_ms_more_than_3_tenths_of_it() {
+        let idle = spans(Span::MILLISECOND, 2);
+        first_answer(idle, Span::from_nanos(1_500_000), true);
+        first_answer(idle, spans(Span::MILLISECOND, 2), false);
+    }
+
+    /// An idle of 1.5 ms counts as 2 ms, so 3 PTO before the first answer is 3.6 ms: on
+    /// a link of 3.4 ms RTT a dial connects, and on one of 4 ms RTT it times out.
+    #[test]
+    fn a_dial_counts_the_idle_in_whole_milliseconds_rounded_up() {
+        let idle = Span::from_nanos(1_500_000);
+        first_answer(idle, Span::from_nanos(1_700_000), true);
+        first_answer(idle, spans(Span::MILLISECOND, 2), false);
+    }
+
+    /// Dials from a client with `idle` over a link with `delay` each way and no loss,
+    /// and checks that it connects when `connects`, and else times out.
+    fn first_answer(idle: Span, delay: Span, connects: bool) {
+        let (mut sim, client, server) = nodes(0);
+        let link = sim::link::Config {
+            delay,
+            ..sim::link::Config::default()
+        };
+        sim.link(&client, &server, link);
+        sim.link(&server, &client, link);
+        testing::shard(&server, SERVER, move |config, node| async move {
+            let part = testing::part(&node.net(), address(&node));
+            let config = crate::Config { idle, ..config };
+            let transport = crate::Transport::new(config, part).expect("a transport");
+            node.clock().sleep(spans(IDLE, 3)).await;
+            drop(transport);
+        });
+        let (peer, at) = (SERVER.public(), Address::Udp(address(&server)));
+        let want = if connects {
+            Ok(Peer::Node(peer))
+        } else {
+            let attempts = Box::new([(at, Error::TimedOut)]);
+            Err(Error::Unreachable {
+                peer: Some(peer),
+                attempts,
+            })
+        };
+        testing::shard(&client, CLIENT, move |config, node| async move {
+            let part = testing::part(&node.net(), address(&node));
+            let config = crate::Config { idle, ..config };
+            let transport = crate::Transport::new(config, part).expect("a transport");
+            let dialed = transport.dial(peer, &[at]).await;
+            let got = dialed.as_ref().map(Session::peer).map_err(Clone::clone);
+            assert_eq!(got, want);
+        });
+        assert_eq!(sim.run(), Ok(()), "{idle:?}, {delay:?}");
+    }
+
     #[test]
     fn a_dial_with_no_address_is_unreachable_at_once() {
         let (mut sim, client, _) = nodes(0);
         testing::transport(&client, CLIENT, move |transport, node| async move {
             let (start, peer) = (node.clock().now(), SERVER.public());
             let dialed = transport.dial(peer, &[]).await;
-            let attempts = Vec::new();
-            assert_eq!(dialed.err(), Some(Error::Unreachable { peer, attempts }));
+            let attempts = Box::default();
+            assert_eq!(
+                dialed.err(),
+                Some(Error::Unreachable {
+                    peer: Some(peer),
+                    attempts
+                })
+            );
             assert_eq!(node.clock().now(), start);
         });
         assert_eq!(sim.run(), Ok(()));

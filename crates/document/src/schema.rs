@@ -55,23 +55,31 @@ pub enum Presence {
     Required,
     /// Each body holds it, or each attribute that this names in its place.
     Unless(&'static [&'static str]),
+    /// Required when the body holds any attribute that this names. A body that holds
+    /// none of them can leave it out, which gives no value.
+    When(&'static [&'static str]),
     /// A body can leave it out, which gives this value, as the docs state it.
     Default(&'static str),
-    /// A body can leave it out, which gives no value. The summary of the body states
-    /// each rule that needs it with other attributes.
+    /// A body can leave it out, which gives no value. A rule that needs it when the
+    /// body holds another attribute is `When`. The summary of the body states each
+    /// other rule that ties it to other attributes.
     Optional,
 }
 
 impl Presence {
     /// Whether a body whose attributes are `attributes` must hold the attribute:
     /// always for `Required`, for `Unless` when a key that it names is not in
-    /// `attributes`, and never for `Default` or `Optional`.
+    /// `attributes`, for `When` when a key that it names is in `attributes`, and never
+    /// for `Default` or `Optional`.
     #[must_use]
     pub fn needed(self, attributes: &Map) -> bool {
         match self {
             Self::Required => true,
             Self::Unless(others) => {
                 !others.iter().all(|other| attributes.get(other).is_some())
+            }
+            Self::When(others) => {
+                others.iter().any(|other| attributes.get(other).is_some())
             }
             Self::Default(_) | Self::Optional => false,
         }
@@ -97,7 +105,7 @@ mod tests {
     }
 
     #[test]
-    fn needs_an_attribute_unless_the_body_holds_each_one_in_its_place() {
+    fn needs_an_attribute_as_the_body_holds_the_ones_it_names() {
         let unless = Presence::Unless(&["bucket", "org"]);
         let cases: [(&[&str], bool); 4] = [
             (&[], true),
@@ -107,6 +115,16 @@ mod tests {
         ];
         for (keys, needed) in cases {
             assert_eq!(unless.needed(&map(keys)), needed, "{keys:?}");
+        }
+        let when = Presence::When(&["key", "trust"]);
+        let cases: [(&[&str], bool); 4] = [
+            (&["key"], true),
+            (&["trust"], true),
+            (&[], false),
+            (&["address", "rate"], false),
+        ];
+        for (keys, needed) in cases {
+            assert_eq!(when.needed(&map(keys)), needed, "{keys:?}");
         }
         assert!(Presence::Required.needed(&map(&["bucket"])));
         assert!(!Presence::Default("1").needed(&map(&[])));

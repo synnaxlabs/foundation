@@ -46,14 +46,14 @@ const READS: block::Config = match block::Config::new(8 << 20) {
     Err(_) => panic!("invariant: the budget fits"),
 };
 
-/// The node that a program reaches: where it listens, and the keys that name it.
+/// The node that a program reaches: where it listens, and the public key that names
+/// it.
 #[derive(Clone, Debug)]
 pub struct Node {
     /// The UDP addresses where the node listens, dialed in this order with a stagger.
     pub addresses: Vec<SocketAddr>,
-    /// The key of the node, which each hello names as the node it goes through.
-    pub key: types::node::Key,
-    /// The public key that the node proves in the handshake.
+    /// The public key that the node proves in the handshake, which each hello names
+    /// as the node it goes through.
     pub public_key: PublicKey,
 }
 
@@ -92,7 +92,6 @@ impl Node {
             .map_err(Error::Local)?;
         let node = Self {
             addresses: vec![local.address],
-            key: local.key,
             public_key: local.public_key,
         };
         let subject = local.admin.map(|private_key| Subject {
@@ -101,6 +100,83 @@ impl Node {
         });
         Ok((node, subject))
     }
+
+    /// The node that answers first at `addresses`, dialed in this order with a stagger,
+    /// with the public key that it proves. Blocks until each address fails, or until a
+    /// node answers and the transport drains the close of each session (up to 3 s). A
+    /// packet of the node that comes before its drain ends makes the close go out
+    /// again. Trust on first use: nothing proves that it is the node the caller means,
+    /// so the caller pins the result and gives it to each later [`Client::connect`]. It
+    /// sends no hello, so it needs no subject.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Thread`] when the thread that dials cannot start, [`Error::Bind`] when
+    /// the local UDP socket cannot bind, [`Error::Session`] with
+    /// [`program::Error::Transport`] when the dial or the handshake fails, and
+    /// [`Error::Panicked`]. With no address, [`Error::Session`] with an `Unreachable`
+    /// of no attempt.
+    #[expect(
+        clippy::missing_panics_doc,
+        clippy::unwrap_in_result,
+        reason = "a shard that did not panic sent its key"
+    )]
+    pub fn answering(addresses: Vec<SocketAddr>) -> Result<Self, Error> {
+        let dialed: Vec<_> = addresses
+            .iter()
+            .copied()
+            .map(transport::Address::Udp)
+            .collect();
+        let (sender, key) = mpsc::channel();
+        let shard = shard(move |tasks| async move {
+            sender
+                .send(answered(&dialed, on_os(tasks)).await)
+                .expect("invariant: `answering` keeps the receiver");
+        })?;
+        shard.join().map_err(|_panicked| Error::Panicked)?;
+        let public_key = key
+            .try_recv()
+            .expect("invariant: a shard that did not panic sent its key")?;
+        Ok(Self {
+            addresses,
+            public_key,
+        })
+    }
+}
+
+/// The config of a transport of the program on the drivers of `os` and `tasks`.
+fn on_os(tasks: Tasks) -> transport::client::Config {
+    transport::client::Config {
+        net: os::net(),
+        clock: os::clock(),
+        entropy: os::entropy(),
+        tasks,
+        pool: Rc::new(block::Pool::heap(POOL)),
+    }
+}
+
+/// The public key of the node that answers first at `addresses`, on a transport of
+/// `config`. Closes the session with code 0 and waits until the close drains, so
+/// that a packet of the node that comes before its end makes the close go out again.
+async fn answered(
+    addresses: &[transport::Address],
+    config: transport::client::Config,
+) -> Result<PublicKey, Error> {
+    let group = Group::new(config.tasks);
+    let config = transport::client::Config {
+        tasks: group.tasks().clone(),
+        ..config
+    };
+    let transport = transport::Client::new(config).map_err(Error::Bind)?;
+    let session = transport.dial_any(addresses).await;
+    let session = session.map_err(|e| Error::Session(program::Error::Transport(e)))?;
+    let transport::Peer::Node(public_key) = session.peer() else {
+        unreachable!("invariant: the dialed side always proves a node key");
+    };
+    session.close(transport::Code(0));
+    drop((session, transport));
+    group.ended().await;
+    Ok(public_key)
 }
 
 /// The error of [`Node::local`] whose `os::stored` failed.
@@ -161,6 +237,23 @@ pub struct Subject {
     pub name: Name,
     /// A private key that the spec lists for the subject.
     pub private_key: PrivateKey,
+}
+
+/// Gives a new Ed25519 private key, from the randomness of the OS.
+///
+/// # Panics
+///
+/// When the OS gives no randomness.
+#[must_use]
+pub fn private_key() -> PrivateKey {
+    drawn(&os::entropy())
+}
+
+/// A private key of 32 bytes of `entropy`.
+fn drawn(entropy: &env::entropy::Entropy) -> PrivateKey {
+    let mut bytes = [0; 32];
+    entropy.fill(&mut bytes);
+    PrivateKey(bytes)
 }
 
 /// A program's session with one node. It can move to and be shared between threads:
@@ -605,21 +698,13 @@ async fn connect(
     subject: Subject,
     tasks: Tasks,
 ) -> Result<(program::Session, usize), Error> {
-    let clock = os::clock();
-    let entropy = os::entropy();
-    let pool = Rc::new(block::Pool::heap(POOL));
     let frames = Rc::new(block::Pool::heap(FRAMES));
     let reads = reads().map_err(Error::Memory)?;
-    let transport = transport::Client::new(transport::client::Config {
-        net: os::net(),
-        clock: clock.clone(),
-        entropy: entropy.clone(),
-        tasks: tasks.clone(),
-        pool: Rc::clone(&pool),
-    })
-    .map_err(Error::Bind)?;
+    let on = on_os(tasks.clone());
+    let (clock, entropy, pool) =
+        (on.clock.clone(), on.entropy.clone(), Rc::clone(&on.pool));
+    let transport = transport::Client::new(on).map_err(Error::Bind)?;
     let config = program::Config {
-        via: node.key,
         node: node.public_key,
         addresses: node
             .addresses

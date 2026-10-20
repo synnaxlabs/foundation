@@ -9,6 +9,7 @@ publish.workspace = true
 access = { path = "../access" }
 clap = { workspace = true }
 config = { path = "../config" }
+config-hcl = { path = "../config-hcl" }
 connector = { path = "../connector" }
 document = { path = "../document" }
 env = { path = "../env" }
@@ -30,7 +31,6 @@ workspace = true
 blob = { path = "../blob" }
 block = { path = "../block", features = ["sim"] }
 clock = { path = "../clock" }
-config-hcl = { path = "../config-hcl" }
 connector = { path = "../connector", features = ["sim"] }
 counting = { path = "../counting" }
 hub = { path = "../hub", features = ["sim"] }

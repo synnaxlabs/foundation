@@ -100,7 +100,7 @@ impl Settings {
     /// `setup` is a node's. Every connection ID the endpoint issues starts with
     /// `shard`.
     pub(super) fn new(setup: &Setup, shard: u8) -> (Self, Endpoint) {
-        Self::with(setup, shard, transport(setup))
+        Self::with(setup, shard, transport(setup), tls(&setup.role))
     }
 
     /// As [`Settings::new`], with `change` made to the transport parameters, for a
@@ -113,15 +113,22 @@ impl Settings {
     ) -> (Self, Endpoint) {
         let mut transport = transport(setup);
         change(&mut transport);
-        Self::with(setup, shard, transport)
+        Self::with(setup, shard, transport, tls(&setup.role))
     }
 
-    fn with(setup: &Setup, shard: u8, transport: TransportConfig) -> (Self, Endpoint) {
+    /// As [`Settings::new`], with `tls` in place of the TLS of the role.
+    #[cfg(test)]
+    pub(super) fn proving(setup: &Setup, shard: u8, tls: Tls) -> (Self, Endpoint) {
+        Self::with(setup, shard, transport(setup), tls)
+    }
+
+    fn with(
+        setup: &Setup,
+        shard: u8,
+        transport: TransportConfig,
+        tls: Tls,
+    ) -> (Self, Endpoint) {
         let transport = Arc::new(transport);
-        let tls = match &setup.role {
-            Role::Node(private_key) => Tls::new(private_key),
-            Role::Program => Tls::program(),
-        };
         let server = tls.server().map(|tls| Arc::new(server(tls, &transport)));
         // `true`: `env::net` sets don't-fragment, so MTU discovery may run.
         #[expect(clippy::disallowed_methods, reason = "the config sets rng_seed")]
@@ -134,8 +141,8 @@ impl Settings {
         (settings, endpoint)
     }
 
-    /// The settings for a dial that expects `expected`.
-    pub(super) fn client(&self, expected: PublicKey) -> ClientConfig {
+    /// The settings for a dial that expects `expected`, or any node key for `None`.
+    pub(super) fn client(&self, expected: Option<PublicKey>) -> ClientConfig {
         self.dial(self.tls.client(expected))
     }
 
@@ -159,6 +166,13 @@ impl Settings {
             .version(QUIC_V1)
             .initial_dst_cid_provider(Arc::new(move || cid::random(&entropy)));
         client
+    }
+}
+
+fn tls(role: &Role) -> Tls {
+    match role {
+        Role::Node(private_key) => Tls::new(private_key),
+        Role::Program => Tls::program(),
     }
 }
 
@@ -236,6 +250,7 @@ fn streams(role: &Role, max: NonZeroU32) -> (VarInt, VarInt) {
 
 fn transport(setup: &Setup) -> TransportConfig {
     let idle_ms = idle_ms(setup.idle);
+    let idle = Duration::from_millis(idle_ms);
     let window = VarInt::try_from(setup.window_bytes).unwrap_or(VarInt::MAX);
     // noq-proto gives credit back in steps of 1/8 of a window, so a stream with the
     // connection's credit can run out while the connection has room.
@@ -258,8 +273,10 @@ fn transport(setup: &Setup) -> TransportConfig {
         .max_idle_timeout(Some(IdleTimeout::from(
             VarInt::from_u64(idle_ms).expect("invariant: i64 nanoseconds fit"),
         )))
-        .keep_alive_interval(Some(Duration::from_millis(idle_ms) / 3))
-        .initial_rtt(Duration::from_millis(333))
+        .keep_alive_interval(Some(idle / 3))
+        // From an idle of 5 ms, with no round-trip sample, the first PTO comes at 3
+        // initial RTTs and the second by 9, both within 9/10 of the idle.
+        .initial_rtt(Duration::from_millis(333).min(idle / 10))
         .packet_threshold(3)
         .time_threshold(9.0 / 8.0)
         .persistent_congestion_threshold(3)
@@ -334,8 +351,8 @@ mod tests {
     use std::num::NonZeroUsize;
     use std::task::Poll;
 
-    use noq_proto::Dir;
     use noq_proto::crypto::HmacKey;
+    use noq_proto::{Dir, PathId};
     use types::time::Monotonic;
 
     use super::*;
@@ -547,7 +564,11 @@ mod tests {
                         && reset.len() < usize::from(MTU_MIN)
                         && reset[0] & 0xc0 == 0x40
                 });
-                assert_eq!(resets.count(), pair.client.sent.len());
+                // The pacer sends the second Initial of the ClientHello 8 ms after the
+                // first, inside the reset window of the address, so only the first
+                // gets a reset.
+                assert_eq!(pair.client.sent.len(), 2);
+                assert_eq!(resets.count(), 1);
                 assert!(!connected(&pair.client) && lost(&pair.client).is_none());
             });
         }
@@ -576,7 +597,7 @@ mod tests {
             testing::run(1, |shard| {
                 let (now, mut buffer) = (pair::at(Duration::ZERO), Vec::new());
                 let mut dialer = program(shard);
-                dialer.connect(now, pair::SERVER_KEY.public(), pair::SERVER);
+                dialer.connect(now, Some(pair::SERVER_KEY.public()), pair::SERVER);
                 let initial = dialer.transmit(now, &mut buffer).expect("an Initial");
                 let issued = ids(initial.contents).1.expect("a source ID").to_vec();
                 // A program resets a short packet only to an ID that it could issue.
@@ -594,7 +615,7 @@ mod tests {
                 let (now, mut buffer) =
                     (pair::at(Duration::from_millis(1)), Vec::new());
                 let mut dialer = program(shard);
-                dialer.connect(now, pair::SERVER_KEY.public(), pair::SERVER);
+                dialer.connect(now, Some(pair::SERVER_KEY.public()), pair::SERVER);
                 let initial = dialer.transmit(now, &mut buffer).expect("an Initial");
                 let initial = initial.contents.to_vec();
                 let mut endpoint = program(shard);
@@ -822,6 +843,139 @@ mod tests {
             });
         }
 
+        /// An idle timeout over 3.33 s, as of a program.
+        const LONG: Span = Span::from_nanos(30 * Span::SECOND.nanos());
+
+        /// A tenth of the idle timeout of a [`Pair`]: the initial RTT of each side
+        /// once it has the peer's transport parameters.
+        const TENTH: Duration = Duration::from_millis(100);
+
+        /// A [`Pair`] whose client is an endpoint of `setup`, with a connection
+        /// dialed.
+        fn dial_from(shard: &testing::Shard, setup: &Setup) -> Pair {
+            let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+            pair.client.endpoint =
+                Endpoint::new(setup, CLIENT_SHARD, NonZeroUsize::MIN);
+            pair.dial(pair::SERVER_KEY.public());
+            pair
+        }
+
+        /// Runs `pair` for 3 s. The server loses each ACK of the client's Initials, so
+        /// the client has no round-trip sample. The client loses its ACK of the
+        /// server's Initials, then its Finished. Gives the client's RTT when it sends
+        /// its Finished, its error, and whether the server connected.
+        ///
+        /// # Panics
+        ///
+        /// When datagram 4 of the client is not of the Handshake space, or none after
+        /// it is.
+        fn lose_finished(pair: &mut Pair) -> (Option<Duration>, Option<Error>, bool) {
+            // Indices in `sent`.
+            let (client, server) = ([3, 4], [0, 1]);
+            let mut rtt = None;
+            for _ in 0..3000 {
+                let sent = pair.client.sent.len();
+                pair.client.drops = usize::from(client.contains(&sent));
+                let sent = pair.server.sent.len();
+                pair.server.drops = usize::from(server.contains(&sent));
+                pair.run(Duration::from_millis(1));
+                // No public call shows the RTT, so the premise reads the noq-proto
+                // connection.
+                if rtt.is_none() && pair.client.sent.len() > 4 {
+                    rtt = pair.client.connection().rtt(PathId::ZERO);
+                }
+            }
+            // A long header of the Handshake space; noq-proto greases the fixed bit.
+            let handshake =
+                |(_, _, datagram): &(_, _, Vec<u8>)| datagram[0] & 0xb0 == 0xa0;
+            let first = pair.client.sent[4].2[0];
+            assert!(
+                handshake(&pair.client.sent[4]),
+                "datagram 4 starts {first:#04x}"
+            );
+            let count = pair.client.sent.len();
+            assert!(
+                pair.client.sent[5..].iter().any(handshake),
+                "no Handshake datagram after 4 of {count}"
+            );
+            let error = lost(&pair.client).map(|(_, error)| error.clone());
+            (rtt, error, connected(&pair.server))
+        }
+
+        #[test]
+        fn keeps_a_connection_whose_finished_is_lost_with_no_round_trip_sample() {
+            let (initial, (rtt, client, server)) = testing::run(1, |shard| {
+                let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                pair.dial(pair::SERVER_KEY.public());
+                let initial = pair.client.connection().rtt(PathId::ZERO);
+                (initial, lose_finished(&mut pair))
+            });
+            assert_eq!(client, None);
+            assert!(server);
+            assert!(initial.is_some(), "no initial RTT");
+            assert_eq!(
+                rtt, initial,
+                "a round-trip sample before the Finished is lost"
+            );
+        }
+
+        #[test]
+        fn a_program_keeps_a_connection_whose_finished_is_lost() {
+            let (rtt, client, server) = testing::run(1, |shard| {
+                let setup = shard.client().setup().expect("a setup");
+                lose_finished(&mut dial_from(shard, &setup))
+            });
+            assert_eq!(client, None);
+            assert!(server);
+            assert_eq!(
+                rtt,
+                Some(TENTH),
+                "a round-trip sample before the Finished is lost"
+            );
+        }
+
+        #[test]
+        fn a_node_of_a_longer_idle_keeps_a_connection_whose_finished_is_lost() {
+            let (rtt, client, server) = testing::run(1, |shard| {
+                let setup = testing::setup(&shard.config(pair::CLIENT_KEY, LONG));
+                lose_finished(&mut dial_from(shard, &setup))
+            });
+            assert_eq!(client, None);
+            assert!(server);
+            assert_eq!(
+                rtt,
+                Some(TENTH),
+                "a round-trip sample before the Finished is lost"
+            );
+        }
+
+        #[test]
+        fn keeps_a_dial_to_a_node_of_a_longer_idle_whose_first_answers_are_lost() {
+            let (rtt, client, server) = testing::run(1, |shard| {
+                let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                let setup = testing::setup(&shard.config(pair::SERVER_KEY, LONG));
+                pair.server.endpoint =
+                    Endpoint::new(&setup, SERVER_SHARD, NonZeroUsize::MIN);
+                pair.dial(pair::SERVER_KEY.public());
+                // The server loses each datagram it sends in the first 700 ms, so it
+                // has no round-trip sample.
+                pair.server.drops = usize::MAX;
+                pair.run(Duration::from_millis(700));
+                // No public call shows the RTT, so the premise reads the noq-proto
+                // connection.
+                let mut connections = pair.server.endpoint.connections.iter().flatten();
+                let connection = connections.next().expect("a connection");
+                let rtt = connection.inner.rtt(PathId::ZERO);
+                pair.server.drops = 0;
+                pair.run(Duration::from_millis(2300));
+                let client = lost(&pair.client).map(|(_, error)| error.clone());
+                (rtt, client, connected(&pair.server))
+            });
+            assert_eq!(client, None);
+            assert!(server);
+            assert_eq!(rtt, Some(TENTH), "a round-trip sample before 700 ms");
+        }
+
         #[test]
         fn rounds_up_to_a_whole_millisecond() {
             for (nanos, ms) in [(1, 1), (1_000_000, 1), (1_000_001, 2), (2_500_000, 3)]
@@ -953,7 +1107,7 @@ mod tests {
                 let mut pair = Pair::new(shard, idle, ROUND_TRIP);
                 pair.foreign = Some(foreign);
                 let (now, peer) = (pair.now(), pair::FOREIGN_KEY.public());
-                let key = pair.client.endpoint.connect(now, peer, pair::FOREIGN);
+                let key = pair.client.endpoint.connect(now, Some(peer), pair::FOREIGN);
                 pair.client.key = Some(key);
                 pair.run(Duration::from_secs(2));
                 let foreign = pair.foreign.as_mut().expect("a foreign peer");

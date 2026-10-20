@@ -24,32 +24,7 @@ use types::sample::{Scalar, Type, Value};
 use types::time::{Span, Stamp};
 use types::{frame, hash};
 
-use crate::{DataLost, Rejected, error, owned};
-
-/// What a write does with a frame that the node took no room for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Loss {
-    /// Log a warning on the `foundation` logger.
-    Warn,
-    /// Raise `DataLost`.
-    Raise,
-    /// Do nothing.
-    Ignore,
-}
-
-impl Loss {
-    /// The loss of the argument `on_loss`.
-    pub(crate) fn parse(on_loss: &str) -> PyResult<Self> {
-        match on_loss {
-            "warn" => Ok(Self::Warn),
-            "raise" => Ok(Self::Raise),
-            "ignore" => Ok(Self::Ignore),
-            other => Err(PyValueError::new_err(format!(
-                "on_loss is {other:?}, not \"warn\", \"raise\", or \"ignore\""
-            ))),
-        }
-    }
-}
+use crate::{Loss, Rejected, error, owned, stop};
 
 /// A writer of channels of one index at its home, which `Client.open_writer` opens. A
 /// `with` block closes it at its end. Its calls take turns to send: a call waits, with
@@ -247,34 +222,15 @@ impl Writer {
         range: frame::Range,
         mut places: Vec<usize>,
     ) -> PyResult<()> {
-        if self.loss == Loss::Ignore {
-            return Ok(());
-        }
         places.sort_unstable();
         places.dedup();
-        let names: Vec<_> = places
+        let seqs =
+            u128::from(range.seq)..u128::from(range.seq) + u128::from(range.count);
+        let lost = places
             .iter()
-            .map(|&place| format!("{} ({})", self.places[place].name, range.count))
-            .collect();
-        let text = format!("samples were lost: {}", names.join(", "));
-        if self.loss == Loss::Warn {
-            py.import("logging")?
-                .call_method1("getLogger", ("foundation",))?
-                .call_method1("warning", (text,))?;
-            return Ok(());
-        }
-        let end = u128::from(range.seq) + u128::from(range.count);
-        let seqs = py
-            .import("builtins")?
-            .getattr("range")?
-            .call1((range.seq, end))?;
-        let lost = PyDict::new(py);
-        for place in places {
-            lost.set_item(self.places[place].name.as_str(), &seqs)?;
-        }
-        let raised = DataLost::new_err(text);
-        raised.value(py).setattr("seqs", lost)?;
-        Err(raised)
+            .map(|&place| (self.places[place].name.as_str(), seqs.clone()));
+        self.loss
+            .act(py, "samples were lost", lost, py.None().bind(py))
     }
 }
 
@@ -284,11 +240,7 @@ impl Writer {
     /// writes it (`f64`, `timestamp`).
     #[getter]
     fn places<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-        let places = self
-            .places
-            .iter()
-            .map(|place| (place.name.as_str(), place.data_type.to_string()));
-        PyTuple::new(py, places)
+        crate::places(py, &self.places)
     }
 
     /// The place of the index, whose samples are the stamps of each frame.
@@ -437,15 +389,16 @@ impl Writer {
         })
     }
 
-    /// Finishes the stream, and blocks until each frame that the node took is on disk
-    /// and the node finished the stream. Control ends then. A close waits for a call
-    /// that sends, with other Python threads running. A call that a close ends before
-    /// its send raises `RuntimeError`. A close after a close gives `None`, and in a
-    /// forked process it gives `None` and ends nothing.
+    /// Finishes the stream, and blocks until each frame that the node took is on disk,
+    /// or its group ended, and the node finished the stream. Control ends then. A close
+    /// waits for a call that sends, with other Python threads running. A call that a
+    /// close ends before its send raises `RuntimeError`. A close after a close gives
+    /// `None`, and in a forked process it gives `None` and ends nothing.
     ///
-    /// Raises `Stopped` when the node stopped the stream, `ConnectionError` when the
-    /// session failed, `RuntimeError` when the client closed, and `PanicException`
-    /// when the client's thread panicked.
+    /// Raises `Stopped` when the node stopped the stream or the write of its group
+    /// ended, and then a frame that the node took may not be on disk. Raises
+    /// `ConnectionError` when the session failed, `RuntimeError` when the client
+    /// closed, and `PanicException` when the client's thread panicked.
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         if process::id() != self.process {
             return Ok(());
@@ -522,11 +475,7 @@ fn rejection(refusal: Refusal) -> (&'static str, &'static str) {
 /// The error of a writer whose one group ended with `end`: the error of a stream
 /// that the node stopped for the same cause.
 fn ended(end: End) -> sdk::Error {
-    let refusal = match end {
-        End::Removed => program::Refusal::Unknown,
-        End::Failed => program::Refusal::Failed,
-    };
-    sdk::Error::Stream(program::Error::Refused(refusal))
+    sdk::Error::Stream(program::Error::Refused(stop(end)))
 }
 
 /// The value of `object` for `place`.
@@ -583,13 +532,10 @@ fn value(place: &Place, object: &Bound<'_, PyAny>) -> PyResult<Value> {
                 Value::F32(narrow)
             }
         }
-        Scalar::Uuid => {
-            let uuid = object.py().import("uuid")?.getattr("UUID")?;
-            if !object.is_instance(&uuid)? {
-                return Err(wrong(place, object)?);
-            }
-            Value::Uuid(object.getattr("int")?.extract::<u128>()?.to_be_bytes())
-        }
+        Scalar::Uuid => match crate::uuid_sample(object)? {
+            Some(sample) => Value::Uuid(sample),
+            None => return Err(wrong(place, object)?),
+        },
         Scalar::Bool => unreachable!("a bool returns above"),
     })
 }
@@ -885,12 +831,18 @@ np.array = guard(np.array, array)
 
     /// The end of the one group of a writer raises `Stopped` with the code of a stream
     /// that the node stopped for the same cause. It calls the map, not `write`: no
-    /// node gives `Outcome::Ended` until #3372, which adds the test through `write`.
+    /// node gives `Outcome::Ended` until PR 2 of #3283, and PR 4 of #3283 adds the
+    /// test through `write`.
     #[test]
     fn ended_raises_stopped_with_the_code_of_each_end() {
         Python::initialize();
         Python::attach(|py| {
-            for (end, code) in [(End::Removed, "unknown"), (End::Failed, "failed")] {
+            let ends = [
+                (End::Removed, "unknown"),
+                (End::Failed, "failed"),
+                (End::Refused, "refused"),
+            ];
+            for (end, code) in ends {
                 let error = crate::error(py, &super::ended(end));
                 assert_eq!(error.get_type(py).name().unwrap().to_string(), "Stopped");
                 let given: String =

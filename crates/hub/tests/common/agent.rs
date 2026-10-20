@@ -15,7 +15,7 @@ use wire::hub::client::{
 };
 use wire::hub::write::{Head, Reply, Time};
 
-use crate::net::{HOME, NODE, own_pool, public_key};
+use crate::net::{HOME, own_pool, public_key};
 
 pub(crate) const SUBJECT: &str = "ops.agent";
 /// Two more subjects that the spec lists with `AGENT`.
@@ -43,6 +43,21 @@ pub(crate) struct Stream {
 }
 
 impl Stream {
+    /// The stream of `sender` and `receiver`, which sends blocks of `pool`.
+    pub(crate) fn new(
+        pool: std::rc::Rc<block::Pool>,
+        sender: Sender,
+        receiver: Receiver,
+    ) -> Self {
+        Self {
+            pool,
+            sender,
+            receiver,
+            mode: None,
+            live: None,
+        }
+    }
+
     pub(crate) async fn send(&mut self, bytes: &[u8]) {
         let block = self.pool.copy(bytes).expect("the pool has room");
         self.sender.send(block).await.expect("sends");
@@ -244,13 +259,7 @@ impl Agent {
         let client = transport::Client::new(config).expect("a client");
         let session = client.dial(public_key(&HOME), &[at]).await.expect("dials");
         let (sender, receiver) = session.open(Class::Complete).await.expect("opens");
-        let mut hello = Stream {
-            pool: std::rc::Rc::clone(&pool),
-            sender,
-            receiver,
-            mode: None,
-            live: None,
-        };
+        let mut hello = Stream::new(std::rc::Rc::clone(&pool), sender, receiver);
         hello.send(&wire::header::encode(Protocol::Hub)).await;
         Self {
             node: node.clone(),
@@ -261,13 +270,13 @@ impl Agent {
         }
     }
 
-    /// A hello of [`SUBJECT`] through [`NODE`] that echoes `challenge` and lives
+    /// A hello of [`SUBJECT`] through [`HOME`] that echoes `challenge` and lives
     /// [`LIFE`] from the challenge's mesh time.
     pub(crate) fn hello(challenge: Challenge) -> Hello {
         Hello {
             subject: name(SUBJECT),
             key: public_key(&AGENT),
-            via: NODE,
+            via: public_key(&HOME),
             connection: CONNECTION,
             nonce: challenge.nonce,
             expires: challenge.now.latest + LIFE,
@@ -310,13 +319,7 @@ impl Agent {
 
     async fn silent_as(&self, class: Class) -> Stream {
         let (sender, receiver) = self.session.open(class).await.expect("opens");
-        Stream {
-            pool: std::rc::Rc::clone(&self.pool),
-            sender,
-            receiver,
-            mode: None,
-            live: None,
-        }
+        Stream::new(std::rc::Rc::clone(&self.pool), sender, receiver)
     }
 
     /// Sends a request of `length` bytes, signed over `body`, and `body` in messages

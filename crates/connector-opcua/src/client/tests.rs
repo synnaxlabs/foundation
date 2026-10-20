@@ -17,7 +17,7 @@ use sim::{Sim, node};
 use types::quality::Quality;
 use types::time::{Span, Stamp};
 
-use self::common::is;
+use self::common::{is, set_result};
 use super::{
     Calls, Client, Flight, GRACE, Large, Nodes, READS, Request, SPLIT, STATE, Slots,
     UNREAD, answer, id_bytes, most,
@@ -30,7 +30,7 @@ use crate::ffi::{self, Status};
 use crate::gate::Gate;
 use crate::node::{Key, Name, Node};
 use crate::secure::Policy;
-use crate::server::{Limits, Server};
+use crate::server::{Limits, Secure, Server};
 use crate::unwind::caught;
 use crate::value::{self, Fault, Value};
 
@@ -239,8 +239,9 @@ async fn serve<T>(
     serve_on(node, sessions, time, None, body).await
 }
 
-/// [`serve`], on a loop that reads `time`, with an endpoint of each policy of
-/// `security`, in its order, on its credentials, when it is given.
+/// [`serve`], on a loop that reads `time`, with an endpoint in `Sign` and in
+/// `SignAndEncrypt` of each policy of `security`, in its order, on its credentials,
+/// and none in `None`, when it is given.
 async fn serve_on<T>(
     node: &node::Node,
     sessions: u16,
@@ -252,10 +253,16 @@ async fn serve_on<T>(
     let local = SocketAddr::new(node.addresses()[0], PORT);
     let manager = Manager::listening(time, node.net(), local, 4, &mut rng)
         .expect("the port is free");
-    let mut server = match security {
+    let server = match security {
         // SAFETY: the close below deletes the server before the manager drops.
         Some((credentials, policies)) => unsafe {
-            Server::start_secure(&manager, c"", sessions, credentials, policies)
+            let modes = [Mode::Sign, Mode::SignAndEncrypt];
+            let secure = Secure {
+                credentials,
+                policies,
+                modes: &modes,
+            };
+            Server::start_secure(&manager, c"", sessions, &secure)
         },
         // SAFETY: as above.
         None => unsafe { Server::start(&manager, c"", sessions) },
@@ -2492,12 +2499,6 @@ const NOT_GOOD: [Status; 2] = [Status(0x00A9_0000), Status(0x4000_0000)];
 /// The type of a `CreateSession` answer.
 const CREATE_RESPONSE: [u8; 4] = [0x01, 0x00, 0xD0, 0x01];
 
-/// Sets the service result of the answer `message` to `status`.
-fn set_result(message: &mut [u8], status: Status) {
-    // The type of the answer, then its time and request handle.
-    message[40..44].copy_from_slice(&status.0.to_le_bytes());
-}
-
 /// Gives the end of a connect whose answers of type `kind` have the service result
 /// `status`, as `relayed_connect` does.
 fn session_result(kind: [u8; 4], status: Status) -> (Option<Status>, usize) {
@@ -2903,8 +2904,7 @@ fn a_read_with_two_failed_answers_ends_with_the_status_of_the_first() {
     let mut held = Vec::new();
     let reads = read_split(move |index, mut message| match index {
         1 => {
-            message[40..44]
-                .copy_from_slice(&Status::BAD_INTERNAL_ERROR.0.to_le_bytes());
+            set_result(&mut message, Status::BAD_INTERNAL_ERROR);
             held = message;
             vec![]
         }
@@ -3018,4 +3018,5 @@ mod chunks;
 pub(crate) mod common;
 mod flood;
 mod secure;
+mod subscription;
 mod walk;
