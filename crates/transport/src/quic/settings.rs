@@ -852,6 +852,8 @@ mod tests {
                 // Initials, so the client has no round-trip sample. The client loses
                 // its ACK of the server's Initials, then its Finished.
                 let (client, server) = ([3, 4], [0, 1]);
+                let initial = pair.client.connection().rtt(PathId::ZERO);
+                assert!(initial.is_some(), "no initial RTT");
                 let mut rtt = None;
                 for _ in 0..3000 {
                     let sent = pair.client.sent.len();
@@ -863,14 +865,24 @@ mod tests {
                         rtt = pair.client.connection().rtt(PathId::ZERO);
                     }
                 }
-                // The initial RTT, so no sample when the Finished is lost.
-                assert_eq!(rtt, Some(Duration::from_millis(100)));
+                assert_eq!(
+                    rtt, initial,
+                    "a round-trip sample before the Finished is lost"
+                );
                 // A long header of the Handshake space; noq-proto greases the fixed
                 // bit.
                 let handshake =
                     |(_, _, datagram): &(_, _, Vec<u8>)| datagram[0] & 0xb0 == 0xa0;
-                assert!(handshake(&pair.client.sent[4]));
-                assert!(pair.client.sent[5..].iter().any(handshake), "no resend");
+                let first = pair.client.sent[4].2[0];
+                assert!(
+                    handshake(&pair.client.sent[4]),
+                    "datagram 4 starts {first:#04x}"
+                );
+                let count = pair.client.sent.len();
+                assert!(
+                    pair.client.sent[5..].iter().any(handshake),
+                    "no Handshake datagram after 4 of {count}"
+                );
                 let client = lost(&pair.client).map(|(_, error)| error.clone());
                 (client, connected(&pair.server))
             });

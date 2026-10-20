@@ -772,6 +772,15 @@ mod tests {
         first_answer(idle, spans(Span::MILLISECOND, 2), false);
     }
 
+    /// An idle of 1.5 ms counts as 2 ms, so 3 PTO before the first answer is 3.6 ms: on
+    /// a link of 3.4 ms RTT a dial connects, and on one of 4 ms RTT it times out.
+    #[test]
+    fn a_dial_counts_the_idle_in_whole_milliseconds_rounded_up() {
+        let idle = Span::from_nanos(1_500_000);
+        first_answer(idle, Span::from_nanos(1_700_000), true);
+        first_answer(idle, spans(Span::MILLISECOND, 2), false);
+    }
+
     /// Dials from a client with `idle` over a link with `delay` each way and no loss,
     /// and checks that it connects when `connects`, and else times out.
     fn first_answer(idle: Span, delay: Span, connects: bool) {
