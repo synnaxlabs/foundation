@@ -1012,7 +1012,7 @@ fn refuses_a_policy_of_a_subject_with_no_admin_on_its_key() {
 /// placement that homes each index on `edge`.
 const YARD: &str = "channel \"yard.time\" { kind = \"index\" }\nchannel \"yard.temp\" \
                     {\n  data_type = \"f64\"\n  index = \"yard.time\"\n}\nchannel \
-                    \"yard.ctl\" {\n  data_type = \"f64\"\n  index = \
+                    \"yard.ctl\" {\n  data_type = \"string\"\n  index = \
                     \"yard.time\"\n}\nplacement \"yard.home\" {\n  select = \"**\"\n  \
                     home = \"edge\"\n}\n";
 

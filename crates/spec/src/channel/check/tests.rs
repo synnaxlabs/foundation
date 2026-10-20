@@ -34,6 +34,10 @@ fn f64() -> DataType {
     DataType::Sample(sample::Type::Scalar(Scalar::F64))
 }
 
+fn string() -> DataType {
+    DataType::Sample(sample::Type::String)
+}
+
 fn check_all(channels: &[(&str, Channel)]) -> Vec<Problem> {
     let channels = channels
         .iter()
@@ -48,7 +52,7 @@ fn accepts_channels_with_correct_edges() {
         ("a.time", index(1, Some(2), Some(3))),
         ("a.error", data(2, 1, None, f64())),
         ("a.control_time", index(6, None, None)),
-        ("a.control", data(3, 6, None, f64())),
+        ("a.control", data(3, 6, None, string())),
         ("a.quality", data(4, 1, None, DataType::Quality)),
         ("a.pressure", data(5, 1, Some(4), f64())),
     ];
@@ -59,7 +63,7 @@ fn accepts_channels_with_correct_edges() {
 fn refuses_a_control_channel_on_the_index_it_controls() {
     let channels = [
         ("a.time", index(1, None, Some(3))),
-        ("a.control", data(3, 1, None, f64())),
+        ("a.control", data(3, 1, None, string())),
     ];
     let wrong = Problem::Wrong {
         from: name("a.time"),
@@ -67,6 +71,33 @@ fn refuses_a_control_channel_on_the_index_it_controls() {
         to: name("a.control"),
     };
     assert_eq!(check_all(&channels), [wrong]);
+}
+
+#[test]
+fn refuses_a_control_channel_of_a_type_other_than_string() {
+    let channels = [
+        ("a.time", index(1, None, Some(3))),
+        ("a.control_time", index(6, None, None)),
+        ("a.control", data(3, 6, None, f64())),
+    ];
+    let wrong = Problem::Wrong {
+        from: name("a.time"),
+        edge: Edge::Control,
+        to: name("a.control"),
+    };
+
+    let problems = check_all(&channels);
+
+    assert_eq!(problems, [wrong]);
+    assert_eq!(
+        problems[0].to_string(),
+        "the control channel of `a.time` is `a.control`, which is not a data channel \
+         of type string on another index"
+    );
+    assert_eq!(
+        problems[0].fix(),
+        "Point it at a data channel of type string on another index"
+    );
 }
 
 #[test]
@@ -197,8 +228,8 @@ fn gives_each_problem_a_message_and_a_fix() {
         (
             wrong(Edge::Control),
             "the control channel of `a.pressure` is `a.time`, which is not a data \
-             channel on another index",
-            "Point it at a data channel on another index",
+             channel of type string on another index",
+            "Point it at a data channel of type string on another index",
         ),
     ] {
         assert_eq!(problem.to_string(), message);
@@ -216,8 +247,8 @@ fn edge(from: u128, len: u128) -> BoxedStrategy<Option<u128>> {
 }
 
 /// A set of channels with correct edges: indexes, then quality channels, then other
-/// data channels, then control channels, each on an index other than the one it
-/// controls.
+/// data channels, then control channels of type string, each on an index other than
+/// the one it controls.
 fn correct() -> impl Strategy<Value = Vec<Channel>> {
     (1_u128..4, 0_u128..3, 1_u128..5)
         .prop_flat_map(|(indexes, qualities, others)| {
@@ -245,7 +276,7 @@ fn correct() -> impl Strategy<Value = Vec<Channel>> {
             for (n, (error, offset)) in (0..).zip(index_edges) {
                 let control = offset.map(|offset| {
                     let key = end + n;
-                    controls.push(data(key, (n + offset) % indexes, None, f64()));
+                    controls.push(data(key, (n + offset) % indexes, None, string()));
                     key
                 });
                 channels.push(index(n, error, control));

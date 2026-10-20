@@ -5,6 +5,7 @@ use std::fmt;
 
 use types::channel;
 use types::name::Name;
+use types::sample;
 
 use super::{Channel, Edge, Kind};
 use crate::data_type::DataType;
@@ -140,7 +141,10 @@ impl Edge {
             (Self::Quality, Kind::Data(data)) => {
                 matches!(data.data_type(), DataType::Quality)
             }
-            (Self::Control, Kind::Data(data)) => *data.index() != from,
+            (Self::Control, Kind::Data(data)) => {
+                matches!(data.data_type(), DataType::Sample(sample::Type::String))
+                    && *data.index() != from
+            }
             (Self::Index, Kind::Index { .. }) | (Self::Error, Kind::Data(_)) => true,
             _ => false,
         }
@@ -156,8 +160,8 @@ impl Edge {
             ),
             Self::Error => ("a data channel", "Point it at a data channel"),
             Self::Control => (
-                "a data channel on another index",
-                "Point it at a data channel on another index",
+                "a data channel of type string on another index",
+                "Point it at a data channel of type string on another index",
             ),
         }
     }
