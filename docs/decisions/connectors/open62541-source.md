@@ -374,10 +374,11 @@
   `plugins/crypto/openssl/certificategroup.c` write the hex of the digest into the
   thumbprint, in place of a block from `malloc` and `free`, and makes
   `UA_CertificateUtils_getSubjectName` free the name of aws-lc with `OPENSSL_free`.
-  Our change: decided by
-  `laptop.architect-2`
-  (https://github.com/synnaxlabs/foundation/pull/3037#issuecomment-6236391062,
-  2026-10-17 16:11 UTC). A crypto library that a later PR links
+  Our change: decided by `laptop.architect-2` (2026-10-20 08:02:50 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3545#issuecomment-6286349076, item 2).
+  Supersedes items 1 and 3 of
+  https://github.com/synnaxlabs/foundation/pull/3037#issuecomment-6236391062. A crypto
+  library that a later PR links
   keeps its own allocator. So the counting allocator of a test or benchmark binary
   counts C too. The copy check compiles without `alloc.h`. A test reads the archive that
   `build.rs` makes with it, and fails on each symbol outside the copy, `shim.c`, and
@@ -1251,7 +1252,8 @@
   `UA_CertificateUtils_getSubjectName` of the copy, through `shim_certificate_names`.
   The test of the names that the production code calls takes these two, as item 1 of
   the ruling above states. Our change makes `getSubjectName` read the whole name, with
-  no cut at 1024 bytes, and give `BadOutOfMemory` when memory runs out, in place of
+  no cut at 1024 bytes, and give `BadOutOfMemory` when memory runs out or the one-line
+  name passes 1 MiB, in place of
   `Good` and a NULL subject. Then the text names only the source. Our change makes
   `getThumbprint` write the thumbprint with no block, in place of a write through a
   `malloc` that it did not check (`laptop.architect-2`, 2026-10-20 08:02 UTC,
