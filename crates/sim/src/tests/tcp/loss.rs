@@ -223,6 +223,24 @@ fn a_syn_ack_lost_each_time_leaves_the_backlog_at_63_s_and_the_connect_at_127_s(
 }
 
 #[test]
+fn a_power_cut_keeps_the_connects_that_give_up_of_the_other_nodes() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let c = sim.node(node::Config::default());
+    sim.link(&b, &a, cut());
+    let _listener = listen(&b, 4433);
+    let remote = at(&b, 4433);
+    let client = start(&a, "client", move |node| async move {
+        let error = connect(&node, remote, options()).await.err();
+        (node.clock().now(), error)
+    });
+    sim.run_for(secs(70)).unwrap();
+    sim.crash(&c, Crash::Power);
+    sim.run().unwrap();
+    let error = Net::TimedOut { remote };
+    assert_eq!(take(&client), (after(secs(127)), Some(error)));
+}
+
+#[test]
 fn a_reset_drops_the_lost_bytes_of_its_stream_and_goes_at_once() {
     let (mut sim, a, b) = pair(0, link::Config::default());
     let mut listener = listen(&b, 4433);
