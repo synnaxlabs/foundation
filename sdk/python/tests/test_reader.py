@@ -6,6 +6,8 @@
 import _thread
 import collections.abc
 import gc
+import logging
+import logging.handlers
 import os
 import signal
 import sys
@@ -254,15 +256,21 @@ class ReaderTest(unittest.TestCase):
         self.assertEqual(second.tolist(), [2.0] * 4)
 
     def lost(self, on_loss: str) -> tuple:
-        """A reader of `plant.a` with `on_loss`, and the frame after a loss that it got,
-        or what it raised. The reader reads on a thread on a new node, while a writer on
-        another client writes frames of `COUNT` samples until the node finds no room for
-        one, then frames of one sample of 1.5 until one fits, then one of 2.5, which the
-        reader has not read yet."""
+        """A reader of `plant.a` with `on_loss`, the frame after a loss that it got, or
+        what it raised, and each record of the `foundation` logger in that run, as
+        `assertLogs` gives it. The reader reads on a thread on a new node, while a
+        writer on another client writes frames of `COUNT` samples until the node finds
+        no room for one, then frames of one sample of 1.5 until one fits, then one of
+        2.5, which the reader has not read yet."""
+        logger = logging.getLogger("foundation")
+        logged = logging.handlers.BufferingHandler(100)
+        logger.addHandler(logged)
+        self.addCleanup(logger.removeHandler, logged)
         # The node does not trim its buffer yet (#160), so a full ring has room only at
         # its end, and how the node batched the frames sets that room. No two frames of
         # one sample fit in some runs, so the input starts again on a new node.
         for _ in range(10):
+            logged.buffer.clear()
             node = Node()
             self.addCleanup(node.stop)
             client = planted(node)
@@ -289,7 +297,11 @@ class ReaderTest(unittest.TestCase):
                     self.assertEqual(
                         len(got), 1, f"no frame after a loss in {PATIENCE} s"
                     )
-                    return reader, got[0]
+                    records = [
+                        f"{r.levelname}:{r.name}:{r.getMessage()}"
+                        for r in logged.buffer
+                    ]
+                    return reader, got[0], records
             reader.close()
             thread.join(PATIENCE)
             if fit == 0:
@@ -354,7 +366,7 @@ class ReaderTest(unittest.TestCase):
     def test_a_frame_after_a_loss_raises_data_lost_and_closes_the_reader(
         self,
     ) -> None:
-        reader, raised = self.lost("raise")
+        reader, raised, _ = self.lost("raise")
         self.assertIsInstance(raised, foundation.DataLost)
         assert_stated(self, raised)
         frame = raised.frame
@@ -367,16 +379,15 @@ class ReaderTest(unittest.TestCase):
             next(reader)
 
     def test_a_frame_after_a_loss_warns_with_on_loss_warn(self) -> None:
-        with self.assertLogs("foundation", "WARNING") as logs:
-            reader, frame = self.lost("warn")
+        reader, frame, logged = self.lost("warn")
         self.assertIsInstance(frame, foundation.Frame)
         text = self.assert_lost(frame.lost)
-        self.assertEqual(logs.output, [f"WARNING:foundation:{text}"])
+        self.assertEqual(logged, [f"WARNING:foundation:{text}"])
         self.assert_read_on(reader)
 
     def test_a_frame_after_a_loss_passes_with_on_loss_ignore(self) -> None:
         with self.assertNoLogs("foundation"):
-            reader, frame = self.lost("ignore")
+            reader, frame, _ = self.lost("ignore")
         self.assertIsInstance(frame, foundation.Frame)
         self.assert_lost(frame.lost)
         self.assert_read_on(reader)
