@@ -566,7 +566,9 @@ class ReaderTest(unittest.TestCase):
         self.assertEqual(next(reader)["plant.a"].tolist(), [1.5])
 
     def test_a_child_that_drops_an_open_reader_touches_no_descriptor(self) -> None:
-        readers = [self.client.open_reader("plant.a")]
+        # The client's thread opens the second reader only after the task of the first
+        # waits for a call, so a drop of the first that is not forgotten wakes it.
+        readers = [self.client.open_reader("plant.a") for _ in range(2)]
 
         def drop() -> object:
             raised = []
@@ -577,7 +579,7 @@ class ReaderTest(unittest.TestCase):
             return raised or None
 
         self.assertEqual(fork(drop), 0)
-        self.assertIsNone(readers[0].close())
+        self.assertEqual([reader.close() for reader in readers], [None, None])
 
     def test_a_close_from_the_garbage_collector_during_next_does_not_hang(
         self,
