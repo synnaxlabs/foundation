@@ -34,36 +34,40 @@ def connect(
 
     `public_key` is the 32 bytes of the key that the node proves, and `private_key` the
     32 bytes of a key that the spec lists for `subject`. A `subject` with no
-    `private_key` takes the key of `~/.foundation/<subject>.key`. Each of `address`,
-    `public_key`, and `subject` comes from the first source that gives it: the
-    arguments, the profile, then the node that runs on the data directory `data`, which
-    gives its address and public key, and whose first admin gives the subject. `data` is
-    a `str` or an `os.PathLike`, the `--data` of `foundation start`, by default
-    `foundation-data`. With an `address`, the data directory counts only when its node
-    is at that address: `127.0.0.1:p` matches a node bound on `0.0.0.0:p`.
+    `private_key` takes the key of `~/.foundation/<subject>.key`. The address comes from
+    the arguments, else from the data directory. Each of `public_key` and `subject`
+    comes from the arguments, else from the profile, else from the data directory. The
+    data directory is `data`, a `str` or an `os.PathLike`, the `--data` of `foundation
+    start`, by default `foundation-data`. The node that runs on it gives its address and
+    public key, and its first admin gives the subject. With an `address`, the data
+    directory counts only when its node is at that address: `127.0.0.1:p` matches a node
+    bound on `0.0.0.0:p`.
 
     The profile is the HCL file that `FOUNDATION_PROFILE` names, else
     `~/.foundation/profile.hcl`. Its `subject` gives the subject, with the key of its
-    `private_key` file, else of `~/.foundation/<subject>.key`, and each `node` block
-    pins the public key of the node at its address. With no other source, the subject
-    is the login name of the user, with the key of `~/.foundation/<login>.key`. A key
-    file that is not there is made, as `ssh-keygen -t ed25519 -N ""` makes it. With no
-    source of the public key, the node that answers at `address` is trusted on first
-    use: the profile pins its key, and the logger `foundation` gets one WARNING.
-    `strict`, else the profile's `strict`, refuses a node with no source of its key.
-    Other Python threads run while it waits.
+    `private_key` file, else of `~/.foundation/<subject>.key`. A `private_key` path that
+    starts with `~/` is in the home directory, and a relative one is in the directory of
+    the profile. Each `node` block pins the public key of the node at its address. With
+    no other source, the subject is the login name of the user, with the key of
+    `~/.foundation/<login>.key`. A key file in `~/.foundation` that is not there is
+    made, as `ssh-keygen -t ed25519 -N ""` makes it. With no source of the public key,
+    the node that answers at `address` is trusted on first use: the profile pins its
+    key, and the logger `foundation` gets one WARNING. `strict`, else the profile's
+    `strict`, refuses a node with no source of its key. Other Python threads run while
+    it waits.
 
     Raises `TypeError` for an argument of a wrong type, `ValueError` for an argument
-    that does not parse, a `private_key` with no `subject`, a profile with a problem, or
-    a key file that is not the OpenSSH file of an Ed25519 key with no passphrase,
-    `RuntimeError` when a thread of the client or of the read of `data` cannot start,
-    `OSError` when the local UDP socket cannot bind or the profile or a key file cannot
-    be read or written, `MemoryError` when the OS refuses the memory of the pool of the
-    frames of the client's readers, `ConnectionError` when no source gives the address,
-    or with `strict` the public key, the data directory cannot be read, the client
-    cannot reach the node, the node does not prove the key that the profile pins, or the
-    node refuses the subject, and `PanicException` when a thread of the client or of the
-    read of `data` panicked.
+    that does not parse, a `private_key` with no `subject`, a profile with a problem, no
+    login name or one that is not a subject name, or a profile or key file that is not
+    UTF-8 or not the OpenSSH file of an Ed25519 key with no passphrase, `RuntimeError`
+    when a thread of the client or of the read of `data` cannot start, `OSError` when
+    the local UDP socket cannot bind, the profile or a key file cannot be read or
+    written, or the profile names a key file that is not there, `MemoryError` when the
+    OS refuses the memory of the pool of the frames of the client's readers,
+    `ConnectionError` when no source gives the address, or with `strict` the public key,
+    the data directory cannot be read, the client cannot reach the node, the node proves
+    another key than its source gives, or the node refuses the subject, and
+    `PanicException` when a thread of the client or of the read of `data` panicked.
     """
 
 class Refused(ConnectionError):

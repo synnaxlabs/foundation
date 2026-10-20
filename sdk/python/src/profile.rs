@@ -18,35 +18,45 @@ use types::name::Name;
 /// The profile of the host, and the file that holds it.
 pub(crate) struct Profile {
     /// The file: the one that `FOUNDATION_PROFILE` names, else
-    /// `~/.foundation/profile.hcl`.
+    /// `~/.foundation/profile.hcl`. An empty `FOUNDATION_PROFILE` counts as unset.
     pub(crate) path: PathBuf,
-    /// What the file holds, or an empty profile when it is not there.
+    /// What the file holds, or an empty profile when it is not there or not read.
     pub(crate) held: config::profile::Profile,
 }
 
 impl Profile {
-    /// Reads the profile of the host. Raises `ValueError` for a profile with a
-    /// problem, with each problem by line, and `OSError` when the file cannot be read.
-    pub(crate) fn read(py: Python<'_>) -> PyResult<Self> {
+    /// The profile of the host, with nothing of its file read.
+    pub(crate) fn unread(py: Python<'_>) -> PyResult<Self> {
         let environ = py.import("os")?.getattr("environ")?;
         let named: Option<PathBuf> = environ
             .call_method1("get", ("FOUNDATION_PROFILE",))?
             .extract()?;
-        let path = match named {
+        let path = match named.filter(|path| !path.as_os_str().is_empty()) {
             Some(path) => path,
             None => home(py)?.join("profile.hcl"),
         };
-        let text = text(&path)?;
-        let held = decoded(&path, &text)?;
+        let held = config::profile::Profile::default();
         Ok(Self { path, held })
+    }
+
+    /// Reads the profile of the host. Raises `ValueError` for a profile with a problem,
+    /// with each problem by line, or that is not UTF-8, and `OSError` when the file
+    /// cannot be read.
+    pub(crate) fn read(py: Python<'_>) -> PyResult<Self> {
+        let mut profile = Self::unread(py)?;
+        let text = text(&profile.path)?.unwrap_or_default();
+        profile.held = decoded(&profile.path, &text)?;
+        Ok(profile)
     }
 
     /// Pins `public_key` as the key of the node at `address` in the file, unless a
     /// `node` block of `address` is there, and returns the key that the file pins.
-    /// Each other byte of the file stays. Two programs that pin at once take turns
-    /// under a lock of the file `<path>.lock`, and the file changes in one rename.
-    /// Makes each missing directory of the path with mode 0700. Raises `ValueError`
-    /// when the file has a problem, and `OSError` when it cannot be read or written.
+    /// Each other byte of the file stays, and a file that is a link stays one. Two
+    /// programs that pin at once take turns under a lock of the file `<path>.lock`,
+    /// and the file changes in one rename, which is on the disk before it returns.
+    /// Makes each missing directory of the path with mode 0700, and the file with
+    /// mode 0600. Raises `ValueError` when the file has a problem, and `OSError` when
+    /// it cannot be read or written.
     pub(crate) fn pin(
         &self,
         address: SocketAddr,
@@ -54,15 +64,19 @@ impl Profile {
     ) -> PyResult<PublicKey> {
         let os =
             |e: io::Error| PyOSError::new_err(format!("{}: {e}", self.path.display()));
-        if let Some(parent) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            private_directory(parent).map_err(os)?;
-        }
-        let lock_path = sibling(&self.path, "lock");
-        let lock =
-            private_file(OpenOptions::new().write(true).create(true), &lock_path)
-                .map_err(os)?;
+        private_directory(directory(&self.path)).map_err(os)?;
+        let path = match fs::canonicalize(&self.path) {
+            Ok(path) => path,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => self.path.clone(),
+            Err(e) => return Err(os(e)),
+        };
+        let lock = private_file(
+            OpenOptions::new().write(true).create(true),
+            &sibling(&path, "lock"),
+        )
+        .map_err(os)?;
         lock.lock().map_err(os)?;
-        let text = text(&self.path)?;
+        let text = text(&path)?.unwrap_or_default();
         if let Some(pinned) = decoded(&self.path, &text)?.nodes.get(&address) {
             return Ok(*pinned);
         }
@@ -77,15 +91,25 @@ impl Profile {
             config_hcl::update(Source(0), &text, &document).unwrap_or_else(|_| {
                 unreachable!("invariant: the text reads, and a node block writes")
             });
-        let temporary = sibling(&self.path, "new");
-        fs::write(&temporary, text).map_err(os)?;
-        fs::rename(&temporary, &self.path).map_err(os)?;
+        let temporary = sibling(&path, "new");
+        let mut file = private_file(
+            OpenOptions::new().write(true).create(true).truncate(true),
+            &temporary,
+        )
+        .map_err(os)?;
+        file.write_all(text.as_bytes())
+            .and_then(|()| file.sync_all())
+            .and_then(|()| fs::rename(&temporary, &path))
+            .and_then(|()| synced(directory(&path)))
+            .map_err(os)?;
         Ok(public_key)
     }
 
-    /// The private key of `subject` in the key file `named`, relative to the directory
-    /// of the profile, else in `~/.foundation/<subject>.key`. Raises as [`key_file`]
-    /// does.
+    /// The private key of `subject` in the key file `named`, else in
+    /// `~/.foundation/<subject>.key`, which [`made`] makes when it is not there. A
+    /// `named` path that starts with `~` is expanded as the shell does, and a relative
+    /// one is in the directory of the profile. Raises `ValueError` as [`made`] does,
+    /// and `OSError` when a file cannot be read or written, or `named` is not there.
     pub(crate) fn private_key(
         &self,
         py: Python<'_>,
@@ -93,74 +117,93 @@ impl Profile {
         named: Option<&Path>,
     ) -> PyResult<PrivateKey> {
         let default = home(py)?.join(format!("{subject}.key"));
-        match named {
-            Some(named) => {
-                let fix = format!(
-                    "remove `private_key` from {}, and connect makes {}",
-                    self.path.display(),
-                    default.display()
-                );
-                key_file(subject, &self.path.with_file_name("").join(named), &fix)
-            }
-            None => key_file(
-                subject,
-                &default,
-                "move the file away, and connect makes a new key there",
-            ),
-        }
+        let Some(named) = named else {
+            let fix = "move the file away, and connect makes a new key there";
+            return made(subject, &default, fix);
+        };
+        let fix = format!(
+            "remove `private_key` from {}, and connect makes {}",
+            self.path.display(),
+            default.display()
+        );
+        let path = self.path.with_file_name("").join(expanded(py, named)?);
+        key(&path, &fix)?.ok_or_else(|| {
+            PyOSError::new_err(format!("{}: no file is there: {fix}", path.display()))
+        })
     }
 }
 
 /// The directory `~/.foundation`, where the profile and each key file of a subject
 /// are by default.
 fn home(py: Python<'_>) -> PyResult<PathBuf> {
+    expanded(py, Path::new("~/.foundation"))
+}
+
+/// `path` with a leading `~` or `~user` expanded to the home directory.
+fn expanded(py: Python<'_>, path: &Path) -> PyResult<PathBuf> {
     py.import("os.path")?
-        .call_method1("expanduser", ("~/.foundation",))?
+        .call_method1("expanduser", (path,))?
         .extract()
 }
 
 /// The private key of `subject` in the OpenSSH file `path`. When there is no file,
 /// makes a new key and writes it there with mode 0600, as `ssh-keygen -t ed25519 -N
-/// ""` writes it, and makes each missing directory with mode 0700. Two programs that
-/// make it at once get one key. Raises `ValueError` when the file is not the key file
-/// of an Ed25519 key with no passphrase, with `fix` for a key with a passphrase, and
-/// `OSError` when it cannot be read or written.
-fn key_file(subject: &Name, path: &Path, fix: &str) -> PyResult<PrivateKey> {
+/// ""` writes it, and makes each missing directory with mode 0700. The file is on the
+/// disk before it returns. Two programs that make it at once get one key. Raises
+/// `ValueError` when the file is not UTF-8 or not the key file of an Ed25519 key with
+/// no passphrase, with `fix` for a key with a passphrase, and `OSError` when it
+/// cannot be read or written.
+fn made(subject: &Name, path: &Path, fix: &str) -> PyResult<PrivateKey> {
+    if let Some(key) = key(path, fix)? {
+        return Ok(key);
+    }
     let os = |e: io::Error| PyOSError::new_err(format!("{}: {e}", path.display()));
-    match fs::read_to_string(path) {
-        Ok(text) => openssh::private_key(&text).map_err(|e| unreadable(path, e, fix)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            let key = sdk::private_key();
-            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-                private_directory(parent).map_err(os)?;
-            }
-            let temporary = sibling(path, &format!("{}.new", process::id()));
-            let mut file = private_file(
-                OpenOptions::new().write(true).create_new(true),
-                &temporary,
-            )
-            .map_err(os)?;
-            let linked = file
-                .write_all(openssh::key_file(&key, subject.as_str()).as_bytes())
-                .and_then(|()| fs::hard_link(&temporary, path));
-            let removed = fs::remove_file(&temporary);
-            match linked.and(removed) {
-                Ok(()) => Ok(key),
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                    key_file(subject, path, fix)
-                }
-                Err(e) => Err(os(e)),
-            }
+    private_directory(directory(path)).map_err(os)?;
+    let made = sdk::private_key();
+    // A crash can leave the file of this pid.
+    let temporary = sibling(path, &format!("{}.new", process::id()));
+    match fs::remove_file(&temporary) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => {
+            let at = temporary.display();
+            return Err(PyOSError::new_err(format!("{at}: {e}")));
         }
-        Err(e) => Err(os(e)),
+        _ => {}
+    }
+    let mut file =
+        private_file(OpenOptions::new().write(true).create_new(true), &temporary)
+            .map_err(os)?;
+    file.write_all(openssh::key_file(&made, subject.as_str()).as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(os)?;
+    let linked = fs::hard_link(&temporary, path);
+    fs::remove_file(&temporary).map_err(os)?;
+    match linked {
+        Ok(()) => synced(directory(path)).map_err(os).map(|()| made),
+        // Another program made the file first, or `path` is a link to no file.
+        Err(e) => key(path, fix)?.ok_or_else(|| {
+            PyOSError::new_err(format!("{}: {e}, and it names no file", path.display()))
+        }),
     }
 }
 
-/// The text of the file `path`, or an empty text when it is not there.
-fn text(path: &Path) -> PyResult<String> {
+/// The private key in the OpenSSH file `path`, or `None` when there is no file.
+/// Raises as [`text`] does, and `ValueError` when it is not the key file of an Ed25519
+/// key with no passphrase, with `fix` for a key with a passphrase.
+fn key(path: &Path, fix: &str) -> PyResult<Option<PrivateKey>> {
+    text(path)?
+        .map(|text| openssh::private_key(&text).map_err(|e| unreadable(path, e, fix)))
+        .transpose()
+}
+
+/// The text of the file `path`, or `None` when there is no file. Raises `ValueError`
+/// when it is not UTF-8, and `OSError` when it cannot be read.
+fn text(path: &Path) -> PyResult<Option<String>> {
     match fs::read_to_string(path) {
-        Ok(text) => Ok(text),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => Err(PyValueError::new_err(
+            format!("{}: the file is not UTF-8", path.display()),
+        )),
         Err(e) => Err(PyOSError::new_err(format!("{}: {e}", path.display()))),
     }
 }
@@ -209,6 +252,23 @@ fn private_directory(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
     builder.create(path)
+}
+
+/// The directory of the file `path`.
+fn directory(path: &Path) -> &Path {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
+
+/// Syncs the entries of `directory` to the disk.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the files of the program's own host"
+)]
+fn synced(directory: &Path) -> io::Result<()> {
+    File::open(directory)?.sync_all()
 }
 
 /// Opens `path` with `options`, and with mode 0600 when it makes the file.

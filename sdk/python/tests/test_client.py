@@ -4,7 +4,9 @@
 """
 
 import base64
+import errno
 import gc
+import getpass
 import os
 import pathlib
 import shutil
@@ -32,6 +34,10 @@ ADMIN = "@admin"
 # The encoding of the base point of Ed25519: a public key that is not of small order.
 BASE = bytes([0x58]) + bytes([0x66] * 31)
 WRONG = bytes(31) + b"\x01"
+# The line of the public key of the private key `bytes(32)`.
+ZERO = (
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDtqJ7zOtqQtYqOo0CpvDXNlMhV3HeJDpjrASKGLWdop"
+)
 FORKED = (
     "a connect in a forked child traps on macOS (#3370): connect in the test process"
 )
@@ -94,6 +100,26 @@ def fingerprint(line: str) -> str:
 def public_key(line: str) -> bytes:
     """The 32 bytes of the public key of `line`."""
     return base64.b64decode(line.split()[1])[-32:]
+
+
+def blocks(subject: str, key: str) -> str:
+    """The blocks that admit `subject` with the line `key` to read each channel."""
+    return (
+        f'subject "{subject}" {{\n  keys = "{key}"\n}}\n\n'
+        f'access "{subject}" {{\n  allow = ["read"]\n  select = "**"\n'
+        f'  subjects = "{subject}"\n}}\n'
+    )
+
+
+def refusal(subject: str, key: str) -> str:
+    """The text of the refusal of `subject` with the line `key`."""
+    return (
+        "the spec has no such subject, does not list the key for it, or the "
+        f"signature is not valid. If the spec of the node does not list subject "
+        f"{subject} with this key, add to its config files on the node's host:\n\n"
+        f"{blocks(subject, key)}\nthen run `foundation plan <files> --out <plan>` "
+        "and `foundation apply <plan>` there"
+    )
 
 
 def forked(*_, **__) -> typing.NoReturn:
@@ -200,6 +226,11 @@ class Node:
                 continue
             client.close()
             return client
+
+    def public_key(self) -> bytes:
+        """The public key that the node wrote to its file `address`."""
+        with open(os.path.join(self.data, "data", "address"), "rb") as file:
+            return file.read()[36:68]
 
     def connect(self, **arguments) -> foundation.Client:
         """`foundation.connect` to this node as its admin, from its data directory,
@@ -385,11 +416,7 @@ class ClientTest(unittest.TestCase):
             self.node.connect(subject=ADMIN, private_key=bytes(32))
         assert_stated(self, raised.exception)
         self.assertEqual(raised.exception.code, "refused")
-        self.assertEqual(
-            str(raised.exception),
-            "the spec has no such subject, does not list the key for it, or the "
-            "signature is not valid",
-        )
+        self.assertEqual(str(raised.exception), refusal(ADMIN, ZERO))
 
     def test_the_address_keyword_wins_over_the_data_directory(self) -> None:
         at = f"[::1]:{self.node.address.rsplit(':', 1)[1]}"
@@ -403,6 +430,15 @@ class ClientTest(unittest.TestCase):
             f"`foundation profile {at}` prints on the node's host to {profile}; "
             f"{self.node.data} holds the node at {self.node.address}",
         )
+        dir = os.path.join(home(self.addCleanup), ".foundation")
+        with self.assertRaises(ConnectionError) as raised:
+            called(self, foundation.connect, at, public_key=WRONG, data=self.node.data)
+        self.assertEqual(
+            str(raised.exception),
+            f"the session failed: no address reached peer {WRONG.hex()}; "
+            f"Udp({at}): the peer stopped answering",
+        )
+        self.assertEqual(os.listdir(dir), ["alice.key"])
 
     def test_the_data_directory_can_be_a_path(self) -> None:
         data = pathlib.Path(self.node.data)
@@ -430,29 +466,20 @@ class ClientTest(unittest.TestCase):
                 subject="plant.operator",
                 private_key=bytes(32),
             )
-        self.assertEqual(
-            str(raised.exception),
-            "the spec has no such subject, does not list the key for it, or the "
-            "signature is not valid",
-        )
+        self.assertEqual(str(raised.exception), refusal("plant.operator", ZERO))
 
     def test_a_subject_that_the_spec_does_not_list_is_refused(self) -> None:
         with self.assertRaises(ConnectionError) as raised:
             self.node.connect(subject="plant.operator", private_key=bytes(32))
-        self.assertEqual(
-            str(raised.exception),
-            "the spec has no such subject, does not list the key for it, or the "
-            "signature is not valid",
-        )
+        self.assertEqual(str(raised.exception), refusal("plant.operator", ZERO))
 
     def test_a_wrong_public_key_is_not_authenticated(self) -> None:
         with self.assertRaises(ConnectionError) as raised:
             self.node.connect(public_key=WRONG)
-        address = self.node.address
         self.assertEqual(
             str(raised.exception),
-            f"the session failed: no address reached peer {WRONG.hex()}; "
-            f"Udp({address}): the peer did not prove key {WRONG.hex()}",
+            f"the node proves public key {self.node.public_key().hex()}, not the "
+            f"pinned {WRONG.hex()}",
         )
 
     def test_the_close_gives_the_cause_when_the_node_closed_the_session(self) -> None:
@@ -737,24 +764,6 @@ class ProfileTest(unittest.TestCase):
         self.node = Node()
         self.addCleanup(self.node.stop)
 
-    def blocks(self, subject: str, key: str) -> str:
-        """The blocks that admit `subject` with the line `key` to read each channel."""
-        return (
-            f'subject "{subject}" {{\n  keys = "{key}"\n}}\n\n'
-            f'access "{subject}" {{\n  subjects = "{subject}"\n  select   = "**"\n'
-            '  allow    = ["read"]\n}\n'
-        )
-
-    def refusal(self, subject: str, key: str) -> str:
-        """The text of the refusal of `subject` with the line `key`."""
-        return (
-            "the spec has no such subject, does not list the key for it, or the "
-            f"signature is not valid. If the spec of the node does not list subject "
-            f"{subject} with this key, add to its config files on the node's host:\n\n"
-            f"{self.blocks(subject, key)}\nthen run `foundation plan <files> --out "
-            "<plan>` and `foundation apply <plan>` there"
-        )
-
     def pinned(self) -> str:
         """The line of the public key that the profile pins for the node."""
         with open(self.profile) as file:
@@ -768,7 +777,7 @@ class ProfileTest(unittest.TestCase):
             with self.assertRaises(foundation.Refused) as raised:
                 called(self, foundation.connect, self.node.address, **arguments)
         self.assertEqual(raised.exception.code, "refused")
-        self.assertEqual(str(raised.exception), self.refusal(name, line(key)))
+        self.assertEqual(str(raised.exception), refusal(name, line(key)))
         self.assertEqual(
             logs.output,
             [
@@ -791,10 +800,19 @@ class ProfileTest(unittest.TestCase):
                 f'node "{self.node.address}" {{\n'
                 f'  public_key = "{self.pinned()}"\n}}\n',
             )
-        self.node.apply(self.blocks("alice", line(key)))
+        self.node.apply(blocks("alice", line(key)))
+        deadline = time.monotonic() + PATIENCE
         with self.assertNoLogs("foundation"):
-            with called(self, foundation.connect, self.node.address) as client:
-                self.assertEqual(client.address, self.node.address)
+            while True:
+                try:
+                    client = called(self, foundation.connect, self.node.address)
+                    break
+                except foundation.Refused:
+                    if time.monotonic() > deadline:
+                        raise
+                    time.sleep(0.01)
+        with client:
+            self.assertEqual(client.address, self.node.address)
 
     def test_strict_refuses_a_node_that_no_source_pins(self) -> None:
         os.makedirs(self.dir)
@@ -902,6 +920,144 @@ class ProfileTest(unittest.TestCase):
             f"segment\n{self.profile}:2:10: `strict` is a bool, not a string. Write "
             "true or false",
         )
+
+    def test_a_key_file_link_to_no_file_is_refused(self) -> None:
+        os.makedirs(self.dir)
+        key = os.path.join(self.dir, "alice.key")
+        os.symlink(os.path.join(self.dir, "gone.key"), key)
+        with self.assertRaises(OSError) as raised:
+            foundation.connect(self.node.address, public_key=self.node.public_key())
+        self.assertEqual(
+            str(raised.exception),
+            f"{key}: {os.strerror(errno.EEXIST)} (os error {errno.EEXIST}), and it "
+            "names no file",
+        )
+        self.assertEqual(os.listdir(self.dir), ["alice.key"])
+
+    def test_a_key_file_is_made_after_a_crash_left_its_temporary_file(self) -> None:
+        os.makedirs(self.dir)
+        key = os.path.join(self.dir, "alice.key")
+        temporary = f"{key}.{os.getpid()}.new"
+        with open(temporary, "w") as file:
+            file.write("left\n")
+        self.trusted("alice", key)
+        self.assertFalse(os.path.exists(temporary))
+        os.remove(key)
+        os.mkdir(temporary)
+        try:
+            os.remove(temporary)
+        except OSError as error:
+            removed = f"{temporary}: {error.strerror} (os error {error.errno})"
+        with self.assertRaises(OSError) as raised:
+            foundation.connect(self.node.address)
+        self.assertEqual(str(raised.exception), removed)
+
+    def test_a_profile_private_key_in_the_home_directory(self) -> None:
+        ssh = os.path.join(os.path.dirname(self.dir), ".ssh")
+        os.makedirs(ssh)
+        key = os.path.join(ssh, "foundation")
+        keygen("-q", "-t", "ed25519", "-N", "", "-f", key)
+        os.makedirs(self.dir)
+        with open(self.profile, "w") as file:
+            file.write('subject = "alice"\nprivate_key = "~/.ssh/foundation"\n')
+        self.trusted("alice", key)
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "alice.key")))
+
+    def test_a_profile_private_key_that_is_not_there_is_not_made(self) -> None:
+        os.makedirs(self.dir)
+        with open(self.profile, "w") as file:
+            file.write('subject = "alice"\nprivate_key = "mine.key"\n')
+        with self.assertRaises(OSError) as raised:
+            foundation.connect(self.node.address, public_key=self.node.public_key())
+        self.assertEqual(
+            str(raised.exception),
+            f"{self.dir}/mine.key: no file is there: remove `private_key` from "
+            f"{self.profile}, and connect makes {self.dir}/alice.key",
+        )
+        self.assertEqual(os.listdir(self.dir), ["profile.hcl"])
+
+    def test_a_uid_with_no_login_name_gives_the_fix(self) -> None:
+        names = ["LOGNAME", "USER", "LNAME", "USERNAME"]
+        environ = dict(os.environ)
+        for name in names:
+            environ.pop(name, None)
+        unnamed = KeyError("getpwuid(): uid not found")
+        with (
+            unittest.mock.patch.dict(os.environ, environ, clear=True),
+            unittest.mock.patch("pwd.getpwuid", side_effect=unnamed),
+        ):
+            try:
+                getpass.getuser()
+            except (KeyError, OSError) as error:
+                cause = str(error)
+            with self.assertRaises(ValueError) as raised:
+                foundation.connect(self.node.address, public_key=self.node.public_key())
+        self.assertEqual(
+            str(raised.exception),
+            f"the user has no login name: {cause}; add `subject = \"<name>\"` to "
+            f"{self.profile}, or pass subject=",
+        )
+
+    def test_an_empty_profile_variable_counts_as_unset(self) -> None:
+        with unittest.mock.patch.dict(os.environ, {"FOUNDATION_PROFILE": ""}):
+            self.trusted("alice", os.path.join(self.dir, "alice.key"))
+
+    def test_a_file_that_is_not_utf8_is_refused(self) -> None:
+        os.makedirs(self.dir)
+        key = os.path.join(self.dir, "alice.key")
+        for path in [key, self.profile]:
+            with open(path, "wb") as file:
+                file.write(b"\xff\n")
+            with self.assertRaises(ValueError) as raised:
+                foundation.connect(self.node.address, public_key=self.node.public_key())
+            self.assertEqual(str(raised.exception), f"{path}: the file is not UTF-8")
+
+    def test_a_home_that_is_a_file_is_refused(self) -> None:
+        with open(self.dir, "w") as file:
+            file.write("not a directory\n")
+        unread = f"{os.strerror(errno.ENOTDIR)} (os error {errno.ENOTDIR})"
+        with self.assertRaises(OSError) as raised:
+            foundation.connect(self.node.address)
+        self.assertEqual(str(raised.exception), f"{self.profile}: {unread}")
+        with self.assertRaises(OSError) as raised:
+            foundation.connect(
+                self.node.address, public_key=self.node.public_key(), subject="alice"
+            )
+        key = os.path.join(self.dir, "alice.key")
+        self.assertEqual(str(raised.exception), f"{key}: {unread}")
+
+    def test_the_profile_subject_wins_over_the_data_directory(self) -> None:
+        os.makedirs(self.dir)
+        with open(self.profile, "w") as file:
+            file.write('subject = "plant.bob"\n')
+        with self.assertNoLogs("foundation"):
+            with self.assertRaises(foundation.Refused) as raised:
+                foundation.connect(data=self.node.data)
+        key = os.path.join(self.dir, "plant.bob.key")
+        self.assertEqual(str(raised.exception), refusal("plant.bob", line(key)))
+
+    def test_the_public_key_argument_wins_over_a_pin(self) -> None:
+        os.makedirs(self.dir)
+        with open(self.profile, "w") as file:
+            file.write(f'node "{self.node.address}" {{\n  public_key = "{ZERO}"\n}}\n')
+        with called(
+            self,
+            foundation.connect,
+            self.node.address,
+            public_key=self.node.public_key(),
+            data=self.node.data,
+        ) as client:
+            self.assertEqual(client.address, self.node.address)
+
+    def test_a_pin_makes_the_directory_of_the_profile(self) -> None:
+        with self.assertLogs("foundation", "WARNING"):
+            with self.assertRaises(foundation.Refused) as raised:
+                foundation.connect(
+                    self.node.address, subject="plant.dave", private_key=bytes(32)
+                )
+        self.assertEqual(str(raised.exception), refusal("plant.dave", ZERO))
+        self.assertEqual(stat.S_IMODE(os.stat(self.dir).st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(os.stat(self.profile).st_mode), 0o600)
 
 
 if __name__ == "__main__":

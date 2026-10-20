@@ -3,6 +3,8 @@ use std::ffi::CStr;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::thread;
+use std::time::Duration;
 
 use pyo3::exceptions::PyConnectionError;
 use pyo3::prelude::*;
@@ -177,6 +179,8 @@ fn suite(dir: &Path, file: &str) -> (bool, String) {
 /// and the count of free ones changes with the process.
 #[test]
 fn error_raises_the_class_and_text_of_each_variant() {
+    let [pinned, proved] = [1, 2].map(|byte| PrivateKey([byte; 32]).public());
+    let other = format!("the node proves public key {proved}, not the pinned {pinned}");
     let cases = [
         (
             sdk::Error::Thread {
@@ -230,6 +234,11 @@ fn error_raises_the_class_and_text_of_each_variant() {
             sdk::Error::Session(program::Error::Unplaced("plant.a".parse().unwrap())),
             "ConnectionError",
             "the node gave no place for the channel plant.a of the open",
+        ),
+        (
+            sdk::Error::OtherKey { pinned, proved },
+            "ConnectionError",
+            &other,
         ),
     ];
     raises(cases);
@@ -348,5 +357,110 @@ fn a_pin_keeps_the_key_that_another_program_pinned_after_the_read() {
         assert_eq!(profile.pin(at, second).unwrap(), first);
         assert_eq!(fs::read_to_string(&path).unwrap(), text);
     });
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Pins in `<path>.lock` only after a rival program lets go of it, and keeps the key
+/// that the rival pinned.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the rival opens the lock, and the pin runs on another thread"
+)]
+fn a_pin_waits_for_the_lock_of_a_rival() {
+    let dir = env::temp_dir().join(format!("foundation-lock-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("profile.hcl");
+    let at: SocketAddr = "10.0.0.5:7400".parse().unwrap();
+    let [first, second] = [1, 2].map(|byte| PrivateKey([byte; 32]).public());
+    let rival = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join("profile.hcl.lock"))
+        .unwrap();
+    rival.lock().unwrap();
+    let profile = Profile {
+        path: path.clone(),
+        held: config::profile::Profile::default(),
+    };
+    let pinning = thread::spawn(move || profile.pin(at, second).map_err(drop));
+    thread::sleep(Duration::from_millis(200));
+    assert!(!pinning.is_finished());
+    let text = format!(
+        "node \"{at}\" {{\n  public_key = \"{}\"\n}}\n",
+        config::openssh::line(first)
+    );
+    fs::write(&path, &text).unwrap();
+    rival.unlock().unwrap();
+    assert_eq!(pinning.join().unwrap(), Ok(first));
+    assert_eq!(fs::read_to_string(&path).unwrap(), text);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Writes the file that a linked profile names, with mode 0600, and keeps the link.
+#[cfg(unix)]
+#[test]
+fn a_pin_keeps_a_linked_profile_a_link() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = env::temp_dir().join(format!("foundation-link-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("dotfiles.hcl");
+    let path = dir.join("profile.hcl");
+    fs::write(&target, "strict = false\n").unwrap();
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+    let at: SocketAddr = "10.0.0.5:7400".parse().unwrap();
+    let key = PrivateKey([3; 32]).public();
+    let profile = Profile {
+        path: path.clone(),
+        held: config::profile::Profile::default(),
+    };
+    assert_eq!(profile.pin(at, key).map_err(drop), Ok(key));
+    assert!(fs::symlink_metadata(&path).unwrap().is_symlink());
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        format!(
+            "strict = false\n\nnode \"{at}\" {{\n  public_key = \"{}\"\n}}\n",
+            config::openssh::line(key)
+        )
+    );
+    let mode = fs::metadata(&target).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let mut left: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["dotfiles.hcl", "dotfiles.hcl.lock", "profile.hcl"]);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Raises `OSError` for a profile that is a link to itself, and takes no lock.
+#[cfg(unix)]
+#[test]
+fn a_pin_of_a_profile_that_links_to_itself_raises() {
+    let dir = env::temp_dir().join(format!("foundation-loop-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("profile.hcl");
+    std::os::unix::fs::symlink(&path, &path).unwrap();
+    let looped = fs::canonicalize(&path).unwrap_err();
+    let profile = Profile {
+        path: path.clone(),
+        held: config::profile::Profile::default(),
+    };
+    let at: SocketAddr = "10.0.0.5:7400".parse().unwrap();
+    Python::initialize();
+    Python::attach(|py| {
+        let error = profile.pin(at, PrivateKey([3; 32]).public()).unwrap_err();
+        assert_eq!(error.get_type(py).name().unwrap().to_string(), "OSError");
+        let text = format!("{}: {looped}", path.display());
+        assert_eq!(error.value(py).to_string(), text);
+    });
+    let left: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(left, ["profile.hcl"]);
     fs::remove_dir_all(&dir).unwrap();
 }
