@@ -25,10 +25,10 @@ impl Mesh {
     /// puts the tree on the set before the proposal, and again after the joint entry
     /// applies when the pointer moved in between, for as long as it takes a majority
     /// of the set to hold it. It logs a warning at the first put after the joint
-    /// entry that fails, and at most once a minute after, with the error of that put
-    /// in the field `error`: [`Error::Quorum`] names each voter whose put failed, and
-    /// [`Error::Tree`] with [`tree::Error::Missing`] names the chunk that this node
-    /// lacks.
+    /// entry that fails and runs again, and at most once a minute after, with the
+    /// error of that put in the field `error`: [`Error::Quorum`] names each voter
+    /// whose put failed, and [`Error::Tree`] with [`tree::Error::Missing`] names the
+    /// chunk that this node lacks.
     ///
     /// # Errors
     ///
@@ -118,7 +118,8 @@ impl Mesh {
 
     // Puts the tree of the pointer in force on each other voter of `set`, each
     // `RETRY`, until a majority of each half holds it. Ends on `Stopped`, `Blob`, or
-    // `Tree(Corrupt)`. Warns at the first put that fails, then at most each `WARN`.
+    // `Tree(Corrupt)`. Warns at the first put that fails and runs again, then at most
+    // each `WARN`.
     pub(super) async fn spread_in_force(&self, set: &Voters) -> Result<(), Error> {
         // No warning goes before this time.
         let mut quiet: Option<Monotonic> = None;

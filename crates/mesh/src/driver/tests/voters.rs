@@ -149,8 +149,8 @@ const LINK: Span = Span::from_nanos(300 * Span::MILLISECOND.nanos());
 /// takes about 17 s. 5 s into it, voter 1 applies a second change, whose one holder is
 /// voter 1. At 12 s the learners stop answering new blob streams, so the put of the
 /// tree of the second change, after the joint entry, gets no `Stored`, and the call
-/// tries again each second. Gives the cluster with the log of voter 1, at 12 s, and
-/// the pointer and the definitions of the second change.
+/// tries again `RETRY` after each try. Gives the cluster with the log of voter 1, at
+/// 12 s, and the pointer and the definitions of the second change.
 fn silent_after_the_joint_entry(
     log: &Log,
 ) -> (Cluster, Pointer, BTreeMap<Name, Definition>) {
@@ -215,7 +215,7 @@ fn a_pointer_that_moves_before_the_joint_entry_is_put_until_a_majority_holds_it(
 }
 
 // A try ends each 11 s: the deadline of the put, then `RETRY`. So the first warning
-// comes about 10 s into the silence, the second at the first failed try at least a
+// comes about 16 s into the silence, the second at the first failed try at least a
 // minute after it, and the third after the run.
 #[test]
 fn a_put_after_the_joint_entry_that_fails_for_a_minute_warns_again() {
