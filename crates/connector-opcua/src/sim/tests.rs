@@ -21,7 +21,7 @@ use crate::event;
 use crate::ffi::Status;
 use crate::node::Node;
 use crate::node::ns0::{self, HAS_COMPONENT, ORGANIZES};
-use crate::secure::{CLIENT_SIDE, Policy, SERVED, START};
+use crate::secure::{CLIENT_SIDE, Policy, SERVER_SIDE, START};
 use crate::value::{Fault, Type, Value};
 
 const SPIKE: &str = "ns=3;s=SpikeData";
@@ -958,7 +958,7 @@ fn secure_connects() -> (Option<Status>, Option<client::Error>, Result<Value, Fa
             CString::new(format!("opc.tcp://{}", listener.local())).expect("no NUL");
         let mut rng = node.entropy().rng();
         let variables = Variables::new(&[SPIKE]);
-        variables.secure(SERVED, Policy::Basic256Sha256, Mode::SignAndEncrypt);
+        variables.secure(SERVER_SIDE, Policy::Basic256Sha256, Mode::SignAndEncrypt);
         let mut out = (None, None, Ok(Value::I32(0)));
         let until = async {
             out.0 = connect(&node, &mut rng, &url).await.err();

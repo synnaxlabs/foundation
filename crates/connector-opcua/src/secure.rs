@@ -33,10 +33,10 @@ pub(crate) const CLIENT: Identity = Identity {
     key: include_bytes!("secure/client-key.der"),
 };
 
-/// The test server, which trusts [`CLIENT`].
-pub(crate) const SERVED: Credentials<'_> = SERVER.trusting(CLIENT.certificate);
+/// The credentials of [`SERVER`], which trust [`CLIENT`].
+pub(crate) const SERVER_SIDE: Credentials<'_> = SERVER.trusting(CLIENT.certificate);
 
-/// The test client, which trusts [`SERVER`].
+/// The credentials of [`CLIENT`], which trust [`SERVER`].
 pub(crate) const CLIENT_SIDE: Credentials<'_> = CLIENT.trusting(SERVER.certificate);
 
 /// A client on the key of [`CLIENT`] whose subject alternative name holds no URI.

@@ -21,7 +21,7 @@ use crate::secure::{
     ANONYMOUS, BROKEN_TRUST, CLIENT, CLIENT_ONLY_SERVER, CLIENT_PEM, CLIENT_SIDE, EC,
     EMPTY_URI, END, HEADED_TRUST, HIGH_PEM, HUGE_SUBJECT, Identity, LASTING,
     LINE_TRUST, LONG_BLOCK_TRUST, LONG_ENTRY, LONG_KEY, LONG_SUBJECT, NAMELESS,
-    ONE_BLOCK_TRUST, OTHER, Policy, REJECTED_SERVER, SERVED, SERVER, START, TRUST,
+    ONE_BLOCK_TRUST, OTHER, Policy, REJECTED_SERVER, SERVER, SERVER_SIDE, START, TRUST,
     TWO_URIS, UNNAMED,
 };
 use crate::server::Limits;
@@ -84,7 +84,7 @@ fn connect(
 fn read(seed: u64, policies: &[Policy], mode: Mode) -> (Result<Read, Error>, u64) {
     connect(
         seed,
-        (SERVED, START),
+        (SERVER_SIDE, START),
         (CLIENT, SERVER.certificate, START),
         policies,
         mode,
@@ -128,7 +128,7 @@ fn a_client_takes_the_policy_of_the_highest_level() {
 fn trusting(trust: impl AsRef<[u8]> + Send + 'static) -> Result<Read, Error> {
     let (read, _) = connect(
         0,
-        (SERVED, START),
+        (SERVER_SIDE, START),
         (CLIENT, trust, START),
         &Policy::ALL,
         Mode::Sign,
@@ -212,7 +212,7 @@ fn a_client_that_trusts_a_pem_after_text_that_starts_with_a_zero_reads() {
 fn a_client_with_a_pem_certificate_and_key_reads() {
     let (read, _) = connect(
         0,
-        (SERVED, START),
+        (SERVER_SIDE, START),
         (CLIENT_PEM, SERVER.certificate, START),
         &Policy::ALL,
         Mode::Sign,
@@ -225,7 +225,7 @@ fn a_client_with_a_pem_certificate_and_key_reads() {
 fn a_der_key_past_100_kib_reads() {
     let (read, _) = connect(
         0,
-        (SERVED, START),
+        (SERVER_SIDE, START),
         (LONG_KEY, SERVER.certificate, START),
         &Policy::ALL,
         Mode::Sign,
@@ -955,7 +955,7 @@ fn a_client_one_second_before_the_start_of_the_server_certificate_ends_the_conne
 fn a_server_past_the_end_of_the_client_certificate_refuses_the_channel() {
     let (read, _) = connect(
         0,
-        (SERVED, END + Span::SECOND),
+        (SERVER_SIDE, END + Span::SECOND),
         (CLIENT, SERVER.certificate, START),
         &Policy::ALL,
         Mode::Sign,
@@ -988,7 +988,7 @@ fn largest_request(policy: Policy, mode: Mode, buffer: u32) -> Largest {
             &node,
             4,
             time,
-            Some((&SERVED, [policy].as_slice())),
+            Some((&SERVER_SIDE, [policy].as_slice())),
             async |mut peer| {
                 peer.server.set_limits(Limits {
                     buffer,
@@ -1077,7 +1077,7 @@ fn an_answer_takes_the_chunks_of_the_server_in_each_mode() {
                 &node,
                 4,
                 time,
-                Some((&SERVED, [Policy::Basic256Sha256].as_slice())),
+                Some((&SERVER_SIDE, [Policy::Basic256Sha256].as_slice())),
                 async |mut peer| {
                     peer.server.set_limits(Limits {
                         buffer: 8192,
@@ -1114,7 +1114,7 @@ fn an_answer_takes_the_payload_of_open62541_when_it_is_the_smaller() {
                 &node,
                 4,
                 time,
-                Some((&SERVED, [Policy::Basic256Sha256].as_slice())),
+                Some((&SERVER_SIDE, [Policy::Basic256Sha256].as_slice())),
                 async |mut peer| {
                     peer.server.set_limits(Limits {
                         buffer,
@@ -1161,7 +1161,7 @@ fn a_received_chunk_holds_the_smaller_of_two_payloads() {
                 &node,
                 4,
                 time,
-                Some((&SERVED, [Policy::Basic256Sha256].as_slice())),
+                Some((&SERVER_SIDE, [Policy::Basic256Sha256].as_slice())),
                 async |mut peer| {
                     peer.server.set_limits(Limits {
                         buffer,

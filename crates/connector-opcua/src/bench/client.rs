@@ -21,7 +21,7 @@ use crate::client::browse::Base;
 use crate::connection;
 use crate::event;
 use crate::node::{Key, Name, Node};
-use crate::secure::{CLIENT_SIDE, Policy, SERVED, START};
+use crate::secure::{CLIENT_SIDE, Policy, SERVER_SIDE, START};
 use crate::server::Secure;
 use crate::unwind::caught;
 use crate::value::Value;
@@ -170,7 +170,7 @@ impl Server {
         clock: Clock,
         net: Net,
         address: IpAddr,
-        mut rng: Rng,
+        rng: Rng,
         setup: Setup,
         body: impl AsyncFnOnce(&Self) -> T,
     ) -> T {
@@ -180,14 +180,6 @@ impl Server {
             mode,
         } = setup;
         let local = SocketAddr::new(address, PORT);
-        let manager = connection::Manager::listening(
-            event::Time::since(Clock::clone(&clock), START),
-            Net::clone(&net),
-            local,
-            u32::from(SESSIONS),
-            &mut rng,
-        )
-        .expect("the port is free");
         let this = Self {
             clock,
             net,
@@ -195,6 +187,14 @@ impl Server {
             rng: RefCell::new(rng),
             mode,
         };
+        let manager = connection::Manager::listening(
+            this.time(),
+            Net::clone(&this.net),
+            local,
+            u32::from(SESSIONS),
+            &mut this.rng.borrow_mut(),
+        )
+        .expect("the port is free");
         let add = |server: &mut crate::server::Server| {
             server.add_scalar(&VALUE, Value::F64(double));
             server.add_scalar(&named(), Value::F64(double));
@@ -212,7 +212,7 @@ impl Server {
         let body = caught(async { body(&this).await });
         let modes = mode.map(|mode| [mode]);
         let secure = modes.as_ref().map(|modes| Secure {
-            credentials: &SERVED,
+            credentials: &SERVER_SIDE,
             policies: &[Policy::Basic256Sha256],
             modes,
         });
@@ -237,19 +237,7 @@ impl Server {
     /// a Read request: the process stops as the Rust allocator does when it has no
     /// memory.
     pub async fn connect(&self, count: usize) -> Client {
-        let rng = &mut Rng::from_seed(self.rng.borrow_mut().next_u64());
-        let time = event::Time::since(Clock::clone(&self.clock), START);
-        let net = Net::clone(&self.net);
-        let connect = crate::client::Client::connect(
-            time,
-            tracing::Span::none(),
-            net,
-            rng,
-            &self.url,
-            self.mode.map(|mode| (&CLIENT_SIDE, mode)),
-            future::pending(),
-        );
-        let session = match connect.await {
+        let session = match self.dial(self.mode).await {
             Ok(session) => session.expect("a pending wait never ends"),
             Err(crate::client::Error::Failed(status)) => {
                 panic!("a connect failed: {status:?}")
@@ -272,6 +260,30 @@ impl Server {
             name,
             bytes,
         }
+    }
+
+    /// Connects a client to the server in `mode`, on its own connection manager.
+    async fn dial(
+        &self,
+        mode: Option<Mode>,
+    ) -> Result<Option<crate::client::Client>, crate::client::Error> {
+        let rng = &mut Rng::from_seed(self.rng.borrow_mut().next_u64());
+        crate::client::Client::connect(
+            self.time(),
+            tracing::Span::none(),
+            Net::clone(&self.net),
+            rng,
+            &self.url,
+            mode.map(|mode| (&CLIENT_SIDE, mode)),
+            future::pending(),
+        )
+        .await
+    }
+
+    /// The wall time of the server and its clients, in the window of the test
+    /// certificates.
+    fn time(&self) -> event::Time {
+        event::Time::since(Clock::clone(&self.clock), START)
     }
 }
 
@@ -413,12 +425,9 @@ impl std::fmt::Debug for Client {
 
 #[cfg(test)]
 mod tests {
-    use std::future;
     use std::net::SocketAddr;
     use std::num::NonZeroU64;
 
-    use env::clock::Clock;
-    use env::net::Net;
     use env::rng::Rng;
     use sim::node::Node;
     use sim::{Sim, node};
@@ -427,10 +436,9 @@ mod tests {
     use super::{Mode, PORT, Server, Variable};
     use crate::client::Error;
     use crate::client::tests::common::channel;
-    use crate::event;
     use crate::ffi::{self, Status};
     use crate::peer::session;
-    use crate::secure::{CLIENT_SIDE, Policy, START};
+    use crate::secure::Policy;
     use crate::unwind::caught;
 
     /// Runs `body` on a node of a sim, and gives the error of the run as text.
@@ -654,19 +662,7 @@ mod tests {
         ];
         let results = modes.map(|(served, mode)| {
             run(async move |node| {
-                let body = async |server: &Server| {
-                    let rng = &mut Rng::from_seed(0);
-                    let connect = crate::client::Client::connect(
-                        event::Time::since(Clock::clone(&server.clock), START),
-                        tracing::Span::none(),
-                        Net::clone(&server.net),
-                        rng,
-                        &server.url,
-                        mode.map(|mode| (&CLIENT_SIDE, mode)),
-                        future::pending(),
-                    );
-                    connect.await.map(drop)
-                };
+                let body = async |server: &Server| server.dial(mode).await.map(drop);
                 secure(&node, served, body).await
             })
         });

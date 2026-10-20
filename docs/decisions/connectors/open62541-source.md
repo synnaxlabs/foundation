@@ -389,12 +389,12 @@
   `OPENSSL_memory_alloc` (link-time wiring); the count in the bench (no check fails on
   it) (`laptop.architect-2`, 2026-10-20 10:35:03 UTC,
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6288961734, on the
-  plan https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6288867020). So
-  the counting allocator of a test or benchmark binary counts the C of the copy,
-  `shim.c`, and `server.c` too. The copy check compiles without `alloc.h`. A test reads
-  the archive that `build.rs` makes with it, and fails on each symbol outside the copy,
-  `shim.c`, and `server.c` that its closed list does not hold. The list holds
-  no clock function and no libc function that gives or takes a heap pointer. Lost:
+  plan https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6288867020).
+  The copy check compiles without `alloc.h`. A test reads the archive that `build.rs`
+  makes with it, and fails on each symbol outside the copy, `shim.c`, and `server.c`
+  that its closed list does not hold. The list holds no clock function and no libc
+  function that gives or takes a heap pointer. So the counting allocator of a test or
+  benchmark binary counts the C of the copy, `shim.c`, and `server.c` too. Lost:
   `UA_ENABLE_MALLOC_SINGLETON` (a global), `--wrap=malloc` (`std::alloc` calls `malloc`,
   so it recurses), and 4 `-D` flags (a define gives no prototype, and C99 needs one).
   Decided by `laptop.architect-2`
