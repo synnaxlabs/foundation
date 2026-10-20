@@ -75,7 +75,8 @@ impl Writer {
         Self {
             places: writer.places().to_vec(),
             named,
-            index: writer.index(),
+            // `Client.open_writer` refuses channels of more than one index.
+            index: writer.places()[0].index,
             bytes_max: writer.bytes_max(),
             state: Mutex::new(Some(State {
                 writer,
@@ -316,7 +317,7 @@ impl Writer {
         let send = |writer: &mut sdk::write::Writer, buffers: &Buffers| {
             #[cfg(feature = "sim")]
             self.part.mark(began);
-            writer.write(&buffers.values)
+            one(writer.write(&buffers.values))
         };
         self.send(py, buffers, send, |buffers| {
             let index = (!buffers.values.is_empty()).then_some(self.index);
@@ -378,11 +379,15 @@ impl Writer {
             let Buffers { bytes, series, .. } = buffers;
             let parts: Vec<_> = series
                 .iter()
-                .map(|(place, range)| (*place, &bytes[range.clone()]))
+                .map(|(place, range)| sdk::write::Series {
+                    place: *place,
+                    count: samples,
+                    bytes: &bytes[range.clone()],
+                })
                 .collect();
             #[cfg(feature = "sim")]
             self.part.mark(began);
-            writer.write_series(samples, &parts)
+            one(writer.write_series(&parts))
         };
         self.send(py, buffers, send, |buffers| {
             buffers.series.iter().map(|&(place, _)| place).collect()
@@ -474,6 +479,27 @@ fn rejection(refusal: Refusal) -> (&'static str, &'static str) {
 
 /// The error of a writer whose one group ended with `end`: the error of a stream
 /// that the node stopped for the same cause.
+/// The outcome of the one group of a frame of a writer of one index, from what a call
+/// of the `sdk` writer gave: the end of the group for `Partial`.
+fn one(
+    written: Result<&[(usize, Outcome)], sdk::Error>,
+) -> Result<Outcome, sdk::Error> {
+    let single = |outcomes: &[(usize, Outcome)]| {
+        let &[(_, outcome)] = outcomes else {
+            panic!(
+                "invariant: a frame of a writer of one index has one group, not {}",
+                outcomes.len()
+            );
+        };
+        outcome
+    };
+    match written {
+        Ok(outcomes) => Ok(single(outcomes)),
+        Err(sdk::Error::Partial { outcomes, .. }) => Ok(single(&outcomes)),
+        Err(error) => Err(error),
+    }
+}
+
 fn ended(end: End) -> sdk::Error {
     sdk::Error::Stream(program::Error::Refused(stop(end)))
 }

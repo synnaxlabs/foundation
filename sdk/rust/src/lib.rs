@@ -14,6 +14,7 @@ use env::files::Files;
 use env::tasks::{Group, Tasks};
 use env::thread::Handle;
 use tokio::sync::{oneshot, watch};
+use types::channel;
 use types::ed25519::{PrivateKey, PublicKey};
 use types::name::Name;
 use types::sample::{Scalar, Type};
@@ -21,7 +22,19 @@ use types::sample::{Scalar, Type};
 pub mod read;
 pub mod write;
 
-pub use program::Place;
+/// A place of a reader or a writer: a channel, at a place of the caller.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Place {
+    /// The channel's key.
+    pub key: channel::Key,
+    /// The channel's sample type.
+    pub data_type: Type,
+    /// The channel's name.
+    pub name: Name,
+    /// The place of the index of the channel's group: the first place of the index
+    /// among the places of the caller, also for a repeat of the index.
+    pub index: usize,
+}
 
 /// The budget of the pool of the transport and the session. Its largest block holds a
 /// datagram.
@@ -481,8 +494,8 @@ pub enum Error {
         proved: PublicKey,
     },
     /// The node refused the open of a stream, or a call of a writer or a reader
-    /// failed. The session goes on. After `Layout`, `Unsent`, and `Pool` of a writer,
-    /// nothing was sent and the writer goes on. Each other error of a writer, and each
+    /// failed. The session goes on. After `Layout`, `Count`, `Unsent`, and `Pool` of a
+    /// writer, nothing was sent and the writer goes on. Each other error of a writer, and each
     /// error of a reader, ended it, and each later call of it gives it again.
     Stream(program::Error),
     /// The data directory of [`Node::local`] names no node to reach, as the cause says.
@@ -509,6 +522,20 @@ pub enum Error {
         place: usize,
         /// Why it does not decode.
         cause: codec::Error,
+    },
+    /// A group of the frame of a write ended before it: a channel of it was removed,
+    /// its home failed, or its home refused the proof of the writer. The other groups
+    /// of the frame got their outcomes, and the writer goes on. Each later frame that
+    /// holds the group gives it again.
+    Partial {
+        /// The channels of the frame in each group that its home took, in place
+        /// order.
+        written: Vec<Name>,
+        /// The channels of the frame in each other group, in place order.
+        unwritten: Vec<Name>,
+        /// The place of the index and the outcome of each group of the frame, in the
+        /// order of their index places.
+        outcomes: Vec<(usize, write::Outcome)>,
     },
 }
 
@@ -549,11 +576,27 @@ impl fmt::Display for Error {
             Self::Decode { place, cause } => {
                 write!(f, "the series of place {place} does not decode: {cause}")
             }
+            Self::Partial {
+                written, unwritten, ..
+            } => {
+                write!(f, "channels {} were not written; ", listed(unwritten))?;
+                if written.is_empty() {
+                    f.write_str("no channel was")
+                } else {
+                    write!(f, "channels {} were", listed(written))
+                }
+            }
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+/// `names` joined by ", ".
+fn listed(names: &[Name]) -> String {
+    let names: Vec<_> = names.iter().map(Name::as_str).collect();
+    names.join(", ")
+}
 
 /// The requests of the calls of a client, which its thread serves.
 type Requests = tokio::sync::mpsc::UnboundedReceiver<Open>;
@@ -633,32 +676,45 @@ fn failed(session: &program::Session, error: program::Error) -> Error {
     }
 }
 
-/// The places of a stream of `names` in `entries`, the places of the node, whose index
-/// is entry `index`: place `n` is `names[n]`, then the index when `names` does not name
-/// it. Each place names the place of the index as its index. Gives the entry of each
-/// place, the places, and the place of the index, or `None` when a name is no entry.
+/// The places of a stream of `names` in `entries`, the places of the node: place `n` is
+/// `names[n]`, then the index of each group that `names` does not name, in the order of
+/// the first name of each group. Gives the entry of each place and the places, or
+/// `None` when a name is no entry.
 fn placed(
     names: &[Name],
-    entries: &[Place],
-    index: usize,
-) -> Option<(Vec<usize>, Vec<Place>, usize)> {
+    entries: &[program::Place],
+) -> Option<(Vec<usize>, Vec<Place>)> {
     let mut each = names
         .iter()
         .map(|name| entries.iter().position(|entry| entry.name == *name))
         .collect::<Option<Vec<_>>>()?;
-    let at = each
-        .iter()
-        .position(|&entry| entry == index)
-        .unwrap_or_else(|| {
+    for at in 0..names.len() {
+        let index = entries[each[at]].index;
+        if !each.contains(&index) {
             each.push(index);
-            each.len() - 1
-        });
-    let place = |&entry: &usize| Place {
-        index: at,
-        ..entries[entry].clone()
+        }
+    }
+    let first = |entry| {
+        each.iter()
+            .position(|&at| at == entry)
+            .expect("invariant: each index has a place")
+    };
+    let place = |&entry: &usize| {
+        let program::Place {
+            key,
+            data_type,
+            ref name,
+            index,
+        } = entries[entry];
+        Place {
+            key,
+            data_type,
+            name: name.clone(),
+            index: first(index),
+        }
     };
     let places = each.iter().map(place).collect();
-    Some((each, places, at))
+    Some((each, places))
 }
 
 /// The main function of the client's thread: connects, sends the outcome, and holds

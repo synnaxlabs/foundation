@@ -579,6 +579,26 @@ impl Client {
         config.authority = authority.0;
         config.lease = lease.map(|lease| lease.0);
         let writer = self.open(py, &names, |client| client.open_writer(config))?;
+        let places = writer.places();
+        let mut indexes: Vec<&str> = Vec::new();
+        for place in places {
+            let index = places[place.index].name.as_str();
+            if !indexes.contains(&index) {
+                indexes.push(index);
+            }
+        }
+        if indexes.len() > 1 {
+            let text = format!(
+                "channels of more than one index ({}): open one writer for each index",
+                indexes.join(", ")
+            );
+            drop(writer);
+            return Err(coded(
+                py,
+                Stopped::new_err(text),
+                program::Refusal::Malformed,
+            ));
+        }
         Ok(write::Writer::new(writer, self.process, loss))
     }
 
@@ -953,6 +973,14 @@ fn exception(py: Python<'_>, error: &sdk::Error, text: String) -> PyErr {
             | program::Error::Frame(_)
             | program::Error::Unplaced(_),
         ) => PyConnectionError::new_err(text),
+        sdk::Error::Partial { outcomes, .. } => {
+            let end = outcomes.iter().find_map(|&(_, outcome)| match outcome {
+                sdk::write::Outcome::Ended(end) => Some(end),
+                _ => None,
+            });
+            let end = end.expect("invariant: Partial holds an ended group");
+            coded(py, Stopped::new_err(text), stop(end))
+        }
         sdk::Error::Panicked => PanicException::new_err(text),
         sdk::Error::Value { .. } => PyTypeError::new_err(text),
     }

@@ -301,6 +301,16 @@ fn each_error_names_its_cause() {
             code: 12,
         }),
         Error::Memory(os::memory::Error::Refused),
+        Error::Partial {
+            written: vec!["cell.c".parse().unwrap(), "cell.time".parse().unwrap()],
+            unwritten: vec!["plant.a".parse().unwrap(), "plant.b".parse().unwrap()],
+            outcomes: Vec::new(),
+        },
+        Error::Partial {
+            written: Vec::new(),
+            unwritten: vec!["plant.a".parse().unwrap()],
+            outcomes: Vec::new(),
+        },
     ];
     assert_eq!(
         errors.map(|e| e.to_string()),
@@ -320,6 +330,8 @@ fn each_error_names_its_cause() {
              of the process",
             "the OS refused memory for the frames of the client's readers; free memory or \
              raise the commit limit of the system",
+            "channels plant.a, plant.b were not written; channels cell.c, cell.time were",
+            "channels plant.a were not written; no channel was",
         ]
     );
 }
