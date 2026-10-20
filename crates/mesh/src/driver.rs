@@ -790,10 +790,6 @@ struct Group {
     fresh: Vec<node::Key>,
     // The voter that `Senders::run` dials next, for a member that is not a voter.
     reach: Option<node::Key>,
-    // The count of dials that `reach` named. A dial stops when the next is named.
-    reaches: u64,
-    // The task of the dial that `reach` named last, while it waits.
-    reacher: Option<Waker>,
     // The task of `Senders::run`, while it waits for a new queue or a `reach`.
     starter: Option<Waker>,
     turn: Turn,
@@ -814,6 +810,7 @@ impl Group {
         used: Used,
     ) -> Self {
         raft.set_learners(state.keys());
+        let turn = Turn::new(raft.key());
         Self {
             raft,
             state,
@@ -829,10 +826,8 @@ impl Group {
             waits: None,
             fresh: Vec::new(),
             reach: None,
-            reaches: 0,
-            reacher: None,
             starter: None,
-            turn: Turn::new(),
+            turn,
             applied: Applied::default(),
             calls: BTreeMap::new(),
             used,
@@ -994,12 +989,12 @@ impl Group {
         slot
     }
 
-    // Asks `Senders::run` to dial `to`, which stops the dial it asked for before.
+    // Asks `Senders::run` to dial `to` in place of the voter it dials now.
     fn reach(&mut self, to: node::Key) {
         self.reach = Some(to);
-        self.reaches = self.reaches.wrapping_add(1);
-        let waiting = self.reacher.take().into_iter();
-        waiting.chain(self.starter.take()).for_each(Waker::wake);
+        if let Some(starter) = self.starter.take() {
+            starter.wake();
+        }
     }
 
     // Tells `run` that the group has an input.
@@ -1043,8 +1038,7 @@ impl Group {
         self.sessions.clear();
         let queues = self.queues.values_mut();
         let waiting = queues.filter_map(|queue| queue.waker.take());
-        let starters = self.starter.take().into_iter().chain(self.reacher.take());
-        waiting.chain(starters).for_each(Waker::wake);
+        waiting.chain(self.starter.take()).for_each(Waker::wake);
     }
 
     // Applies each change in `committed`, and wakes each watch when a home moves.
@@ -1348,8 +1342,7 @@ async fn run(
             while Pin::new(&mut tick).poll(cx).is_ready() {
                 group.input(|raft| raft.tick(rng.next_u64()));
                 let group = &mut *group;
-                if let Some(to) = group.turn.tick(group.raft.voters(), group.raft.key())
-                {
+                if let Some(to) = group.turn.tick(group.raft.voters()) {
                     group.reach(to);
                 }
                 tick = clock.sleep(TICK);

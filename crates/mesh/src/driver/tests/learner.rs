@@ -89,7 +89,7 @@ fn a_learner_that_the_leader_reaches_dials_no_voter() {
 
 // No voter answers node 4, so each dial waits until it times out.
 #[test]
-fn the_drop_of_the_mesh_stops_the_dial_of_a_learner() {
+fn the_drop_of_the_mesh_ends_the_wait_for_the_dial_of_a_learner() {
     for seed in 0..8 {
         solo_at(seed, move |node, tasks| async move {
             let config = dialed_at(&node, &tasks, 4, 0, &MEMBERS, &IDS).await;
@@ -110,7 +110,7 @@ fn the_drop_of_the_mesh_stops_the_dial_of_a_learner() {
 
 // No voter answers node 4, so each dial would wait until it times out.
 #[test]
-fn a_learner_stops_its_dial_when_it_names_the_next_voter() {
+fn a_learner_stops_its_wait_when_it_names_the_next_voter() {
     solo(|node, tasks| async move {
         let config = dialed_at(&node, &tasks, 4, 0, &MEMBERS, &IDS).await;
         let transport = Rc::clone(&config.transport);

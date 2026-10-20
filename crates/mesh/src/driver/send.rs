@@ -68,52 +68,41 @@ impl From<transport::Error> for Failure {
 }
 
 impl Senders {
-    /// Spawns the task of each member at the first message for it, and a dial of
-    /// each voter that the group asks to reach.
+    /// Spawns the task of each member at the first message for it, and dials the
+    /// voter that the group asks to reach, so that the voter can send on the
+    /// session. A new voter to reach drops the wait for the dial before, but the
+    /// attempt of the transport goes on until it ends. A failed dial does nothing:
+    /// the group names the next voter after a timeout.
     pub(super) async fn run(self) {
+        let mut reach = pin!(None);
         loop {
             let fresh = poll_fn(|cx| {
                 let Some(group) = self.running() else {
                     return Poll::Ready(None);
                 };
-                let mut group = group.borrow_mut();
-                if group.fresh.is_empty() && group.reach.is_none() {
-                    group.starter = Some(cx.waker().clone());
-                    return Poll::Pending;
+                let mut held = group.borrow_mut();
+                if let Some(to) = held.reach.take() {
+                    reach.set(Some(self.dial(to)));
                 }
-                let reach = group.reach.take().map(|to| (to, group.reaches));
-                Poll::Ready(Some((mem::take(&mut group.fresh), reach)))
+                if !held.fresh.is_empty() {
+                    return Poll::Ready(Some(mem::take(&mut held.fresh)));
+                }
+                held.starter = Some(cx.waker().clone());
+                drop(held);
+                if let Some(dial) = reach.as_mut().as_pin_mut()
+                    && dial.poll(cx).is_ready()
+                {
+                    reach.set(None);
+                }
+                Poll::Pending
             });
-            let Some((fresh, reach)) = fresh.await else {
+            let Some(fresh) = fresh.await else {
                 return;
             };
             for to in fresh {
                 self.tasks.tasks().spawn(self.clone().send(to));
             }
-            if let Some((to, dial)) = reach {
-                self.tasks.tasks().spawn(self.clone().reach(to, dial));
-            }
         }
-    }
-
-    // Dials `to`, so that `to` can send on the session. The dial stops when the
-    // group stops or drops, or names the dial after `dial`. A failed dial does
-    // nothing: the group names the next voter after a timeout.
-    async fn reach(self, to: node::Key, dial: u64) {
-        let mut dialed = pin!(self.dial(to));
-        poll_fn(|cx| {
-            let Some(group) = self.running() else {
-                return Poll::Ready(());
-            };
-            let mut group = group.borrow_mut();
-            if group.reaches != dial {
-                return Poll::Ready(());
-            }
-            group.reacher = Some(cx.waker().clone());
-            drop(group);
-            dialed.as_mut().poll(cx).map(drop)
-        })
-        .await;
     }
 
     // Sends each message for `to`. A message that fails drops, with the part that
@@ -205,7 +194,7 @@ impl Senders {
     }
 
     // The group, in a step of the send of a message or of a reach: `alive` or
-    // `reach` found it at the last poll, and no other task ran since.
+    // `run` found it at the last poll, and no other task ran since.
     fn group(&self) -> Rc<RefCell<Group>> {
         let group = self.group.upgrade();
         group.expect("invariant: the group lives in each step of a send")
