@@ -124,12 +124,16 @@
   lowest place of the group and `other` its lowest place of another count. Each error
   names the places of the caller, with nothing sent, and the writer goes on. A call
   checks the place of each item and the type of each value, and keeps at most one item
-  more than the places: a call of more items than places holds a place twice and gives
-  `Unordered`, so the kept frame stays bounded by the places. When a group of the
-  frame got `Outcome::Ended`, the call gives `Error::Partial`: `written` holds the
-  channels of each group that got `Taken`, `unwritten` the rest, and `outcomes` each
-  outcome of the frame. The writer goes on. The end of a group alone gives no error at
-  `close`. `close` gives `Stream(Unstored)` for each group that
+  more than the places: a call of more items than places that passes these checks
+  holds a place twice and gives `Unordered`, so the kept frame stays bounded by the
+  places (`laptop.architect`, 2026-10-20T12:40:40Z,
+  https://github.com/synnaxlabs/foundation/pull/3581#issuecomment-6291063333, item 1;
+  `laptop.architect-2`, 2026-10-20T12:42:39Z,
+  https://github.com/synnaxlabs/foundation/pull/3581#issuecomment-6291098613). When a
+  group of the frame got `Outcome::Ended`, the call gives `Error::Partial`: `written`
+  holds the channels of each group that got `Taken`, `unwritten` the rest, and
+  `outcomes` each outcome of the frame. The writer goes on. The end of a group alone
+  gives no error at `close`. `close` gives `Stream(Unstored)` for each group that
   ended with a frame that the node took and that may not be on disk, with the place of
   the index of each such group (`laptop.architect-2`, 2026-10-19T13:14:55Z,
   https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268099496, item 2,

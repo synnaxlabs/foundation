@@ -865,8 +865,8 @@ fn each_call_after_the_node_ended_the_session_gives_the_cause() {
 
 /// Only Unix: `counting::Local` names the thread with `pthread_self`. A warm `write`
 /// of one index and of two, `write_series`, a `write` of far more values than places,
-/// and `next` make no allocation on the caller's thread. Two calls of `count` at once panic, so this is the one test of the
-/// binary that counts (#3319).
+/// and `next` make no allocation on the caller's thread. Two calls of `count` at once
+/// panic, so this is the one test of the binary that counts (#3319).
 #[cfg(unix)]
 #[test]
 fn a_warm_call_makes_no_allocation_on_the_thread_of_its_caller() {

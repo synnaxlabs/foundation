@@ -284,7 +284,7 @@ impl Writer {
     /// Whether the frame keeps item `n` of a call: one of the first, at most one more
     /// than the places. A call of more items that are each at a place holds a place
     /// twice, so the sort gives `Unordered`, and the kept frame stays bounded by the
-    /// places.
+    /// places. Its pair comes from the kept items, so it can differ with the length.
     fn kept(&self, n: usize) -> bool {
         n <= self.places.len()
     }
