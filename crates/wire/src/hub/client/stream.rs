@@ -114,7 +114,7 @@ impl Opening {
     pub fn new(most: u32) -> Self {
         Self {
             next: Next::Places,
-            most: most.min(PLACES_MAX),
+            most,
         }
     }
 
@@ -227,17 +227,30 @@ impl Run {
             arrived: all,
             names,
         } = self;
-        let run = place::decode(message)?;
-        let rest = rest_of_run(*remain, run.len())?;
         let first = places.count.checked_sub(*remain).unwrap_or_else(|| {
             panic!(
                 "invariant: remain {remain} is at most count {}",
                 places.count
             )
         });
-        let added = run.iter().map(|place| place.name.as_str().len());
-        *names = before.saturating_add(to_u64(added.sum()));
-        all.extend(run);
+        let count = to_usize(places.count);
+        let mut added = 0_u64;
+        // A place past the count drops at once, so `all` stays in the room of
+        // `Run::new` and an error comes in the order of the bytes.
+        let read = place::each(message, |place| {
+            if all.len() < count {
+                added = added.saturating_add(to_u64(place.name.as_str().len()));
+                all.push(place);
+            }
+        });
+        let rest = match read.and_then(|count| Ok(rest_of_run(*remain, count)?)) {
+            Ok(rest) => rest,
+            Err(error) => {
+                all.truncate(to_usize(first));
+                return Err(error);
+            }
+        };
+        *names = before.saturating_add(added);
         if rest > 0 {
             *remain = rest;
             return Ok(None);
@@ -440,11 +453,22 @@ pub mod place {
     /// [`Error::Name`] when its name does not. The first defect in the order of the
     /// bytes gives the error.
     pub fn decode(message: &[u8]) -> Result<Vec<Place>, Error> {
+        let mut places = Vec::new();
+        each(message, |place| places.push(place))?;
+        Ok(places)
+    }
+
+    /// Gives each place in `message` to `take`, in order, and gives their count. Gives
+    /// the errors of [`decode`], after the places before the defect.
+    pub(super) fn each(
+        message: &[u8],
+        mut take: impl FnMut(Place),
+    ) -> Result<usize, Error> {
         if message.is_empty() {
             return Err(Error::Empty);
         }
         let mut fields = Fields::new(message);
-        let mut places = Vec::new();
+        let mut count = 0_usize;
         while !fields.is_empty() {
             let key = u128::from_le_bytes(*fields.take()?);
             let index = u32::from_le_bytes(*fields.take()?);
@@ -454,14 +478,15 @@ pub mod place {
             let [len] = *fields.take()?;
             let name = text::read(fields.take_slice(usize::from(len))?)
                 .map_err(Error::Name)?;
-            places.push(Place {
+            take(Place {
                 key: channel::Key::from_u128(key),
                 data_type,
                 name,
                 index: to_usize(index),
             });
+            count = count.saturating_add(1);
         }
-        Ok(places)
+        Ok(count)
     }
 }
 

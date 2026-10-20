@@ -496,10 +496,24 @@ mod opening {
             opening.decode(Some(&encode_places(Places { count }))).unwrap();
             let room = run.len().checked_mul(size_of::<Place>()).unwrap();
             prop_assert_eq!(opening.held(), u64::try_from(room).unwrap());
+            let mut repeated = run.clone();
+            let key = channel::Key::from_u128(1);
+            repeated.last_mut().unwrap().key = key;
+            let refused = messages(&repeated, max).pop().unwrap();
             let (mut arrived, mut start) = (0_usize, None);
             for message in messages(&run, max) {
-                start = opening.decode(Some(&message)).unwrap();
+                let before = opening.held();
+                let (_, cut) = message.split_last().unwrap();
+                let cut = opening.decode(Some(cut));
+                prop_assert!(matches!(cut, Err(Error::Length { .. })), "{:?}", cut);
+                prop_assert_eq!(opening.held(), before);
                 let more = place::decode(&message).unwrap().len();
+                if arrived.checked_add(more) == Some(run.len()) && run.len() > 1 {
+                    let error = opening.decode(Some(&refused)).err();
+                    prop_assert_eq!(error, Some(Error::Repeated { key }));
+                    prop_assert_eq!(opening.held(), before);
+                }
+                start = opening.decode(Some(&message)).unwrap();
                 arrived = arrived.checked_add(more).unwrap();
                 let names: usize =
                     run[..arrived].iter().map(|place| place.name.as_str().len()).sum();
