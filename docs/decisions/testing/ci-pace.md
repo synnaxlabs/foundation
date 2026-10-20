@@ -77,17 +77,18 @@
   `windows` 28 min, and the `test` of ARM 22 min, and on Linux `cargo test` ran 173 test
   binaries and 40 doc-test sets one after another.
   Amended (`laptop.monitor`, recorded at 2026-10-20T01:31:43Z,
-  https://github.com/synnaxlabs/foundation/issues/3448#issuecomment-6281216123; the jobs `parts` and `test` and
-  their skip, the plan, 2026-10-20T00:42:23Z,
+  https://github.com/synnaxlabs/foundation/issues/3448#issuecomment-6281216123; the
+  jobs `parts` and `test` and their skip, the plan, 2026-10-20T00:42:23Z,
   https://github.com/synnaxlabs/foundation/issues/3448#issuecomment-6280595198): ARM
-  runs the two parts at the same time. The matrix job `parts` of `arm.yaml` runs `cargo xtask test nextest` and
-  `cargo xtask test serial` on two `ubuntu-24.04-arm` runners, and the job `test`, on
-  `ubuntu-24.04`, gives the required check `test`, which passes when both parts passed.
-  Both skip when the filter found no change of code. Supersedes "The job `test` of
-  `arm.yaml` runs both parts, one after the other." of
+  runs the two parts at the same time. The matrix job `parts` of `arm.yaml` runs `cargo
+  xtask test nextest` and `cargo xtask test serial` on two `ubuntu-24.04-arm` runners,
+  and the job `test`, on `ubuntu-24.04`, gives the required check `test`, which passes
+  when both parts passed. Both skip when the filter found no change of code. Supersedes
+  "The job `test` of `arm.yaml` runs both parts, one after the other." of
   https://github.com/synnaxlabs/foundation/issues/3418#issuecomment-6276305229, and the
   name `test` of the ARM job in ARM RUNNER. In run 39335833233 the one job took 21 min.
   In run 39351739537, `nextest` took 12.7 min (11762 passed, 12 skipped), `serial` 8.2
-  min (79 test targets with no harness, 235 doc tests), and the workflow 13.1 min; with
-  a cold cache (run 39349284591), 13.1, 11.1, and 13.4 min. Each part builds on its own
-  runner, and ARM keeps a cache entry for each part in place of one.
+  min (79 test targets with no harness, 235 doc tests), and the workflow 13.1 min; in
+  run 39349284591, 13.1, 11.1, and 13.4 min. No part of these three runs found a cache.
+  Each part builds on its own runner, and ARM keeps a cache entry for each part in
+  place of one.
