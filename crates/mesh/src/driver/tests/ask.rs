@@ -832,9 +832,10 @@ fn an_ask_whose_first_voter_refuses_joins_by_the_stored_request_at_the_next() {
     }
 }
 
-/// Starts node `id` on a new node of `sim`, which answers each join stream with
-/// `message` and then ends its reply half. Gives its voter.
-fn answerer(sim: &mut Sim, id: u8, message: Vec<u8>) -> Voter {
+/// Starts node `id` on a new node of `sim`, which answers join stream `n` with
+/// `answers[n]` and then ends its reply half. It holds each later stream with no
+/// answer. Gives its voter.
+fn answerer(sim: &mut Sim, id: u8, answers: Vec<Vec<u8>>) -> Voter {
     let node = sim.node(sim::node::Config::default());
     let at = SocketAddr::new(node.addresses()[0], PORT);
     let own = node.clone();
@@ -842,15 +843,19 @@ fn answerer(sim: &mut Sim, id: u8, message: Vec<u8>) -> Voter {
         let pool = create_pool();
         let config = transport_config(&own, &tasks, id, Rc::clone(&pool));
         let transport = bind(&own, PORT, config);
-        let message = Rc::new(message);
+        let answers = Rc::new(std::cell::RefCell::new(answers.into_iter()));
         while let Ok(session) = transport.accept().await {
-            let (pool, message, streams) =
-                (Rc::clone(&pool), Rc::clone(&message), tasks.clone());
+            let (pool, answers, streams) =
+                (Rc::clone(&pool), Rc::clone(&answers), tasks.clone());
             tasks.spawn(async move {
                 while let Ok(mut incoming) = session.accept().await {
-                    let (pool, message) = (Rc::clone(&pool), Rc::clone(&message));
+                    let pool = Rc::clone(&pool);
+                    let answer = answers.borrow_mut().next();
                     streams.spawn(async move {
                         while let Ok(Some(_)) = incoming.receiver.recv().await {}
+                        let Some(message) = answer else {
+                            return std::future::pending().await;
+                        };
                         let mut sender = incoming.sender.unwrap();
                         let block = pool.copy(&message).unwrap();
                         if sender.send(block).await.is_ok() {
@@ -871,19 +876,33 @@ fn answerer(sim: &mut Sim, id: u8, message: Vec<u8>) -> Voter {
 
 // The join of the stored request applied at each voter. The second ask gives another
 // card, by a ticket whose first voter refuses each request and whose second voter
-// admits the stored one (`Joined`), but its founding does not come, as when the
-// `send_founding` of a voter fails after its `Joined`. A voter admitted the stored
-// request in each round, so the ask must not write the new one over it, and a third
-// ask with the voters of the cluster joins by it.
+// admits the stored one (`Joined`) in each round, but its founding does not come, as
+// when the `send_founding` of a voter fails after its `Joined`. A voter admitted the
+// stored request, so the ask must not write the new one over it, and a third ask with
+// the voters of the cluster joins by it.
 #[test]
 fn an_ask_whose_voter_admits_the_stored_request_and_sends_no_founding_keeps_it() {
+    keeps_the_stored_request(&vec![joined(100); 8]);
+}
+
+// As above, but the second voter answers only the first round, and each later round
+// gets no answer from it. A voter admitted the stored request in the call, so no later
+// round writes the new one over it.
+#[test]
+fn an_ask_whose_voter_admitted_the_stored_request_in_an_earlier_round_keeps_it() {
+    keeps_the_stored_request(&[joined(100)]);
+}
+
+// Asks as the two tests above say, with `answers` from the second voter, and checks
+// that the join file still holds the stored request and that the third ask joins.
+fn keeps_the_stored_request(answers: &[Vec<u8>]) {
     for seed in 0..2 {
         let mut cluster = recorded_cluster(seed, &IDS, &[]);
         let unknown = region::Refused::Unknown {
             public_key: public(TICKET),
         };
         let first = refuser(&mut cluster.sim, 6, Refusal::Refused(unknown));
-        let second = answerer(&mut cluster.sim, 7, joined(100));
+        let second = answerer(&mut cluster.sim, 7, answers.to_vec());
         let ticket = Ticket::new(
             private(TICKET),
             "plant".parse().unwrap(),
@@ -897,7 +916,7 @@ fn an_ask_whose_voter_admits_the_stored_request_and_sends_no_founding_keeps_it()
             (ticket_to(TICKET, &IDS), changed),
         ];
         let (node, asked) = asks_on(&mut cluster.sim, asks);
-        cluster.run(seconds(60));
+        cluster.run(seconds(200));
         let asked: Vec<_> = asked.lock().unwrap().drain(..).map(|(a, _)| a).collect();
         let ticket = ticket_to(TICKET, &IDS);
         let request = region::Request {

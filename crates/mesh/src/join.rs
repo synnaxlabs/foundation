@@ -77,7 +77,6 @@ pub fn bound(ticket: &Ticket) -> Span {
 /// at most 10 s + its bytes / (100 KiB/s), which is 665.36 s for the largest. A voter
 /// admits a join once this node's `Join` has applied there, so a repeat of the same
 /// request is admitted again.
-///
 /// Before its first ask, `ask` makes `config.dir` and keeps the request in the file
 /// `join` in it, durable. The file holds the card and the ticket's admission, a
 /// signature over this card only, and never the private key of the ticket. When the
@@ -85,11 +84,11 @@ pub fn bound(ticket: &Ticket) -> Span {
 /// `config.transport` proves, `ask` sends that request, and does not send `config.card`
 /// or `config.status`. Else it writes the new request over it. So a node that stops
 /// after a voter applied its join, and before the answer came, is admitted at the next
-/// call. When a round ends with no voter that admits the stored request and with one
-/// that refuses it, `ask` writes the request of `config.card` and `config.status` over
-/// it and asks the next round with that, at once. The file stays for the life of
-/// `config.dir`: each [`Mesh::open`](crate::Mesh::open) of a founding that lacks this
-/// node reads it.
+/// call. When a round ends with a voter that refuses the stored request, and no voter
+/// admitted it in this call, `ask` writes the request of `config.card` and
+/// `config.status` over it and asks the next round with that, at once. The file stays
+/// for the life of `config.dir`: each [`Mesh::open`](crate::Mesh::open) of a founding
+/// that lacks this node reads it.
 ///
 /// # Errors
 ///
@@ -149,9 +148,9 @@ pub async fn ask(config: Config) -> Result<region::Founding, Error> {
     let header = header(&pool).map_err(Error::Pool)?;
     let mut join = encoded(&pool, request)?;
     let mut missed = Vec::new();
-    let mut refused = false;
     for round in 0..ROUNDS {
         if round > 0 {
+            let refused = missed.iter().any(|(_, m)| matches!(m, Miss::Refused(_)));
             match later.take_if(|_| refused) {
                 Some(fresh) => {
                     file::write(&files, &dir, &blocks, &fresh).await?;
@@ -161,9 +160,16 @@ pub async fn ask(config: Config) -> Result<region::Founding, Error> {
             }
         }
         let messages = [&header, &join];
-        match ask_round(&clock, &transport, &ticket, messages, &mut missed).await {
+        match ask_round(&clock, &transport, &ticket, messages).await {
             Round::Founded(founding) => return Ok(founding),
-            Round::Missed { refused: now } => refused = now,
+            Round::Missed {
+                missed: now,
+                joined,
+            } => {
+                // The stored request applied, so no later round writes over it.
+                later = later.filter(|_| !joined);
+                missed = now;
+            }
         }
     }
     Err(Error::Unjoined { missed })
@@ -172,20 +178,22 @@ pub async fn ask(config: Config) -> Result<region::Founding, Error> {
 // How a round of asks ends.
 enum Round {
     Founded(region::Founding),
-    // `refused`: a voter refused the request, and no voter answered `Joined`.
-    Missed { refused: bool },
+    // The miss of each voter. `joined`: a voter answered `Joined`.
+    Missed {
+        missed: Vec<(node::Key, Miss)>,
+        joined: bool,
+    },
 }
 
 // Asks each voter of `ticket` once with `messages`, and gives the first founding that
-// comes. Else `missed` holds the miss of each voter.
+// comes.
 async fn ask_round(
     clock: &Clock,
     transport: &Transport,
     ticket: &Ticket,
     messages: [&Block; 2],
-    missed: &mut Vec<(node::Key, Miss)>,
 ) -> Round {
-    missed.clear();
+    let mut missed = Vec::new();
     let mut joined = false;
     for voter in ticket.voters() {
         let miss = match ask_voter(clock, transport, voter, messages).await {
@@ -200,12 +208,7 @@ async fn ask_round(
         };
         missed.push((voter.key, miss));
     }
-    let refused = missed
-        .iter()
-        .any(|(_, miss)| matches!(miss, Miss::Refused(_)));
-    Round::Missed {
-        refused: refused && !joined,
-    }
+    Round::Missed { missed, joined }
 }
 
 // The join message of `request`, in a block of `pool`.
