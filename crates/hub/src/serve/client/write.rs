@@ -31,7 +31,7 @@ const STORED_BYTES: usize = Reply::Stored { frames: 0 }.encoded_len();
 
 /// The stream that carried the open of a write to this node.
 #[derive(Clone, Copy)]
-pub(super) enum Origin {
+enum Origin {
     /// The program's own write stream, which takes no renewal.
     Program,
     /// A forward from the program's node `via` of the group at the places of `forward`,
@@ -45,11 +45,62 @@ pub(super) enum Origin {
     },
 }
 
-/// Serves the write of `subject` that `write` starts on a stream from `origin`:
-/// verifies its open with `admission`, takes the group of a forward, opens its writer,
-/// and sends its places, then writes each frame of the program and sends its outcome,
-/// and `Stored` after each commit, until the stream finishes.
+/// Serves the write of `subject` that `write` starts on the program's own stream:
+/// verifies its open with `admission`, opens its writer, and sends its places, then
+/// writes each frame of the program and sends its outcome, and `Stored` after each
+/// commit, until the stream finishes.
 pub(super) async fn serve(
+    state: &Rc<RefCell<State>>,
+    admission: &Admission,
+    subject: Name,
+    write: Write,
+    receiver: &mut Receiver,
+    sender: &mut Sender,
+) -> Result<(), Error> {
+    let origin = Origin::Program;
+    let Some((writer, _ends)) =
+        opened(state, admission, origin, subject, write, receiver, sender).await?
+    else {
+        return Ok(());
+    };
+    let replies =
+        relay::<false>(state, writer, |_| Ok(false), receiver, sender).await?;
+    replies.finish(state, sender).await
+}
+
+/// Serves the write that `write` starts on a forward from the program's node `via` of
+/// the group at the places of `forward`, as [`serve`] does, after it takes that group,
+/// for the subject of `admission`, which has admitted a hello. Each message at the
+/// wait for the home and between frames is a renewal of the hello that `admission`
+/// admits.
+pub(super) async fn forward(
+    state: &Rc<RefCell<State>>,
+    admission: &Admission,
+    via: node::Key,
+    forward: Forward,
+    write: Write,
+    receiver: &mut Receiver,
+    sender: &mut Sender,
+) -> Result<(), Error> {
+    let subject = admission
+        .subject()
+        .expect("invariant: an admitted hello has a subject");
+    let origin = Origin::Forward { via, forward };
+    let Some((writer, _ends)) =
+        opened(state, admission, origin, subject, write, receiver, sender).await?
+    else {
+        return Ok(());
+    };
+    let renewal = |message: &[u8]| renewal(admission, state, message);
+    let replies = relay::<true>(state, writer, renewal, receiver, sender).await?;
+    replies.finish(state, sender).await
+}
+
+/// Verifies the open of `write` with `admission`, takes the group of a forward, opens
+/// its writer, and sends its places, then gives the writer with the hold of its ends
+/// and counts in the budget. Gives `None` after it finishes `sender` when the program
+/// finishes first.
+async fn opened(
     state: &Rc<RefCell<State>>,
     admission: &Admission,
     origin: Origin,
@@ -57,10 +108,10 @@ pub(super) async fn serve(
     write: Write,
     receiver: &mut Receiver,
     sender: &mut Sender,
-) -> Result<(), Error> {
+) -> Result<Option<(Writer, Reserved)>, Error> {
     let open = open(state, admission, subject.clone(), write, receiver).await?;
     let held = held(&open.channels);
-    let (open, decoded, _ends) = match origin {
+    let (open, decoded, ends) = match origin {
         Origin::Program => {
             let ends = ends(state, subject.clone(), &open)?;
             (open, Reserved::new(state, subject.clone(), held)?, ends)
@@ -70,7 +121,7 @@ pub(super) async fn serve(
             let decoded = Reserved::new(state, subject.clone(), held + places)?;
             let Some(open) = take(forward, open, receiver).await? else {
                 sender.finish()?;
-                return Ok(());
+                return Ok(None);
             };
             let ends = ends(state, subject.clone(), &open)?;
             (open, decoded, ends)
@@ -80,25 +131,11 @@ pub(super) async fn serve(
         here(state, admission, origin, subject, open, receiver).await?
     else {
         sender.finish()?;
-        return Ok(());
+        return Ok(None);
     };
     start(state, sender, &writer, names).await?;
     drop(decoded);
-    // A relay of its own for each origin, so a program's frame pays no check of a
-    // renewal.
-    let replies = match origin {
-        Origin::Program => {
-            relay::<false>(state, writer, |_| Ok(false), receiver, sender).await?
-        }
-        Origin::Forward { .. } => {
-            let renewal = |message: &[u8]| renewal(admission, state, message);
-            // A trait object, so that a program's write inlines none of this copy.
-            let relay: Pin<Box<dyn Future<Output = _>>> =
-                Box::pin(relay::<true>(state, writer, renewal, receiver, sender));
-            relay.await?
-        }
-    };
-    replies.finish(state, sender).await
+    Ok(Some((writer, ends)))
 }
 
 /// The open of the group at the places of the run of `forward`, or `None` when the

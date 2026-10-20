@@ -12,7 +12,7 @@ use wire::hub::client::Signed;
 use wire::hub::client::write::Write;
 use wire::hub::forward::Forward;
 
-use super::write::{self, Origin};
+use super::write;
 use crate::State;
 use crate::serve::Error;
 use crate::serve::admission::Admission;
@@ -34,9 +34,6 @@ pub(in crate::serve) async fn serve(
     };
     admission.admit(state, Signed::decode(&message)?)?;
     drop(message);
-    let subject = admission
-        .subject()
-        .expect("invariant: an admitted hello has a subject");
     let mut expiry = pin!(admission.expiry(state));
     let mut served = pin!(async {
         let Some(message) = receiver.recv().await? else {
@@ -45,8 +42,7 @@ pub(in crate::serve) async fn serve(
         };
         let write = Write::decode(&message)?;
         drop(message);
-        let origin = Origin::Forward { via, forward };
-        write::serve(state, &admission, origin, subject, write, receiver, sender).await
+        write::forward(state, &admission, via, forward, write, receiver, sender).await
     });
     // The write polls first, so a renewal moves the end in the poll that admits it.
     poll_fn(|cx| match served.as_mut().poll(cx) {

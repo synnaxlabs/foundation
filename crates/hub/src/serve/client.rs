@@ -354,18 +354,9 @@ pub(crate) async fn later(
         }
         Ok(Some((subject, First::Write(open)))) => {
             let (state, admission) = (&session.state, &session.client.admission);
-            let origin = write::Origin::Program;
-            write::serve(
-                state,
-                admission,
-                origin,
-                subject,
-                open,
-                &mut receiver,
-                &mut sender,
-            )
-            .await
-            .map(|()| Served::Ended)
+            write::serve(state, admission, subject, open, &mut receiver, &mut sender)
+                .await
+                .map(|()| Served::Ended)
         }
         Err(error) => Err(error),
     };
