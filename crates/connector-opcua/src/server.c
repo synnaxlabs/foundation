@@ -9,8 +9,9 @@
 #include <open62541/client.h>
 #include <open62541/plugin/certificategroup_default.h>
 #include <open62541/server_config_default.h>
-/* For the continuation points that each session holds. */
+/* For the Publish decode memory of a client. */
 #include "client/ua_client_internal.h"
+/* For the continuation points that each session holds. */
 #include "server/ua_server_internal.h"
 #pragma GCC diagnostic pop
 
@@ -310,12 +311,21 @@ void shim_client_receive(UA_Client *client, UA_UInt32 size) {
     UA_Client_getConfig(client)->localConnectionConfig.recvBufferSize = size;
 }
 
-/* Gives the count of blocks that `client` keeps for the decode of a Publish answer. */
-size_t shim_client_blocks(UA_Client *client) {
+/* Gives the count of blocks that `client` keeps for the decode of a Publish answer,
+ * and writes the sum of their sizes to `bytes`. */
+size_t shim_client_blocks(UA_Client *client, size_t *bytes) {
     size_t count = 0;
-    for(PublishBlock *block = client->publishArena.blocks; block; block = block->next)
+    *bytes = 0;
+    for(PublishBlock *block = client->publishArena.blocks; block; block = block->next) {
         count++;
+        *bytes += block->size;
+    }
     return count;
+}
+
+/* Takes nelem * elsize bytes of the Publish decode memory of `client`. */
+void *shim_client_calloc(UA_Client *client, size_t nelem, size_t elsize) {
+    return __Client_PublishArena_calloc(&client->publishArena, nelem, elsize);
 }
 
 /* Sets the MaxMessageSize that `client` gives in its next HEL and takes. */

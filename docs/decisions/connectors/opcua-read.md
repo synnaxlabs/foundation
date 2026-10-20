@@ -199,14 +199,20 @@
   At `subscribe`, the client reserves in each change buffer the changes of
   `PUBLISHES` answers, each of the changes that the revised queues of the items hold
   (at least 1 an item), at most the most that fit an answer. It also reserves the
-  memory of the decode of one such answer: open62541 decodes each Publish answer into
-  memory that the client keeps, and frees after the answer each block past the
-  reserved one (`laptop.architect-2`, 2026-10-19T21:52:11Z,
-  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6278199669). A
+  memory of the decode of one such answer (`laptop.architect-2`,
+  2026-10-19T21:52:11Z,
+  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6278199669).
+  open62541 decodes each Publish answer into memory that the client keeps. After an
+  answer that took more than one block, it keeps the memory of that answer as one
+  block, so the memory never shrinks, and a later answer of that size allocates none
+  (`laptop.architect-2`, 2026-10-19T23:31:50Z,
+  https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6279663796). A
   server that sends more changes than the queues hold grows the change buffers, which
   do not shrink. Each buffer holds the changes of at most `PUBLISHES` answers, each at
   most the receive limit over the 5 bytes of the smallest notification, so with the
-  doubling of a `Vec` the 2 buffers of a client hold at most about 54 MB.
+  doubling of a `Vec` the 2 buffers of a client hold at most about 54 MB, and the
+  memory of the decode about 11 MB, or less than 3 times that while an answer larger
+  than the kept memory decodes.
   `subscribe(nodes, sampling)` asks for a publishing interval of the longer of
   `sampling` and 100 ms, at most 1 min, a keep-alive count of max(1, floor(1 min /
   interval)), and a queue of each item that holds the samples of two revised publishing

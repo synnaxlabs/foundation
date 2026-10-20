@@ -12,6 +12,7 @@ use types::time::{Span, Stamp};
 
 use super::service::{Item, Request};
 use super::{Calls, Client, PUBLISHES, READS, id_bytes};
+use crate::alloc;
 use crate::ffi::{self, Status};
 use crate::node::Node;
 use crate::value::{self, Fault, Value};
@@ -73,28 +74,12 @@ pub(super) struct Changes {
 
 impl Changes {
     /// Makes room in the buffer and in `given` for the changes of [`PUBLISHES`]
-    /// answers of `each` changes, and in `client` for the decode of one such answer.
-    ///
-    /// # Safety
-    ///
-    /// `client` lives, and decodes no Publish answer.
-    unsafe fn reserve(
-        &self,
-        client: *mut ffi::Client,
-        given: &mut Vec<Change>,
-        each: usize,
-    ) {
+    /// answers of `each` changes.
+    fn reserve(&self, given: &mut Vec<Change>, each: usize) {
         let count = each.saturating_mul(usize::from(PUBLISHES));
         for buffer in [&mut *self.buffer.borrow_mut(), given] {
             buffer.reserve(count.saturating_sub(buffer.len()));
         }
-        // SAFETY: the caller keeps the client alive and out of a decode.
-        let status = Status(unsafe { ffi::shim_client_reserve(client, each) });
-        assert_eq!(
-            status,
-            Status::GOOD,
-            "the memory of the decode of {each} changes"
-        );
     }
 
     /// Adds `change`. The first change into the empty buffer stops the Publish
@@ -107,7 +92,7 @@ impl Changes {
         let mut buffer = self.buffer.borrow_mut();
         if buffer.is_empty() {
             // SAFETY: the caller keeps the client alive.
-            unsafe { ffi::shim_client_publishes(client, true) };
+            unsafe { ffi::shim_client_publish_stop(client) };
         }
         buffer.push(change);
     }
@@ -123,7 +108,7 @@ impl Changes {
         mem::swap(given, &mut self.buffer.borrow_mut());
         if !given.is_empty() {
             // SAFETY: the caller keeps the client alive.
-            unsafe { ffi::shim_client_publishes(client, false) };
+            unsafe { ffi::shim_client_publish_resume(client) };
         }
     }
 }
@@ -146,9 +131,10 @@ impl Client {
     /// `CreateMonitoredItems` calls of at most that many. Each answer of a Publish fits
     /// the receive limit of the client, for items of a scalar of at most 8 bytes. Once
     /// the server makes the subscription, the client keeps [`PUBLISHES`] Publish
-    /// requests in flight, and [`Client::read`] and the services send fewer to keep the
-    /// sum from the call. Each change that comes, also while the client reads or
-    /// serves, stays in the client until [`Client::changes`] gives it, with no drop.
+    /// requests in flight, or fewer after a server refuses one, and [`Client::read`]
+    /// and the services send fewer to keep the sum from the call. Each change that
+    /// comes, also while the client reads or serves, stays in the client until
+    /// [`Client::changes`] gives it, with no drop.
     /// While a change waits, the client sends no Publish request, so at most the
     /// answers of the [`PUBLISHES`] requests in flight wait, and later values wait in
     /// the queues of the server. It reserves the memory of the changes of
@@ -173,6 +159,11 @@ impl Client {
     ///
     /// When `sampling` is not positive. On a second call, also after an error, as a
     /// `CreateSubscription` that failed in the client can still make a subscription.
+    ///
+    /// # Aborts
+    ///
+    /// When open62541 cannot allocate the memory of the decode of a Publish answer:
+    /// the process stops as the Rust allocator does when it has no memory.
     #[cfg_attr(
         not(any(test, feature = "sim")),
         expect(dead_code, reason = "PR 5 of #2622 calls it")
@@ -207,7 +198,7 @@ impl Client {
         // SAFETY: the client lives.
         unsafe { ffi::shim_client_publish_count(self.raw.as_ptr(), PUBLISHES) };
         // SAFETY: the client lives.
-        unsafe { ffi::shim_client_publishes(self.raw.as_ptr(), false) };
+        unsafe { ffi::shim_client_publish_resume(self.raw.as_ptr()) };
         let sampling = ms(sampling);
         let queue = queue(interval, sampling);
         let build =
@@ -238,13 +229,12 @@ impl Client {
         let queued = (items.iter().flatten())
             .map(|item| usize::try_from(item.queue.max(1)).unwrap_or(usize::MAX))
             .fold(0, usize::saturating_add);
+        let each = most.min(queued);
+        (self.calls.changes).reserve(&mut self.changes, each);
         // SAFETY: the client lives, and decodes no answer between drives.
-        unsafe {
-            (self.calls.changes).reserve(
-                self.raw.as_ptr(),
-                &mut self.changes,
-                most.min(queued),
-            );
+        let status = unsafe { ffi::shim_client_reserve(self.raw.as_ptr(), each) };
+        if Status(status) != Status::GOOD {
+            alloc::exhausted();
         }
         Ok(Revised {
             interval: span(interval),

@@ -743,29 +743,124 @@ fn a_take_keeps_the_publish_requests_that_a_refusal_lowers() {
     assert_eq!((refused, sent), (1, vec![1; 5]));
 }
 
-/// The subscribe reserves one block for the decode of a Publish answer. An answer of
-/// 4 KiB takes a second block, which the client frees after the answer.
+/// Gives the count of the blocks of the Publish decode of `client`, and the sum of
+/// their sizes.
+fn blocks(client: &Client) -> (usize, usize) {
+    let mut bytes = 0;
+    // SAFETY: the client lives, and `bytes` is a place to write.
+    let count =
+        unsafe { ffi::test::shim_client_blocks(client.raw.as_ptr(), &raw mut bytes) };
+    (count, bytes)
+}
+
+/// The subscribe reserves one block for the decode of a Publish answer of the changes
+/// that the queues hold: 104 bytes a change and 1 KiB.
 #[test]
-fn an_answer_past_the_reserve_keeps_only_the_reserved_block() {
-    let (changes, blocks) = run(0, async |node| {
+fn the_reserved_block_holds_the_changes_of_the_queues() {
+    let reserved =
+        [1, 8].map(|queues| on_level(queues, async |_, client, _| blocks(client)));
+    assert_eq!(reserved, [(1, 1024 + 104), (1, 1024 + 8 * 104)]);
+}
+
+/// The subscribe reserves one block for the decode of a Publish answer, smaller than 4
+/// KiB. An answer of 4 KiB takes a second block, and after the answer the client keeps
+/// the memory of that answer as one block.
+#[test]
+fn an_answer_past_the_reserve_keeps_its_memory_as_one_block() {
+    let (changes, reserved, after) = run(0, async |node| {
         serve(&node, 4, async |mut peer| {
             peer.server.add_bytes(&numbered(0), 4096);
             let mut client = peer.connected().await;
             let revised = client.subscribe(&[numbered(0)], LEVEL).await;
             assert!(revised.is_ok(), "{revised:?}");
-            // SAFETY: the client lives.
-            let reserved =
-                unsafe { ffi::test::shim_client_blocks(client.raw.as_ptr()) };
+            let reserved = blocks(&client);
             let changes = client.changes(future::pending()).await.map(<[_]>::len);
-            // SAFETY: the client lives.
-            let after = unsafe { ffi::test::shim_client_blocks(client.raw.as_ptr()) };
+            let after = blocks(&client);
             client.close().await;
-            (changes, [reserved, after])
+            (changes, reserved, after)
         })
         .await
     })
     .0;
-    assert_eq!((changes, blocks), (Ok(1), [1, 1]));
+    assert_eq!((changes, reserved.0, after.0), (Ok(1), 1, 1));
+    assert!(reserved.1 < 4096, "{reserved:?}");
+    assert!((4096..2 * 4096).contains(&after.1), "{after:?}");
+}
+
+/// The binary encoding of a `DataChangeNotification` in an `ExtensionObject` of a
+/// body, then the length of the body.
+const DATA_CHANGE: [u8; 5] = [0x01, 0x00, 0x2B, 0x03, 0x01];
+
+/// Removes the server timestamp of the change of a Double in the Publish answer
+/// `message`, of one item: the mask of its `DataValue` with a value, a status, and
+/// both timestamps loses the server timestamp, and its 8 bytes go.
+fn unstamped(message: &mut Vec<u8>) {
+    let mask = at(message, &[0x0F, 0x0B]);
+    message[mask] = 0x07;
+    message.drain(mask + 22..mask + 30);
+    resized(message, -8);
+}
+
+/// Adds `delta` bytes to the length of the body of the `DataChangeNotification` and
+/// sets the chunk size of the Publish answer `message`.
+fn resized(message: &mut [u8], delta: i32) {
+    let length = at(message, &DATA_CHANGE) + DATA_CHANGE.len();
+    let mut body = [0; 4];
+    body.copy_from_slice(&message[length..length + 4]);
+    let body = i32::from_le_bytes(body) + delta;
+    message[length..length + 4].copy_from_slice(&body.to_le_bytes());
+    let size = u32::try_from(message.len()).expect("fits");
+    message[4..8].copy_from_slice(&size.to_le_bytes());
+}
+
+/// The index of the first `pattern` in `message`.
+fn at(message: &[u8], pattern: &[u8]) -> usize {
+    let found = message.windows(pattern.len()).position(|w| w == pattern);
+    found.expect("the pattern")
+}
+
+/// A Publish answer that decodes into the memory of the answer before it keeps no
+/// field of that answer: past the first answer, a relay removes the server timestamp
+/// of each change, and the changes have none.
+#[test]
+fn an_answer_keeps_no_field_of_the_answer_before() {
+    let stamped = run(0, async |node| {
+        serve(&node, 4, async |mut peer| {
+            let level = add_level(&peer);
+            peer.server.set_publishing(1000.0);
+            let url = format!("opc.tcp://{}:{RELAY}", node.addresses()[0]);
+            let answers = Cell::new(0);
+            let rewrite = |message: &mut Vec<u8>| {
+                if is(message, PUBLISH_RESPONSE) {
+                    let found =
+                        message.windows(DATA_CHANGE.len()).any(|w| w == DATA_CHANGE);
+                    if found {
+                        answers.set(answers.get() + 1);
+                        if answers.get() > 1 {
+                            unstamped(message);
+                        }
+                    }
+                }
+            };
+            relayed(&node, &Relay::default(), rewrite, async {
+                let mut client = peer.connect(&url).await.expect("the client connects");
+                let revised = client.subscribe(&[numbered(0)], LEVEL).await;
+                assert!(revised.is_ok(), "{revised:?}");
+                let mut stamped = Vec::new();
+                for value in 1..=3 {
+                    let got = client.changes(future::pending()).await.expect("no end");
+                    stamped.extend(got.iter().map(|change| change.server.is_some()));
+                    level.set(f64::from(value));
+                }
+                client.close().await;
+                stamped
+            })
+            .await
+        })
+        .await
+    })
+    .0;
+    assert_eq!(stamped, [true, false, false]);
 }
 
 /// A reserve past the memory of the process fails with `BadOutOfMemory` and keeps the
@@ -773,7 +868,8 @@ fn an_answer_past_the_reserve_keeps_only_the_reserved_block() {
 /// block with its header holds, and of more bytes than the allocator gives.
 #[test]
 fn a_reserve_past_the_memory_fails_and_keeps_the_block() {
-    let (names, blocks) = on_level(100, async |_, client, _| {
+    let (names, kept) = on_level(100, async |_, client, _| {
+        let before = blocks(client);
         let raw = client.raw.as_ptr();
         let statuses = [
             // SAFETY: the client lives, and no answer decodes.
@@ -783,11 +879,45 @@ fn a_reserve_past_the_memory_fails_and_keeps_the_block() {
             // SAFETY: as above.
             unsafe { ffi::test::__Client_PublishArena_reserve(raw, usize::MAX / 2) },
         ];
-        // SAFETY: the client lives.
-        let blocks = unsafe { ffi::test::shim_client_blocks(raw) };
-        (statuses.map(|status| Status(status).name()), blocks)
+        (
+            statuses.map(|status| Status(status).name()),
+            [before, blocks(client)],
+        )
     });
-    assert_eq!((names, blocks), (["BadOutOfMemory"; 3], 1));
+    assert_eq!(names, ["BadOutOfMemory"; 3]);
+    assert_eq!(kept[0], kept[1]);
+    assert_eq!(kept[1].0, 1);
+}
+
+/// Memory past the first block of the decode takes a new block of at least the size
+/// of that block, so the small allocations after a large one take no block each. A
+/// size that overflows takes nothing, and the next answer keeps the memory as one
+/// block.
+#[test]
+fn memory_past_the_block_takes_a_block_of_its_size() {
+    let (taken, overflowed, after) = on_level(1, async |_, client, level| {
+        let raw = client.raw.as_ptr();
+        let mut taken = vec![blocks(client)];
+        for size in [2048, 16] {
+            // SAFETY: the client lives, and no answer decodes.
+            let p = unsafe { ffi::test::shim_client_calloc(raw, 1, size) };
+            assert!(!p.is_null());
+            taken.push(blocks(client));
+        }
+        // SAFETY: as above.
+        let p = unsafe { ffi::test::shim_client_calloc(raw, usize::MAX / 16 + 2, 16) };
+        let overflowed = (p.is_null(), blocks(client));
+        level.set(1.0);
+        let changes = client.changes(future::pending()).await.map(<[_]>::len);
+        assert_eq!(changes, Ok(1));
+        (taken, overflowed, blocks(client))
+    });
+    let reserved = 1024 + 104;
+    let grown = [(1, reserved), (2, reserved + 2048), (3, reserved + 4096)];
+    assert_eq!(taken, grown);
+    assert_eq!(overflowed, (true, grown[2]));
+    assert_eq!(after.0, 1);
+    assert!(after.1 > 2048 + 16, "{after:?}");
 }
 
 /// Once subscribed, a client keeps [`PUBLISHES`] of its [`READS`] for the Publish

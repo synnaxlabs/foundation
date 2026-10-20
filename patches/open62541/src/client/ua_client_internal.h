@@ -127,11 +127,18 @@ typedef struct PublishBlock {
 } PublishBlock;
 
 /* The memory of the decode of each async Publish answer. Each answer takes
- * zeroed memory from the first block of the list, and the reset after its
- * callback frees each block but the last (the oldest), which it keeps empty. */
+ * zeroed memory from the first block of the list. The reset after its callback
+ * keeps the memory of an answer that took more than one block as one block, so
+ * the arena keeps the memory of the largest answer and never shrinks. */
 typedef struct {
     PublishBlock *blocks;
 } PublishArena;
+
+/* The calloc of the decode of a Publish answer, of the PublishArena context.
+ * When the first block cannot hold the memory, it takes a new first block of at
+ * least the size of the old one. It gives NULL when nelem * elsize overflows. */
+void *
+__Client_PublishArena_calloc(void *context, size_t nelem, size_t elsize);
 
 /* Makes the kept block of the arena hold at least size bytes. Call it only
  * between answers. */

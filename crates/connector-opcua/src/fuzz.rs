@@ -74,7 +74,9 @@ fn read(clock: Clock, data: &[u8]) -> (Status, Status) {
 /// `Good`, it encodes the value, decodes those bytes with as many zeros after them as
 /// their length (#435), and encodes again. A `DataValue` gives the same read of its
 /// value, or the same fault, and the same time (`value::time`), or the same status,
-/// from both decodes. An input of fewer than 2 bytes decodes nothing.
+/// from both decodes. A decode under a calloc that takes memory it never frees, as a
+/// Publish answer decodes, gives the same status, length, and encoding. An input of
+/// fewer than 2 bytes decodes nothing.
 ///
 /// # Panics
 ///
@@ -84,12 +86,22 @@ pub fn decode(data: &[u8]) {
         return;
     };
     let name = data_type.name();
-    let Ok((value, read)) = Value::decode(data_type, input) else {
-        return;
+    let bumped = bumped(data_type, input).map_err(Status::name);
+    let (value, decoded) = match Value::decode(data_type, input) {
+        Ok(decoded) => decoded,
+        Err(status) => {
+            let status = Err(status.name());
+            assert_eq!(
+                bumped.map(drop),
+                status,
+                "{name}: the calloc changes the decode"
+            );
+            return;
+        }
     };
     assert!(
-        read <= input.len(),
-        "{name}: read {read} of {} bytes",
+        decoded <= input.len(),
+        "{name}: decoded {decoded} of {} bytes",
         input.len()
     );
     let once = value
@@ -128,6 +140,11 @@ pub fn decode(data: &[u8]) {
             "{name}: {once:02x?} reads two ways"
         );
     }
+    assert_eq!(
+        bumped,
+        Ok((once, decoded)),
+        "{name}: the calloc changes the decode"
+    );
 }
 
 /// The text of the read of `value`, a `DataValue`, as a sample and as a time: a `NaN`
@@ -152,11 +169,105 @@ fn read_of(value: &Value) -> String {
     format!("{sample}, {time:?}")
 }
 
+/// The binary encoding of the value of `data_type` at `value`.
+///
+/// # Safety
+///
+/// `value` points to a decoded value of `data_type`.
+unsafe fn encode(
+    value: *const c_void,
+    data_type: &DataType,
+) -> Result<Vec<u8>, Status> {
+    let mut output = Bytes {
+        length: 0,
+        data: std::ptr::null_mut(),
+    };
+    // SAFETY: the caller gives a decoded value, and an empty output makes the encoder
+    // allocate.
+    let code = unsafe {
+        ffi::UA_encodeBinary(value, data_type, &raw mut output, std::ptr::null_mut())
+    };
+    if code != 0 {
+        return Err(Status(code));
+    }
+    // SAFETY: the encoder gave `length` bytes at `data`.
+    let bytes = unsafe { std::slice::from_raw_parts(output.data, output.length) };
+    let bytes = bytes.to_vec();
+    let byte_string = &ffi::types()[BYTE_STRING];
+    // SAFETY: the encoder allocated the output, a `ByteString`.
+    unsafe { ffi::UA_clear((&raw mut output).cast(), byte_string) };
+    Ok(bytes)
+}
+
 /// Splits `data` into the type that its first two bytes pick and the rest.
 fn pick(data: &[u8]) -> Option<(&'static DataType, &[u8])> {
     let (&[low, high], input) = data.split_first_chunk()?;
     let at = usize::from(u16::from_le_bytes([low, high])) % TYPES;
     Some((&ffi::types()[at], input))
+}
+
+/// Zeroed memory of 16-byte blocks that a decode takes in order.
+struct Bump {
+    memory: Vec<u128>,
+    used: usize,
+}
+
+/// The [`ffi::Calloc`] of a [`Bump`], NULL when it is full.
+unsafe extern "C" fn bump_calloc(
+    context: *mut c_void,
+    count: usize,
+    size: usize,
+) -> *mut c_void {
+    // SAFETY: the context of each decode is a live `Bump`.
+    let bump = unsafe { &mut *context.cast::<Bump>() };
+    let blocks = count.saturating_mul(size).div_ceil(16);
+    match bump
+        .memory
+        .get_mut(bump.used..bump.used.saturating_add(blocks))
+    {
+        Some(taken) => {
+            bump.used += blocks;
+            taken.as_mut_ptr().cast()
+        }
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// Decodes a value of `data_type` from the start of `bytes` under the calloc of a
+/// [`Bump`] of 256 bytes for each byte of `bytes` and 4 KiB, which nothing frees, and
+/// gives its encoding and the number of bytes read.
+fn bumped(
+    data_type: &'static DataType,
+    bytes: &[u8],
+) -> Result<(Vec<u8>, usize), Status> {
+    let mut memory = vec![0_u64; data_type.size().div_ceil(8)];
+    let mut bump = Bump {
+        memory: vec![0; 16 * bytes.len() + 256],
+        used: 0,
+    };
+    let input = Bytes {
+        length: bytes.len(),
+        data: bytes.as_ptr().cast_mut(),
+    };
+    let mut options = DecodeOptions::default();
+    options.context = (&raw mut bump).cast();
+    options.calloc = Some(bump_calloc);
+    // SAFETY: the memory holds `memSize` bytes with 8-byte alignment, the decoder only
+    // reads the input, and the calloc gives memory that lives to the end of the call.
+    let code = unsafe {
+        ffi::UA_decodeBinary(
+            &raw const input,
+            memory.as_mut_ptr().cast(),
+            data_type,
+            &raw mut options,
+        )
+    };
+    if code != 0 {
+        return Err(Status(code));
+    }
+    // SAFETY: the decode gave a value of `data_type`, in memory that lives.
+    let encoded = unsafe { encode(memory.as_ptr().cast(), data_type) }?;
+    Ok((encoded, options.decoded))
 }
 
 /// A decoded value, cleared when dropped.
@@ -200,30 +311,8 @@ impl Value {
     }
 
     fn encode(&self) -> Result<Vec<u8>, Status> {
-        let mut output = Bytes {
-            length: 0,
-            data: std::ptr::null_mut(),
-        };
-        // SAFETY: the value is a decoded value of its type, and an empty output makes
-        // the encoder allocate.
-        let code = unsafe {
-            ffi::UA_encodeBinary(
-                self.pointer(),
-                self.data_type,
-                &raw mut output,
-                std::ptr::null_mut(),
-            )
-        };
-        if code != 0 {
-            return Err(Status(code));
-        }
-        // SAFETY: the encoder gave `length` bytes at `data`.
-        let bytes = unsafe { std::slice::from_raw_parts(output.data, output.length) };
-        let bytes = bytes.to_vec();
-        let byte_string = &ffi::types()[BYTE_STRING];
-        // SAFETY: the encoder allocated the output, a `ByteString`.
-        unsafe { ffi::UA_clear((&raw mut output).cast(), byte_string) };
-        Ok(bytes)
+        // SAFETY: the value is a decoded value of its type.
+        unsafe { encode(self.pointer(), self.data_type) }
     }
 
     fn size(&self) -> usize {
@@ -450,33 +539,6 @@ mod tests {
         decode(&data);
     }
 
-    /// Zeroed memory of 16-byte blocks that a decode takes in order.
-    struct Bump {
-        memory: Vec<u128>,
-        used: usize,
-    }
-
-    /// The [`ffi::Calloc`] of a [`Bump`], NULL when it is full.
-    unsafe extern "C" fn bump(
-        context: *mut c_void,
-        count: usize,
-        size: usize,
-    ) -> *mut c_void {
-        // SAFETY: the context of each decode of the test is a live `Bump`.
-        let bump = unsafe { &mut *context.cast::<Bump>() };
-        let blocks = count.saturating_mul(size).div_ceil(16);
-        match bump
-            .memory
-            .get_mut(bump.used..bump.used.saturating_add(blocks))
-        {
-            Some(taken) => {
-                bump.used += blocks;
-                taken.as_mut_ptr().cast()
-            }
-            None => std::ptr::null_mut(),
-        }
-    }
-
     /// Under a calloc, an `ExtensionObject` of a type that the decoder does not know
     /// keeps its string type id in the first block of the calloc, as nothing frees a
     /// copy.
@@ -499,7 +561,7 @@ mod tests {
         };
         let mut options = DecodeOptions::default();
         options.context = (&raw mut memory).cast();
-        options.calloc = Some(bump);
+        options.calloc = Some(bump_calloc);
         let mut value = [0_usize; 6];
         // SAFETY: the value holds the 48 bytes of an `ExtensionObject`, aligned to 8,
         // and the calloc gives memory that lives to the end of the test.

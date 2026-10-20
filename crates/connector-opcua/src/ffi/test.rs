@@ -303,7 +303,15 @@ unsafe extern "C" {
     );
     pub(crate) fn shim_client_receive(client: *mut super::Client, size: u32);
     pub(crate) fn shim_client_message(client: *mut super::Client, size: u32);
-    pub(crate) fn shim_client_blocks(client: *mut super::Client) -> usize;
+    pub(crate) fn shim_client_blocks(
+        client: *mut super::Client,
+        bytes: *mut usize,
+    ) -> usize;
+    pub(crate) fn shim_client_calloc(
+        client: *mut super::Client,
+        nelem: usize,
+        elsize: usize,
+    ) -> *mut std::ffi::c_void;
     pub(crate) fn __Client_PublishArena_reserve(
         client: *mut super::Client,
         size: usize,
