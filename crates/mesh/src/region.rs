@@ -188,6 +188,12 @@ impl State {
         &self.region
     }
 
+    /// The voters as of the last entry applied: the configuration of the last
+    /// `Voters` entry, or the founding voters.
+    pub(crate) const fn voters(&self) -> &Voters {
+        &self.voters
+    }
+
     /// The member with `key`, or `None` when the region has no such member.
     pub(crate) fn member(&self, key: node::Key) -> Option<&Member> {
         self.members.get(&key)

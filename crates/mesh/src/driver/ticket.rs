@@ -11,11 +11,11 @@ use crate::ticket::{Options, Ticket, Voter};
 impl Mesh {
     /// Makes a join ticket for the region, records it with `options`, and gives its
     /// secret. The key pair comes from [`Config::entropy`](super::Config::entropy).
-    /// The ticket lists each voter of the newest configuration in the log of this node,
-    /// of both halves of a joint one, in node key order, with the addresses of its
-    /// card. A follower forwards the change to the leader. It returns when an entry
-    /// that records the ticket has committed and this node applied it, and proposes
-    /// again as [`Mesh::set_home`] does. An entry of an earlier try of this call that
+    /// The ticket lists each voter of the configuration that this node has applied, of
+    /// both halves of a joint one, in node key order, with the addresses of its card.
+    /// A follower forwards the change to the leader. It returns when an entry that
+    /// records the ticket has committed and this node applied it, and proposes again
+    /// as [`Mesh::set_home`] does. An entry of an earlier try of this call that
     /// recorded the ticket counts as the record.
     ///
     /// # Errors
@@ -25,7 +25,8 @@ impl Mesh {
     ///
     /// # Panics
     ///
-    /// On a broken invariant of the region state: a refusal of the change.
+    /// On a broken invariant of the region state: a refusal of the change, or a voter
+    /// that is not a member.
     pub async fn ticket(&self, options: Options) -> Result<Ticket, Error> {
         let region = self.group.borrow().state.prefix().clone();
         if !region.contains(&options.prefix) {
@@ -54,16 +55,13 @@ impl Mesh {
                 None => {}
             }
         }
-        let group = self.group.borrow();
-        let voters = group
-            .raft
+        let state = &self.group.borrow().state;
+        let voters = state
             .voters()
             .nodes()
-            .filter_map(|key| group.state.member(key))
-            .map(|member| Voter {
-                key: member.card.key(),
-                public_key: member.public_key(),
-                addresses: member.card.card().addresses.clone(),
+            .map(|key| {
+                let member = state.member(key);
+                Voter::of(member.expect("invariant: each applied voter is a member"))
             })
             .collect();
         Ok(Ticket::new(private_key, region, voters))

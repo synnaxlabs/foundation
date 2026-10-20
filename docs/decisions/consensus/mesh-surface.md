@@ -249,12 +249,14 @@
   records the ticket with a `Ticket` change, which a follower forwards, and returns
   when an entry that records it has committed and this node applied it. It proposes
   again as `set_home` does, and an entry of an earlier try counts as the record. The
-  ticket lists each voter of the newest configuration in the log of this node, of both
-  halves of a joint one, in node key order, with the addresses of its card. A prefix that is not under the region's prefix gives the new
-  `Error::Outside { prefix, region }` before any proposal; `NoVote` and `Stopped` come
-  as for `set_home`. Lost: a token that the admin's node signs and that no change
-  records, since a single-use ticket needs a use count that each member agrees on
-  (BQ11a), and a token cannot be revoked. Plan:
+  ticket lists each voter of the configuration that this node has applied, of both
+  halves of a joint one, in node key order, with the addresses of its card: a voter of
+  a newer configuration that is only in the log can be a node that this node has not
+  applied as a member, with no card. A prefix that is not under the region's prefix
+  gives the new `Error::Outside { prefix, region }` before any proposal; `NoVote` and
+  `Stopped` come as for `set_home`. Lost: a token that the admin's node signs and that
+  no change records, since a single-use ticket needs a use count that each member
+  agrees on (BQ11a), and a token cannot be revoked. Plan:
   https://github.com/synnaxlabs/foundation/issues/1157#issuecomment-6293270267.
-  Approved by `laptop.architect` (2026-10-20:
+  Approved by `laptop.architect` (2026-10-20T14:33:01Z:
   https://github.com/synnaxlabs/foundation/issues/1157#issuecomment-6293328111).

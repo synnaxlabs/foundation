@@ -3,7 +3,7 @@
 
 use super::home::run;
 use super::*;
-use crate::ticket::{Record, Voter};
+use crate::ticket::{Record, Ticket, Voter};
 
 impl Cluster {
     /// Node `node` makes a ticket with `options` at its next tick.
@@ -22,6 +22,9 @@ fn voter_of(id: u8) -> Voter {
     }
 }
 
+// The tests read the record on each member from its state: an admit through
+// `join::ask` would use a single-use ticket at the first member, so no public call
+// shows the record on each member.
 #[test]
 fn a_call_on_each_voter_records_its_ticket_on_each_member() {
     for run in 0..4 {
@@ -134,7 +137,8 @@ fn a_call_on_a_node_that_is_not_a_voter_gives_no_vote_at_once() {
     });
 }
 
-// The entropy of the node gives each key pair, so two calls give two tickets.
+// The entropy of the node gives each key pair, so two calls give two tickets. The test
+// reads the record from the state, as the first test does.
 #[test]
 fn a_lone_voter_records_each_ticket_with_its_own_key_pair() {
     solo(|node, tasks| async move {
@@ -183,4 +187,92 @@ fn an_entry_of_an_earlier_try_counts_as_the_record() {
         options,
     };
     assert_eq!(changes, [recorded.clone(), recorded]);
+}
+
+// Node 2 sends the entry of the ticket and, after it, `appended`, and commits only the
+// ticket. Gives the voters of the ticket, which read back from its text, and the voters
+// of the newest configuration in the log of node 1.
+fn ticket_after(appended: Vec<Voters>) -> (Vec<node::Key>, Vec<node::Key>) {
+    let call = |_, mesh: Mesh| async move {
+        let made = mesh.ticket(common::options("plant.edge", false)).await;
+        let newest: Vec<_> = mesh.group.borrow().raft.voters().nodes().collect();
+        (made, newest)
+    };
+    let ((made, newest), ()) = run(call, |mut leader| async move {
+        let (change, mut asked) = leader.proposal().await;
+        leader.answer(&mut asked, at(1)).await.unwrap();
+        let ticket = Entry {
+            at: at(1),
+            data: Data::Bytes(encoded(&change)),
+        };
+        let configurations = appended.into_iter().zip(2..);
+        let appended = configurations
+            .map(|(voters, index)| common::voters_entry(2, at(index), voters));
+        leader
+            .append_entries(iter::once(ticket).chain(appended).collect(), 1)
+            .await;
+        leader.rest(seconds(2)).await;
+    });
+    let text = made.unwrap().text();
+    let read: Ticket = text.parse().unwrap();
+    let listed = read.voters().iter().map(|voter| voter.key).collect();
+    (listed, newest)
+}
+
+// Node 4 is no member that node 1 applied, so a ticket that lists the newest
+// configuration has no card for it.
+#[test]
+fn a_ticket_lists_the_applied_voters_when_the_log_replaces_one() {
+    let joint = Voters {
+        incoming: [1, 2, 4].map(key).into(),
+        outgoing: IDS.map(key).into(),
+    };
+    let last = Voters {
+        incoming: [1, 2, 4].map(key).into(),
+        outgoing: [].into(),
+    };
+    let (listed, newest) = ticket_after(vec![joint, last]);
+    assert_eq!(newest, [1, 2, 4].map(key));
+    assert_eq!(listed, IDS.map(key));
+}
+
+#[test]
+fn a_ticket_lists_the_applied_voters_when_the_log_adds_one() {
+    let joint = Voters {
+        incoming: [1, 2, 3, 4].map(key).into(),
+        outgoing: IDS.map(key).into(),
+    };
+    let (listed, newest) = ticket_after(vec![joint]);
+    assert_eq!(newest, [1, 2, 3, 4].map(key));
+    assert_eq!(listed, IDS.map(key));
+}
+
+// Node 1 applies a joint configuration that removes node 3, and then the ticket.
+#[test]
+fn a_ticket_lists_each_voter_of_both_halves_of_an_applied_joint_configuration() {
+    let call = |_, mesh: Mesh| async move {
+        mesh.ticket(common::options("plant.edge", false)).await
+    };
+    let (made, ()) = run(call, |mut leader| async move {
+        let (change, mut asked) = leader.proposal().await;
+        leader.answer(&mut asked, at(2)).await.unwrap();
+        let joint = Voters {
+            incoming: [1, 2].map(key).into(),
+            outgoing: IDS.map(key).into(),
+        };
+        let ticket = Entry {
+            at: at(2),
+            data: Data::Bytes(encoded(&change)),
+        };
+        let entries = vec![common::voters_entry(2, at(1), joint), ticket];
+        leader.append_entries(entries, 2).await;
+        leader.rest(seconds(2)).await;
+    });
+    let listed: Vec<_> = made
+        .unwrap()
+        .voters()
+        .iter()
+        .map(|voter| voter.key)
+        .collect();
+    assert_eq!(listed, IDS.map(key));
 }
