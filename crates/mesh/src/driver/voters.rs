@@ -58,16 +58,16 @@ impl Mesh {
         keyed(&self.group.borrow(), &voters)?;
         self.check_proposer()?;
         let set = Voters {
-            incoming: voters.clone(),
+            incoming: voters,
             outgoing: BTreeSet::new(),
         };
         let pointer = self.pointer();
-        self.spread(&set, &self.tree(pointer.root).await?).await?;
+        self.put(&set, pointer.root).await?;
         let at = {
             let attempt = self.attempt()?;
             let at = self
                 .proposed(|group| {
-                    Ok(group.raft.propose_voters(keyed(group, &voters)?)?)
+                    Ok(group.raft.propose_voters(keyed(group, &set.incoming)?)?)
                 })
                 .await?;
             match attempt.applied(at).await? {
@@ -86,11 +86,7 @@ impl Mesh {
             if moved == pointer {
                 return Ok(at);
             }
-            let put = match self.tree(moved.root).await {
-                Ok(digests) => self.spread(&set, &digests).await.map(|_| ()),
-                Err(error) => Err(error),
-            };
-            match put {
+            match self.put(&set, moved.root).await {
                 Ok(()) => return Ok(at),
                 Err(Error::Quorum { .. } | Error::Lacking(_)) => {}
                 Err(error) => return Err(error),
@@ -99,14 +95,14 @@ impl Mesh {
         }
     }
 
-    // Each chunk of the tree at `root`, from this node's store, in the order of a walk
-    // from the root.
-    async fn tree(&self, root: Digest) -> Result<Vec<Digest>, Error> {
+    // Puts each chunk of the tree at `root`, from this node's store, on each other
+    // voter of `set`, in the order of a walk from the root.
+    async fn put(&self, set: &Voters, root: Digest) -> Result<(), Error> {
         let mut chunks = Chunks::default();
         let mut digests = Vec::new();
         loop {
             let digest = match tree::diff(&chunks, tree::empty(), root) {
-                Ok(_) => return Ok(digests),
+                Ok(_) => break,
                 Err(tree::Error::Missing(digest)) => digest,
                 Err(tree::Error::Corrupt(digest)) => {
                     return Err(Error::Lacking(digest));
@@ -118,6 +114,7 @@ impl Mesh {
             };
             digests.push(digest);
         }
+        self.spread(set, &digests).await.map(|_| ())
     }
 }
 
