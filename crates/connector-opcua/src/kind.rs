@@ -246,11 +246,38 @@ async fn run(ctx: Context<Config>) -> Result<(), Error> {
         ctx.cancel().wait(),
         async |client| {
             if ctx.config().polled {
-                read(&ctx, client, &mut frames).await
+                read(&ctx, client, &mut frames).await.map(|()| None)
             } else {
                 watch::run(&ctx, client, &mut frames).await
             }
         },
+    )
+    .await?;
+    match ran.transpose()?.flatten() {
+        Some(status) => fall_back(&ctx, &mut frames, status).await,
+        None => Ok(()),
+    }
+}
+
+/// Notes that the server answered the subscribe with `status`, and polls as [`read`]
+/// does on a new session, so that the client and the server keep nothing of the
+/// subscribe.
+#[cold]
+async fn fall_back(
+    ctx: &Context<Config>,
+    frames: &mut Frames<'_>,
+    status: Status,
+) -> Result<(), Error> {
+    frames.polls = Some(status);
+    frames.left.show(ctx, frames.polls, None);
+    let ran = session(
+        event::Time::mesh(ctx.clock().clone(), frames.writer.time()),
+        ctx.span().clone(),
+        ctx.net().clone(),
+        &mut ctx.rng(),
+        &ctx.config().address,
+        ctx.cancel().wait(),
+        async |client| read(ctx, client, frames).await,
     )
     .await?;
     ran.unwrap_or(Ok(()))
@@ -310,20 +337,6 @@ async fn session<T>(
     Ok(Some(done))
 }
 
-/// Notes that the server answered the subscribe with `status`, and polls as [`read`]
-/// does.
-#[cold]
-async fn fall_back(
-    ctx: &Context<Config>,
-    client: &mut Client,
-    frames: &mut Frames<'_>,
-    status: Status,
-) -> Result<(), Error> {
-    frames.left.polls = Some(status);
-    frames.left.show(ctx, None);
-    read(ctx, client, frames).await
-}
-
 /// Reads each node once per tick until the cancel, and writes the frame of each tick.
 async fn read(
     ctx: &Context<Config>,
@@ -335,7 +348,7 @@ async fn read(
     let nodes: Vec<Node> = reads.iter().map(|read| read.node.clone()).collect();
     let nodes = client.nodes(&nodes);
     if let Some(large) = nodes.large().first() {
-        return Err(large_read(reads, large));
+        return Err(too_large(LARGE_READ, "Read", reads, large));
     }
     let missed = ctx.count("missed");
     let mut timer = pace::Timer::new(ctx.clock(), ctx.config().rate);
@@ -421,6 +434,9 @@ struct Frames<'a> {
     /// The sample type of the channel of each read, in order.
     types: Vec<Scalar>,
     left: Left,
+    /// The answer to the subscribe for which the run polls, which the note names
+    /// before the read.
+    polls: Option<Status>,
 }
 
 /// The counts of the values that a frame leaves out.
@@ -430,9 +446,6 @@ struct Left {
     mistyped: status::Count,
     /// The read and the type that the note names, or `None` when it shows none.
     noted: Option<(usize, value::Type)>,
-    /// The answer to the subscribe for which the run polls, which the note names
-    /// before the read.
-    polls: Option<Status>,
 }
 
 impl<'a> Frames<'a> {
@@ -469,8 +482,8 @@ impl<'a> Frames<'a> {
                 uncertain: ctx.count("uncertain"),
                 mistyped: ctx.count("mistyped"),
                 noted: None,
-                polls: None,
             },
+            polls: None,
         }))
     }
 
@@ -523,7 +536,7 @@ impl<'a> Frames<'a> {
         let written = self.writer.write(kept, stamp);
         self.left.add(bad, uncertain, mistyped);
         if first.is_some() || !absent {
-            self.left.note(self.ctx, first);
+            self.left.note(self.ctx, self.polls, first);
         }
         written
     }
@@ -539,15 +552,17 @@ impl Left {
 
     /// Sets the note of `ctx` for `mistyped`, when it is not the note of the frame
     /// before: the read at a value of another type, its type, and the sample type of
-    /// its channel. `None` shows only the note of [`fall_back`], or none.
+    /// its channel, after the note of [`fall_back`] for `polls`. `None` shows only
+    /// that note, or none.
     #[inline]
     fn note(
         &mut self,
         ctx: &Context<Config>,
+        polls: Option<Status>,
         mistyped: Option<(usize, value::Type, Scalar)>,
     ) {
         if mistyped.map(|(at, value, _)| (at, value)) != self.noted {
-            self.show(ctx, mistyped);
+            self.show(ctx, polls, mistyped);
         }
     }
 
@@ -555,10 +570,11 @@ impl Left {
     fn show(
         &mut self,
         ctx: &Context<Config>,
+        polls: Option<Status>,
         mistyped: Option<(usize, value::Type, Scalar)>,
     ) {
         self.noted = mistyped.map(|(at, value, _)| (at, value));
-        let polls = (self.polls).map(|status| {
+        let polls = polls.map(|status| {
             format!("polls: the server has no subscriptions ({status:?})")
         });
         let polls = polls.as_deref().unwrap_or_default();
@@ -594,11 +610,16 @@ impl Why {
         match value {
             Ok(value) if value.scalar() == sample => Ok(sample::Value::from(*value)),
             Ok(value) => Err(Self::Mistyped(value.type_of())),
-            Err(fault) => Err(match fault.cause() {
-                Cause::Type(opc_type) => Self::Mistyped(opc_type),
-                Cause::Status(status) if status.uncertain() => Self::Uncertain,
-                Cause::Status(_) => Self::Bad,
-            }),
+            Err(fault) => Err(Self::fault(*fault)),
+        }
+    }
+
+    /// Why a frame leaves out a value of `fault`.
+    fn fault(fault: Fault) -> Self {
+        match fault.cause() {
+            Cause::Type(opc_type) => Self::Mistyped(opc_type),
+            Cause::Status(status) if status.uncertain() => Self::Uncertain,
+            Cause::Status(_) => Self::Bad,
         }
     }
 }
@@ -621,16 +642,21 @@ fn sample_type(read: &Read, data_type: Type) -> Diagnostic {
     )
 }
 
-/// The error of a read of `reads` whose node alone needs a Read past one message of the
-/// server.
-fn large_read(reads: &[Read], &Large { index, bytes, most }: &Large) -> Error {
+/// The error `code` of a read of `reads` whose node alone needs a `call` past one
+/// message of the server.
+fn too_large(
+    code: Code,
+    call: &str,
+    reads: &[Read],
+    &Large { index, bytes, most }: &Large,
+) -> Error {
     let read = &reads[index];
     Error::Config(vec![Diagnostic::new(
-        LARGE_READ,
+        code,
         None,
         format!(
-            "a Read of the node `{}` of the channel `{}` needs {bytes} bytes, past the \
-             {most} bytes of one message of the server",
+            "a {call} of the node `{}` of the channel `{}` needs {bytes} bytes, past \
+             the {most} bytes of one message of the server",
             read.node, read.channel,
         ),
         "Raise the message size of the server".into(),

@@ -1,3 +1,8 @@
+//! These tests call `Drive` and `device` through private calls: a test server cannot
+//! give a timestamp at the edge of the map of a `Stamp`, a server timestamp after its
+//! arrival, or each order of holds in one drive. `kind::tests` runs the same rules
+//! through `kind::run`.
+
 use super::*;
 
 const S: i64 = 1_000_000_000;
@@ -78,13 +83,13 @@ fn the_device_time_is_the_source_timestamp_unless_it_is_absent_or_later() {
         change(0, Some(7 * S), Some(6 * S)),
         change(1, None, Some(6 * S)),
         change(1, Some(0), Some(6 * S)),
-        change(1, Some(5 * S), None),
+        change(1, Some(7 * S), None),
     ];
     let fitted = drive.take(&changes, &mut exact(), stamp(1_000 * S), &reads());
     assert!(!fitted.expect("each has a timestamp"));
     let at: Vec<_> = drive.entries.iter().map(|entry| entry.at).collect();
     let device = |seconds| device(stamp(seconds * S)).expect("in the map");
-    assert_eq!(at, [5, 6, 6, 6, 5].map(device));
+    assert_eq!(at, [5, 6, 6, 6, 7].map(device));
 }
 
 #[test]
@@ -166,6 +171,8 @@ fn each_overflow_counts() {
     assert_eq!(drive.overflows, 1);
 }
 
+/// `held` reads a private field: it sets the error of each stamp, which no caller sees
+/// until #2627 writes that error to the error channel of its index.
 #[test]
 fn the_order_is_device_time_then_read_then_arrival_with_each_hold() {
     let mut drive = Drive::new(2);

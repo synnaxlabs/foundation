@@ -1,7 +1,7 @@
 #![expect(clippy::arithmetic_side_effects, reason = "a test may panic")]
 
 use std::borrow::Borrow;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::net::SocketAddr;
@@ -33,7 +33,7 @@ use types::quality::Quality;
 use super::*;
 use crate::client::GRACE;
 use crate::client::tests::common::{env, is, rig, set_result};
-use crate::client::tests::{RELAY, Relay, relayed, relayed_up};
+use crate::client::tests::{RELAY, Relay, relayed, relayed_both, relayed_up};
 use crate::gate::Gate;
 use crate::sim::{Served, Variables, serve};
 
@@ -2149,29 +2149,81 @@ where
 /// The note of a run that polls a server with no subscription service.
 const POLLS: &str = "polls: the server has no subscriptions (BadServiceUnsupported)";
 
-/// A server with no `CreateSubscription` or no `CreateMonitoredItems` service is read
-/// on each tick as `polled = true` reads it, with a note and no error.
+/// The binary encoding of the `CreateSession`, `CloseSession`, and Publish requests,
+/// and of a `CreateMonitoredItems` answer, each a `NodeId` of 4 bytes.
+const CREATE_SESSION: [u8; 4] = [0x01, 0x00, 0xCD, 0x01];
+const CLOSE_SESSION: [u8; 4] = [0x01, 0x00, 0xD9, 0x01];
+const PUBLISH: [u8; 4] = [0x01, 0x00, 0x3A, 0x03];
+const MONITORED: [u8; 4] = [0x01, 0x00, 0xF2, 0x02];
+
+/// A server with no `CreateSubscription` or no `CreateMonitoredItems` service, or one
+/// that answers either with `BadNotImplemented`, is read on each tick as `polled =
+/// true` reads it, with a note and no error. The poll runs on a new session, so the
+/// server holds no subscription and gets no Publish request after the fallback.
 #[test]
 fn polls_a_server_with_no_subscription_service() {
-    for kind in [CREATE_SUBSCRIPTION, CREATE_MONITORED_ITEMS] {
-        let outcome = unsubscribed(kind, Setup::three(), |scene| async move {
+    let unknown = Status::BAD_SERVICE_UNSUPPORTED;
+    let cases = [
+        (Some(CREATE_SUBSCRIPTION), None, unknown),
+        (Some(CREATE_MONITORED_ITEMS), None, unknown),
+        (None, Some(CREATED), Status::BAD_NOT_IMPLEMENTED),
+        (None, Some(MONITORED), Status::BAD_NOT_IMPLEMENTED),
+    ];
+    for (request, answer, status) in cases {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let sent = Arc::clone(&log);
+        let setup = Setup::three();
+        let outcome = scene(RELAY, "10Hz", false, setup, move |scene| async move {
+            let node = scene.node.clone();
+            let up = move |message: &mut Vec<u8>| {
+                let kinds = [
+                    CREATE_SESSION,
+                    CREATE_SUBSCRIPTION,
+                    CREATE_MONITORED_ITEMS,
+                    PUBLISH,
+                    CLOSE_SESSION,
+                ];
+                if let Some(&kind) = kinds.iter().find(|&&kind| is(message, kind)) {
+                    sent.lock().expect("the log").push(kind);
+                }
+                if request.is_some_and(|kind| is(message, kind)) {
+                    message[26..28].copy_from_slice(&[0xFF, 0x7F]);
+                }
+            };
+            let down = move |message: &mut Vec<u8>| {
+                if answer.is_some_and(|kind| is(message, kind)) {
+                    set_result(message, Status::BAD_NOT_IMPLEMENTED);
+                }
+            };
             scene.after(ms(430), |scene| async move {
                 scene.variables.change(Quality::GOOD);
             });
-            scene.supervise(ms(1_050)).await
+            let supervised = scene.supervise(ms(1_050));
+            Box::pin(relayed_both(&node, up, down, supervised)).await
         });
+        let case = (request, answer);
         assert!(outcome.result.is_ok(), "{:?}", outcome.result);
-        assert_eq!(errors(&outcome.statuses), [], "{kind:?}");
-        assert_eq!(notes(&outcome.statuses), [POLLS], "{kind:?}");
+        assert_eq!(errors(&outcome.statuses), [], "{case:?}");
+        let polls = format!("polls: the server has no subscriptions ({status:?})");
+        assert_eq!(notes(&outcome.statuses), [polls], "{case:?}");
         let frames = &outcome.frames;
-        assert_eq!(keys(frames), vec![vec![1, 2, 3, 4]; 11], "{kind:?}");
+        assert_eq!(keys(frames), vec![vec![1, 2, 3, 4]; 11], "{case:?}");
         for (key, node) in [(2, A), (3, B), (4, C)] {
-            assert_eq!(values(frames, key), served(&outcome, node), "{node}");
+            let served = served(&outcome, node);
+            let polled = &served[served.len() - frames.len()..];
+            assert_eq!(values(frames, key), polled, "{node}");
         }
         let stamps: Vec<_> = frames.iter().map(|frame| stamp(frame, 1)).collect();
         for pair in stamps.windows(2) {
             assert_eq!(pair[1] - pair[0], ms(100).nanos(), "{stamps:?}");
         }
+        let log = log.lock().expect("the log");
+        let second = log.iter().rposition(|&kind| kind == CREATE_SESSION);
+        let second = second.expect("a session");
+        assert_eq!(log[..second].last(), Some(&CLOSE_SESSION), "{case:?}");
+        assert_eq!(log[second..], [CREATE_SESSION, CLOSE_SESSION], "{case:?}");
+        let sessions = log.iter().filter(|&&kind| kind == CREATE_SESSION).count();
+        assert_eq!(sessions, 2, "{case:?}");
     }
 }
 
@@ -2344,4 +2396,199 @@ fn counts_each_overflow_of_the_queue_of_an_item_as_missed() {
     // publishing interval that dropped one, so 2 for each item.
     assert_eq!(last(&outcome.statuses, MISSED), 6);
     assert_eq!(last(&outcome.statuses, IN), 15);
+}
+
+/// A node whose `CreateMonitoredItems` call alone is past one message of the server
+/// ends the run with a config error, as a Read past it does with `polled = true`.
+#[test]
+fn refuses_a_node_whose_watch_alone_is_past_one_message_of_the_server() {
+    let node = format!("ns=3;s={}", "x".repeat(600_000));
+    let mut setup = Setup::three();
+    setup.reads[1].1.clone_from(&node);
+    let outcome = watch(setup, |scene| async move { scene.supervise(ms(350)).await });
+    assert_eq!(
+        diagnostics(outcome.result),
+        [Diagnostic::new(
+            Code::new("opcua.large-watch"),
+            None,
+            format!(
+                "a CreateMonitoredItems call of the node `{node}` of the channel \
+                 `plant.b` needs 600107 bytes, past the 524047 bytes of one message of the server"
+            ),
+            "Raise the message size of the server".into(),
+        )]
+    );
+    assert_eq!(outcome.frames, []);
+}
+
+/// The binary encoding of a Publish answer, a `NodeId` of 4 bytes.
+const PUBLISHED: [u8; 4] = [0x01, 0x00, 0x3D, 0x03];
+
+/// The source timestamp of the changes of [`untimed`], 2025-12-31.
+const SOURCE: Stamp = Stamp::from_nanos(1_767_139_200 * 1_000_000_000);
+
+/// Runs a watch of [`Setup::three`] in which each node changes at 430 ms with the
+/// status `quality`, and a relay sets both timestamps of each of those changes to 0.
+fn untimed(quality: Quality) -> Record {
+    scene(
+        RELAY,
+        "20Hz",
+        false,
+        Setup::three(),
+        move |scene| async move {
+            let node = scene.node.clone();
+            let nanos = u64::try_from(SOURCE.nanos()).expect("after 1970");
+            let time = (nanos / 100 + 116_444_736_000_000_000).to_le_bytes();
+            let clear = move |message: &mut Vec<u8>| {
+                if !is(message, PUBLISHED) {
+                    return;
+                }
+                let mut at = 0;
+                while let Some(found) = message[at..].windows(8).position(|w| w == time)
+                {
+                    // The source timestamp, then the server timestamp.
+                    message[at + found..at + found + 16].fill(0);
+                    at += found + 16;
+                }
+            };
+            scene.after(ms(430), move |scene| async move {
+                scene.variables.change_at(quality, SOURCE);
+            });
+            let supervised = scene.supervise(ms(1_050));
+            Box::pin(relayed(&node, &Relay::default(), clear, supervised)).await
+        },
+    )
+}
+
+/// A Good change with no timestamp ends the run with a config error, as no time
+/// places it.
+#[test]
+fn refuses_a_good_change_with_no_timestamp() {
+    let outcome = untimed(Quality::GOOD);
+    assert_eq!(
+        diagnostics(outcome.result),
+        [Diagnostic::new(
+            Code::new("opcua.no-timestamp"),
+            None,
+            "the server gives a value of the node `ns=3;s=SpikeData` of the channel \
+             `plant.a` with no timestamp that maps to mesh time, so the subscription \
+             cannot place it"
+                .into(),
+            "Set `polled = true` to read each node at the rate".into(),
+        )]
+    );
+    assert_eq!(keys(&outcome.frames), vec![vec![1, 2, 3, 4]]);
+}
+
+/// A Bad change with no timestamp counts as Bad and makes no frame, as a Bad value
+/// with one does.
+#[test]
+fn counts_a_bad_change_with_no_timestamp_as_bad() {
+    let outcome = untimed(Quality(0x8000_0000));
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    assert_eq!(errors(&outcome.statuses), []);
+    assert_eq!(last(&outcome.statuses, BAD), 3);
+    assert_eq!(keys(&outcome.frames), vec![vec![1, 2, 3, 4]]);
+}
+
+/// Two drives whose source timestamps cross, the second 1.2 s before the first, give
+/// stamps that strictly increase.
+#[test]
+fn writes_two_drives_whose_source_timestamps_cross_at_stamps_that_increase() {
+    let outcome = watch(Setup::three(), |scene| async move {
+        scene.after(ms(430), |scene| async move {
+            let source = wall(&scene) - Span::SECOND;
+            scene.variables.change_at(Quality::GOOD, source);
+        });
+        scene.after(ms(1_230), |scene| async move {
+            let source = wall(&scene) - Span::from_nanos(2 * Span::SECOND.nanos());
+            scene.variables.change_at(Quality::GOOD, source);
+        });
+        scene.supervise(ms(2_050)).await
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    let frames = &outcome.frames;
+    assert_eq!(keys(frames), vec![vec![1, 2, 3, 4]; 3]);
+    let stamps: Vec<_> = frames.iter().map(|frame| stamp(frame, 1)).collect();
+    assert_eq!(stamps[2], stamps[1] + 1, "{stamps:?}");
+    assert!(stamps[1] > stamps[0], "{stamps:?}");
+    assert_eq!(values(frames, 2), [0.0, 1.0, 2.0]);
+}
+
+/// A server that ends the subscription while the connection stays ends the run with a
+/// device error, and the next run subscribes again and writes.
+#[test]
+fn subscribes_again_after_the_server_ends_the_subscription() {
+    let outcome = scene(RELAY, "20Hz", false, Setup::three(), |scene| async move {
+        let node = scene.node.clone();
+        let armed = Rc::new(Cell::new(false));
+        let arm = Rc::clone(&armed);
+        let end = move |message: &mut Vec<u8>| {
+            if armed.get() && is(message, PUBLISHED) {
+                armed.set(false);
+                set_result(message, Status::BAD_SESSION_CLOSED);
+            }
+        };
+        scene.after(ms(430), move |scene| async move {
+            scene.variables.change(Quality::GOOD);
+            arm.set(true);
+        });
+        scene.after(ms(3_030), |scene| async move {
+            scene.variables.change(Quality::GOOD);
+        });
+        let supervised = scene.supervise(ms(4_050));
+        Box::pin(relayed(&node, &Relay::default(), end, supervised)).await
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    let ended = "the subscription to opc.tcp://10.0.0.1:4841 ended with \
+                 BadNoSubscription";
+    assert_eq!(errors(&outcome.statuses), [(2, ended.into())]);
+    assert_eq!(last(&outcome.statuses, RESTARTS), 1);
+    assert_eq!(values(&outcome.frames, 2).last(), Some(&2.0));
+}
+
+/// A server clock that goes back 1 min between two changes of one Publish answer
+/// keeps the order of the values of each node.
+#[test]
+fn keeps_the_order_of_each_node_when_the_clock_goes_back_in_a_drive() {
+    let outcome = watch(Setup::three(), |scene| async move {
+        scene.variables.limit_queues(100, 1_000.0);
+        scene.stop().await;
+        scene.serve();
+        scene.variables.set_clock(minutes(5));
+        scene.after(ms(1_230), |scene| async move {
+            scene.variables.change(Quality::GOOD);
+        });
+        scene.after(ms(1_430), |scene| async move {
+            scene.variables.set_clock(minutes(4));
+        });
+        scene.after(ms(1_630), |scene| async move {
+            scene.variables.change(Quality::GOOD);
+        });
+        scene.supervise(ms(3_050)).await
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    assert_eq!(errors(&outcome.statuses), []);
+    for key in [2, 3, 4] {
+        let bits = outcome.frames.iter().filter_map(|frame| fixed(frame, &key));
+        let values: Vec<_> = bits.flatten().map(|&bits| f64::from_bits(bits)).collect();
+        assert_eq!(values, [0.0, 1.0, 2.0], "{key}");
+    }
+}
+
+/// A cancel during the read of the current time, first or after 10 s, on a server
+/// that stops, ends the run [`GRACE`] after it, as the doc of `run` says.
+#[test]
+fn a_cancel_during_a_read_of_the_current_time_ends_after_the_grace() {
+    for (stop, cancel) in [
+        (Span::from_nanos(3_600_000), ms(500)),
+        (ms(9_900), ms(10_500)),
+    ] {
+        let outcome = watch(Setup::three(), move |scene| async move {
+            scene.after(stop, |scene| async move { scene.gate.close() });
+            assert_eq!(ends_after_the_cancel(&scene, cancel).await, GRACE);
+            Ok(())
+        });
+        assert!(outcome.result.is_ok(), "{stop:?}: {:?}", outcome.result);
+    }
 }

@@ -372,23 +372,26 @@ fn a_write_of_a_frame_of_any_type_allocates_nothing() {
 }
 
 /// Drives 21 to 100 of the changes of a subscription allocate nothing: the take, the
-/// sort, and the write of the frame, for one change or a change of each of 64 reads,
-/// into channels of one type or of each type in turn. The drive grows its buffers in
-/// drive 1, and the test home grows its groups in the first 20, as for writes.
+/// sort, and the write of the frames, for one change or a change of each of 64 reads,
+/// into channels of one type or of each type in turn, at one device time or at a
+/// device time for each change. The drive grows its buffers in drive 1, and the test
+/// home grows its groups in the first 20, as for writes.
 fn a_drive_of_changes_allocates_nothing() {
-    let runs: [(&[Scalar], usize); 4] = [
-        (&[Scalar::F64], 1),
-        (&[Scalar::F64], 64),
-        (&[Scalar::Bool], 64),
-        (connector_opcua::bench::kind::SCALARS, 64),
+    let one = Span::from_nanos(1);
+    let runs: [(&[Scalar], usize, Span); 5] = [
+        (&[Scalar::F64], 1, Span::ZERO),
+        (&[Scalar::F64], 64, Span::ZERO),
+        (&[Scalar::F64], 64, one),
+        (&[Scalar::Bool], 64, Span::ZERO),
+        (connector_opcua::bench::kind::SCALARS, 64, Span::ZERO),
     ];
-    for (scalars, moved) in runs {
+    for (scalars, moved, spread) in runs {
         let count = |work: &mut dyn FnMut()| ALLOCATOR.count(work).1;
-        let drives = kind::drives(64, scalars, 100, moved, count);
+        let drives = kind::drives(64, scalars, 100, moved, spread, count);
         assert_eq!(
             drives[20..],
             [0; 80],
-            "drives 21 to 100 of {moved} changes of 64 reads of {scalars:?}"
+            "drives 21 to 100 of {moved} changes {spread:?} apart of 64 reads of {scalars:?}"
         );
     }
 }

@@ -15,6 +15,7 @@ use std::time::Instant;
 use connector::kind::Kind as _;
 use connector_opcua::bench::kind::SCALARS;
 use types::sample::{Scalar, Type};
+use types::time::Span;
 
 #[path = "../tests/common/kind.rs"]
 mod kind;
@@ -38,9 +39,11 @@ const WRITES: [(usize, &[Scalar], [usize; 2]); 7] = [
     (256, &[Scalar::Bool], [0, 0]),
     (256, SCALARS, [0, 0]),
 ];
-/// The node counts and the changes of each drive of a subscription, into f64
-/// channels. One change of 256 nodes is the frame of one moved channel.
-const DRIVES: [(usize, usize); 3] = [(1, 1), (256, 256), (256, 1)];
+/// The node counts, the changes of each drive of a subscription into f64 channels, and
+/// the ns between the device times of two changes. One change of 256 nodes is the
+/// frame of one moved channel. A spread of 1 ns makes a frame of each change.
+const DRIVES: [(usize, usize, i64); 4] =
+    [(1, 1, 0), (256, 256, 0), (256, 1, 0), (256, 256, 1)];
 /// The ticks or writes before the timed ones. Tick 1 connects. The test home grows the
 /// `Vec`s of its groups in its first two commits, then reuses each group. 20 covers two
 /// commits on both lines: a write each 1 ms, and a tick each 100 ms.
@@ -146,21 +149,23 @@ fn writes() {
 fn drives() {
     println!("ns per drive of the changes of a subscription over {TICKS} drives");
     println!(
-        "{:<10} {:>7} {:>7} {:>7} {:>7}",
-        "nodes", "changes", "p10", "p50", "p90"
+        "{:<10} {:>7} {:>7} {:>7} {:>7} {:>7}",
+        "nodes", "changes", "spread", "p10", "p50", "p90"
     );
-    for (nodes, moved) in DRIVES {
+    for (nodes, moved, spread) in DRIVES {
+        let spread = Span::from_nanos(spread);
         let count = WARMUP + TICKS / WRITE_RUNS;
         let mut drives: Vec<_> = (0..WRITE_RUNS)
             .flat_map(|_| {
-                kind::drives(nodes, &[Scalar::F64], count, moved, time)
+                kind::drives(nodes, &[Scalar::F64], count, moved, spread, time)
                     .split_off(WARMUP)
             })
             .collect();
         drives.sort_unstable();
         let at = |percent: usize| drives[drives.len() * percent / 100];
         println!(
-            "{nodes:<10} {moved:>7} {:>7} {:>7} {:>7}",
+            "{nodes:<10} {moved:>7} {:>7} {:>7} {:>7} {:>7}",
+            spread.nanos(),
             at(10),
             at(50),
             at(90)

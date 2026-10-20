@@ -11,7 +11,7 @@ use std::task::Poll;
 use types::time::{Span, Stamp};
 
 use super::service::{Item, Request};
-use super::{Calls, Client, PUBLISHES, READS, id_bytes};
+use super::{Calls, Client, Large, PUBLISHES, READS, id_bytes};
 use crate::alloc;
 use crate::ffi::{self, Status};
 use crate::node::Node;
@@ -40,6 +40,9 @@ pub(crate) struct Revised {
     pub(crate) interval: Span,
     /// For each node, in order, its item, or the status of its create result.
     pub(crate) items: Vec<Result<Sampled, Status>>,
+    /// Each node whose call alone is past one message, in order. Its item is
+    /// `BadRequestTooLarge`.
+    pub(crate) large: Vec<Large>,
 }
 
 /// A monitored item that the server made.
@@ -237,6 +240,7 @@ impl Client {
         Ok(Revised {
             interval: span(interval),
             items,
+            large: split.large,
         })
     }
 

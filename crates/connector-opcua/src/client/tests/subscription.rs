@@ -154,6 +154,7 @@ fn made(count: usize) -> Revised {
     Revised {
         interval: ms(100),
         items: vec![Ok(item); count],
+        large: Vec::new(),
     }
 }
 
@@ -180,7 +181,15 @@ fn the_queue_holds_the_values_of_two_round_trips_past_two_intervals() {
         };
         let interval = ms(100);
         let items = vec![Ok(item)];
-        assert_eq!(revised, Ok(Revised { interval, items }), "{round_trip:?}");
+        assert_eq!(
+            revised,
+            Ok(Revised {
+                interval,
+                items,
+                large: Vec::new()
+            }),
+            "{round_trip:?}"
+        );
     }
 }
 
@@ -198,7 +207,8 @@ fn a_sampling_past_100_ms_is_the_publishing_interval() {
         revised,
         Ok(Revised {
             interval,
-            items: vec![Ok(item)]
+            items: vec![Ok(item)],
+            large: Vec::new(),
         })
     );
 }
@@ -607,7 +617,8 @@ fn on_level<T: Send + 'static>(
                 revised,
                 Revised {
                     interval: Span::SECOND,
-                    items: vec![Ok(item)]
+                    items: vec![Ok(item)],
+                    large: Vec::new(),
                 }
             );
             let first = client.changes(future::pending()).await.map(untimed);

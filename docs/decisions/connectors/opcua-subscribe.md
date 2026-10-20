@@ -16,6 +16,15 @@
   the fix. Lost: the time of its arrival, which has no true error (`laptop.architect-2`,
   2026-10-19T23:36:41Z, item 1:
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6279727836).
+  A value that is not Good and has no timestamp makes no sample, and `bad` or
+  `uncertain` counts it, as the polled mode counts a read that is not Good
+  (`laptop.architect-2`, item 2 of
+  https://github.com/synnaxlabs/foundation/pull/3507#issuecomment-6283684793). Inside
+  one drive, the device times of each node never go back: a change whose device time
+  is earlier than that of the change of its node before it gets the time of that
+  change. Lost, a simple version first: the true time of the values on one side of a
+  clock step inside one drive. A fit for each side of the step keeps it
+  (https://github.com/synnaxlabs/foundation/issues/3514).
   The queue of each item holds the samples of the larger of two publishing intervals
   that the server gives and two round trips of the first `CurrentTime` read. Past a
   round trip of two intervals, one Publish answer can come a round trip after the one
@@ -32,16 +41,27 @@
   down (`laptop.architect-2`, item 3 of 6279727836). The end is not silent: the run
   ends with the Device error "the subscription to {address} ended with {status}", which
   the `error` status channel holds at the time of the end, and `restarts` counts it
-  (`laptop.monitor`, the condition on the lifetime end of the PR 5 key choices).
+  (`laptop.monitor`, the condition on the lifetime end of the PR 5 key choices,
+  https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6283679034).
   A subscription that ends, or a node that the server does not watch, ends the run with
-  `kind::Error::Device`. The run closes its session, the supervisor connects again with
-  its backoff, and the next run subscribes again, so data starts again after a server
-  restart with no user step (`laptop.monitor`, round 2 of #3435, step 4 of
-  https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6278830972).
+  `kind::Error::Device` (`laptop.architect-2`, section 3 of
+  https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6157348272). The
+  run closes its session, the supervisor connects again with its backoff, and the next
+  run subscribes again, so data starts again after a server restart with no user step
+  (`laptop.monitor`, round 2 of #3435, step 4 of
+  https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6278830972). The
+  polled mode counts a node that the server does not watch as `bad` and writes the
+  others. Lost, a simple version first: leave out an item that the server does not
+  watch, note it, and try it again at each read of `CurrentTime`
+  (https://github.com/synnaxlabs/foundation/issues/3509). A node whose
+  CreateMonitoredItems call alone is past one message of the server ends the run with
+  `kind::Error::Config` and `opcua.large-watch`, as `opcua.large-read` does for a
+  Read.
   When CreateSubscription or CreateMonitoredItems answers `BadServiceUnsupported` or
   `BadNotImplemented`, as a server of the Nano Embedded Device profile can (OPC UA
-  Part 7), the kind polls for the rest of that connect, as `polled = true` does, with
-  the note "polls: the server has no subscriptions ({status})". The next connect tries
+  Part 7), the kind closes that session and polls on a new session for the rest of
+  that connect, as `polled = true` does, so the server keeps no subscription, with the
+  note "polls: the server has no subscriptions ({status})". The next connect tries
   a subscription again, since the server can change. Other statuses end the run with
   `kind::Error::Device`. The person ("Ok what you choose is ok", 2026-10-13, through
   `laptop.monitor`, 2026-10-13T23:43:30Z,

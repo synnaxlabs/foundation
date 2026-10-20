@@ -2011,6 +2011,17 @@ pub(crate) async fn relayed_up<T>(
     beside(relay(node, &Relay::default(), up, |_| {}), body).await
 }
 
+/// Runs `body` while [`relay`] runs on `node`, and gives each message of the client to
+/// `up` and each message of the server to `down`.
+pub(crate) async fn relayed_both<T>(
+    node: &node::Node,
+    up: impl FnMut(&mut Vec<u8>),
+    down: impl FnMut(&mut Vec<u8>),
+    body: impl Future<Output = T>,
+) -> T {
+    beside(relay(node, &Relay::default(), up, down), body).await
+}
+
 /// Runs `body` while `relay` runs.
 async fn beside<T>(
     relay: impl Future<Output = ()>,
