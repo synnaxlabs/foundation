@@ -109,5 +109,5 @@
   (https://github.com/synnaxlabs/foundation/pull/3332#issuecomment-6258753211).
   Lost: a check that skips each `Optional` attribute, which no longer finds one that the
   check needs; a `secure` block inside the `opcua` body, which changes its decided
-  schema and codes. Decided by `laptop.architect-2` (2026-10-20T04:23:29Z:
+  schema. Decided by `laptop.architect-2` (2026-10-20T04:23:29Z:
   https://github.com/synnaxlabs/foundation/pull/3471#issuecomment-6283332456).

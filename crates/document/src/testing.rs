@@ -122,13 +122,14 @@ pub fn needs(body: &Body, key: &str, held: &Document) -> bool {
 /// Asserts that each example holds to its body. At each site of each example,
 /// `problems` finds none in the example, none with an attribute removed that its site
 /// does not need, and none with each attribute with a default of its site removed. Each
-/// name of each `Unless` and `When` of a site is an attribute of that site. Each item of
-/// `examples` is a key that `problems` gets, the body, and the example.
+/// `Unless` and `When` of a site names at least one attribute, and each name is an
+/// attribute of that site. Each item of `examples` is a key that `problems` gets, the
+/// body, and the example.
 ///
 /// # Panics
 ///
 /// When an assert fails, or when no site has an attribute that it does not need, no
-/// site has an attribute with a default, or no site has an `Unless`.
+/// site has an attribute with a default, or no site has an `Unless` or a `When`.
 pub fn assert_examples<K>(
     examples: impl IntoIterator<Item = (K, &'static Body, Document)>,
     problems: impl Fn(&K, &Document) -> Vec<Diagnostic>,
