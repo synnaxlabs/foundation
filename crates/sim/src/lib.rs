@@ -629,7 +629,7 @@ pub enum Crash {
     ///   clock runs on.
     /// - Each packet that waits to be sent on a link from the node is lost.
     /// - Each TCP stream and listener ends with no segment, so a peer gets an RST
-    ///   only when it sends.
+    ///   only after its RTO while it waits, as its next try meets the closed port.
     Power,
 }
 

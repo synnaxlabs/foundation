@@ -42,6 +42,8 @@ enum Timed {
     /// The read of the frame of a write, after [`HELD`], when the client's thread holds
     /// the frame.
     Held,
+    /// [`Timed::Held`] with `next_within`.
+    HeldWithin,
 }
 
 /// Runs the bench and prints its table.
@@ -59,8 +61,9 @@ pub(crate) fn run() {
     let sdk_read = sdk_line(calls, Timed::Read);
     let twice = sdk_line(calls, Timed::Twice);
     let held = sdk_line(calls / 2, Timed::Held);
+    let held_within = sdk_line(calls / 2, Timed::HeldWithin);
     println!(
-        "{:<14} {:>6} {:>9} {:>9}",
+        "{:<20} {:>6} {:>9} {:>9}",
         "line", "round", "p50 µs", "p99 µs"
     );
     for (name, spans) in [
@@ -72,11 +75,12 @@ pub(crate) fn run() {
         ("program read", program_read),
         ("sdk read twice", twice),
         ("sdk next held", held),
+        ("sdk next_within held", held_within),
     ] {
         for (round, mut spans) in spans.into_iter().enumerate() {
             spans.sort_unstable();
             let at = |percent: usize| micros(spans[spans.len() * percent / 100]);
-            println!("{name:<14} {round:>6} {:>9.1} {:>9.1}", at(50), at(99));
+            println!("{name:<20} {round:>6} {:>9.1} {:>9.1}", at(50), at(99));
         }
     }
 }
@@ -128,12 +132,19 @@ fn spans(
             matches!(written, Ok(sdk::write::Outcome::Taken { .. })),
             "{written:?}"
         );
-        if timed == Timed::Held {
+        if matches!(timed, Timed::Held | Timed::HeldWithin) {
             spin(HELD);
             start = Instant::now();
         }
         if let Some(reader) = &mut reader {
-            let frame = reader.next().expect("the reader reads");
+            let frame = if timed == Timed::HeldWithin {
+                let frame = reader.next_within(Duration::from_secs(10));
+                frame
+                    .expect("the reader reads")
+                    .expect("the frame comes in 10 s")
+            } else {
+                reader.next().expect("the reader reads")
+            };
             assert_eq!(frame.count(), 1, "the frame of the write");
             for place in 0..places {
                 black_box(frame.series(place));

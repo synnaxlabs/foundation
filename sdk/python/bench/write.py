@@ -102,12 +102,14 @@ def channel(n: int) -> str:
     return f"w.c{n:03}"
 
 
-def connect(node: Node) -> foundation.Client:
-    """Plans and applies `CHANNELS` channels of `f64` and one of `bool` on one index
-    on `node`, and gives a client of it once the hub of the node knows them."""
+def connect(node: Node, channels: int = CHANNELS) -> foundation.Client:
+    """Plans and applies `channels` channels of `f64`, one of `bool`, and one of `uuid`
+    on one index on `node`, and gives a client of it once the hub of the node knows
+    them."""
     hcl = 'channel "w.time" { kind = "index" }\n'
     hcl += 'channel "w.flag" {\n  data_type = "bool"\n  index = "w.time"\n}\n'
-    for n in range(CHANNELS):
+    hcl += 'channel "w.key" {\n  data_type = "uuid"\n  index = "w.time"\n}\n'
+    for n in range(channels):
         hcl += f'channel "{channel(n)}" {{\n  data_type = "f64"\n'
         hcl += '  index = "w.time"\n}\n'
     hcl += 'placement "w.home" {\n  select = "w.*"\n  home = "edge"\n}\n'
@@ -125,7 +127,7 @@ def connect(node: Node) -> foundation.Client:
     deadline = time.monotonic() + PATIENCE
     while True:
         try:
-            client.open_writer(channel(CHANNELS - 1)).close()
+            client.open_writer(channel(channels - 1)).close()
             return client
         except foundation.Stopped as error:
             if error.code != "unknown" or time.monotonic() > deadline:
