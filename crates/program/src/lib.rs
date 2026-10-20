@@ -561,6 +561,13 @@ pub enum Error {
         /// The form of the frame.
         form: Form,
     },
+    /// Each group that it names ended with a frame that its home took and whose
+    /// `Stored` did not come, so that frame may not be on disk. Each item is the place
+    /// of the index of the group and why the group ended. The other groups go on.
+    /// [`Writer::stored`] gives it once each taken frame of every other group is on
+    /// disk, and again at each later call, so an `Ok` never says that a frame of an
+    /// ended group is on disk. [`Writer::finish`] gives it after `Finished`.
+    Unstored(Vec<(usize, write::End)>),
 }
 
 impl fmt::Display for Error {
@@ -612,6 +619,16 @@ impl fmt::Display for Error {
                 "a frame that the node stamps holds 1 sample in the raw form, not \
                  {count} in the {form:?} form, so it was not sent"
             ),
+            Self::Unstored(groups) => {
+                f.write_str(
+                    "the write ended with a taken frame that may not be on disk for",
+                )?;
+                for (at, (place, end)) in groups.iter().enumerate() {
+                    let and = if at == 0 { "" } else { "," };
+                    write!(f, "{and} the group of index place {place} ({end:?})")?;
+                }
+                Ok(())
+            }
         }
     }
 }

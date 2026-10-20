@@ -593,6 +593,10 @@ fn exception(py: Python<'_>, error: &sdk::Error, text: String) -> PyErr {
         sdk::Error::Stream(program::Error::Refused(refusal)) => {
             coded(py, Stopped::new_err(text), *refusal)
         }
+        sdk::Error::Stream(program::Error::Unstored(groups)) => {
+            let (_, end) = groups.first().expect("invariant: Unstored names a group");
+            coded(py, Stopped::new_err(text), stop(*end))
+        }
         sdk::Error::Stream(
             program::Error::Layout(_)
             | program::Error::Unsent { .. }
@@ -625,6 +629,14 @@ fn coded(py: Python<'_>, error: PyErr, refusal: program::Refusal) -> PyErr {
     match error.value(py).setattr("code", code(refusal)) {
         Ok(()) => error,
         Err(e) => e,
+    }
+}
+
+/// The refusal with which the node stops a stream for the cause of `end`.
+fn stop(end: program::write::End) -> program::Refusal {
+    match end {
+        program::write::End::Removed => program::Refusal::Unknown,
+        program::write::End::Failed => program::Refusal::Failed,
     }
 }
 

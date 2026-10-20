@@ -106,7 +106,7 @@ async fn end(stream: &mut Stream) -> Vec<Reply> {
 }
 
 fn stored(frames: u64) -> Reply {
-    Reply::Stored { frames }
+    Reply::Stored { group: 0, frames }
 }
 
 fn taken(frame: u64, seq: u64, count: u32) -> Reply {
@@ -802,7 +802,7 @@ fn refuses_a_backfill_frame_that_the_home_finds_no_block_for_as_full() {
     let stamps: Vec<i64> = (1..=32).collect();
     // The blocks of the outcome, of the `Stored`, and of the draft of 32 samples, 560
     // bytes.
-    let len = Reply::Stored { frames: 0 }.encoded_len();
+    let len = stored(0).encoded_len();
     let ready = spare_for_a_while(vec![Outcome::LEN_MAX, len, 560]);
     let home = read_session(439, ready, move |mut agent| async move {
         agent.admit().await;
