@@ -27,6 +27,9 @@ exclude_re = [
   'crates/connector/src/kind\.rs:.*replace Kind::tag -> Option<String> with None$',
   # Benchmarks ship in no binary; the run itself checks them.
   '^bench/',
+  # With `!=`, each draft takes the check of each group, which gives the counts that
+  # one count for all series gives. Only the time differs: `benches/write.rs`.
+  'crates/program/src/write\.rs:.*replace == with != in Writer::draft$',
   # `main` reads the arguments and calls a task. Each task has its own tests.
   'xtask/src/main\.rs:.*(replace main ->| in main$)',
   # The run needs the pinned nightly, which the mutants job does not install. A planted
