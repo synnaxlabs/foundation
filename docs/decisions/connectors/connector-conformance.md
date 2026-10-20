@@ -135,8 +135,7 @@
      The status hides each secret value that a run read (ruling of `laptop.architect-2`
      on #2849 item 4, 2026-10-16T17:54:49Z:
      https://github.com/synnaxlabs/foundation/issues/2849#issuecomment-6221505945).
-     Until #3603 does that, the echo form of `influx` fails, as its status shows the
-     token. Scenario 7 runs 30.1 s of plant time for `opcua` (box1, at 2026-10-20).
+     Scenario 7 runs 30.1 s of plant time for `opcua` (box1, at 2026-10-20).
 
   The numbers are tunable by the architect of `connector`. Plan of
   `laptop.architect-2` at 2026-10-13T21:22:43Z
