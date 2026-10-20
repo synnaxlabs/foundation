@@ -26,6 +26,7 @@ sector = { path = "../../crates/sector" }
 types = { path = "../../crates/types" }
 
 [dev-dependencies]
+block = { path = "../../crates/block" }
 os = { path = "../../crates/os" }
 transport = { path = "../../crates/transport" }
 

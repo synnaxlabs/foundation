@@ -33,8 +33,9 @@ fn _error(py: Python<'_>, kind: &str) -> PyResult<()> {
     Err(super::error(py, &error))
 }
 
-/// The time from the start of the last call of a writer that reached its `sdk` call to
-/// just before that call, which the bench reads.
+/// A time that the bench reads: for a writer, from the start of its last call that
+/// reached its `sdk` call to just before that call; for a reader, from the `sdk` frame
+/// of its last call to just before that call returned.
 #[derive(Default)]
 pub(crate) struct Part(AtomicU64);
 

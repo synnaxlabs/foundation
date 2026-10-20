@@ -625,5 +625,9 @@ ring (`home::handoff::read`, #2278), the newest named reader entry of each index
 the ring (`home::named::read`, #2278), the buffer entry that a complete reader reads from
 disk (`home::stored::Decoder::frame`, #2738), the chunk processing of open62541
 (`ua_securechannel.c`, #1990), the trust load of the open62541 copy
-(`openSSLLoadEachCertificate` through `UA_CertificateUtils_checkTrust`), which no config
-reaches until PR 2d of #2934 (#3289).
+(`openSSLLoadEachCertificate` through `UA_CertificateUtils_checkTrust`), which a config
+reaches through `trust` of the `opcua` kind (#3289), and the loads of the own
+certificate and key of the copy (`UA_CertificateUtils_certificateLine`,
+`UA_CertificateUtils_keyLine`, `UA_OpenSSL_LoadPrivateKey`, and
+`UA_OpenSSL_LoadLocalCertificate`), which a config reaches through `certificate` and
+`key` of the `opcua` kind (#3497).

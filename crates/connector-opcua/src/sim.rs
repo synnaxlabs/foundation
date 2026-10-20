@@ -44,11 +44,13 @@ use env::rng::Rng;
 use types::quality::Quality;
 use types::time::{Monotonic, Span, Stamp};
 
+use crate::client::{Credentials, Mode};
 use crate::connection::Manager;
 use crate::event;
 pub use crate::log::call_refused;
 use crate::node::Node;
-use crate::server::{Answer, Server};
+use crate::secure::Policy;
+use crate::server::{Answer, Secure, Server};
 use crate::value::Value;
 
 /// The sessions and secure channels of [`serve`].
@@ -78,6 +80,8 @@ struct State {
     /// The status of each answer of the state of the server, at first Good.
     #[cfg(test)]
     answer: Quality,
+    /// The credentials and the one policy and mode of a server, set before it starts.
+    security: Option<(Credentials<'static>, Policy, Mode)>,
 }
 
 #[derive(Debug)]
@@ -153,6 +157,7 @@ impl Variables {
             states: 0,
             #[cfg(test)]
             answer: Quality::GOOD,
+            security: None,
         })))
     }
 
@@ -237,6 +242,18 @@ impl Variables {
     #[cfg(test)]
     pub(crate) fn time_out_sessions(&self, most: Span) {
         self.state().session = Some(most);
+    }
+
+    /// Makes a server offer only `policy` in `mode`, and no endpoint in `None`, on the
+    /// certificate and key of `credentials`, and trust only their `trust`.
+    #[cfg(test)]
+    pub(crate) fn secure(
+        &self,
+        credentials: Credentials<'static>,
+        policy: Policy,
+        mode: Mode,
+    ) {
+        self.state().security = Some((credentials, policy, mode));
     }
 
     /// Gives each later answer of the state of the server the status `quality`.
@@ -376,6 +393,7 @@ pub async fn serve(
         .collect();
     #[cfg(test)]
     let (most, session, fixed) = variables.hooks();
+    let security = variables.state().security;
     let add = |server: &mut Server| {
         server.cap_references(tree::REFERENCES);
         tree::add(server);
@@ -420,7 +438,12 @@ pub async fn serve(
             server.add_source(node, move || variables.read(index, clock.now(), wall()));
         }
     };
-    Server::serve(manager, SESSIONS, add, until.wait()).await
+    let secure = (security.as_ref()).map(|(credentials, policy, mode)| Secure {
+        credentials,
+        policies: std::slice::from_ref(policy),
+        modes: std::slice::from_ref(mode),
+    });
+    Server::serve(manager, SESSIONS, secure.as_ref(), add, until.wait()).await
 }
 
 /// Runs the [`serve`] that `serve` gives for a new token until `work` ends, then
