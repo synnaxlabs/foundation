@@ -76,6 +76,7 @@ fn run(args: &[OsString], vars: BTreeMap<OsString, OsString>) -> Result<u8, Fail
     match command_line(&shards, args.to_vec())? {
         Run::Exit(status) => Ok(status),
         Run::Start(start) => node(&start, shards, vars).map(|()| 0),
+        Run::Profile(_) => unreachable!("invariant: `command_line` runs a profile"),
     }
 }
 
@@ -109,7 +110,7 @@ fn command_line(shards: &Shards, args: Vec<OsString>) -> Result<Run, Failure> {
             input.read(ops::line).await
         };
         let run = ops::cli(
-            args,
+            args.clone(),
             input,
             io::stdout().lock(),
             io::stderr().lock(),
@@ -119,6 +120,10 @@ fn command_line(shards: &Shards, args: Vec<OsString>) -> Result<Run, Failure> {
             async |dir: &Path| reach(dir, &tasks, &opened).await.map(send),
         )
         .await;
+        let run = match run {
+            Run::Profile(asked) => Run::Exit(profile(&asked, &args, &opened).await),
+            run => run,
+        };
         ran.send(run).expect("invariant: `main` keeps the receiver");
     });
     let shard = shard.map_err(failed)?;
@@ -165,14 +170,8 @@ async fn reach(
     tasks: &Tasks,
     opened: &mpsc::Sender<env::thread::Handle>,
 ) -> Result<program::Session, Failure> {
-    let threads = os::threads().map_err(failed)?;
-    let (disk, handle) =
-        os::stored(dir, &threads, "files-reach").map_err(|error| stored(dir, error))?;
-    opened
-        .send(handle)
-        .expect("invariant: `main` keeps the receiver");
     let reached = node::client::reach(node::client::Config {
-        files: env::files::Files::new(disk),
+        files: files(dir, opened)?,
         net: net(),
         clock: os::clock(),
         entropy: os::entropy(),
@@ -180,6 +179,67 @@ async fn reach(
     })
     .await;
     reached.map_err(|error| unreached(dir, error))
+}
+
+/// The files of the data directory `dir`, read on an I/O thread whose handle goes to
+/// `opened`, for the main thread to join.
+#[expect(
+    clippy::unwrap_in_result,
+    reason = "`main` keeps the receiver until the shard ends"
+)]
+fn files(
+    dir: &Path,
+    opened: &mpsc::Sender<env::thread::Handle>,
+) -> Result<env::files::Files, Failure> {
+    let threads = os::threads().map_err(failed)?;
+    let (disk, handle) =
+        os::stored(dir, &threads, "files-reach").map_err(|error| stored(dir, error))?;
+    opened
+        .send(handle)
+        .expect("invariant: `main` keeps the receiver");
+    Ok(env::files::Files::new(disk))
+}
+
+/// Writes the `node` block of a profile that pins the node that runs on the data
+/// directory of `asked`, at its address, to standard output, as JSON with `--json`,
+/// and gives the exit status. A failure goes to standard error through [`ops::fail`]
+/// of `args`.
+async fn profile(
+    asked: &ops::Profile,
+    args: &[OsString],
+    opened: &mpsc::Sender<env::thread::Handle>,
+) -> u8 {
+    let dir = &asked.data;
+    let local = match files(dir, opened) {
+        Ok(files) => sector::local::read(&files)
+            .await
+            .map_err(|error| unreached(dir, node::client::Error::Local(error))),
+        Err(failure) => Err(failure),
+    };
+    let public_key = match local {
+        Ok(local) => local.public_key,
+        Err(failure) => return ops::fail(args, &failure, io::stderr().lock()),
+    };
+    let text = if asked.json {
+        let line = config::openssh::line(public_key);
+        format!(
+            "{}\n",
+            serde_json::json!({ "address": asked.address, "public_key": line })
+        )
+    } else {
+        let document = document::Document {
+            blocks: vec![config::profile::node(asked.address, public_key)],
+            ..document::Document::default()
+        };
+        let document = document::encoding::Checked::new(document)
+            .unwrap_or_else(|_| unreachable!("invariant: a node block is shallow"));
+        config_hcl::write(&document)
+            .unwrap_or_else(|_| unreachable!("invariant: HCL holds a node block"))
+    };
+    match io::stdout().lock().write_all(text.as_bytes()) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
 }
 
 /// What sends a request through `client` and gives the reply.

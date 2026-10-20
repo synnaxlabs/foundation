@@ -162,8 +162,8 @@ fn each_operation_appears_once_in_the_cli_the_tools_and_the_docs() {
     let tools = tools();
     let tools = tools["tools"].as_array().expect("tools is a list");
     let docs = operation::docs(&crate::common::create_kinds());
-    // Three more for `start`, `mcp`, and `help`, which are not operations.
-    assert_eq!(command.get_subcommands().count(), TABLE.len() + 3);
+    // Four more for `start`, `profile`, `mcp`, and `help`, which are not operations.
+    assert_eq!(command.get_subcommands().count(), TABLE.len() + 4);
     assert_eq!(tools.len(), TABLE.len());
     let inputs = operation::inputs();
     let outputs = operation::outputs();
@@ -916,7 +916,7 @@ mod start {
     fn log(args: &[&str]) -> Log {
         match start(args) {
             Run::Start(start) => start.log,
-            Run::Exit(status) => panic!("start exited with {status}"),
+            run => panic!("start gave {run:?}"),
         }
     }
 
@@ -1229,6 +1229,64 @@ mod start {
                 String::from_utf8_lossy(&written)
             );
         }
+    }
+}
+
+mod profile {
+    use std::ffi::OsString;
+    use std::io;
+    use std::path::PathBuf;
+
+    use super::offline;
+    use crate::{Profile, Run};
+
+    /// The run of `foundation profile` with `args`, its output, and its errors.
+    fn profile(args: &[&str]) -> (Run, String, String) {
+        let args = ["foundation", "profile"]
+            .iter()
+            .chain(args)
+            .map(OsString::from);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let run = offline(args, io::empty(), &mut stdout, &mut stderr);
+        let text = |bytes| String::from_utf8(bytes).expect("UTF-8");
+        (run, text(stdout), text(stderr))
+    }
+
+    #[test]
+    fn gives_the_address_the_data_directory_and_json_to_the_node() {
+        let expected = Profile {
+            data: PathBuf::from("d"),
+            json: true,
+            address: "[::1]:7400".parse().unwrap(),
+        };
+        assert_eq!(
+            profile(&["[::1]:7400", "--data", "d", "--json"]),
+            (Run::Profile(expected), String::new(), String::new())
+        );
+    }
+
+    #[test]
+    fn takes_foundation_data_by_default() {
+        let (run, ..) = profile(&["10.0.0.5:7400"]);
+        let expected = Profile {
+            data: PathBuf::from("foundation-data"),
+            json: false,
+            address: "10.0.0.5:7400".parse().unwrap(),
+        };
+        assert_eq!(run, Run::Profile(expected));
+    }
+
+    #[test]
+    fn refuses_an_address_with_no_port() {
+        let (run, out, errors) = profile(&["10.0.0.5"]);
+        assert_eq!((run, out.as_str()), (Run::Exit(2), ""));
+        assert_eq!(
+            errors,
+            "error[ops.argument]: invalid value for one of the arguments: `<ADDRESS>`: \
+             invalid socket address syntax\nfix: Match the arguments to `foundation \
+             --help` or `foundation <operation> --help`\n"
+        );
     }
 }
 

@@ -1254,6 +1254,7 @@ dependencies = [
  "bytes",
  "clock",
  "codec",
+ "config",
  "config-hcl",
  "connector",
  "connector-influx",

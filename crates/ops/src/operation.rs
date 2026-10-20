@@ -16,7 +16,7 @@ use crate::error::{Among, Error};
 use crate::remote::{self, Link};
 use crate::scope::Scope;
 use crate::serve::Point;
-use crate::{Failure, Log, Start, browse, import, plan, status};
+use crate::{Failure, Log, Profile, Start, browse, import, plan, status};
 
 /// The data directory of a command that names none.
 pub(crate) const DATA: &str = "foundation-data";
@@ -105,6 +105,10 @@ enum Command {
     Docs(Empty),
     /// Start a node on a data directory, and run it until Ctrl-C.
     Start(StartArgs),
+    /// Print the `node` block that pins the node of a data directory in the profile of
+    /// a program on another host, such as one that connects with `strict`. The node
+    /// must run.
+    Profile(ProfileArgs),
     Plan(PlanArgs),
     Apply(ApplyArgs),
     Status(NodeArgs),
@@ -237,6 +241,15 @@ fn named(value: &str) -> Result<(String, String), String> {
         .split_once('=')
         .map(|(name, path)| (name.to_owned(), path.to_owned()))
         .ok_or_else(|| format!("`{value}` has no `=` between a name and a path"))
+}
+
+#[derive(clap::Args)]
+struct ProfileArgs {
+    /// The address where a program on another host dials the node, such as
+    /// `10.0.0.5:7400`: the `--listen` address, or the address of a NAT in front of it.
+    address: SocketAddr,
+    #[command(flatten)]
+    node: NodeArgs,
 }
 
 #[derive(clap::Args)]
@@ -399,6 +412,7 @@ pub(crate) enum Parsed {
         data: PathBuf,
     },
     Start(Start),
+    Profile(Profile),
     Help(String),
     /// Serve MCP, with each tool call on the node of `data`, and its files under the
     /// folders `files`, else the working directory.
@@ -448,6 +462,14 @@ pub(crate) fn parse(args: &[OsString], json: bool) -> Result<Parsed, Error> {
                 json: log_format.map_or(json, |format| format == Format::Json),
                 level: log_level.into(),
             },
+        })),
+        Command::Profile(ProfileArgs {
+            address,
+            node: NodeArgs { data },
+        }) => Ok(Parsed::Profile(Profile {
+            data,
+            json,
+            address,
         })),
         Command::Plan(PlanArgs { input, node }) => Ok(on(Request::Plan(input), node)),
         Command::Apply(ApplyArgs { input, node }) => {

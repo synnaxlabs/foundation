@@ -42,7 +42,7 @@ use operation::Parsed;
 use remote::Link;
 use scope::Scope;
 pub use serve::serve;
-pub use start::{Log, Start};
+pub use start::{Log, Profile, Start};
 
 /// What the process does once [`cli`] returns.
 #[derive(Debug, PartialEq, Eq)]
@@ -51,6 +51,9 @@ pub enum Run {
     Exit(u8),
     /// Start a node with these arguments. `cli` wrote nothing for it.
     Start(Start),
+    /// Print the `node` block of a program's profile that pins the node of `data`.
+    /// `cli` wrote nothing for it.
+    Profile(Profile),
 }
 
 /// Runs one command line, such as `["foundation", "version", "--json"]`, and returns
@@ -114,6 +117,7 @@ where
     let json = json(&args);
     let done = match operation::parse(&args, json) {
         Ok(Parsed::Start(start)) => return Run::Start(start),
+        Ok(Parsed::Profile(profile)) => return Run::Profile(profile),
         Ok(Parsed::Run { request, data }) => {
             let mut link = Link::new(async || reach(&data).await);
             match request

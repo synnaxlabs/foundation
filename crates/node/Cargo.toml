@@ -21,6 +21,7 @@ block = { path = "../block" }
 buffer = { path = "../buffer" }
 program = { path = "../program" }
 clock = { path = "../clock" }
+config = { path = "../config" }
 config-hcl = { path = "../config-hcl" }
 connector = { path = "../connector" }
 connector-influx = { path = "../connector-influx" }

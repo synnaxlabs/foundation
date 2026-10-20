@@ -6,6 +6,18 @@ use types::name::Name;
 
 use crate::error;
 
+/// The arguments of `foundation profile`.
+#[derive(Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Profile {
+    /// `--data`, else `foundation-data` in the working directory.
+    pub data: PathBuf,
+    /// `--json`: the output is JSON.
+    pub json: bool,
+    /// The address where a program on another host dials the node.
+    pub address: SocketAddr,
+}
+
 /// The arguments of `foundation start`.
 #[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
