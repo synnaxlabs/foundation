@@ -99,8 +99,10 @@ impl Mesh {
     // Puts `digests` on `to` on one stream, in order, and gives why it failed. Each
     // step fails after `DEADLINE`: the dial with the open of the stream, and the
     // `Stored` of each chunk. A step that fails on a session that ended dials once
-    // more and goes on from its chunk, and a session that stored a chunk earns one
-    // more redial. No chunk opens no stream. The card of `to` is read once.
+    // more and goes on from its chunk. A session that stored a chunk earns one more
+    // redial. So does one session that lost to a dial of the peer, at the start and
+    // after each session that stored a chunk. No chunk opens no stream. The card of
+    // `to` is read once.
     async fn put_on(&self, to: node::Key, digests: &[Digest]) -> Result<(), Miss> {
         let (public_key, addresses) =
             self.group.borrow().contact(to).ok_or(Miss::Unknown)?;
@@ -108,7 +110,7 @@ impl Mesh {
             return Ok(());
         }
         let mut left = digests;
-        let mut redial = true;
+        let (mut redial, mut raced) = (true, false);
         loop {
             let dialed = step(&self.clock, async {
                 let dial = self.transport.dial(public_key, &addresses);
@@ -123,11 +125,12 @@ impl Mesh {
                 Err(error) => Err(Failed::Call(error)),
             };
             let again = |ended: transport::Error| {
-                redial || left.len() < before || replaced(&ended)
+                redial || left.len() < before || !raced && replaced(&ended)
             };
             match pushed {
                 Ok(()) => return Ok(()),
                 Err(Failed::Call(_)) if session.ended().is_some_and(again) => {
+                    raced = left.len() == before && (raced || !redial);
                     redial = false;
                 }
                 Err(failed) => return Err(failed.into()),

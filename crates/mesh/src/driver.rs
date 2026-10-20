@@ -1561,6 +1561,8 @@ mod tests {
         changes: BTreeMap<u8, (Pointer, BTreeMap<Name, Definition>)>,
         /// The nodes that answer no blob stream.
         silent: BTreeSet<u8>,
+        /// The nodes that close the session of each blob stream with code 0.
+        closing: BTreeSet<u8>,
         /// The blob streams that each node served.
         blobs: BTreeMap<u8, usize>,
         /// Each spec change of `applies` that returned, in order: its node, the
@@ -1815,8 +1817,9 @@ mod tests {
     }
 
     /// Serves each stream of each session that a peer opens to `transport`, as `node`
-    /// does, and holds each blob stream with no answer when node `id` is silent. The
-    /// group refuses no message of a cluster.
+    /// does, and holds each blob stream with no answer when node `id` is silent, or
+    /// closes its session with code 0 when node `id` is closing. The group refuses no
+    /// message of a cluster.
     async fn accept(
         mesh: Mesh,
         transport: Rc<Transport>,
@@ -1835,18 +1838,26 @@ mod tests {
             tasks.spawn(async move {
                 while let Ok(mut incoming) = session.accept().await {
                     let (mesh, board) = (mesh.clone(), Arc::clone(&board));
+                    let session = session.clone();
                     streams.spawn(async move {
                         let Ok(Some(header)) = incoming.receiver.recv().await else {
                             return;
                         };
                         let (protocol, _) = wire::header::decode(&header).unwrap();
                         if protocol == Protocol::Blob {
-                            let silent = {
+                            let (silent, closing) = {
                                 let mut board = board.lock().unwrap();
                                 let blobs = board.blobs.entry(id).or_default();
                                 *blobs = blobs.checked_add(1).unwrap();
-                                board.silent.contains(&id)
+                                (
+                                    board.silent.contains(&id),
+                                    board.closing.contains(&id),
+                                )
                             };
+                            if closing {
+                                session.close(Code(0));
+                                return;
+                            }
                             if silent {
                                 std::future::pending::<()>().await;
                             }

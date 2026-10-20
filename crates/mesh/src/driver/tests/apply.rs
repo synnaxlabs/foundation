@@ -943,6 +943,37 @@ fn an_apply_misses_a_voter_whose_redialed_session_ends_with_no_chunk_stored() {
     assert_eq!(cluster.board().applied, [(1, base(), Err(quorum))]);
 }
 
+// Voter 3 is down, and voter 2 closes the session of each blob stream with code 0, as
+// one that lost to a dial of the peer does. The put dials once more, and once more for
+// the code 0, so voter 2 serves three blob streams and misses.
+#[test]
+fn an_apply_redials_a_voter_once_for_a_session_that_ends_with_code_0() {
+    let mut cluster = Cluster::new(0);
+    cluster.start_voter(1);
+    cluster.start_voter(2);
+    cluster.run(seconds(5));
+    cluster.board.lock().unwrap().closing = [2].into();
+    cluster.change(1, base(), &create_largest(1));
+    cluster.run(seconds(15));
+    let closed =
+        blob::peer::Error::Stream(transport::Error::PeerClosed { code: Code(0) });
+    let quorum = Error::Quorum {
+        held: 1,
+        voters: 3,
+        missed: vec![
+            Missed {
+                node: key(2),
+                name: Some(name("plant.node2")),
+                cause: Miss::Put(closed),
+            },
+            late(3),
+        ],
+    };
+    let board = cluster.board();
+    assert_eq!(board.applied, [(1, base(), Err(quorum))]);
+    assert_eq!(board.blobs, [(2, 3)].into());
+}
+
 // Voter 3 is down, and the links of voter 2 break 1.5 s into the apply, after the
 // last `Stored` of its put and before the end of its stream. Each chunk is durable on
 // voter 2, so it is a holder, and the put opens no second stream to it.

@@ -46,10 +46,11 @@
   chunk within each 10 s stays a holder, and a silent one misses 10 s after its last
   `Stored`. A step that fails on a session that ended dials once more and goes on from
   its chunk, as a session to a peer that restarted ends only at its first use. A session
-  that stored a chunk earns one more redial, and so does a session that ends with code
-  0, as it lost to a session that the peer dialed at the same time. Another session
-  that ends with no chunk stored ends the put after one redial. With no listed chunk,
-  the node dials no voter (`laptop.architect`, 2026-10-20T10:05:20Z:
+  that stored a chunk earns one more redial. So does one session that ends with code
+  0, as it lost to a session that the peer dialed at the same time, at the start and
+  after each session that stored a chunk. Another session that ends with no chunk
+  stored ends the put after one redial. With no listed chunk, the node dials no voter
+  (`laptop.architect`, 2026-10-20T10:05:20Z:
   https://github.com/synnaxlabs/foundation/issues/3405#issuecomment-6288473151, on the
   plan https://github.com/synnaxlabs/foundation/issues/3405#issuecomment-6288441342,
   which supersedes the calls of 16 chunks and their deadline of
@@ -58,10 +59,10 @@
   https://github.com/synnaxlabs/foundation/issues/1231#issuecomment-6272668202, and the
   redial bound of 2 of
   https://github.com/synnaxlabs/foundation/pull/3399#issuecomment-6273716895). The
-  redial on code 0: approval owed. A miss gives the cause
-  of the last attempt. A voter whose chunks each got `Stored` is a holder, also when
-  the end of its stream fails or passes `peer::DEADLINE`, and the put dials it no more
-  (`laptop.architect`, 2026-10-20T10:26:52Z:
+  redial on code 0: approval owed, and `laptop.monitor`, 2026-10-20 (kind 9). A miss
+  gives the cause of the last attempt. A voter whose chunks each got `Stored` is a
+  holder, also when the end of its stream fails or passes `peer::DEADLINE`, and the
+  put dials it no more (`laptop.architect`, 2026-10-20T10:26:52Z:
   https://github.com/synnaxlabs/foundation/pull/3568#issuecomment-6288829862).
   A holder is the node when it is a voter, or a voter whose put ended `Ok` while a half
   that holds it lacked a majority; another failed step, also a failed read of the node's
