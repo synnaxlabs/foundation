@@ -9,17 +9,19 @@
   (`Raft::admission`: `Error::Removed` for a `PreVote` or a `Vote` at or below the
   commit, or below the term at it (`laptop.architect`, 2026-10-19T18:56:00Z:
   https://github.com/synnaxlabs/foundation/pull/3407#issuecomment-6274855859), of a
-  sender that a committed configuration removed and that is not a member, else
-  `Error::NotVoter`), and each claim
-  holds (`Error::Claim`), the claims being what `Raft::claims` gives, so a link that the
-  node does not read is not checked. So a node with a configuration refuses a leader
-  that is not a voter of that configuration, when a change that the node does not hold
-  made that leader a voter. The node does not get the log from that leader (a known
-  defect, #1096, that #1107 fixes). A leader that stays a voter through the change
-  passes the check, and its chain proves the change (RAFT SURFACE). A node with no
-  configuration takes no request. Only a voter that an operator wiped is such a node
-  (#881), because a node that joins opens with the founding voters from its join answer
-  (decided by the architect, #242, 2026-10-07T04:20:40Z:
+  sender that a committed configuration removed and that is not a member, with no join
+  in the log that this node has not applied (`laptop.architect`, 2026-10-20T02:45:51Z:
+  https://github.com/synnaxlabs/foundation/pull/3411#issuecomment-6282135192), else
+  `Error::NotVoter`), and each claim holds (`Error::Claim`), the claims being what
+  `Raft::claims` gives, so a link that the node does not read is not checked. So a node
+  with a configuration refuses a leader that is not a voter of that configuration, when
+  a change that the node does not hold made that leader a voter. The node does not get
+  the log from that leader (a known defect, #1096, that #1107 fixes). A leader that
+  stays a voter through the change passes the check, and its chain proves the change
+  (RAFT SURFACE). A node with no configuration takes no request. Only a voter that an
+  operator wiped is such a node (#881), because a node that joins opens with the
+  founding voters from its join answer (decided by the architect, #242,
+  2026-10-07T04:20:40Z:
   https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). A claim
   in the proof whose signer has no key at the node, or whose signature does not hold
   under a key from a join that is not applied, is removed before `step`. An append is
