@@ -691,8 +691,8 @@ fn an_ask_by_another_ticket_writes_a_new_request_and_joins() {
 }
 
 // Each voter refuses the first card, which takes the name of node 1. The second ask
-// has a free name and the same ticket: a voter refuses the stored request, so the ask
-// writes its own over it and joins with that.
+// has a free name and the same ticket: each voter refuses the stored request, so the
+// ask writes its own over it and joins with that in the second round, with no pause.
 #[test]
 fn an_ask_with_a_free_name_after_a_refused_name_writes_its_request_and_joins() {
     for seed in 0..2 {
@@ -705,8 +705,8 @@ fn an_ask_with_a_free_name_after_a_refused_name_writes_its_request_and_joins() {
         ];
         let (node, asked) = asks_on(&mut cluster.sim, asks);
         cluster.run(seconds(60));
-        let asked: Vec<_> = asked.lock().unwrap().drain(..).map(|(a, _)| a).collect();
-        let [first, second] = &asked[..] else {
+        let asked: Vec<_> = asked.lock().unwrap().drain(..).collect();
+        let [(first, _), (second, took)] = &asked[..] else {
             panic!("run {seed}: {asked:?}");
         };
         assert!(
@@ -714,6 +714,7 @@ fn an_ask_with_a_free_name_after_a_refused_name_writes_its_request_and_joins() {
             "run {seed}: {first:?}"
         );
         assert_eq!(*second, Ok(founding_of(&IDS, &IDS)), "run {seed}");
+        assert!(*took < seconds(1), "run {seed}: after {took}");
         let ticket = ticket_to(TICKET, &IDS);
         let request = region::Request {
             ticket: ticket.public_key(),
@@ -734,6 +735,82 @@ fn an_ask_with_a_free_name_after_a_refused_name_writes_its_request_and_joins() {
             let card = records[&id].get(&JOINER).map(|member| member.card.clone());
             assert_eq!(card, Some(free.clone()), "run {seed}: node {id}");
         }
+    }
+}
+
+/// Starts node `id` on a new node of `sim`, which answers each join stream with
+/// `refusal`. Gives its voter.
+fn refuser(sim: &mut Sim, id: u8, refusal: Refusal) -> Voter {
+    let node = sim.node(sim::node::Config::default());
+    let at = SocketAddr::new(node.addresses()[0], PORT);
+    let own = node.clone();
+    let main = move |tasks: Tasks| async move {
+        let pool = create_pool();
+        let config = transport_config(&own, &tasks, id, Rc::clone(&pool));
+        let transport = bind(&own, PORT, config);
+        let unjoined = Rc::new(unjoined(refusal));
+        while let Ok(session) = transport.accept().await {
+            let (pool, unjoined, streams) =
+                (Rc::clone(&pool), Rc::clone(&unjoined), tasks.clone());
+            tasks.spawn(async move {
+                while let Ok(mut incoming) = session.accept().await {
+                    let (pool, unjoined) = (Rc::clone(&pool), Rc::clone(&unjoined));
+                    streams.spawn(async move {
+                        while let Ok(Some(_)) = incoming.receiver.recv().await {}
+                        let mut sender = incoming.sender.unwrap();
+                        let message = pool.copy(&unjoined).unwrap();
+                        if sender.send(message).await.is_ok() {
+                            drop(sender.finish());
+                        }
+                    });
+                }
+            });
+        }
+    };
+    let config = env::shards::Config {
+        name: "refuser".into(),
+        core: None,
+    };
+    drop(node.shards().start(config, main).unwrap());
+    voter_at(id, at)
+}
+
+// The join of the stored request applied at voter 2, and the second ask gives another
+// card. Its first voter, node 6, refuses each request by its ticket. Voter 2 admits
+// only the stored request, so the ask joins by it in the same round.
+#[test]
+fn an_ask_whose_first_voter_refuses_joins_by_the_stored_request_at_the_next() {
+    for seed in 0..2 {
+        let mut cluster = recorded_cluster(seed, &IDS, &[]);
+        let unknown = region::Refused::Unknown {
+            public_key: public(TICKET),
+        };
+        let first = refuser(&mut cluster.sim, 6, Refusal::Refused(unknown));
+        let voters = vec![first, voter_at(2, address(2))];
+        let ticket = Ticket::new(private(TICKET), "plant".parse().unwrap(), voters);
+        let card = common::member(JOINER).card;
+        let asks = vec![
+            (ticket_to(TICKET, &IDS), card.clone()),
+            (ticket, member_signed(JOINER, JOINER, 2).card),
+        ];
+        let (node, asked) = asks_on(&mut cluster.sim, asks);
+        cluster.run(seconds(30));
+        let founding = Ok(founding_of(&IDS, &IDS));
+        let asked: Vec<_> = asked.lock().unwrap().drain(..).map(|(a, _)| a).collect();
+        assert_eq!(asked, [founding.clone(), founding], "run {seed}");
+        let ticket = ticket_to(TICKET, &IDS);
+        let request = region::Request {
+            ticket: ticket.public_key(),
+            admission: ticket.admission(&card),
+            card: card.into(),
+            status: common::names([]),
+        };
+        let left = on(
+            &mut cluster,
+            &node,
+            |node| async move { stored(&node).await },
+        );
+        assert_eq!(left, Ok(Some(request)), "run {seed}");
     }
 }
 

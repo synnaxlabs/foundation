@@ -192,7 +192,8 @@
   syncs the directory, as for the file `founding`. So a crash leaves the old request,
   the new one, or none, and `Error::JoinFile` names only a file that changed on disk.
   A crash before the rename can lose an old request, but `ask` writes over a request
-  only when its ticket or key is not that of the call, or a voter refuses it.
+  only when its ticket or key is not that of the call, or a round ends with a refusal
+  of it and with no voter that admits it.
   `config.founding.members` can lack this node when `config.dir` holds the join file of
   this node: the node opens with no member record of its own, and only its log can make
   it a voter. Its member record comes when it applies its join (`laptop.architect`,
@@ -200,18 +201,21 @@
   https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6286140973; the
   surface and its condition 1: 2026-10-20T09:51:13Z,
   https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6288239430).
-  Amended (2026-10-20, round 1 of PR 5e of #336): when a voter refuses the stored
-  request for its card, its ticket, or its status, `ask` writes the request of its card
-  and status over it, at most once in a call and durable before the first send, and asks
-  the next voters with it. This replaces item 3 for that case, because a node that can
-  never join by its ticket is the worse failure. The case left is a voter that refuses
-  the stored request while the entry of another voter for it has committed but has not
-  applied there, after the card or the status changed. An `ask` in a mesh directory that
-  holds a founding file gives `Error::Founded`, before it makes the directory or reads
-  `join`: the file stays for the life of the directory, and each open of a founding that
-  lacks this node reads it. Lost: `ask` gives the stored founding when the ticket is for
-  its region, which is a silent success for a caller in the wrong order
-  (`laptop.architect`, 2026-10-20T11:14:16Z,
+  Amended (2026-10-20, round 1 of PR 5e of #336): when a round ends with no voter that
+  admits the stored request and with one that refuses it for its card, its ticket, or
+  its status, `ask` writes the request of its card and status over it, at most once in a
+  call and durable before the first send, and asks the next round with it, at once. That
+  round is one of the 8, so `bound` holds. This replaces item 3 for that case, because a
+  node that can never join by its ticket is the worse failure. A voter that applied the
+  join admits only the stored request, so the case left is a round in which each voter
+  that applied the join does not admit it, after the card or the status changed
+  (`laptop.architect`, 2026-10-20T12:00:29Z,
+  https://github.com/synnaxlabs/foundation/pull/3571#issuecomment-6290352039). An `ask`
+  in a mesh directory that holds a founding file gives `Error::Founded`, before it makes
+  the directory or reads `join`: the file stays for the life of the directory, and each
+  open of a founding that lacks this node reads it. Lost: `ask` gives the stored
+  founding when the ticket is for its region, which is a silent success for a caller in
+  the wrong order (`laptop.architect`, 2026-10-20T11:14:16Z,
   https://github.com/synnaxlabs/foundation/pull/3571#issuecomment-6289593633).
   Until snapshots (#253), a region whose founders all left cannot admit a node. `secret`
   finds no key itself: `ops` and `node` read the member and pass its seal key. A

@@ -84,9 +84,10 @@ pub fn bound(ticket: &Ticket) -> Span {
 /// `config.transport` proves, `ask` sends that request, and does not send `config.card`
 /// or `config.status`. Else it writes the new request over it. So a node that stops
 /// after a voter applied its join, and before the answer came, is admitted at the next
-/// call. When a voter refuses the stored request for its card, its ticket, or its
-/// status, `ask` writes the request of `config.card` and `config.status` over it and
-/// asks with that. The file stays for the life of `config.dir`: each
+/// call. When a round ends with no voter that admits the stored request and with one
+/// that refuses it for its card, its ticket, or its status, `ask` writes the request
+/// of `config.card` and `config.status` over it and asks the next round with that, at
+/// once. The file stays for the life of `config.dir`: each
 /// [`Mesh::open`](crate::Mesh::open) of a founding that lacks this node reads it.
 ///
 /// # Errors
@@ -130,7 +131,7 @@ pub async fn ask(config: Config) -> Result<region::Founding, Error> {
         card: card.into(),
         status,
     };
-    // The request that a refusal of the stored one writes over it.
+    // The request that a round with a refusal of the stored one writes over it.
     let mut later = None;
     let request = match file::read(&files, &dir, &blocks, Mode::Write).await? {
         Some(stored)
@@ -149,7 +150,16 @@ pub async fn ask(config: Config) -> Result<region::Founding, Error> {
     let mut missed = Vec::new();
     for round in 0..ROUNDS {
         if round > 0 {
-            clock.sleep(PAUSE).await;
+            let refused = missed
+                .iter()
+                .any(|(_, miss)| matches!(miss, Miss::Refused(_)));
+            match later.take_if(|_| refused) {
+                Some(fresh) => {
+                    file::write(&files, &dir, &blocks, &fresh).await?;
+                    join = encoded(&pool, fresh)?;
+                }
+                None => clock.sleep(PAUSE).await,
+            }
         }
         missed.clear();
         for voter in ticket.voters() {
@@ -158,10 +168,6 @@ pub async fn ask(config: Config) -> Result<region::Founding, Error> {
                 Ok(founding) => return Ok(founding),
                 Err(miss) => miss,
             };
-            if let (Miss::Refused(_), Some(fresh)) = (&miss, later.take()) {
-                file::write(&files, &dir, &blocks, &fresh).await?;
-                join = encoded(&pool, fresh)?;
-            }
             missed.push((voter.key, miss));
         }
     }
