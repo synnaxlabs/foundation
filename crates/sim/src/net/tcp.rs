@@ -2,7 +2,7 @@
 //! and the segments of one direction of a stream arrive in the order they were sent.
 
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::IoSlice;
 use std::net::SocketAddr;
 use std::task::{self, Poll};
@@ -33,8 +33,8 @@ const RTO_SYN: Span = Span::SECOND;
 const RTO_MIN: Span = Span::from_nanos(200 * Span::MILLISECOND.nanos());
 /// The most RTO after each loss doubles it, as on Linux (`TCP_RTO_MAX`).
 const RTO_MAX: Span = Span::from_nanos(120 * Span::SECOND.nanos());
-/// The time from the first send of a lost segment other than a SYN or a SYN-ACK to the
-/// timeout of its end: 15 tries from [`RTO_MIN`], as Linux models `tcp_retries2`.
+/// The time from the first send of a lost segment of a stream to the timeout of its
+/// end: 15 tries from [`RTO_MIN`], as Linux models `tcp_retries2`.
 const WRITE_TIMEOUT: Span = Span::from_nanos(924_600 * Span::MILLISECOND.nanos());
 /// The time from the first SYN of a connect to its timeout: 7 tries from
 /// [`RTO_SYN`], as on Linux (`tcp_syn_retries`).
@@ -75,7 +75,9 @@ enum Kind {
     },
     Data(Vec<u8>),
     Fin,
-    Rst,
+    /// It answers a segment of the class `0` to an end that is gone or refuses, and
+    /// goes again for the end that waits on that segment. An abort sends `None`.
+    Rst(Option<Retry>),
 }
 
 impl Kind {
@@ -86,6 +88,34 @@ impl Kind {
             _ => 0,
         }
     }
+
+    /// Whether it is an ACK or an RST. It waits behind no lost segment, and the next
+    /// segment of its stream in its direction carries it when it is lost.
+    fn answer(&self) -> bool {
+        matches!(self, Self::Ack { .. } | Self::Rst(_))
+    }
+
+    /// How it goes again when it is lost, or `None` when it never does.
+    fn retry(&self) -> Option<Retry> {
+        match self {
+            Self::Syn { .. } => Some(Retry::Connect),
+            Self::SynAck { .. } => Some(Retry::Accept),
+            Self::Ack { .. } | Self::Data(_) | Self::Fin => Some(Retry::Stream),
+            Self::Rst(retry) => *retry,
+        }
+    }
+}
+
+/// How a lost segment goes again: its RTO, and when the end that waits on it times
+/// out.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Retry {
+    /// A SYN, or an RST that answers one. The connect ends at its own deadline.
+    Connect,
+    /// A SYN-ACK, or an RST that answers one.
+    Accept,
+    /// Bytes, a FIN, an ACK, or an RST that answers one of them.
+    Stream,
 }
 
 /// Why an end sends nothing more and takes no segment.
@@ -100,10 +130,9 @@ enum Broken {
 /// Where an end is in its life.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
-    /// Its first SYN went at true time `0`, and its connect waits.
+    /// Its first SYN went at true time `0`, and its connect waits, or failed once it
+    /// broke.
     Connecting(Monotonic),
-    /// An RST answered its SYN.
-    Refused,
     /// It answered a SYN to listener `0`, and waits for the ACK.
     Accepting(u64),
     /// It waits for an accept of listener `0`.
@@ -189,11 +218,10 @@ impl End {
         }
     }
 
-    /// Whether the stream has ended: it broke, an RST answered its SYN, or it
-    /// closed. As on Linux, the end then leaves its pair and frees its port, and a
-    /// drop of it sends nothing.
+    /// Whether the stream has ended: it broke or it closed. As on Linux, the end then
+    /// leaves its pair and frees its port, and a drop of it sends nothing.
     fn done(&self) -> bool {
-        self.broken.is_some() || self.phase == Phase::Refused || self.closed()
+        self.broken.is_some() || self.closed()
     }
 
     /// Whether each FIN arrived and its own is acked.
@@ -210,10 +238,10 @@ impl End {
         }
     }
 
-    /// Whether it waits for an ACK from its peer: to be accepted, or for its bytes,
-    /// its FIN, or room for its bytes.
+    /// Whether it waits for an answer from its peer: to its SYN or its SYN-ACK, or
+    /// for its bytes, its FIN, or room for its bytes.
     fn waits(&self) -> bool {
-        matches!(self.phase, Phase::Accepting(_))
+        matches!(self.phase, Phase::Connecting(_) | Phase::Accepting(_))
             || self.acked < self.sent
             || !self.outbox.is_empty()
             || self.fin == Fin::Sent
@@ -236,23 +264,20 @@ struct Listening {
     failed: bool,
 }
 
-/// The order of the segments in flight in each direction, the lost ones, and the first
-/// case that sim does not simulate yet.
+/// The order of the segments in flight in each direction, the lost ones and their
+/// tries, and the first case that sim does not simulate yet.
 #[derive(Default)]
 struct Lanes {
     /// The latest arrival in flight in each direction, by source and destination,
     /// and the count of segments in flight there.
     floors: BTreeMap<(SocketAddr, SocketAddr), (Monotonic, usize)>,
     /// The lost segment of each stream in each direction that has one, and the
-    /// segments other than ACKs sent there after it, which wait for it as a receiver
-    /// holds the bytes after a gap. By source, destination, and stream.
+    /// segments other than answers sent there after it, which wait for it as a
+    /// receiver holds the bytes after a gap. By source, destination, and stream.
     held: BTreeMap<(SocketAddr, SocketAddr, u64), Held>,
-    /// The lost ACK of each stream in each direction, by source, destination, and
+    /// The lost answer of each stream in each direction, by source, destination, and
     /// stream.
-    acks: BTreeMap<(SocketAddr, SocketAddr, u64), LostAck>,
-    /// The true time at which each connect gives up whose SYN arrived and whose
-    /// SYN-ACK timed out, by the source, destination, and stream of its SYN.
-    connects: BTreeMap<(SocketAddr, SocketAddr, u64), Monotonic>,
+    answers: BTreeMap<(SocketAddr, SocketAddr, u64), Answer>,
     yet: Option<&'static str>,
 }
 
@@ -294,18 +319,22 @@ impl Tries {
     }
 
     /// Whether the end that waits on `segment` times out at true time `now`, in
-    /// place of its next try. As on Linux, a SYN goes until [`CONNECT_TIMEOUT`], a
-    /// SYN-ACK 6 times (`tcp_synack_retries`), and another segment until
-    /// [`WRITE_TIMEOUT`].
+    /// place of its next try. As on Linux, a SYN-ACK goes 6 times
+    /// (`tcp_synack_retries`), and a segment of a stream until [`WRITE_TIMEOUT`]. A
+    /// connect ends at its own deadline.
     fn timed_out(&self, now: Monotonic, segment: &Segment) -> bool {
-        match segment.kind {
-            Kind::Syn { .. } => now - self.since >= CONNECT_TIMEOUT,
-            Kind::SynAck { .. } => self.losses > 5,
-            Kind::Ack { .. } | Kind::Data(_) | Kind::Fin => {
-                now - self.since >= WRITE_TIMEOUT
-            }
-            Kind::Rst => unreachable!("invariant: a lost RST never goes again"),
+        match segment.retry() {
+            Retry::Connect => false,
+            Retry::Accept => self.losses > 5,
+            Retry::Stream => now - self.since >= WRITE_TIMEOUT,
         }
+    }
+}
+
+impl Segment {
+    /// How it goes again, as it was lost.
+    fn retry(&self) -> Retry {
+        (self.kind.retry()).expect("invariant: a lost segment goes again")
     }
 }
 
@@ -317,10 +346,13 @@ struct Held {
     segments: VecDeque<(Monotonic, Segment)>,
 }
 
-/// A lost ACK. As ACKs are cumulative, the next segment of its stream in its
-/// direction carries it, and it goes again only when none arrives first.
-struct LostAck {
-    tries: Tries,
+/// A lost ACK or RST. As ACKs are cumulative and an end that is gone answers each
+/// segment with an RST, the next segment of its stream in its direction carries it,
+/// and it goes again only when none arrives first.
+struct Answer {
+    /// `None` while it is an ACK that no end waits on. It is armed again when its end
+    /// waits.
+    tries: Option<Tries>,
     /// The segments in flight in its direction at its last loss, which arrive
     /// before one that can carry it.
     ahead: usize,
@@ -329,8 +361,8 @@ struct LostAck {
 
 impl Lanes {
     /// Sends a segment of `kind` of `stream` from end `from` at true time `now`. A
-    /// segment other than an ACK goes after the segments that its stream holds in its
-    /// direction. An RST first drops them, as Linux purges its queues at an abort.
+    /// segment other than an answer goes after the segments that its stream holds in
+    /// its direction.
     fn send(
         &mut self,
         wire: &mut Wire,
@@ -340,10 +372,7 @@ impl Lanes {
         kind: Kind,
     ) {
         let (source, destination) = (from.local, from.peer);
-        if matches!(kind, Kind::Rst) {
-            self.discard(from, stream);
-        }
-        let ack = matches!(kind, Kind::Ack { .. });
+        let answer = kind.answer();
         let segment = Segment {
             source,
             destination,
@@ -351,13 +380,14 @@ impl Lanes {
             kind,
         };
         match self.held.get_mut(&(source, destination, stream)) {
-            Some(held) if !ack => held.segments.push_back((now, segment)),
+            Some(held) if !answer => held.segments.push_back((now, segment)),
             _ => self.release(wire, now, [(now, segment)]),
         }
     }
 
     /// Sends `segments` of one direction of a stream in order at true time `now`,
-    /// until one that is lost holds the rest. A lost ACK holds nothing.
+    /// until one that is lost holds the rest. A lost answer holds nothing. A segment
+    /// lost past `u64` nanoseconds never goes again, and the rest wait on it.
     fn release(
         &mut self,
         wire: &mut Wire,
@@ -370,10 +400,10 @@ impl Lanes {
                 continue;
             };
             let Some(tries) = Tries::new(wire, now, since, &lost) else {
-                continue;
+                return;
             };
-            if matches!(lost.kind, Kind::Ack { .. }) {
-                self.miss(tries, lost);
+            if lost.kind.answer() {
+                self.keep(tries, lost);
             } else {
                 let key = (lost.source, lost.destination, lost.stream);
                 let segments = iter::once((since, lost)).chain(segments).collect();
@@ -386,8 +416,9 @@ impl Lanes {
     /// Puts `segment` on its link at true time `now`. It leaves its link as
     /// [`Wire::depart`] gives, then it is lost as the link's loss draws, or arrives
     /// after the delay and a jitter draw of the link, and not before a segment in
-    /// flight in its direction. A link with no loss makes no draw of it. Gives back a
-    /// lost segment other than an RST.
+    /// flight in its direction. A link with no loss makes no draw of it. An ACK that
+    /// goes takes the place of the lost ACK of its stream and direction. Gives back a
+    /// lost segment that goes again.
     fn transmit(
         &mut self,
         wire: &mut Wire,
@@ -406,36 +437,39 @@ impl Lanes {
             return Ok(());
         };
         if lost {
-            return if matches!(segment.kind, Kind::Rst) {
-                Ok(())
-            } else {
-                Err(segment)
+            return match segment.kind.retry() {
+                Some(_) => Err(segment),
+                None => Ok(()),
             };
         }
         let Some(at) = wire.draw(&path, departure) else {
             return Ok(());
         };
+        if matches!(segment.kind, Kind::Ack { .. }) {
+            self.answers.remove(&(source, destination, segment.stream));
+        }
         let at = self.raise(source, destination, at);
         wire.put(&path, departure, at, Packet::Segment(segment));
         Ok(())
     }
 
-    /// Keeps `lost`, an ACK with `tries`, in place of a lost ACK of its stream and
-    /// direction, which keeps its tries.
-    fn miss(&mut self, tries: Tries, lost: Segment) {
+    /// Keeps `lost`, an answer with `tries`, in place of a lost answer of its stream
+    /// and direction, which keeps its tries unless no end waits on it.
+    fn keep(&mut self, tries: Tries, lost: Segment) {
         let (source, destination) = (lost.source, lost.destination);
         let ahead = self
             .floors
             .get(&(source, destination))
             .map_or(0, |floor| floor.1);
-        match self.acks.entry((source, destination, lost.stream)) {
-            Entry::Occupied(mut ack) => {
-                let ack = ack.get_mut();
-                (ack.ahead, ack.segment) = (ahead, lost);
+        match self.answers.entry((source, destination, lost.stream)) {
+            Entry::Occupied(mut answer) => {
+                let answer = answer.get_mut();
+                answer.tries.get_or_insert(tries);
+                (answer.ahead, answer.segment) = (ahead, lost);
             }
-            Entry::Vacant(ack) => {
-                ack.insert(LostAck {
-                    tries,
+            Entry::Vacant(answer) => {
+                answer.insert(Answer {
+                    tries: Some(tries),
                     ahead,
                     segment: lost,
                 });
@@ -443,20 +477,36 @@ impl Lanes {
         }
     }
 
-    /// The true time at which the first lost segment goes again or times out, or a
-    /// connect gives up.
+    /// Arms the lost ACK to end `to` of `stream` that no end waited on, as the end now
+    /// waits on it: it goes again after its RTO from true time `now`, and times out
+    /// from `now`.
+    fn arm(&mut self, wire: &Wire, now: Monotonic, to: Pair, stream: u64) {
+        let key = (to.peer, to.local, stream);
+        if let Some(answer) = self.answers.get_mut(&key)
+            && answer.tries.is_none()
+        {
+            answer.tries = Tries::new(wire, now, now, &answer.segment);
+        }
+    }
+
+    /// The true time at which the first lost segment goes again or times out.
     fn first(&self) -> Option<Monotonic> {
         let held = self.held.values().map(|held| held.tries.at);
-        let acks = self.acks.values().map(|ack| ack.tries.at);
-        held.chain(acks)
-            .chain(self.connects.values().copied())
-            .min()
+        let answers = self.answers.values().filter_map(|answer| answer.tries);
+        held.chain(answers.map(|tries| tries.at)).min()
     }
 
     /// Sends again each lost segment due by true time `now`, then the segments that
-    /// waited on it. Gives each lost segment whose end that waits on it times out,
-    /// and drops the segments that waited on it.
-    fn retry(&mut self, wire: &mut Wire, now: Monotonic) -> Vec<Segment> {
+    /// waited on it. `waits` gives whether the end that waits on a lost answer does,
+    /// or `None` when no end takes it: an ACK that no end waits on waits with no
+    /// timer, and an RST goes. Gives each lost segment whose end that waits on it
+    /// times out, and drops the segments that waited on it.
+    fn retry(
+        &mut self,
+        wire: &mut Wire,
+        now: Monotonic,
+        waits: impl Fn(&Segment) -> Option<bool>,
+    ) -> Vec<Segment> {
         let mut failed = Vec::new();
         let due: Vec<_> = (self.held.iter())
             .filter(|(_, held)| held.tries.at <= now)
@@ -482,46 +532,76 @@ impl Lanes {
                 }
             }
         }
-        let due: Vec<_> = (self.acks.iter())
-            .filter(|(_, ack)| ack.tries.at <= now)
+        let due: Vec<_> = (self.answers.iter())
+            .filter(|(_, answer)| answer.tries.is_some_and(|tries| tries.at <= now))
             .map(|(&key, _)| key)
             .collect();
         for key in due {
-            let LostAck { tries, segment, .. } =
-                self.acks.remove(&key).expect("invariant: found");
+            let Entry::Occupied(mut answer) = self.answers.entry(key) else {
+                unreachable!("invariant: found");
+            };
+            let ack = matches!(answer.get().segment.kind, Kind::Ack { .. });
+            match waits(&answer.get().segment) {
+                Some(true) => {}
+                Some(false) if ack => {
+                    answer.get_mut().tries = None;
+                    continue;
+                }
+                _ => {
+                    answer.remove();
+                    continue;
+                }
+            }
+            let Answer { tries, segment, .. } = answer.remove();
+            let tries = tries.expect("invariant: a due answer has its tries");
             if tries.timed_out(now, &segment) {
                 failed.push(segment);
             } else if let Err(lost) = self.transmit(wire, now, segment)
                 && let Some(tries) = tries.next(wire, now, &lost)
             {
-                self.miss(tries, lost);
+                self.keep(tries, lost);
             }
         }
         failed
     }
 
-    /// Makes the connect of end `from`, whose SYN went first at true time `since`
-    /// and arrived, give up [`CONNECT_TIMEOUT`] after it.
-    fn give_up(&mut self, from: Pair, stream: u64, since: Monotonic) {
-        if let Some(at) = since.checked_add(CONNECT_TIMEOUT) {
-            self.connects.insert((from.local, from.peer, stream), at);
-        }
-    }
-
-    /// Takes the end and stream of each connect that gives up by true time `now`.
-    fn expire(&mut self, now: Monotonic) -> Vec<(Pair, u64)> {
-        (self.connects.extract_if(.., |_, at| *at <= now))
-            .map(|((local, peer, stream), _)| (Pair { local, peer }, stream))
-            .collect()
-    }
-
-    /// Drops the lost segments of `stream` from end `from`, and those that wait on
-    /// them.
-    fn discard(&mut self, from: Pair, stream: u64) {
+    /// Takes the lost segments of `stream` from end `from`, which has gone without
+    /// its close. As its peer sends again what waits on them and meets a closed port,
+    /// a lost SYN-ACK, or a lost ACK that an end may wait on, becomes a lost RST with
+    /// its tries.
+    fn leave(&mut self, from: Pair, stream: u64) {
         let key = (from.local, from.peer, stream);
-        self.held.remove(&key);
-        self.acks.remove(&key);
-        self.connects.remove(&key);
+        let held = self.held.remove(&key);
+        let syn_ack = held.and_then(|held| {
+            let (_, first) = held.segments.front().expect("invariant: held");
+            matches!(first.kind, Kind::SynAck { .. })
+                .then_some((held.tries, Retry::Connect))
+        });
+        let ack = match self.answers.remove(&key) {
+            Some(Answer {
+                tries: Some(tries),
+                segment:
+                    Segment {
+                        kind: Kind::Ack { .. },
+                        ..
+                    },
+                ..
+            }) => Some((tries, Retry::Stream)),
+            Some(answer) if matches!(answer.segment.kind, Kind::Rst(_)) => {
+                self.answers.insert(key, answer);
+                None
+            }
+            _ => None,
+        };
+        if let Some((tries, retry)) = syn_ack.or(ack) {
+            let lost = Segment {
+                source: from.local,
+                destination: from.peer,
+                stream,
+                kind: Kind::Rst(Some(retry)),
+            };
+            self.keep(tries, lost);
+        }
     }
 
     /// Adds a segment in flight from `source` to `destination` that arrives at true
@@ -540,17 +620,12 @@ impl Lanes {
     }
 
     /// Counts again the segments that `node` has in flight, after its power cut
-    /// dropped those that had not left it, and drops its lost ones.
+    /// dropped those that had not left it, and takes its lost segments as each of
+    /// its ends leaves.
     fn cut(&mut self, wire: &Wire, node: usize) {
         let own = addresses(node);
         self.floors
             .retain(|(source, _), _| !own.contains(&source.ip()));
-        self.held
-            .retain(|(source, ..), _| !own.contains(&source.ip()));
-        self.acks
-            .retain(|(source, ..), _| !own.contains(&source.ip()));
-        self.connects
-            .retain(|(source, ..), _| !own.contains(&source.ip()));
         for (at, packet) in wire.flights() {
             if let Packet::Segment(segment) = packet
                 && own.contains(&segment.source.ip())
@@ -558,10 +633,18 @@ impl Lanes {
                 self.raise(segment.source, segment.destination, at);
             }
         }
+        let lost: BTreeSet<_> = (self.held.keys())
+            .chain(self.answers.keys())
+            .filter(|(source, ..)| own.contains(&source.ip()))
+            .copied()
+            .collect();
+        for (local, peer, stream) in lost {
+            self.leave(Pair { local, peer }, stream);
+        }
     }
 
     /// Notes the arrival of a segment of `stream` from `source` to `destination`,
-    /// and gives the lost ACK that it carries.
+    /// and gives the lost answer that it carries.
     fn arrive(
         &mut self,
         source: SocketAddr,
@@ -578,14 +661,14 @@ impl Lanes {
         }
         let mut carried = None;
         let lane = (source, destination, 0)..=(source, destination, u64::MAX);
-        for (&key, ack) in self.acks.range_mut(lane) {
-            if ack.ahead > 0 {
-                ack.ahead -= 1;
+        for (&key, answer) in self.answers.range_mut(lane) {
+            if answer.ahead > 0 {
+                answer.ahead -= 1;
             } else if key.2 == stream {
                 carried = Some(key);
             }
         }
-        self.acks.remove(&carried?).map(|ack| ack.segment.kind)
+        (self.answers.remove(&carried?)).map(|answer| answer.segment.kind)
     }
 }
 
@@ -600,6 +683,8 @@ pub(super) struct Sockets {
     ports: BTreeMap<usize, u16>,
     /// The last key given to an end, a listener, or a stream.
     last: u64,
+    /// The true time of the first SYN and the key of each end that connects.
+    connects: BTreeSet<(Monotonic, u64)>,
     lanes: Lanes,
 }
 
@@ -609,9 +694,12 @@ impl Sockets {
         self.lanes.yet.take()
     }
 
-    /// The true time at which the first lost segment goes again or times out.
+    /// The true time at which the first lost segment goes again or times out, or a
+    /// connect times out.
     pub(super) fn first(&self) -> Option<Monotonic> {
-        self.lanes.first()
+        let connect = (self.connects.first())
+            .and_then(|&(since, _)| since.checked_add(CONNECT_TIMEOUT));
+        self.lanes.first().into_iter().chain(connect).min()
     }
 
     /// A key that no end, listener, or stream has had.
@@ -632,14 +720,10 @@ impl Sockets {
         key
     }
 
-    /// Removes end `key`. Unless its stream closed, it drops its held segments, as
-    /// Linux purges its queues.
+    /// Removes end `key`.
     fn remove(&mut self, key: u64) -> End {
+        let routed = self.unroute(key);
         let end = (self.ends.remove(&key)).expect("invariant: the end lives");
-        if !end.closed() {
-            self.lanes.discard(end.pair, end.stream);
-        }
-        let routed = self.unroute(end.pair, key);
         assert!(
             routed || end.done(),
             "invariant: an end that is not done has its pair"
@@ -647,14 +731,42 @@ impl Sockets {
         end
     }
 
-    /// Takes the segments to `pair` from end `key`, and gives whether it had them.
-    fn unroute(&mut self, pair: Pair, key: u64) -> bool {
+    /// Takes the segments to its pair from end `key`, and gives whether it had them.
+    /// When it had them, its connect ends, the lost answers to it drop, and unless its
+    /// stream closed, its lost segments go as [`Lanes::leave`] says.
+    fn unroute(&mut self, key: u64) -> bool {
+        let end = &self.ends[&key];
+        let (pair, stream) = (end.pair, end.stream);
         let routed = self.routes.get(&pair) == Some(&key);
-        if routed {
-            self.routes.remove(&pair);
+        if !routed {
+            return false;
         }
-        routed
+        self.routes.remove(&pair);
+        if let Phase::Connecting(since) = end.phase {
+            self.connects.remove(&(since, key));
+        }
+        self.lanes.answers.remove(&(pair.peer, pair.local, stream));
+        if !end.closed() {
+            self.lanes.leave(pair, stream);
+        }
+        true
     }
+}
+
+/// The key of the end in `ends` that waits on `segment` while it is lost: the
+/// receiver of an answer, and the sender of another segment.
+fn owner(
+    ends: &BTreeMap<u64, End>,
+    routes: &BTreeMap<Pair, u64>,
+    segment: &Segment,
+) -> Option<u64> {
+    let (local, peer) = if segment.kind.answer() {
+        (segment.destination, segment.source)
+    } else {
+        (segment.source, segment.destination)
+    };
+    let key = *routes.get(&Pair { local, peer })?;
+    (ends[&key].stream == segment.stream).then_some(key)
 }
 
 /// The TCP ends and listeners of a run, with the wire they send on.
@@ -672,13 +784,11 @@ fn mss(wire: &Wire, from: Pair) -> usize {
 
 /// The time after which `segment`, lost `losses` times, goes again: the RTO of its
 /// kind, doubled after each loss but the first, to at most [`RTO_MAX`]. The RTO of a
-/// SYN or a SYN-ACK is [`RTO_SYN`], and that of another segment is the round trip of
-/// its links at their most delay, plus [`RTO_MIN`].
+/// handshake segment is [`RTO_SYN`], and that of a segment of a stream is the round
+/// trip of its links at their most delay, plus [`RTO_MIN`].
 fn rto(wire: &Wire, segment: &Segment, losses: u32) -> Span {
     let (source, destination) = (segment.source, segment.destination);
-    let rto = if matches!(segment.kind, Kind::Syn { .. } | Kind::SynAck { .. }) {
-        RTO_SYN
-    } else {
+    let rto = if segment.retry() == Retry::Stream {
         let from = node(source.ip()).expect("invariant: an end is on a node");
         let to = node(destination.ip()).expect("invariant: a peer is on a node");
         let [out, back] = [(from, destination), (to, source)]
@@ -687,6 +797,8 @@ fn rto(wire: &Wire, segment: &Segment, losses: u32) -> Span {
             .iter()
             .fold(0i64, |sum, span| sum.saturating_add(span.nanos()));
         Span::from_nanos(nanos)
+    } else {
+        RTO_SYN
     };
     let doubled = rto.nanos().saturating_mul(1 << (losses - 1).min(32));
     Span::from_nanos(doubled.min(RTO_MAX.nanos()))
@@ -743,12 +855,7 @@ impl<'a> Tcp<'a> {
         let own = addresses(node);
         (self.sockets.ends.values())
             .filter(|end| own.contains(&end.pair.local.ip()))
-            .filter(|end| {
-                matches!(
-                    end.phase,
-                    Phase::Connecting(_) | Phase::Refused | Phase::Open
-                )
-            })
+            .filter(|end| matches!(end.phase, Phase::Connecting(_) | Phase::Open))
             .count()
     }
 
@@ -785,7 +892,7 @@ impl<'a> Tcp<'a> {
             let (pair, stream) = (end.pair, end.stream);
             self.sockets
                 .lanes
-                .send(self.wire, now, pair, stream, Kind::Rst);
+                .send(self.wire, now, pair, stream, Kind::Rst(None));
         }
     }
 
@@ -861,6 +968,7 @@ impl<'a> Tcp<'a> {
         let end = End::new(pair, stream, Phase::Connecting(now), options, 0);
         let edge = end.advertised;
         let key = self.sockets.insert(end);
+        self.sockets.connects.insert((now, key));
         self.sockets
             .lanes
             .send(self.wire, now, pair, stream, Kind::Syn { edge });
@@ -875,18 +983,17 @@ impl<'a> Tcp<'a> {
         waker: &task::Waker,
     ) -> (Poll<Result<(), Error>>, Option<Waker>) {
         let end = self.end(key);
-        match end.phase {
-            Phase::Connecting(_) => (
+        let remote = end.pair.peer;
+        match (end.phase, end.broken) {
+            (Phase::Connecting(_), None) => (
                 Poll::Pending,
                 end.writing.replace(Waker::new(waker.clone())),
             ),
-            Phase::Refused => {
-                let remote = end.pair.peer;
-                let error = match end.broken {
-                    Some(Broken::TimedOut) => Error::TimedOut { remote },
-                    _ => Error::Refused { remote },
-                };
-                (Poll::Ready(Err(error)), None)
+            (Phase::Connecting(_), Some(Broken::Reset)) => {
+                (Poll::Ready(Err(Error::Refused { remote })), None)
+            }
+            (Phase::Connecting(_), Some(Broken::TimedOut)) => {
+                (Poll::Ready(Err(Error::TimedOut { remote })), None)
             }
             _ => (Poll::Ready(Ok(())), None),
         }
@@ -1001,7 +1108,7 @@ impl<'a> Tcp<'a> {
         if open {
             self.sockets
                 .lanes
-                .send(self.wire, now, pair, stream, Kind::Rst);
+                .send(self.wire, now, pair, stream, Kind::Rst(None));
         }
         wakers
     }
@@ -1024,8 +1131,7 @@ impl<'a> Tcp<'a> {
             wakers.extend(end.reading.take());
             wakers.extend(end.writing.take());
             match end.phase {
-                Phase::Connecting(_) => end.phase = Phase::Refused,
-                Phase::Refused | Phase::Open => {}
+                Phase::Connecting(_) | Phase::Open => {}
                 Phase::Accepting(_) | Phase::Queued(_) | Phase::Orphan => {
                     self.sockets.remove(key);
                     continue;
@@ -1063,57 +1169,62 @@ impl<'a> Tcp<'a> {
             local: destination,
             peer: source,
         };
+        let mut found = self.find(pair, stream);
         let mut wakers = Vec::new();
         if let Some(Kind::Ack {
             received,
             edge,
             fin,
         }) = carried
-            && let Some(key) = self.receiver(pair, stream)
+            && let Some((key, true)) = found
         {
             wakers = self.ack(at, key, received, edge, fin);
+            found = self.find(pair, stream);
         }
-        wakers.extend(self.take(at, pair, stream, kind));
+        let taken = self.take(at, pair, stream, kind, found);
+        if wakers.is_empty() {
+            return taken;
+        }
+        wakers.extend(taken);
         wakers
     }
 
-    /// The end of `stream` on `pair`.
-    fn find(&self, pair: Pair, stream: u64) -> Option<u64> {
-        (self.sockets.routes.get(&pair).copied())
-            .filter(|&key| self.sockets.ends[&key].stream == stream)
-    }
-
-    /// The end of `stream` on `pair` that takes an ACK, bytes, or a FIN: a
+    /// The end of `stream` on `pair`, and whether it takes an ACK, bytes, or a FIN: a
     /// connecting end takes only its SYN-ACK and an RST.
-    fn receiver(&self, pair: Pair, stream: u64) -> Option<u64> {
-        (self.find(pair, stream)).filter(|&key| {
-            !matches!(self.sockets.ends[&key].phase, Phase::Connecting(_))
-        })
+    fn find(&self, pair: Pair, stream: u64) -> Option<(u64, bool)> {
+        let key = *self.sockets.routes.get(&pair)?;
+        let end = &self.sockets.ends[&key];
+        let receives = !matches!(end.phase, Phase::Connecting(_));
+        (end.stream == stream).then_some((key, receives))
     }
 
-    /// Takes a segment of `kind` of `stream` to `pair` at true time `at`.
+    /// Takes a segment of `kind` of `stream` to `pair` at true time `at`, where
+    /// `found` is its end as [`Self::find`] gives.
     fn take(
         &mut self,
         at: Monotonic,
         pair: Pair,
         stream: u64,
         kind: Kind,
+        found: Option<(u64, bool)>,
     ) -> Vec<Waker> {
-        let end = self.find(pair, stream);
-        let receiver = self.receiver(pair, stream);
+        let end = found.map(|(key, _)| key);
+        let receiver = found.filter(|&(_, receives)| receives).map(|(key, _)| key);
         match (kind, receiver) {
             (Kind::Syn { edge }, _) => {
                 self.syn(at, pair, stream, edge);
                 Vec::new()
             }
-            (Kind::SynAck { edge }, _) => self.syn_ack(at, pair, stream, end, edge),
-            (Kind::Rst, _) => {
+            (Kind::SynAck { edge }, _) => {
+                let connect = end.filter(|_| receiver.is_none());
+                self.syn_ack(at, pair, stream, connect, edge)
+            }
+            (Kind::Rst(_), _) => {
                 end.map_or_else(Vec::new, |key| self.break_off(key, Broken::Reset))
             }
-            (_, None) => {
-                self.sockets
-                    .lanes
-                    .send(self.wire, at, pair, stream, Kind::Rst);
+            (kind, None) => {
+                let rst = Kind::Rst(kind.retry());
+                self.sockets.lanes.send(self.wire, at, pair, stream, rst);
                 Vec::new()
             }
             (
@@ -1140,9 +1251,8 @@ impl<'a> Tcp<'a> {
             !listening.failed && receives(listening.node, listening.local, pair.local)
         });
         let Some((&listener, listening)) = listener else {
-            self.sockets
-                .lanes
-                .send(self.wire, at, pair, stream, Kind::Rst);
+            let rst = Kind::Rst(Some(Retry::Connect));
+            self.sockets.lanes.send(self.wire, at, pair, stream, rst);
             return;
         };
         if listening.queue.len() >= listening.queue_max {
@@ -1160,107 +1270,81 @@ impl<'a> Tcp<'a> {
             .send(self.wire, at, pair, stream, Kind::SynAck { edge });
     }
 
-    /// Takes the SYN-ACK of `stream` to `pair`, where `end` is the end of the stream.
-    /// With no connect there, an RST answers.
+    /// Takes the SYN-ACK of `stream` to `pair`, where `connect` is the end of the
+    /// stream when it connects. With no connect there, an RST answers.
     fn syn_ack(
         &mut self,
         at: Monotonic,
         pair: Pair,
         stream: u64,
-        end: Option<u64>,
+        connect: Option<u64>,
         edge: usize,
     ) -> Vec<Waker> {
-        let key =
-            end.filter(|&key| matches!(self.end(key).phase, Phase::Connecting(_)));
-        let Some(key) = key else {
-            self.sockets
-                .lanes
-                .send(self.wire, at, pair, stream, Kind::Rst);
+        let Some(key) = connect else {
+            let rst = Kind::Rst(Some(Retry::Accept));
+            self.sockets.lanes.send(self.wire, at, pair, stream, rst);
             return Vec::new();
         };
         let end = self.end(key);
+        let Phase::Connecting(since) = end.phase else {
+            unreachable!("invariant: a connect connects");
+        };
         (end.phase, end.edge) = (Phase::Open, edge);
+        self.sockets.connects.remove(&(since, key));
+        let end = self.end(key);
         let (ack, waker) = (end.ack(), end.writing.take());
         self.sockets.lanes.send(self.wire, at, pair, stream, ack);
         waker.into_iter().collect()
     }
 
-    /// Ends the stream of `key` for `broken`, with no answer to its peer: a connect is
-    /// refused or times out, an accepting end leaves its backlog, and another end
-    /// drops its bytes not sent.
+    /// Ends the stream of `key` for `broken`, with no answer to its peer: an
+    /// accepting end leaves its backlog, and another end fails its connect or drops
+    /// its bytes not sent.
     fn break_off(&mut self, key: u64, broken: Broken) -> Vec<Waker> {
         let end = self.end(key);
-        let wakers = match end.phase {
-            Phase::Connecting(_) => {
-                end.phase = Phase::Refused;
-                if broken == Broken::TimedOut {
-                    end.broken = Some(broken);
-                }
-                end.writing.take().into_iter().collect()
-            }
-            Phase::Accepting(listener) => {
-                self.sockets.remove(key);
-                let listening = (self.sockets.listeners.get_mut(&listener))
-                    .expect("invariant: an accepting end has its listener");
-                listening.queue.retain(|&queued| queued != key);
-                return Vec::new();
-            }
-            Phase::Refused => unreachable!("invariant: a refused end has no pair"),
-            Phase::Queued(_) | Phase::Open | Phase::Orphan => {
-                end.broken = Some(broken);
-                end.outbox.clear();
-                [end.reading.take(), end.writing.take()]
-                    .into_iter()
-                    .flatten()
-                    .collect()
-            }
-        };
-        let (pair, stream) = (end.pair, end.stream);
-        self.sockets.lanes.discard(pair, stream);
+        if let Phase::Accepting(listener) = end.phase {
+            self.sockets.remove(key);
+            let listening = (self.sockets.listeners.get_mut(&listener))
+                .expect("invariant: an accepting end has its listener");
+            listening.queue.retain(|&queued| queued != key);
+            return Vec::new();
+        }
+        end.broken = Some(broken);
+        end.outbox.clear();
+        let wakers = [end.reading.take(), end.writing.take()]
+            .into_iter()
+            .flatten()
+            .collect();
         self.reap(key);
         wakers
     }
 
-    /// Sends again each lost segment due by true time `now`, and times out each end
-    /// that waits on a lost segment whose tries ended: the sender of a SYN, a
-    /// SYN-ACK, bytes, or a FIN, and the receiver of an ACK that waits on one. As on
-    /// Linux, the connect that a SYN-ACK answers gives up [`CONNECT_TIMEOUT`] after
-    /// its first SYN. Returns the wakers of the polls it makes ready.
+    /// Times out each connect [`CONNECT_TIMEOUT`] after its first SYN, as on Linux,
+    /// then sends again each lost segment due by true time `now`, and times out each
+    /// end that waits on a lost segment whose tries ended. Returns the wakers of the
+    /// polls it makes ready.
     pub(super) fn retry(&mut self, now: Monotonic) -> Vec<Waker> {
         let mut wakers = Vec::new();
-        for segment in self.sockets.lanes.retry(self.wire, now) {
-            let receiver = Pair {
-                local: segment.destination,
-                peer: segment.source,
-            };
-            let pair = match segment.kind {
-                Kind::Syn { .. } | Kind::SynAck { .. } | Kind::Data(_) | Kind::Fin => {
-                    Pair {
-                        local: segment.source,
-                        peer: segment.destination,
-                    }
-                }
-                Kind::Ack { .. } => receiver,
-                Kind::Rst => unreachable!("invariant: an RST never goes again"),
-            };
-            if matches!(segment.kind, Kind::SynAck { .. })
-                && let Some(key) = self.find(receiver, segment.stream)
-            {
-                let Phase::Connecting(since) = self.end(key).phase else {
-                    unreachable!("invariant: the end of a lost SYN-ACK connects");
-                };
-                (self.sockets.lanes).give_up(receiver, segment.stream, since);
-            }
-            if let Some(key) = self.find(pair, segment.stream)
-                && (!matches!(segment.kind, Kind::Ack { .. }) || self.end(key).waits())
-            {
+        while let Some(&(since, key)) = self.sockets.connects.first()
+            && (since.checked_add(CONNECT_TIMEOUT)).is_some_and(|at| at <= now)
+        {
+            self.sockets.connects.pop_first();
+            wakers.extend(self.break_off(key, Broken::TimedOut));
+        }
+        let Sockets {
+            ends,
+            routes,
+            lanes,
+            ..
+        } = &mut *self.sockets;
+        let waits = |segment: &Segment| {
+            owner(ends, routes, segment).map(|key| ends[&key].waits())
+        };
+        for segment in lanes.retry(self.wire, now, waits) {
+            let Sockets { ends, routes, .. } = &*self.sockets;
+            if let Some(key) = owner(ends, routes, &segment) {
                 wakers.extend(self.break_off(key, Broken::TimedOut));
             }
-        }
-        for (pair, stream) in self.sockets.lanes.expire(now) {
-            let key = (self.find(pair, stream))
-                .expect("invariant: a connect that gives up has its end");
-            wakers.extend(self.break_off(key, Broken::TimedOut));
         }
         wakers
     }
@@ -1298,9 +1382,8 @@ impl<'a> Tcp<'a> {
         let end = self.end(key);
         if end.phase == Phase::Orphan {
             let End { pair, stream, .. } = self.sockets.remove(key);
-            self.sockets
-                .lanes
-                .send(self.wire, at, pair, stream, Kind::Rst);
+            let rst = Kind::Rst(Some(Retry::Stream));
+            self.sockets.lanes.send(self.wire, at, pair, stream, rst);
             return Vec::new();
         }
         end.inbox.extend(bytes);
@@ -1345,6 +1428,9 @@ impl<'a> Tcp<'a> {
                 .lanes
                 .send(self.wire, now, pair, stream, Kind::Fin);
         }
+        if end.waits() {
+            self.sockets.lanes.arm(self.wire, now, end.pair, end.stream);
+        }
     }
 
     /// Takes the segments to its pair from `key` once its stream is done, and removes
@@ -1357,8 +1443,7 @@ impl<'a> Tcp<'a> {
         if end.phase == Phase::Orphan {
             self.sockets.remove(key);
         } else {
-            let pair = end.pair;
-            self.sockets.unroute(pair, key);
+            self.sockets.unroute(key);
         }
     }
 
@@ -1407,7 +1492,7 @@ mod tests {
         Tcp::new(&mut sockets, &mut wire).arrive(at, bytes);
         assert!(sockets.ends[&key].inbox.is_empty());
         let (_, answer) = next(&mut wire);
-        assert!(matches!(answer.kind, Kind::Rst));
+        assert!(matches!(answer.kind, Kind::Rst(Some(Retry::Stream))));
         assert_eq!(answer.stream, 1);
     }
 
