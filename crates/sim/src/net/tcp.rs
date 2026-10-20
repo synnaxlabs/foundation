@@ -92,7 +92,7 @@ impl Kind {
     }
 
     /// Whether it is an ACK or an RST. It waits behind no lost segment, and the next
-    /// segment of its stream in its direction carries it when it is lost.
+    /// answer of its stream in its direction takes its place when it is lost.
     fn answer(&self) -> bool {
         matches!(self, Self::Ack { .. } | Self::Rst(_))
     }
@@ -338,7 +338,7 @@ struct Held {
 }
 
 /// A lost ACK or RST. As ACKs are cumulative and an end that is gone answers each
-/// segment with an RST, the next segment of its stream in its direction carries it,
+/// segment with an RST, the next answer of its stream in its direction carries it,
 /// and it goes again only when none arrives first.
 struct Answer {
     /// The true time of its next try, or `None` while no end waits on it. It is
