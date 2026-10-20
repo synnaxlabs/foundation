@@ -516,8 +516,12 @@ state on `main`.
   the time until the allocator gives that memory again. Trigger for a request path
   that clears them: an attacker who reads freed heap of the node and not its live
   heap. The status of the run holds the text form of the last value of each source
-  that the run read, in a `secret::Value` that is cleared when the run ends, to hide
-  it in each text that it shows (SECRET SOURCES).
+  that the run read, in a `secret::Value` that is cleared when the run ends or a later
+  read of its source replaces it, to hide it in each text that it shows (SECRET
+  SOURCES). A value that is also a word of the text, such as the password `password`
+  in "the password secret(...)", shows by the place of its marks, so a reader of the
+  status can guess it. The status cannot tell the fixed text of an error from an echo
+  of a value, so the defense is a value that is not a word.
 - Whoever can write the `ca` source of an `influx` connector can make the node trust
   a server of their own, so they can stand in for the InfluxDB server and get the
   token. A `ca` adds to the roots of the node and never replaces them, so it cannot
