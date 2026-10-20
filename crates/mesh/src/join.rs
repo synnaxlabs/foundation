@@ -1,10 +1,14 @@
 //! Asks the voters of a ticket to admit this node to their region.
 
+pub(crate) mod file;
+
 use std::fmt;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use block::{Block, Pool};
 use env::clock::Clock;
+use env::files::{Files, Mode};
 use transport::stream::Receiver;
 use transport::{Class, Code, Transport};
 use types::time::{Monotonic, Span};
@@ -12,6 +16,7 @@ use types::time::{Monotonic, Span};
 use crate::card;
 use crate::driver::{header, within};
 use crate::error::Error;
+use crate::file::Blocks;
 use crate::message::Message;
 use crate::refusal::Refusal;
 use crate::region::{self, Request};
@@ -45,6 +50,11 @@ pub struct Config {
     pub pool: Rc<Pool>,
     /// The transport of this shard. It proves the public key of `card`.
     pub transport: Rc<Transport>,
+    /// The file seam. `os` or `sim` implements it.
+    pub files: Files,
+    /// The mesh directory that `Mesh::open` takes as `Config::dir`. Its parent must
+    /// be there and durable.
+    pub dir: PathBuf,
 }
 
 /// The most time that [`ask`] takes when no voter starts a founding: 8 x (10 s for
@@ -67,10 +77,22 @@ pub fn bound(ticket: &Ticket) -> Span {
 /// admits a join once this node's `Join` has applied there, so a repeat of the same
 /// request is admitted again.
 ///
+/// Before its first ask, `ask` makes `config.dir` and keeps the request in the file
+/// `join` in it, durable. The file holds the card and the ticket's admission, a
+/// signature over this card only, and never the private key of the ticket. When the
+/// file holds a request for the public key of `config.ticket` and the public key that
+/// `config.transport` proves, `ask` sends that request, and does not send
+/// `config.card`. Else it writes the new request over it. So a node that stops after
+/// a voter applied its join, and before the answer came, is admitted at the next
+/// call.
+///
 /// # Errors
 ///
 /// - [`Error::Unjoined`] when no voter admitted the node in the last round.
-/// - [`Error::Pool`] when the pool has no block for the request.
+/// - [`Error::JoinFile`] when `config.dir` holds a join file that does not read back
+///   whole.
+/// - [`Error::Pool`] when the pool has no block for the request or its file.
+/// - [`Error::Files`] when a file call fails.
 ///
 /// # Panics
 ///
@@ -84,17 +106,33 @@ pub async fn ask(config: Config) -> Result<region::Founding, Error> {
         clock,
         pool,
         transport,
+        files,
+        dir,
     } = config;
+    let own = transport.public_key();
     assert_eq!(
-        transport.public_key(),
+        own,
         card.card().public_key,
         "invariant: the transport proves the public key of the card"
     );
-    let request = Request {
-        ticket: ticket.public_key(),
-        admission: ticket.admission(&card),
-        card: card.into(),
-        status,
+    let blocks = Blocks::new(Rc::clone(&pool)).map_err(Error::Pool)?;
+    let request = match file::read(&files, &dir, &blocks, Mode::Write).await? {
+        Some(stored)
+            if stored.ticket == ticket.public_key()
+                && stored.card.card.public_key == own =>
+        {
+            stored
+        }
+        _ => {
+            let request = Request {
+                ticket: ticket.public_key(),
+                admission: ticket.admission(&card),
+                card: card.into(),
+                status,
+            };
+            file::write(&files, &dir, &blocks, &request).await?;
+            request
+        }
     };
     let join = Message::Join {
         request: Box::new(request),

@@ -123,8 +123,8 @@ pub enum Error {
     },
     /// A call of this node's chunk store failed.
     Blob(blob::Error),
-    /// A file call on the founding file, on the directory of the spec in use, or on a
-    /// file in it, failed.
+    /// A file call on the founding file, on the join file, on the directory of the
+    /// spec in use, or on a file in it, failed.
     Files(files::Error),
     /// A file in the directory of the spec in use does not name a pointer.
     Stray {
@@ -188,6 +188,11 @@ pub enum Error {
     /// a torn write explains.
     CardFile {
         /// The path of the file.
+        path: PathBuf,
+    },
+    /// The join file of the mesh directory does not read back whole.
+    JoinFile {
+        /// The path of the join file.
         path: PathBuf,
     },
     /// No voter of the ticket admitted this node in the last round of asks.
@@ -323,6 +328,13 @@ impl fmt::Display for Error {
                 "the file {} holds no valid card version that this node signed",
                 path.display()
             ),
+            Self::JoinFile { path } => {
+                write!(
+                    f,
+                    "the join file {} does not read back whole",
+                    path.display()
+                )
+            }
             Self::Unjoined { missed } => {
                 f.write_str("no voter of the ticket admitted this node")?;
                 let mut each = missed.iter();

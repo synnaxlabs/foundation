@@ -1,6 +1,8 @@
 //! Tests of `join::ask` by node 5, against the voters of a cluster or a voter that
 //! sends scripted answers.
 
+use env::files::Mode;
+
 use super::serve::MALFORMED;
 use super::*;
 use crate::join::{self, Miss};
@@ -62,13 +64,26 @@ fn config_of(
         clock: node.clock(),
         pool: create_pool(),
         transport,
+        files: node.files(),
+        dir: PathBuf::new(),
     }
 }
 
 /// Starts [`JOINER`] on a new node of `sim`, which asks by each of `tickets` in turn.
 /// Gives what each ask gave.
-#[expect(clippy::arithmetic_side_effects, reason = "a test may panic")]
 fn ask_each(sim: &mut Sim, tickets: Vec<Ticket>) -> Asked {
+    let card = common::member(JOINER).card;
+    let asks = tickets.into_iter().map(|ticket| (ticket, card.clone()));
+    asks_on(sim, asks.collect()).1
+}
+
+/// Starts [`JOINER`] on a new node of `sim`, which asks by each ticket of `asks` with
+/// its card, in turn. Gives the node and what each ask gave.
+#[expect(clippy::arithmetic_side_effects, reason = "a test may panic")]
+fn asks_on(
+    sim: &mut Sim,
+    asks: Vec<(Ticket, card::Signed)>,
+) -> (sim::node::Node, Asked) {
     let node = sim.node(sim::node::Config::default());
     let asked = Asked::default();
     let (own, slot) = (node.clone(), Arc::clone(&asked));
@@ -76,8 +91,11 @@ fn ask_each(sim: &mut Sim, tickets: Vec<Ticket>) -> Asked {
         let node = own;
         let clock = node.clock();
         let transport = transport_of(&node, &tasks, JOINER);
-        for ticket in tickets {
-            let config = config_of(&node, Rc::clone(&transport), ticket);
+        for (ticket, card) in asks {
+            let config = join::Config {
+                card,
+                ..config_of(&node, Rc::clone(&transport), ticket)
+            };
             let start = clock.now();
             let founding = join::ask(config).await;
             slot.lock().unwrap().push((founding, clock.now() - start));
@@ -90,7 +108,7 @@ fn ask_each(sim: &mut Sim, tickets: Vec<Ticket>) -> Asked {
         core: None,
     };
     drop(node.shards().start(config, main).unwrap());
-    asked
+    (node, asked)
 }
 
 /// A cluster of `ids` that recorded ticket 8, which admits `plant.*` any number of
@@ -556,11 +574,13 @@ fn ask_gives_the_error_of_a_pool_with_no_block_for_the_request() {
     solo(|node, tasks| async move {
         let transport = transport_of(&node, &tasks, JOINER);
         let config = config_of(&node, transport, ticket_to(TICKET, &IDS));
+        let mut body = Vec::new();
+        request_of(&config).encode(&mut body);
         let held = fill(&config.pool);
         let asked = join::ask(config).await;
         drop(held);
-        let header = wire::header::encode(Protocol::Mesh).len();
-        assert_eq!(asked, Err(exhausted(header)));
+        // The write of the join file takes the first block.
+        assert_eq!(asked, Err(exhausted(crate::file::frame(1, &body).len())));
     });
 }
 
@@ -594,4 +614,127 @@ fn ask_panics_on_a_transport_of_another_key() {
         let config = config_of(&node, transport, ticket_to(TICKET, &IDS));
         drop(join::ask(config).await);
     });
+}
+
+/// The request that an ask with `config` and no join file sends.
+fn request_of(config: &join::Config) -> region::Request {
+    region::Request {
+        ticket: config.ticket.public_key(),
+        admission: config.ticket.admission(&config.card),
+        card: config.card.clone().into(),
+        status: config.status.clone(),
+    }
+}
+
+/// Reads the join file of the mesh directory of `node`.
+async fn stored(node: &sim::node::Node) -> Result<Option<region::Request>, Error> {
+    let blocks = crate::file::Blocks::new(create_pool()).unwrap();
+    join::file::read(&node.files(), Path::new(""), &blocks, Mode::Read).await
+}
+
+/// The miss of each voter of [`IDS`] that refuses the unknown ticket `id`.
+fn refused_by_each(id: u8) -> Result<region::Founding, Error> {
+    let unknown = region::Refused::Unknown {
+        public_key: public(id),
+    };
+    let miss = Miss::from(Refusal::Refused(unknown));
+    let missed = IDS.iter().map(|&of| (key(of), miss.clone())).collect();
+    Err(Error::Unjoined { missed })
+}
+
+// The second ask gives another card, as a node that stops before the answer and signs
+// a new card does. It sends the stored request, so each voter admits it again and
+// keeps the first card.
+#[test]
+fn a_second_ask_sends_the_stored_request_and_not_its_card() {
+    for seed in 0..2 {
+        let mut cluster = recorded_cluster(seed, &IDS, &[]);
+        let first = common::member(JOINER).card;
+        let asks = vec![
+            (ticket_to(TICKET, &IDS), first.clone()),
+            (
+                ticket_to(TICKET, &IDS),
+                member_signed(JOINER, JOINER, 2).card,
+            ),
+        ];
+        let (_, asked) = asks_on(&mut cluster.sim, asks);
+        cluster.run(seconds(20));
+        let founding = Ok(founding_of(&IDS, &IDS));
+        let asked: Vec<_> = asked.lock().unwrap().drain(..).map(|(a, _)| a).collect();
+        assert_eq!(asked, [founding.clone(), founding], "run {seed}");
+        cluster.script(|_| home_to(9));
+        cluster.run(seconds(5));
+        let records = cluster.board().records;
+        for id in IDS {
+            let card = records[&id].get(&JOINER).map(|member| member.card.clone());
+            assert_eq!(card, Some(first.clone()), "run {seed}: node {id}");
+        }
+    }
+}
+
+// Each voter refuses ticket 9, which is not recorded. The second ask has another
+// ticket, so it writes a new request, which joins.
+#[test]
+fn an_ask_by_another_ticket_writes_a_new_request_and_joins() {
+    let mut cluster = recorded_cluster(0, &IDS, &[]);
+    let tickets = vec![ticket_to(9, &IDS), ticket_to(TICKET, &IDS)];
+    let asked = ask_each(&mut cluster.sim, tickets);
+    cluster.run(seconds(60));
+    let asked: Vec<_> = asked.lock().unwrap().drain(..).map(|(a, _)| a).collect();
+    assert_eq!(asked, [refused_by_each(9), Ok(founding_of(&IDS, &IDS))]);
+}
+
+// No voter of the ticket runs. The file held the request of another public key, and
+// the ask writes its own over it before it asks.
+#[test]
+fn ask_keeps_its_request_in_the_join_file_over_one_of_another_public_key() {
+    solo(|node, tasks| async move {
+        let blocks = crate::file::Blocks::new(create_pool()).unwrap();
+        let other = region::Request {
+            ticket: public(TICKET),
+            card: common::member(6).card.into(),
+            admission: [0; 64],
+            status: common::names([]),
+        };
+        let files = node.files();
+        join::file::write(&files, Path::new(""), &blocks, &other)
+            .await
+            .unwrap();
+        let transport = transport_of(&node, &tasks, JOINER);
+        let config = config_of(&node, transport, ticket_to(TICKET, &IDS));
+        let request = request_of(&config);
+        let asked = join::ask(config).await;
+        assert!(matches!(asked, Err(Error::Unjoined { .. })), "{asked:?}");
+        assert_eq!(stored(&node).await, Ok(Some(request)));
+    });
+}
+
+// A changed byte of the check, of the version, or of the body.
+#[test]
+fn ask_gives_the_error_of_a_join_file_that_does_not_read_back_whole() {
+    for at in [0, 8, 10] {
+        solo(move |node, tasks| async move {
+            let transport = transport_of(&node, &tasks, JOINER);
+            let config = config_of(&node, transport, ticket_to(TICKET, &IDS));
+            let blocks = crate::file::Blocks::new(create_pool()).unwrap();
+            let files = node.files();
+            let request = request_of(&config);
+            join::file::write(&files, Path::new(""), &blocks, &request)
+                .await
+                .unwrap();
+            let file = files.open(Path::new("join"), Mode::Write).await.unwrap();
+            let pool = create_pool();
+            let byte = file.read_at(at, pool.alloc(1).unwrap()).await.unwrap();
+            let block = pool.copy(&[byte.first().unwrap() ^ 1]).unwrap();
+            file.write_at(at, &[block]).await.unwrap();
+            file.sync().await.unwrap();
+            file.close().await;
+            let path = PathBuf::from("join");
+            assert_eq!(
+                join::ask(config).await,
+                Err(Error::JoinFile { path }),
+                "{at}"
+            );
+        });
+    }
 }

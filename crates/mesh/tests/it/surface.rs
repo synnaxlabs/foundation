@@ -518,6 +518,7 @@ fn error_has_one_case_for_each_cause_that_a_public_call_gives() {
         | Error::Unfounded { .. }
         | Error::Unjoined { .. }
         | Error::CardFile { .. }
+        | Error::JoinFile { .. }
         | Error::Soon => {}
     };
     let _: fn(&Error) = cases;
@@ -536,8 +537,10 @@ fn ask_takes_the_parts_of_a_join_and_names_each_miss() {
             clock,
             pool,
             transport,
+            files,
+            dir,
         } = config;
-        drop((ticket, card, status, clock, pool, transport));
+        drop((ticket, card, status, clock, pool, transport, files, dir));
     };
     let _: fn(join::Config) = parts;
     let cases = |miss: &join::Miss| match miss {
