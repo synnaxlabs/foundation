@@ -194,8 +194,8 @@ impl Table {
     }
 
     /// Ends `attempt` to `node` with what its dial gave. A session waits for
-    /// `accept`, and closes the held one. After an error, the attempt gives the held
-    /// session.
+    /// `accept`, and closes the held one once it answers a ping. After an error, the
+    /// attempt gives the held session.
     fn dialed(
         &mut self,
         node: PublicKey,
@@ -211,8 +211,12 @@ impl Table {
         );
         let result = match dialed {
             Ok(session) => {
-                entry.close_held();
                 entry.replace(&session, true);
+                // As the client of the handshake, this node completes first. The
+                // peer can still be in it, and a lost close then ends in a reset.
+                if let Some(held) = entry.held.as_ref().map(Session::downgrade) {
+                    self.prove(node, &session, held);
+                }
                 self.push(session.clone());
                 Ok(session)
             }
@@ -261,8 +265,7 @@ impl Table {
         if lower && (dialed || entry.dial.is_some()) {
             entry.close_held();
             entry.held = Some(session.clone());
-            if let Some(open) = open.filter(|_| !entry.proving) {
-                entry.proving = true;
+            if let Some(open) = open {
                 self.prove(node, &open, session.downgrade());
             }
             return None;
@@ -279,10 +282,16 @@ impl Table {
     }
 
     /// Pings `open`, the session that this node dialed to `node`, on the one task
-    /// of the entry. When the peer answers a ping sent after the held session `held`
-    /// arrived, the held session closes. When `open` ends or drops first, the held
-    /// session wins.
-    fn prove(&self, node: PublicKey, open: &Session, mut held: session::Weak) {
+    /// of the entry, unless that task runs already. When the peer answers a ping sent
+    /// after the held session `held` arrived, the held session closes. When `open`
+    /// ends or drops first, the held session wins.
+    fn prove(&mut self, node: PublicKey, open: &Session, mut held: session::Weak) {
+        let entry = self.nodes.get_mut(&node);
+        let entry = entry.expect("invariant: the entry holds a session");
+        if entry.proving {
+            return;
+        }
+        entry.proving = true;
         let this = rc::Weak::clone(&self.this);
         let mut ping = open.quic().ping();
         self.tasks.spawn(async move {
@@ -1006,6 +1015,41 @@ mod tests {
         });
     }
 
+    /// A node of
+    /// [`two_nodes_that_dial_each_other_on_a_lossy_link_close_the_loser_with_code_0`]
+    /// with `key`, as [`dial_at_once`] on a link of 20 ms. It checks that each
+    /// session that `dial` and `accept` gave and that is not open after 3 s ended
+    /// with `Code(0)`.
+    fn dial_through_loss(
+        node: &Node,
+        key: PrivateKey,
+        peer: PublicKey,
+        at: [Address; 1],
+    ) {
+        testing::start(node, move |shard, node| async move {
+            let config = shard.config(key, testing::spans(Span::SECOND, 30));
+            let (transport, sessions) = accepting(config, &node);
+            let offset = node.entropy().rng().below(750_000);
+            let offset = Span::from_nanos(i64::try_from(offset).expect("small"));
+            node.clock().sleep(offset).await;
+            let dialed = transport.dial(peer, &at).await.expect("a session");
+            sessions.borrow_mut().push(dialed);
+            node.clock().sleep(testing::spans(Span::SECOND, 3)).await;
+            let kept: Vec<_> = sessions.borrow_mut().drain(..).collect();
+            for session in kept.iter().filter(|session| !session.quic().live()) {
+                let error = session.closed().await;
+                assert!(
+                    matches!(
+                        error,
+                        Error::Closed { code: Code(0) }
+                            | Error::PeerClosed { code: Code(0) }
+                    ),
+                    "{error:?}"
+                );
+            }
+        });
+    }
+
     // The lower node closes its open session with code 9, and the higher node's open
     // session gets it, so both keep the same one.
     #[test]
@@ -1017,6 +1061,30 @@ mod tests {
                 let at = |node| [Address::Udp(testing::address(node))];
                 dial_at_once(&one, a, b_key, at(&two));
                 dial_at_once(&two, b, a_key, at(&one));
+                assert_eq!(sim.run(), Ok(()), "run {value}");
+            }
+        }
+    }
+
+    // The lower node's dial completes first, as the client of its handshake, while it
+    // holds the higher node's session. Each run lost each close of the held session
+    // to the loss of 40%, and the higher node's session then ended with a reset.
+    #[test]
+    fn two_nodes_that_dial_each_other_on_a_lossy_link_close_the_loser_with_code_0() {
+        let link = sim::link::Config {
+            delay: testing::spans(Span::MILLISECOND, 20),
+            loss: 0.4,
+            ..sim::link::Config::default()
+        };
+        for value in [21, 67, 135, 153, 366] {
+            for (a, b) in [(CLIENT, SERVER), (SERVER, CLIENT)] {
+                let (mut sim, one, two) = testing::nodes(value);
+                sim.link(&one, &two, link);
+                sim.link(&two, &one, link);
+                let (a_key, b_key) = (a.public(), b.public());
+                let at = |node| [Address::Udp(testing::address(node))];
+                dial_through_loss(&one, a, b_key, at(&two));
+                dial_through_loss(&two, b, a_key, at(&one));
                 assert_eq!(sim.run(), Ok(()), "run {value}");
             }
         }
@@ -1844,11 +1912,49 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
-    // The client runs no `accept`, so only the server can close the client's
-    // session. The server holds it while its slow dial runs, and closes it with
-    // `Code(0)` when that dial completes.
+    // The client's second transport dials the server while the server's slow dial to
+    // the first runs, so only the server can close that session. The server's dial
+    // completes first at the server, the client of its handshake, and the server
+    // closes the held session one round trip later, once the client answers a ping.
     #[test]
-    fn the_lower_key_closes_the_held_session_when_its_dial_completes() {
+    fn the_lower_key_closes_the_held_session_once_its_dialed_one_answers_a_ping() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let at = [Address::Udp(testing::address(&server))];
+        let slow = [dead(&client)[0], Address::Udp(testing::address(&client))];
+        testing::shard(&server, SERVER, move |config, node| async move {
+            let (transport, _sessions) = accepting(config, &node);
+            let mine = transport.dial(CLIENT.public(), &slow).await;
+            let mine = mine.expect("its own session");
+            assert!(own(&transport, &mine));
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 100))
+                .await;
+            mine.close(Code(5));
+            linger(&node).await;
+        });
+        testing::start(&client, move |shard, node| async move {
+            let [first, second] = copies(&shard, &node);
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 10))
+                .await;
+            let held = second.dial(SERVER.public(), &at).await.expect("a session");
+            let accepted = first.accept().await.expect("the server's session");
+            let start = node.clock().now();
+            assert_eq!(held.closed().await, Error::PeerClosed { code: Code(0) });
+            let closed = node.clock().now() - start;
+            let trip = testing::spans(Span::MICROSECOND, 500);
+            assert!(closed >= trip, "closed after {closed:?}");
+            assert_eq!(accepted.closed().await, Error::PeerClosed { code: Code(5) });
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    // The server holds the client's session while its slow dial runs. That dial
+    // completes first at the server, the client of its handshake, so the server
+    // closes the held session only once the client answers a ping. The client has
+    // then taken the server's session, and closed its own with `Code(0)`.
+    #[test]
+    fn the_higher_key_closes_its_session_once_the_dial_of_the_lower_key_completes() {
         let (mut sim, client, server) = testing::nodes(0);
         let at = [Address::Udp(testing::address(&server))];
         let slow = [dead(&client)[0], Address::Udp(testing::address(&client))];
@@ -1866,7 +1972,7 @@ mod tests {
         testing::transport(&client, CLIENT, move |transport, _| async move {
             let dialed = transport.dial(SERVER.public(), &at).await;
             let dialed = dialed.expect("a session");
-            assert_eq!(dialed.closed().await, Error::PeerClosed { code: Code(0) });
+            assert_eq!(dialed.closed().await, Error::Closed { code: Code(0) });
         });
         assert_eq!(sim.run(), Ok(()));
     }

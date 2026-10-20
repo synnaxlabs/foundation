@@ -1367,6 +1367,41 @@ fn a_reader_whose_session_loses_the_tie_break_on_a_lossy_link_gets_each_frame() 
     );
 }
 
+// The home's dial completes first, as the client of its handshake, while it holds
+// the reader's session. The home closes the held session only once the reader
+// answers a ping on the home's session, so a loss of each close leaves no reset.
+#[test]
+fn a_reader_whose_session_loses_the_tie_break_on_a_link_of_loss_0_4_gets_each_frame() {
+    let link = sim::link::Config {
+        delay: Span::from_nanos(20 * Span::MILLISECOND.nanos()),
+        loss: 0.4,
+        ..sim::link::Config::default()
+    };
+    // Each seed failed with a reset when the home closed the held session at once.
+    for seed in [95, 148, 161, 162, 287, 369, 374, 376] {
+        remote(
+            seed,
+            link,
+            |node, tasks, transport, steps| async move {
+                until(&node.clock(), &steps.opening).await;
+                let at = [steps.reader.expect("the reader's address")];
+                let session = transport.dial(public_key(&HOME), &at);
+                let session = session.await.expect("dials");
+                let kept = Arc::clone(&steps);
+                hub_home(node, tasks, transport, steps, |test| {
+                    write_three(test, kept)
+                })
+                .await;
+                drop(session);
+            },
+            |test, steps| async move {
+                steps.opening.store(true, Ordering::Relaxed);
+                read_three(test, steps).await;
+            },
+        );
+    }
+}
+
 /// `Ok` with the output of `a` when it is done first, else `Err` with that of `b`.
 async fn race<A: Future, B: Future>(a: A, b: B) -> Result<A::Output, B::Output> {
     let (mut a, mut b) = (pin!(a), pin!(b));
