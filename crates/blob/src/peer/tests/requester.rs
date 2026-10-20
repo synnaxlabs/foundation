@@ -971,3 +971,27 @@ fn a_reply_after_the_last_put_of_a_push_gives_unexpected_at_its_finish() {
         },
     );
 }
+
+#[test]
+fn a_reply_after_the_last_put_that_does_not_decode_stops_the_finish_with_its_code() {
+    let (a, bytes) = chunk(1, 100);
+    run_session(
+        0,
+        DISK,
+        move |_, session| async move {
+            let mut stream = raw(accept(&session).await.unwrap());
+            stream.take_put().await;
+            stream.answer(Reply::Stored { digest: a }).await;
+            stream.send(&[9]).await;
+            assert_eq!(stream.reset().await, reset(MALFORMED));
+        },
+        move |peer| async move {
+            let store = open(&peer.node, 0).await;
+            put(&store, a, &bytes).await;
+            let push = peer::Push::open(&store, &peer.session).await.unwrap();
+            let push = push.put(a).await.unwrap();
+            let kind = wire::blob::Error::Kind { kind: 9 };
+            assert_eq!(push.finish().await, Err(Error::Wire(kind)));
+        },
+    );
+}

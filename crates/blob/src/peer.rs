@@ -255,7 +255,9 @@ impl<'a> Push<'a> {
     /// # Errors
     ///
     /// [`Error::Unexpected`] for a reply after the last put, which stops the stream
-    /// with `MALFORMED`, and [`Error::Stream`] when the stream or its session fails.
+    /// with `MALFORMED`, [`Error::Wire`] for such a reply that does not decode, which
+    /// stops it with its code, and [`Error::Stream`] when the stream or its session
+    /// fails.
     pub async fn finish(mut self) -> Result<(), Error> {
         let ended = async {
             self.sender.finish()?;
@@ -508,8 +510,8 @@ pub enum Error {
     OneWay,
     /// The store refused a put, or failed. `serve` stops the stream with `MISMATCH`
     /// for [`crate::Error::Mismatch`], with `FULL` for [`crate::Error::Floor`] and a
-    /// full disk, and with code 0 for each other error. [`get()`] and [`put()`] end
-    /// it with code 0.
+    /// full disk, and with code 0 for each other error. [`get()`], [`put()`], and
+    /// [`Push`] end it with code 0.
     Store(crate::Error),
     /// The stream or its session failed. No code.
     Stream(transport::Error),
