@@ -40,7 +40,7 @@ fn main() {
         assert!(bytes <= BOUND, "{name}: the start takes {bytes} bytes");
     }
     let bytes = write_frames(&places);
-    assert_eq!(bytes, 16 * count, "16 bytes for each place of a write");
+    assert_eq!(bytes, 20 * count, "20 bytes for each place of a write");
 }
 
 /// The places at the cap, each name 255 bytes, the index at place 0.
@@ -51,6 +51,7 @@ fn places() -> Vec<Place> {
             key: channel::Key::from_u128(u128::try_from(n).expect("fits") + 1),
             data_type: Type::Scalar(if n == 0 { Scalar::Stamp } else { Scalar::I64 }),
             name: format!("c{n:0>254}").parse().expect("a name"),
+            index: 0,
         })
         .collect()
 }
@@ -58,9 +59,8 @@ fn places() -> Vec<Place> {
 /// The peak heap of [`write::Frames::new`] over the key set of `places`, built outside
 /// the count.
 fn write_frames(places: &[Place]) -> usize {
-    let set =
-        KeySet::ordered(places.iter().map(|place| (place.key, place.data_type)), 0)
-            .expect("no key repeats");
+    let channels = places.iter().map(|place| (place.key, place.data_type, 0));
+    let set = KeySet::ordered(channels).expect("no key repeats");
     let set = Arc::new(set);
     let before = ALLOCATOR.held();
     ALLOCATOR.reset_peak();
@@ -86,11 +86,7 @@ fn peak(places: &[Place], split: &[usize]) -> usize {
         })
         .collect();
     let mut first = [0; Places::LEN];
-    Places {
-        count: PLACES_MAX,
-        index: 0,
-    }
-    .encode(&mut first);
+    Places { count: PLACES_MAX }.encode(&mut first);
     let before = ALLOCATOR.held();
     ALLOCATOR.reset_peak();
     let mut reader = Reader::new(Mode::Complete);

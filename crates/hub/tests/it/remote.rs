@@ -35,7 +35,7 @@ use crate::net::{HOME, PEER, PORT, own_pool, public_key, transport_sized};
 const MESSAGE_MIN: usize = 1472;
 /// The fewest bytes that the transport of a node with a region takes in one message,
 /// as `mesh::Mesh::open` refuses less.
-const REGION_MIN: usize = 50_355;
+const REGION_MIN: usize = 51_379;
 /// The window of a transport of a test, in bytes.
 const WINDOW: usize = 1 << 20;
 
@@ -3529,9 +3529,10 @@ fn lets_go_of_the_transport_once_the_hub_each_session_and_each_link_drop() {
                 "the task of the remote reader holds the hub"
             );
             clock.sleep(Span::from_nanos(1)).await;
+            // The hub holds the transport and a clone of the mesh, which holds it too.
             assert_eq!(
                 Rc::strong_count(&transport),
-                held - 1,
+                held - 2,
                 "the hub let go of the transport"
             );
             drop(region);

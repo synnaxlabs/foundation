@@ -135,7 +135,7 @@ mod pins {
         assert_eq!(BODY_BYTES_MAX, 16_777_216);
         assert_eq!((Challenge::LEN, Request::LEN, Response::LEN), (33, 73, 9));
         assert_eq!(OPEN_BYTES_MAX, 65_536);
-        assert_eq!((Read::LEN, Places::LEN), (73, 9));
+        assert_eq!((Read::LEN, Places::LEN), (73, 5));
     }
 }
 
@@ -684,11 +684,22 @@ fn names_each_error() {
                 count: 65_537,
                 cap: 65_536,
             },
-            "the stream has 65537 places, over the cap of 65536",
+            "the stream has 65537 places, not from 1 to the cap of 65536",
         ),
         (
-            Error::Index { index: 3, count: 3 },
-            "the places put the index at place 3 of 3",
+            Error::Places {
+                count: 0,
+                cap: 65_536,
+            },
+            "the stream has 0 places, not from 1 to the cap of 65536",
+        ),
+        (
+            Error::Index { place: 2, index: 3 },
+            "place 2 names place 3 as its index, which is not an index",
+        ),
+        (
+            Error::ManyIndexes { place: 2, index: 3 },
+            "place 2 names place 3 as its index, and a read has the one index of place 0",
         ),
         (
             Error::Sample(text::Error::Parse(sample::Error::Syntax)),
@@ -709,9 +720,10 @@ fn names_each_error() {
         ),
         (
             Error::Unstamped {
+                place: 1,
                 sample: sample::Type::Scalar(sample::Scalar::U8),
             },
-            "the index place has sample type u8, not timestamp",
+            "the index place 1 has sample type u8, not timestamp",
         ),
         (
             Error::Repeated {

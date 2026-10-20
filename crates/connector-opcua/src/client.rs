@@ -146,9 +146,9 @@ pub(crate) enum Error {
 }
 
 /// Why open62541 refuses the [`Credentials`] of a client. Its `Display` names the
-/// part, such as "the key does not parse". Each refusal other than `Time` and
-/// `Trailing` can also come from a lack of memory, as its check gives one result for
-/// it and for the cause.
+/// part, such as "the key does not parse". Each refusal other than `Time`,
+/// `Trailing`, and `Line` can also come from a lack of memory, as its check gives one
+/// result for it and for the cause.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Refusal {
     /// `certificate` does not parse or holds no RSA key.
@@ -169,6 +169,12 @@ pub(crate) enum Refusal {
     /// The PEM block of the certificate `number`, from 1, of `trust` holds bytes after
     /// it, such as trust settings or a second certificate.
     Trailing { number: usize },
+    /// Line `number`, from 1 and counted by `\n`, of `credential` is in a PEM block
+    /// and holds a byte of 0x80 to 0xFF that the CPU targets read in two ways.
+    Line {
+        credential: Credential,
+        number: usize,
+    },
     /// `certificate` holds no URI in its subject alternative name.
     Uri,
 }
@@ -189,9 +195,20 @@ impl Refusal {
             ffi::Refusal::EMPTY => Self::Empty,
             ffi::Refusal::INVALID => Self::Invalid { number: raw.number },
             ffi::Refusal::TRAILING => Self::Trailing { number: raw.number },
+            ffi::Refusal::TRUST_LINE => Self::line(Credential::Trust, raw),
+            ffi::Refusal::CERTIFICATE_LINE => Self::line(Credential::Certificate, raw),
+            ffi::Refusal::KEY_LINE => Self::line(Credential::Key, raw),
             ffi::Refusal::URI => Self::Uri,
-            kind => panic!("invariant: shim.c gives a refusal of 0 to 8, not {kind}"),
+            kind => panic!("invariant: shim.c gives a refusal of 0 to 11, not {kind}"),
         })
+    }
+
+    /// Gives the `Line` refusal of `credential` at the line of `raw`.
+    fn line(credential: Credential, raw: &ffi::Refusal) -> Self {
+        Self::Line {
+            credential,
+            number: raw.number,
+        }
     }
 }
 
@@ -218,10 +235,33 @@ impl fmt::Display for Refusal {
                 f,
                 "the PEM block of certificate {number} of the trust holds bytes after it"
             ),
+            Self::Line { credential, number } => write!(
+                f,
+                "line {number} of {credential}, in a PEM block, holds a byte of 0x80 \
+                 to 0xFF, which PEM does not allow"
+            ),
             Self::Uri => f.write_str(
                 "the certificate holds no URI in its subject alternative name",
             ),
         }
+    }
+}
+
+/// The field of the [`Credentials`] that a [`Refusal::Line`] names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Credential {
+    Certificate,
+    Key,
+    Trust,
+}
+
+impl fmt::Display for Credential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Certificate => "the certificate",
+            Self::Key => "the key",
+            Self::Trust => "the trust",
+        })
     }
 }
 

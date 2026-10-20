@@ -278,6 +278,13 @@ static UA_TrustLoad
 openSSLLoadEachCertificate(const UA_ByteString cert, STACK_OF(X509) *stack,
                            size_t *number);
 
+/* Loads `crl`, DER then PEM. */
+static X509_CRL *
+openSSLLoadCrl(const UA_ByteString *crl) {
+    X509_CRL *result = UA_OpenSSL_LoadDerCrl(crl);
+    return result ? result : UA_OpenSSL_LoadPemCrl(crl);
+}
+
 static UA_StatusCode
 reloadCertificates(UA_CertificateGroup *certGroup) {
     /* Check parameter */
@@ -321,39 +328,13 @@ reloadCertificates(UA_CertificateGroup *certGroup) {
         return UA_STATUSCODE_BADOUTOFMEMORY;
     }
     for(size_t i = 0; i < context->trustList.trustedCrlsSize; i++) {
-        X509_CRL * crl = NULL;
-        BIO * bio = NULL;
-
-        bio = BIO_new_mem_buf((void *)context->trustList.trustedCrls[i].data,
-                              (int)context->trustList.trustedCrls[i].length);
-        /* Try to load DER encoded CRL */
-        crl = d2i_X509_CRL_bio(bio, NULL);
-        if(crl == NULL) {
-            /* Try to load PEM encoded CRL */
-            (void)BIO_reset(bio);
-            crl = PEM_read_bio_X509_CRL(bio, NULL, UA_OpenSSL_refusePassword, NULL);
-        }
-        BIO_free(bio);
-
+        X509_CRL *crl = openSSLLoadCrl(&context->trustList.trustedCrls[i]);
         if(crl == NULL)
             return UA_STATUSCODE_BADINTERNALERROR;
         sk_X509_CRL_push(context->crls, crl);
     }
     for(size_t i = 0; i < context->trustList.issuerCrlsSize; i++) {
-        X509_CRL * crl = NULL;
-        BIO * bio = NULL;
-
-        bio = BIO_new_mem_buf((void *)context->trustList.issuerCrls[i].data,
-                              (int)context->trustList.issuerCrls[i].length);
-        /* Try to load DER encoded Issuer CRL */
-        crl = d2i_X509_CRL_bio(bio, NULL);
-        if(crl == NULL) {
-            /* Try to load PEM encoded Issuer CRL */
-            (void)BIO_reset(bio);
-            crl = PEM_read_bio_X509_CRL(bio, NULL, UA_OpenSSL_refusePassword, NULL);
-        }
-        BIO_free(bio);
-
+        X509_CRL *crl = openSSLLoadCrl(&context->trustList.issuerCrls[i]);
         if(crl == NULL)
             return UA_STATUSCODE_BADINTERNALERROR;
         sk_X509_CRL_push(context->crls, crl);
@@ -413,7 +394,9 @@ openSSLLoadLeafCertificate(UA_ByteString cert, size_t *offset) {
     }
     *offset += cert.length;
 
-    BIO *bio = BIO_new_mem_buf((void *) cert.data, (int)cert.length);
+    BIO *bio = UA_OpenSSL_PemBio(&cert, NULL);
+    if(!bio)
+        return NULL;
     X509 *result = PEM_read_bio_X509(bio, NULL, UA_OpenSSL_refusePassword, NULL);
     BIO_free(bio);
     return result;
@@ -449,17 +432,17 @@ openSSLPushCertificate(const UA_Byte **at, const UA_Byte *end, STACK_OF(X509) *s
 }
 
 /* Pushes each certificate of the bytestring onto the stack, and gives why it does
- * not load, with the number from 1 of the certificate that fails in `number`. A
- * bytestring that starts with a DER certificate is DER certificates back to back,
- * and bytes after the last one are one more. Else it is PEM: each block of
- * `CERTIFICATE`, `X509 CERTIFICATE`, or `TRUSTED CERTIFICATE`. aws-lc reads a line
- * in pieces of at most 253 bytes, drops the bytes of 0x20 or less as a `char` at the
- * end of each, so also 0x80 to 0xFF where `char` is signed, and starts a block at a
- * piece from `-----BEGIN ` to `-----`. It skips other text and a block of another
- * label, but fails on a block of any label that it cannot read, such as an empty one,
- * damaged base64, or an `END` line that does not name its label, which counts as one
- * more. A block with any byte after its certificate fails, also trust settings,
- * which the verify of the group does not apply. Clears the error queue of the thread.
+ * not load, with the number from 1 of the certificate that fails in `number`, or of
+ * the line for `UA_TRUSTLOAD_LINE`. A bytestring that starts with a DER certificate
+ * is DER certificates back to back, and bytes after the last one are one more. Else
+ * it is PEM: each block of `CERTIFICATE`, `X509 CERTIFICATE`, or `TRUSTED
+ * CERTIFICATE`, in the pieces that `UA_OpenSSL_PemBio` states, which fails on a
+ * piece that each target reads in another way. aws-lc skips other text and a block
+ * of another label, but fails on a block of any label that it cannot read, such as
+ * an empty one, damaged base64, or an `END` line that does not name its label,
+ * which counts as one more. A block with any byte after its certificate fails, also
+ * trust settings, which the verify of the group does not apply. Clears the error
+ * queue of the thread.
  */
 static UA_TrustLoad
 openSSLLoadEachCertificate(const UA_ByteString cert, STACK_OF(X509) *stack,
@@ -476,12 +459,11 @@ openSSLLoadEachCertificate(const UA_ByteString cert, STACK_OF(X509) *stack,
         ERR_clear_error();
         return load;
     }
-    BIO *bio = BIO_new_mem_buf((void *)cert.data, (ossl_ssize_t)cert.length);
+    BIO *bio = UA_OpenSSL_PemBio(&cert, number);
     if(!bio) {
         ERR_clear_error();
-        return UA_TRUSTLOAD_NOMEMORY;
+        return *number > 0 ? UA_TRUSTLOAD_LINE : UA_TRUSTLOAD_NOMEMORY;
     }
-    *number = 0;
     load = UA_TRUSTLOAD_GOOD;
     unsigned char *der;
     long length;
@@ -1042,82 +1024,47 @@ UA_CertificateUtils_getKeySize(UA_ByteString *certificate,
     return UA_STATUSCODE_GOOD;
 }
 
+/* Gives the public key of `data`, a certificate in PEM then DER, else a CSR in PEM
+ * then DER, or NULL. */
+static EVP_PKEY *
+openSSLLoadPublicKey(const UA_ByteString *data) {
+    const UA_Byte *at = data->data;
+    X509 *cert = NULL;
+    BIO *bio = UA_OpenSSL_PemBio(data, NULL);
+    if(bio)
+        cert = PEM_read_bio_X509(bio, NULL, UA_OpenSSL_refusePassword, NULL);
+    BIO_free(bio);
+    if(!cert)
+        cert = d2i_X509(NULL, &at, (long)data->length);
+    X509_REQ *csr = NULL;
+    if(!cert) {
+        bio = UA_OpenSSL_PemBio(data, NULL);
+        if(bio)
+            csr = PEM_read_bio_X509_REQ(bio, NULL, UA_OpenSSL_refusePassword, NULL);
+        BIO_free(bio);
+    }
+    if(!cert && !csr) {
+        at = data->data;
+        csr = d2i_X509_REQ(NULL, &at, (long)data->length);
+    }
+    EVP_PKEY *key = NULL;
+    if(cert)
+        key = X509_get_pubkey(cert);
+    else if(csr)
+        key = X509_REQ_get_pubkey(csr);
+    X509_free(cert);
+    X509_REQ_free(csr);
+    return key;
+}
+
 UA_StatusCode
 UA_CertificateUtils_comparePublicKeys(const UA_ByteString *certificate1,
                                       const UA_ByteString *certificate2) {
     if(certificate1 == NULL || certificate2 == NULL)
         return UA_STATUSCODE_BADINTERNALERROR;
 
-    BIO *dataBio1 = BIO_new_mem_buf(certificate1->data, certificate1->length);
-    if(!dataBio1)
-        return UA_STATUSCODE_BADINTERNALERROR;
-
-    BIO *dataBio2 = BIO_new_mem_buf(certificate2->data, certificate2->length);
-    if(!dataBio2) {
-        BIO_free(dataBio1);
-        return UA_STATUSCODE_BADINTERNALERROR;
-    }
-
-    X509 *cert1 = NULL;
-    X509 *cert2 = NULL;
-    X509_REQ *csr1 = NULL;
-    X509_REQ *csr2 = NULL;
-    /* Try to read the certificate as PEM first */
-    cert1 = PEM_read_bio_X509(dataBio1, NULL, UA_OpenSSL_refusePassword, NULL);
-    if(!cert1) {
-        /* If PEM read fails, reset BIO and try reading as DER */
-        (void)BIO_reset(dataBio1);
-        cert1 = d2i_X509_bio(dataBio1, NULL);
-    }
-    /* Try to read as a csr */
-    if(!cert1) {
-        (void)BIO_reset(dataBio1);
-        csr1 = PEM_read_bio_X509_REQ(dataBio1, NULL, UA_OpenSSL_refusePassword, NULL);
-        if(!csr1) {
-            (void)BIO_reset(dataBio1);
-            csr1 = d2i_X509_REQ_bio(dataBio1, NULL);
-        }
-    }
-    if(!cert1 && !csr1) {
-        BIO_free(dataBio1);
-        BIO_free(dataBio2);
-        return UA_STATUSCODE_BADINTERNALERROR;
-    }
-
-    cert2 = PEM_read_bio_X509(dataBio2, NULL, UA_OpenSSL_refusePassword, NULL);
-    if(!cert2) {
-        /* If PEM read fails, reset BIO and try reading as DER */
-        (void)BIO_reset(dataBio2);
-        cert2 = d2i_X509_bio(dataBio2, NULL);
-    }
-    /* Try to load as a csr */
-    if(!cert2) {
-        (void)BIO_reset(dataBio2);
-        csr2 = PEM_read_bio_X509_REQ(dataBio2, NULL, UA_OpenSSL_refusePassword, NULL);
-        if(!csr2) {
-            (void)BIO_reset(dataBio2);
-            csr2 = d2i_X509_REQ_bio(dataBio2, NULL);
-        }
-    }
-    if(!cert2 && !csr2) {
-        X509_free(cert1);
-        X509_REQ_free(csr1);
-        BIO_free(dataBio1);
-        BIO_free(dataBio2);
-        return UA_STATUSCODE_BADINTERNALERROR;
-    }
-
-    BIO_free(dataBio1);
-    BIO_free(dataBio2);
-
-    EVP_PKEY *pkey1 = cert1 ? X509_get_pubkey(cert1) : X509_REQ_get_pubkey(csr1);
-    EVP_PKEY *pkey2 = cert2 ? X509_get_pubkey(cert2) : X509_REQ_get_pubkey(csr2);
-
-    X509_free(cert1);
-    X509_free(cert2);
-    X509_REQ_free(csr1);
-    X509_REQ_free(csr2);
-
+    EVP_PKEY *pkey1 = openSSLLoadPublicKey(certificate1);
+    EVP_PKEY *pkey2 = openSSLLoadPublicKey(certificate2);
     if(!pkey1 || !pkey2) {
         EVP_PKEY_free(pkey1);
         EVP_PKEY_free(pkey2);
@@ -1223,7 +1170,11 @@ UA_CertificateUtils_decryptPrivateKey(const UA_ByteString privateKey,
     }
 
     /* Decrypt */
-    BIO *bio = BIO_new_mem_buf((void*)privateKey.data, (int)privateKey.length);
+    size_t line;
+    BIO *bio = UA_OpenSSL_PemBio(&privateKey, &line);
+    if(!bio)
+        return line > 0 ? UA_STATUSCODE_BADSECURITYCHECKSFAILED
+                        : UA_STATUSCODE_BADOUTOFMEMORY;
     pkey = PEM_read_bio_PrivateKey(bio, NULL,
                                              privateKeyPasswordCallback,
                                              (void*)(uintptr_t)&password);

@@ -1095,6 +1095,77 @@
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6256452096). An issuer
   entry keeps the load of the release (`laptop.architect-2`, 2026-10-18 22:07 UTC,
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255744593, item 2).
+  aws-lc reads PEM in the pieces of `BIO_gets`, at most 253 bytes each, and drops the
+  bytes of 0x20 or less as a `char` at the end of each, so where `char` is signed it
+  also drops 0x80 to 0xFF. One trust file gives the same trust on each CPU target
+  (`laptop.monitor`, kind (f), 2026-10-19 17:04 UTC,
+  https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6272707868). Before
+  aws-lc reads it, the load refuses a trust with a piece of a PEM block that holds a
+  byte of 0x80 to 0xFF after its last byte of 0x21 to 0x7F, or anywhere in a piece that
+  has none. A block runs from a piece that starts `-----BEGIN ` and whose kept bytes
+  hold no NUL and end in `-----`, through the next piece whose kept bytes start
+  `-----END ` (`laptop.architect-2`, 2026-10-19 18:24 UTC,
+  https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6274242216; for the
+  NUL test, https://github.com/synnaxlabs/foundation/pull/3423#issuecomment-6278366654).
+  So a `BEGIN` or `END` line of a block with such a byte after its dashes makes the load
+  refuse the trust. A `BEGIN` line with a byte of 0x21 to 0x7F after such a byte is read
+  alike on each target, and the check passes it: when it ends in `-----`, it starts a
+  block of another label, whose label holds that byte
+  (https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6278209789); else
+  it is text, and its block drops (`laptop.monitor`, message 8b694c3c, recorded
+  2026-10-19 21:36 UTC,
+  https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6277920980, which
+  supersedes the first item of
+  https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6272707868 for such
+  a line). Such an `END` line fails in aws-lc on each target as
+  `client::Refusal::Invalid`, unless it names the label of a block that such a `BEGIN`
+  line starts; that block drops
+  (https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6278296455;
+  `laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/pull/3423#issuecomment-6278381176). Text
+  outside the blocks keeps any bytes. A further case that each target reads alike
+  needs no message to `laptop.monitor`: this text records it, with a test
+  (`laptop.monitor`, message c4c6936d,
+  https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6278296455). The
+  rule holds for each PEM read of the copy, so for a PEM key and certificate too
+  (#3428). The check is in C, in `UA_OpenSSL_PemBio` of `securitypolicy_common.c`, the
+  one PEM entry of the copy: it makes the BIO of each PEM read, and first refuses such
+  a piece (`laptop.architect-2`, 2026-10-19 20:55 UTC,
+  https://github.com/synnaxlabs/foundation/issues/3428#issuecomment-6277130219). A site
+  that tries DER first does it before the entry, on the bytes: `d2i_X509`,
+  `d2i_X509_REQ`, `d2i_X509_CRL`, and `d2i_AutoPrivateKey` in place of their `_bio`
+  forms. So a DER key over 100 KiB, which `d2i_PrivateKey_bio` refused, loads
+  (`laptop.architect-2`, 2026-10-19 23:26 UTC,
+  https://github.com/synnaxlabs/foundation/issues/3428#issuecomment-6279597410, item
+  3). `cargo xtask open62541` admits `BIO_new_mem_buf` only in the entry, and no `_bio`
+  DER read or `BIO_reset`. The test
+  `a_begin_line_at_a_piece_of_253_bytes_of_a_long_line_starts_a_block` pins the piece
+  size of aws-lc. `UA_CertificateUtils_certificateLine` and
+  `UA_CertificateUtils_keyLine` of `certificategroup.h` run the loaders of the policies
+  and give the line at which the entry refuses the own certificate or key, and
+  `shim_client_secure` checks the certificate, then the key, before the policies. The
+  client gives `client::Refusal::Line { credential, number }`, with the field of
+  `Credentials` that holds the line (`client::Credential`) and the line from 1 counted
+  by `\n`, since the check runs before aws-lc counts certificates (`laptop.architect-2`,
+  items 1 and 2 of
+  https://github.com/synnaxlabs/foundation/issues/3428#issuecomment-6279597410; the
+  name `Credential` in place of `Part`, which `client.rs` holds: `laptop.architect-2`,
+  2026-10-19 23:38 UTC,
+  https://github.com/synnaxlabs/foundation/issues/3428#issuecomment-6279750751, which
+  also approves one entry BIO for each PEM read of `openSSLLoadPublicKey` in place of
+  `BIO_reset`). A site that the client does not reach
+  keeps its own failure for a refused line: a CRL fails as a damaged one,
+  `UA_CertificateUtils_comparePublicKeys` skips the PEM read, and
+  `UA_CertificateUtils_decryptPrivateKey` gives `BadSecurityChecksFailed`. A
+  certificate of the server from the wire that the entry refuses does not load, as a
+  damaged one. PR 2d of #2934, the caller that reads the files, puts the path of the
+  file of that field before that text (`laptop.architect-2`, 2026-10-19 18:24 UTC,
+  https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6274242216). Lost:
+  a check in Rust in `Client::connect`, which copies the DER rule; a check in the kind,
+  which other callers skip; aws-lc patched to compare as unsigned, which gives no
+  refusal and no line; a filter BIO, whose refusal comes out of aws-lc as a read error;
+  and a check of the raw bytes in the shim, which refuses a DER certificate that the
+  load reads.
   The validity check of the own certificate and the map of each refusal in `kind.rs`
   move to PR 2b (`laptop.architect-2`, 2026-10-18 21:37 UTC,
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255457069, items 1

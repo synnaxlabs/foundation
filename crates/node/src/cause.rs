@@ -2,7 +2,7 @@
 //! each variant, so a new variant that wraps a file call cannot go unread.
 
 use env::files;
-use mesh::Stopped;
+use mesh::{Miss, Stopped};
 
 /// The failed file call that caused `error`, or `None`.
 pub(crate) fn buffer(error: &buffer::Error) -> Option<&files::Error> {
@@ -39,6 +39,9 @@ pub(crate) fn mesh(error: &mesh::Error) -> Option<&files::Error> {
         mesh::Error::Log(error) => log(error),
         mesh::Error::Blob(error) => blob(error),
         mesh::Error::Stopped(error) => stopped(error),
+        mesh::Error::Quorum { missed, .. } => {
+            missed.iter().find_map(|missed| miss(&missed.cause))
+        }
         mesh::Error::Raft(_)
         | mesh::Error::Spoofed { .. }
         | mesh::Error::NotVoter { .. }
@@ -56,7 +59,6 @@ pub(crate) fn mesh(error: &mesh::Error) -> Option<&files::Error> {
         | mesh::Error::Stale { .. }
         | mesh::Error::Large { .. }
         | mesh::Error::Problems(_)
-        | mesh::Error::Quorum { .. }
         | mesh::Error::Stray { .. }
         | mesh::Error::NotIndex(_)
         | mesh::Error::UnknownNode(_)
@@ -68,6 +70,25 @@ pub(crate) fn mesh(error: &mesh::Error) -> Option<&files::Error> {
         | mesh::Error::Unfounded { .. }
         | mesh::Error::CardFile { .. }
         | mesh::Error::Soon => None,
+    }
+}
+
+/// The failed file call that caused `miss`, or `None`.
+fn miss(miss: &Miss) -> Option<&files::Error> {
+    match miss {
+        Miss::Put(blob::peer::Error::Store(error)) => blob(error),
+        Miss::Put(
+            blob::peer::Error::Wire(_)
+            | blob::peer::Error::OneWay
+            | blob::peer::Error::Stream(_)
+            | blob::peer::Error::Absent { .. }
+            | blob::peer::Error::Refused { .. }
+            | blob::peer::Error::Unexpected { .. }
+            | blob::peer::Error::Unanswered,
+        )
+        | Miss::Deadline
+        | Miss::Unknown
+        | Miss::Dial(_) => None,
     }
 }
 
@@ -96,7 +117,8 @@ mod tests {
     use std::path::PathBuf;
 
     use env::files;
-    use mesh::{Stopped, log};
+    use mesh::{Miss, Missed, Stopped, log};
+    use types::node;
 
     use crate::Error;
 
@@ -108,6 +130,23 @@ mod tests {
             code: 13,
         };
         let write = || Stopped::Write(log::Error::Files(failed.clone()));
+        let store = blob::peer::Error::Store(blob::Error::Files(failed.clone()));
+        let quorum = mesh::Error::Quorum {
+            held: 1,
+            voters: 3,
+            missed: vec![
+                Missed {
+                    node: node::Key::from_u128(2),
+                    name: None,
+                    cause: Miss::Deadline,
+                },
+                Missed {
+                    node: node::Key::from_u128(3),
+                    name: None,
+                    cause: Miss::Put(store),
+                },
+            ],
+        };
         for error in [
             Error::Directory(failed.clone()),
             Error::Buffer {
@@ -119,6 +158,7 @@ mod tests {
             Error::Mesh(mesh::Error::Log(log::Error::Files(failed.clone()))),
             Error::Mesh(mesh::Error::Blob(blob::Error::Files(failed.clone()))),
             Error::Mesh(mesh::Error::Stopped(write())),
+            Error::Mesh(quorum),
             Error::Group(write()),
         ] {
             assert_eq!(error.files(), Some(&failed), "{error:?}");
@@ -139,6 +179,15 @@ mod tests {
         for error in [
             Error::Mesh(mesh::Error::Log(corrupt)),
             Error::Mesh(mesh::Error::Blob(floor)),
+            Error::Mesh(mesh::Error::Quorum {
+                held: 1,
+                voters: 2,
+                missed: vec![Missed {
+                    node: node::Key::from_u128(2),
+                    name: None,
+                    cause: Miss::Put(blob::peer::Error::Unanswered),
+                }],
+            }),
             Error::Group(Stopped::Dropped),
             Error::Key,
         ] {

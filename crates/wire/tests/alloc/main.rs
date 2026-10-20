@@ -19,7 +19,7 @@ use types::{
 use wire::hub::{
     Credit, Due, Frames, FromHome, FromReader, Head, Home, Mode, Open, Reader, Reply,
     Step, ends, keys,
-    write::{self, Outcome, Refusal, Time},
+    write::{self, End, Outcome, Refusal, Time},
 };
 
 #[global_allocator]
@@ -94,7 +94,6 @@ fn write_head() {
     let head = write::Head {
         time: Time::Frame(Path::Backfill),
         form: Form::Encoded,
-        count: 1_000,
         series: 3,
     };
     let mut out = [0; write::Head::LEN];
@@ -106,13 +105,20 @@ fn write_replies() {
     for reply in [
         write::Reply::Outcome {
             frame: 1,
+            group: 4,
             outcome: Outcome::Lost {
                 range: Range { seq: 7, count: 3 },
             },
         },
         write::Reply::Outcome {
             frame: 2,
+            group: 0,
             outcome: Outcome::Refused(Refusal::Order),
+        },
+        write::Reply::Outcome {
+            frame: 3,
+            group: 1,
+            outcome: Outcome::Ended(End::Failed),
         },
         write::Reply::Stored { frames: 9 },
     ] {
@@ -244,13 +250,10 @@ fn frames() {
 /// Each input of each frame of a program's write at the node, the first frame included.
 /// The draft comes from the caller's pool outside the count.
 fn write_frames() {
-    let set = KeySet::ordered(
-        [
-            (channel::Key::from_u128(1), Type::Scalar(Scalar::Stamp)),
-            (channel::Key::from_u128(2), Type::Scalar(Scalar::I64)),
-        ],
-        0,
-    )
+    let set = KeySet::ordered([
+        (channel::Key::from_u128(1), Type::Scalar(Scalar::Stamp), 0),
+        (channel::Key::from_u128(2), Type::Scalar(Scalar::I64), 0),
+    ])
     .expect("no key repeats");
     let config = block::Config::new(1 << 16).expect("the budget fits");
     let memory = block::Heap::new(config.reservation());
@@ -260,12 +263,12 @@ fn write_frames() {
     write::Head {
         time: Time::Frame(Path::Live),
         form: Form::Raw,
-        count: 2,
         series: 2,
     }
     .encode(&mut head);
     let mut run = [0; 2 * ends::LEN];
     ends::encode([(0, 16), (1, 32)], &mut run);
+    let counts = 2_u32.to_le_bytes();
     let body = [7; 32];
     for round in 0..2 {
         let (steps, allocations) = ALLOCATOR.count(|| {
@@ -274,13 +277,9 @@ fn write_frames() {
             let due = matches!(frames.due(), Ok(write::Due::Draft { .. }));
             (head, ends, due)
         });
-        assert!(
-            matches!(
-                steps,
-                (Ok(write::Step::Head(_)), Ok(write::Step::More), true)
-            ),
-            "the head and ends did not decode: {steps:?}"
-        );
+        let (Ok(write::Step::Head(_)), Ok(write::Step::More), true) = steps else {
+            panic!("the head and ends did not decode: {steps:?}");
+        };
         assert_eq!(
             allocations, 0,
             "the head and ends of write frame {round} allocated"
@@ -291,20 +290,30 @@ fn write_frames() {
         let draft = layout.draft(&pool, form).expect("a block");
         let (step, allocations) = ALLOCATOR.count(|| {
             let step = frames.draft(draft);
+            let counts = frames.decode(&counts);
             let Ok(write::Due::Body(rest)) = frames.due() else {
                 panic!("a body is due");
             };
             rest[..20].copy_from_slice(&body[..20]);
-            (step, frames.received(20), frames.decode(&body[20..]))
+            (
+                step,
+                counts,
+                frames.received(20),
+                frames.decode(&body[20..]),
+            )
         });
-        assert_eq!(allocations, 0, "the draft and body of a write allocated");
+        assert_eq!(
+            allocations, 0,
+            "the draft, counts, and body of a write allocated"
+        );
         let (
             write::Step::More,
+            Ok(write::Step::More),
             Ok(write::Step::More),
             Ok(write::Step::Frame { draft, .. }),
         ) = step
         else {
-            panic!("the body did not give a frame: {step:?}");
+            panic!("the counts and body did not give a frame: {step:?}");
         };
         let frame = draft.freeze(Path::Live);
         assert_eq!(frame.series(1), Some(&body[16..]), "the body round trips");
@@ -419,12 +428,13 @@ fn place_messages() {
             key: channel::Key::from_u128(key),
             data_type: data_type.parse().expect("a sample type"),
             name: "a".parse().expect("a name"),
+            index: 0,
         });
-    let mut out = [0; 70];
+    let mut out = [0; 82];
     let mut lens = [0; 3];
     let ((), allocations) = ALLOCATOR.count(|| {
         let mut rest = &mut out[..];
-        for (message, len) in place::messages(&places, 28).zip(&mut lens) {
+        for (message, len) in place::messages(&places, 32).zip(&mut lens) {
             *len = message.encoded_len();
             let (into, after) = rest.split_at_mut(*len);
             message.encode(into);
@@ -432,10 +442,10 @@ fn place_messages() {
         }
     });
     assert_eq!(allocations, 8, "the place messages allocated another count");
-    assert_eq!(lens, [28, 21, 21], "each place is a message");
+    assert_eq!(lens, [32, 25, 25], "each place is a message");
     let mut reader = Reader::new(Mode::Complete);
     let mut first = [0; Places::LEN];
-    Places { count: 3, index: 0 }.encode(&mut first);
+    Places { count: 3 }.encode(&mut first);
     reader.decode(Some(&first)).expect("the places decode");
     let mut rest = &out[..];
     let mut start = None;

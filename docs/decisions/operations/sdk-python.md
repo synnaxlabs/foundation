@@ -67,6 +67,13 @@
   `Session` that the node refused with a code raises `Refused`, a subclass of
   `ConnectionError` (SDK PYTHON WRITER in
   `docs/decisions/operations/sdk-python-writer.md`).
+  `Memory`, the refusal of the memory of the pool of the frames of the readers, raises
+  `MemoryError` (`laptop.architect-2`, 2026-10-19T14:39:03Z,
+  https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6269865289).
+  `Decode`, a series of a read that does not decode, raises `ConnectionError`: it
+  breaks the protocol of the node, as the `Stream` errors that map there
+  (`laptop.architect-2`, 2026-10-19T12:21:56Z, item 2 of
+  https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6267089707).
   No Python test reaches `Bind`, so the Rust table test of the map, with a real `Bind`,
   is its only test (`laptop.architect-2`, 2026-10-18T15:00:03Z,
   https://github.com/synnaxlabs/foundation/pull/3193#issuecomment-6251395290).
@@ -93,9 +100,32 @@
   surface is a step: the demo needs `foundation.connect("address")` alone, so the
   defaults of #2177 land before it
   (https://github.com/synnaxlabs/foundation/issues/2923#issuecomment-6238857409). The
-  feature `sim` adds test-only functions, so a test asserts that a panic on the caller's
-  thread gives `PanicException`, not an abort (`laptop.architect-2`,
-  2026-10-17T18:39:00Z,
+  wheel gives the stub `foundation/_native.pyi`, with the doc of each item, and
+  `py.typed` (`laptop.architect-2`, 2026-10-19T18:31:12Z,
+  https://github.com/synnaxlabs/foundation/pull/3394#issuecomment-6274374226).
+  `tests/test_stubs.py` asserts that the stub defines each public item of the module,
+  with its parameters, defaults, bases, `final`, and doc, that each annotation names a
+  type, that each value that the module gives (a return, also `None`, a property, and
+  each attribute of an exception) is of the type that the stub states, and that each
+  argument of the calls that check the stub is of the type of its parameter (#3212 PR
+  1c; `box2.builder-5`, plan, 2026-10-19T16:53:36Z,
+  https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6272502641).
+  The types of the stub are a key choice of kind 2 that `laptop.monitor` accepted at
+  2026-10-19T17:24Z
+  (https://github.com/synnaxlabs/foundation/pull/3394#issuecomment-6274540156), with
+  the defaults that let `connect()` and `open_writer("pt_1")` give no other argument.
+  The stub is written by hand. A stub that PyO3 `experimental-inspect` generates lost:
+  in PyO3 0.30.1 its guide calls it still in development, so its text can move with a
+  PyO3 bump; it works only on an inline `#[pymodule] mod`, and a `&Bound<PyAny>`
+  argument needs its type as a string in `#[pyo3(signature)]`, so the second copy of
+  each type moves into Rust; and no introspection states `code` and `seqs`, which the
+  module sets when it raises. The generated stub may come back when the guide of PyO3
+  no longer calls the feature experimental; then `test_stubs.py` keeps only what the
+  generator cannot state. The keys of the `dict` of `write` and `write_series`, and the
+  values of the `dict` of `write`, are `Any` until #3408. The feature `sim` adds
+  test-only functions, so a test asserts that a panic on the caller's thread gives
+  `PanicException`, not an abort
+  (`laptop.architect-2`, 2026-10-17T18:39:00Z,
   https://github.com/synnaxlabs/foundation/issues/3059#issuecomment-6238735903). One
   Rust test runs the suite `sdk/python/tests` in an embedded interpreter on the build
   of the crate, so `cargo test` and `cargo mutants` test the module. It starts the

@@ -52,11 +52,13 @@ fn select(channels: &[&str]) -> Selector {
     Selector::new(channels.iter().copied()).expect("a selector")
 }
 
-fn place(at: u128, data_type: Type, channel: &str) -> Place {
+/// The place of `channel`, whose group's index is at place `index`.
+fn place(at: u128, data_type: Type, channel: &str, index: usize) -> Place {
     Place {
         key: key(at),
         data_type,
         name: name(channel),
+        index,
     }
 }
 
@@ -209,7 +211,7 @@ fn gives_each_frame_of_a_complete_read_in_order() {
             .expect("opens");
         assert_eq!(
             reader.places(),
-            [place(2, I64, "value"), place(1, STAMP, "time")]
+            [place(2, I64, "value", 1), place(1, STAMP, "time", 1)]
         );
         assert_eq!(keys(&reader), [key(2), key(1)]);
         let mut stamps = Vec::new();
@@ -237,7 +239,7 @@ fn gives_a_latest_read_its_index_once_when_its_selector_matches_it() {
             .expect("opens");
         assert_eq!(
             reader.places(),
-            [place(1, STAMP, "time"), place(2, I64, "value")]
+            [place(1, STAMP, "time", 0), place(2, I64, "value", 0)]
         );
         assert_eq!(keys(&reader), [key(1), key(2)]);
         let frame = reader.next().await.expect("a frame");
@@ -318,9 +320,9 @@ fn runs_a_request_beside_an_open_reader() {
 /// The places of a channel on `time` on each side of `time`.
 fn around() -> [Place; 3] {
     [
-        place(10, I64, "a"),
-        place(1, STAMP, "time"),
-        place(11, I64, "b"),
+        place(10, I64, "a", 1),
+        place(1, STAMP, "time", 1),
+        place(11, I64, "b", 1),
     ]
 }
 
@@ -333,7 +335,7 @@ fn gives_each_series_at_the_entry_of_its_place() {
     by_hand(
         410,
         move |session, node| async move {
-            let mut read = opened(&session, &around(), 1).await;
+            let mut read = opened(&session, &around()).await;
             let range = Range { seq: 5, count: 1 };
             let run = [(0, 8), (1, 16), (2, 24)];
             send_frame(&mut read, range, &run, &sent, &[10, 14]).await;
@@ -349,6 +351,7 @@ fn gives_each_series_at_the_entry_of_its_place() {
                     .expect("opens");
                 assert_eq!(reader.places(), around());
                 assert_eq!(keys(&reader), [key(10), key(1), key(11)]);
+                assert_eq!(reader.index(), 1);
                 let frame = reader.next().await.expect("a frame");
                 assert_eq!(frame.range(0), Some(Range { seq: 5, count: 1 }));
                 assert_eq!(frame.form(), Form::Encoded);
@@ -370,9 +373,9 @@ fn gives_each_series_at_the_entry_of_its_place() {
 #[test]
 fn takes_the_index_at_the_place_that_the_node_names() {
     let places = [
-        place(1, STAMP, "time"),
-        place(10, I64, "a"),
-        place(11, I64, "b"),
+        place(1, STAMP, "time", 0),
+        place(10, I64, "a", 0),
+        place(11, I64, "b", 0),
     ];
     let sent = places.clone();
     let body: Vec<u8> = (0..8).collect();
@@ -380,7 +383,7 @@ fn takes_the_index_at_the_place_that_the_node_names() {
     by_hand(
         411,
         move |session, node| async move {
-            let mut read = opened(&session, &sent, 0).await;
+            let mut read = opened(&session, &sent).await;
             let range = Range { seq: 5, count: 1 };
             send_frame(&mut read, range, &[(0, 8)], &stamps, &[8]).await;
             node.clock().sleep(QUIET).await;
@@ -392,7 +395,7 @@ fn takes_the_index_at_the_place_that_the_node_names() {
                     .await
                     .expect("opens");
                 assert_eq!(reader.places(), places);
-                assert_eq!(reader.set().groups(), [0]);
+                assert_eq!((reader.index(), reader.set().groups()), (0, &[0][..]));
                 let frame = reader.next().await.expect("a frame");
                 assert_eq!(frame.iter().collect::<Vec<_>>(), [(0, &body[..])]);
             })
@@ -411,7 +414,7 @@ fn gives_a_frame_whose_draft_waited_at_a_call_that_dropped() {
         418,
         move |session, mut hello, node| async move {
             admit(&mut hello, &node.clock()).await;
-            let mut read = opened(&session, &around(), 1).await;
+            let mut read = opened(&session, &around()).await;
             let end = u32::try_from(LEN).expect("fits");
             for seq in [0, 1] {
                 let range = Range { seq, count: 1 };
@@ -465,7 +468,7 @@ fn gives_a_large_frame_while_the_program_holds_one_small_frame() {
         901,
         move |session, mut hello, node| async move {
             admit(&mut hello, &node.clock()).await;
-            let mut read = opened(&session, &around(), 1).await;
+            let mut read = opened(&session, &around()).await;
             let end = u32::try_from(SMALL).expect("fits");
             for seq in 0..BATCH {
                 let range = Range { seq, count: 1 };
@@ -530,7 +533,7 @@ fn refuses_the_retired_kind_of_behind_at_each_call() {
     by_hand(
         411,
         |session, node| async move {
-            let mut read = opened(&session, &around(), 1).await;
+            let mut read = opened(&session, &around()).await;
             send(read.sender.as_mut().expect("two-way"), &[3]).await;
             assert_eq!(stopped(&mut read).await, Code(MALFORMED));
             node.clock().sleep(QUIET).await;
@@ -563,7 +566,7 @@ fn refuses_a_read_finished_before_it_opened() {
             seed,
             move |session, node| async move {
                 let mut read = accept_read(&session).await;
-                start(&mut read, &around(), 1, sent).await;
+                start(&mut read, &around(), sent).await;
                 read.sender
                     .as_mut()
                     .expect("two-way")
@@ -582,35 +585,60 @@ fn refuses_a_read_finished_before_it_opened() {
     }
 }
 
-/// Places that name one channel twice, also apart, or that `wire` refuses, are not
-/// valid: the program stops the read as `MALFORMED`.
+/// Places that name one channel twice, also apart, or that `wire` refuses, such as
+/// places of two indexes, are not valid: the program stops the read as `MALFORMED`,
+/// with no panic.
 #[test]
 fn stops_a_read_whose_places_are_not_valid() {
-    let twice = vec![place(1, STAMP, "time"), place(1, STAMP, "again")];
+    let twice = vec![place(1, STAMP, "time", 0), place(1, STAMP, "again", 0)];
     let apart = vec![
-        place(10, I64, "a"),
-        place(1, STAMP, "time"),
-        place(10, I64, "again"),
+        place(10, I64, "a", 1),
+        place(1, STAMP, "time", 1),
+        place(10, I64, "again", 1),
     ];
-    let unstamped = vec![place(10, I64, "a"), place(1, I64, "time")];
+    let unstamped = vec![place(10, I64, "a", 1), place(1, I64, "time", 1)];
+    let two = vec![
+        place(10, I64, "a", 1),
+        place(1, STAMP, "time", 1),
+        place(20, I64, "b", 3),
+        place(2, STAMP, "other", 3),
+    ];
     let repeated =
         |n| Error::Message(wire::hub::client::Error::Repeated { key: key(n) });
+    // The node opens the read of two indexes, so only the reader's check keeps it from
+    // the frames.
     let cases = [
-        (414, twice, 0, repeated(1)),
-        (418, apart, 1, repeated(10)),
+        (414, twice, false, repeated(1)),
+        (418, apart, false, repeated(10)),
+        (
+            424,
+            two,
+            true,
+            Error::Message(wire::hub::client::Error::ManyIndexes {
+                place: 2,
+                index: 3,
+            }),
+        ),
         (
             419,
             unstamped,
-            1,
-            Error::Message(wire::hub::client::Error::Unstamped { sample: I64 }),
+            false,
+            Error::Message(wire::hub::client::Error::Unstamped {
+                place: 1,
+                sample: I64,
+            }),
         ),
     ];
-    for (seed, places, index, error) in cases {
+    for (seed, places, open, error) in cases {
         by_hand(
             seed,
             move |session, node| async move {
                 let mut read = accept_read(&session).await;
-                start(&mut read, &places, index, places.len()).await;
+                start(&mut read, &places, places.len()).await;
+                if open {
+                    let sender = read.sender.as_mut().expect("two-way");
+                    reply(sender, Reply::Opened { live: 0 }).await;
+                }
                 assert_eq!(stopped(&mut read).await, Code(MALFORMED));
                 node.clock().sleep(QUIET).await;
             },
@@ -700,7 +728,7 @@ fn stops_a_read_at_a_frame_or_a_reply_that_is_not_valid() {
         by_hand(
             seed,
             move |session, node| async move {
-                let mut read = opened(&session, &around(), 1).await;
+                let mut read = opened(&session, &around()).await;
                 let range = Range { seq: 0, count: 1 };
                 match fault {
                     Fault::Lacks => {
@@ -773,7 +801,7 @@ fn gives_the_error_of_the_renewal_to_an_open_reader() {
         417,
         |session, mut hello, node| async move {
             admit(&mut hello, &node.clock()).await;
-            let _read = opened(&session, &around(), 1).await;
+            let _read = opened(&session, &around()).await;
             node.clock().sleep(APART).await;
             let sender = hello.sender.as_mut().expect("two-way");
             send(sender, &[0xff]).await;
@@ -823,7 +851,7 @@ fn ends_a_read_whose_frame_no_block_of_its_pool_holds() {
         427,
         |session, mut hello, node| async move {
             admit(&mut hello, &node.clock()).await;
-            let mut read = opened(&session, &around(), 1).await;
+            let mut read = opened(&session, &around()).await;
             let end = u32::try_from(LEN).expect("fits");
             let range = Range { seq: 0, count: 1 };
             send_frame(&mut read, range, &[(1, end)], &[0; LEN], &[LEN]).await;

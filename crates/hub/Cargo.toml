@@ -13,6 +13,7 @@ sim = ["home/sim"]
 access = { path = "../access" }
 block = { path = "../block" }
 clock = { path = "../clock" }
+control = { path = "../control" }
 env = { path = "../env" }
 home = { path = "../home" }
 mesh = { path = "../mesh" }

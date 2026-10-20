@@ -238,13 +238,15 @@ mod opening {
     use types::channel;
 
     use super::*;
-    use crate::hub::client::{Place, Places, place};
+    use crate::hub::client::{PLACES_MAX, Place, Places, place};
 
-    fn pt(key: u128, data_type: &str) -> Place {
+    /// A place named `a`, on the index at place `index`.
+    fn pt(key: u128, data_type: &str, index: usize) -> Place {
         Place {
             key: channel::Key::from_u128(key),
             data_type: data_type.parse().unwrap(),
             name: "a".parse().unwrap(),
+            index,
         }
     }
 
@@ -280,11 +282,11 @@ mod opening {
 
     #[test]
     fn gives_the_places_and_their_key_set_after_the_run() {
-        let run = [pt(1, "u8"), pt(2, "timestamp"), pt(3, "u8")];
-        let messages = messages(&run, 49);
+        let run = [pt(1, "u8", 1), pt(2, "timestamp", 1), pt(3, "u8", 1)];
+        let messages = messages(&run, 57);
         assert_eq!(messages.len(), 2);
         let mut opening = Opening::default();
-        let places = Places { count: 3, index: 1 };
+        let places = Places { count: 3 };
         assert!(matches!(
             opening.decode(Some(&encode_places(places))),
             Ok(None)
@@ -302,71 +304,126 @@ mod opening {
         );
     }
 
+    /// Places on two indexes give a key set of two groups, numbered in the order of
+    /// their index places, and the index of each place.
+    #[test]
+    fn gives_a_key_set_of_each_index_of_the_places() {
+        let run = [
+            pt(1, "u8", 3),
+            pt(2, "timestamp", 1),
+            pt(3, "f64", 3),
+            pt(4, "timestamp", 3),
+            pt(5, "u8", 1),
+        ];
+        let mut opening = Opening::default();
+        let places = Places { count: 5 };
+        opening.decode(Some(&encode_places(places))).unwrap();
+        let Some(Start { places, set }) =
+            opening.decode(Some(&messages(&run, 300)[0])).unwrap()
+        else {
+            panic!("the write gave no start");
+        };
+        assert_eq!(places, run);
+        assert_eq!(set.groups(), [1, 3]);
+        let indexes: Vec<_> = (0..5).map(|entry| set.index(entry)).collect();
+        assert_eq!(indexes, [3, 1, 3, 3, 1]);
+    }
+
     #[test]
     #[should_panic(expected = "a stream is decoded after the decoder gave its start")]
     fn panics_on_a_decode_after_the_places() {
         let mut opening = Opening::default();
-        let places = Places { count: 1, index: 0 };
+        let places = Places { count: 1 };
         opening.decode(Some(&encode_places(places))).unwrap();
         opening
-            .decode(Some(&messages(&[pt(1, "timestamp")], 300)[0]))
+            .decode(Some(&messages(&[pt(1, "timestamp", 0)], 300)[0]))
             .unwrap();
         drop(opening.decode(None));
     }
 
     #[test]
     fn gives_finished_when_the_node_finishes_before_the_last_place() {
-        assert!(matches!(
-            Opening::default().decode(None),
-            Err(Error::Finished)
-        ));
+        assert_eq!(Opening::default().decode(None).err(), Some(Error::Finished));
         let mut opening = Opening::default();
-        let places = Places { count: 2, index: 0 };
+        let places = Places { count: 2 };
         opening.decode(Some(&encode_places(places))).unwrap();
         opening
-            .decode(Some(&messages(&[pt(1, "timestamp")], 300)[0]))
+            .decode(Some(&messages(&[pt(1, "timestamp", 0)], 300)[0]))
             .unwrap();
-        assert!(matches!(opening.decode(None), Err(Error::Finished)));
+        assert_eq!(opening.decode(None).err(), Some(Error::Finished));
     }
 
     #[test]
     fn gives_the_errors_of_a_first_message_and_stays_as_it_was() {
         let mut opening = Opening::default();
-        assert!(matches!(
-            opening.decode(Some(&zeros(5, Places::LEN))),
-            Err(Error::Kind { kind: 5 })
-        ));
-        assert!(matches!(
-            opening.decode(Some(&zeros(7, Places::LEN))),
-            Err(Error::Kind { kind: 7 })
-        ));
-        assert!(matches!(
-            opening.decode(Some(&[6])),
-            Err(Error::Length { len: 1 })
-        ));
-        assert!(matches!(opening.decode(Some(&[])), Err(Error::Empty)));
-        let places = Places { count: 1, index: 0 };
+        assert_eq!(
+            opening.decode(Some(&zeros(5, Places::LEN))).err(),
+            Some(Error::Kind { kind: 5 })
+        );
+        assert_eq!(
+            opening.decode(Some(&zeros(7, Places::LEN))).err(),
+            Some(Error::Kind { kind: 7 })
+        );
+        assert_eq!(
+            opening.decode(Some(&[6])).err(),
+            Some(Error::Length { len: 1 })
+        );
+        assert_eq!(
+            opening.decode(Some(&zeros(6, Places::LEN))).err(),
+            Some(Error::Places {
+                count: 0,
+                cap: PLACES_MAX
+            })
+        );
+        assert_eq!(opening.decode(Some(&[])).err(), Some(Error::Empty));
+        let places = Places { count: 1 };
         assert!(matches!(
             opening.decode(Some(&encode_places(places))),
             Ok(None)
         ));
     }
 
+    /// Each refused last message leaves the run as it was, so a later one gives the
+    /// start.
     #[test]
     fn gives_the_errors_of_the_run() {
         let mut opening = Opening::default();
-        let places = Places { count: 2, index: 0 };
+        let places = Places { count: 2 };
         opening.decode(Some(&encode_places(places))).unwrap();
-        assert!(matches!(
-            opening.decode(Some(&messages(&[pt(1, "u8")], 300)[0])),
-            Err(Error::Unstamped { .. })
-        ));
-        let repeated = messages(&[pt(1, "timestamp"), pt(1, "u8")], 300);
-        assert!(matches!(
-            opening.decode(Some(&repeated[0])),
-            Err(Error::Repeated { key }) if key == channel::Key::from_u128(1)
-        ));
-        let run = [pt(1, "timestamp"), pt(2, "u8")];
+        let cases = [
+            (
+                [pt(1, "u8", 0), pt(2, "u8", 0)],
+                Error::Unstamped {
+                    place: 0,
+                    sample: "u8".parse().unwrap(),
+                },
+            ),
+            (
+                [pt(1, "timestamp", 0), pt(2, "u8", 2)],
+                Error::Index { place: 1, index: 2 },
+            ),
+            (
+                [pt(1, "timestamp", 0), pt(2, "u8", 1)],
+                Error::Unstamped {
+                    place: 1,
+                    sample: "u8".parse().unwrap(),
+                },
+            ),
+            (
+                [pt(1, "timestamp", 0), pt(1, "u8", 0)],
+                Error::Repeated {
+                    key: channel::Key::from_u128(1),
+                },
+            ),
+        ];
+        for (run, error) in cases {
+            assert_eq!(
+                opening.decode(Some(&messages(&run, 300)[0])).err(),
+                Some(error),
+                "{run:?}"
+            );
+        }
+        let run = [pt(1, "timestamp", 0), pt(2, "u8", 0)];
         let (places, _) = home(opening.decode(Some(&messages(&run, 300)[0])).unwrap());
         assert_eq!(places, run);
     }

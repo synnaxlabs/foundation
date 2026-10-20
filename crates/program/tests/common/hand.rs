@@ -84,18 +84,13 @@ pub(crate) async fn accept_stream(
     incoming
 }
 
-/// Sends the start of a read on `read`: a places of `places` with its index at
-/// `index`, then the run of the first `sent` of `places`.
-pub(crate) async fn start(
-    read: &mut Incoming,
-    places: &[Place],
-    index: u32,
-    sent: usize,
-) {
+/// Sends the start of a read on `read`: a places of `places`, then the run of the
+/// first `sent` of `places`.
+pub(crate) async fn start(read: &mut Incoming, places: &[Place], sent: usize) {
     let sender = read.sender.as_mut().expect("two-way");
     let mut bytes = [0; Places::LEN];
     let count = u32::try_from(places.len()).expect("fits");
-    Places { count, index }.encode(&mut bytes);
+    Places { count }.encode(&mut bytes);
     send(sender, &bytes).await;
     for message in place::messages(&places[..sent], 1 << 10) {
         let mut bytes = vec![0; message.encoded_len()];
@@ -104,25 +99,19 @@ pub(crate) async fn start(
     }
 }
 
-/// Accepts the next read and opens it with `places` and its index at `index`.
-pub(crate) async fn opened(
-    session: &transport::Session,
-    places: &[Place],
-    index: u32,
-) -> Incoming {
-    opened_at(session, places, index, 0).await
+/// Accepts the next read and opens it with `places`.
+pub(crate) async fn opened(session: &transport::Session, places: &[Place]) -> Incoming {
+    opened_at(session, places, 0).await
 }
 
-/// Accepts the next read and opens it with `places`, its index at `index`, and the
-/// open position `live`.
+/// Accepts the next read and opens it with `places` and the open position `live`.
 pub(crate) async fn opened_at(
     session: &transport::Session,
     places: &[Place],
-    index: u32,
     live: u64,
 ) -> Incoming {
     let mut read = accept_read(session).await;
-    start(&mut read, places, index, places.len()).await;
+    start(&mut read, places, places.len()).await;
     reply(
         read.sender.as_mut().expect("two-way"),
         Reply::Opened { live },
