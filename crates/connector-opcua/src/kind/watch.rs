@@ -88,11 +88,11 @@ pub(super) async fn run(
 }
 
 /// Takes and writes `count` drives of the reads of `ctx` with no server, each a change
-/// of each of the first `moved` reads with the value 1 in the sample type of its channel (`true` for
-/// `bool`), both timestamps 0.5 ms before the drive, and each drive 1 ms of its clock
-/// after the last, through a fit of a server clock that reads mesh time exactly. Gives
-/// what `measure` gives for the take and the write of each drive. `measure` calls the
-/// work that it gets once. For benchmarks.
+/// of each of the first `moved` reads with the value 1 in the sample type of its
+/// channel (`true` for `bool`), both timestamps 0.5 ms before the drive, and each drive
+/// 1 ms of its clock after the last, through a fit of a server clock that reads mesh
+/// time exactly. Gives what `measure` gives for the take and the write of each drive.
+/// `measure` calls the work that it gets once. For benchmarks.
 ///
 /// # Errors
 ///

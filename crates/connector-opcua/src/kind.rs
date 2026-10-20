@@ -1,5 +1,5 @@
-//! The `opcua` kind: reads OPC UA nodes at a fixed rate, and writes at most one frame
-//! per tick.
+//! The `opcua` kind: subscribes to OPC UA nodes and writes each change, or reads them
+//! at a fixed rate and writes at most one frame per tick.
 
 use std::ffi::CStr;
 use std::{fmt, future};
@@ -42,15 +42,18 @@ const NO_READ: &str = "the connector has no `read` block, so it reads nothing. \
                        `read` block for each.";
 
 /// The counts of the status of each connector: the samples that the home applied,
-/// the ticks that the timer skipped, the samples that a frame lost, and the values
-/// that a frame leaves out as Bad, as Uncertain, and as of another type.
+/// the ticks that the timer skipped or the changes after a full queue of the server,
+/// the samples that a frame lost, and the values that a frame leaves out as Bad, as
+/// Uncertain, and as of another type.
 const COUNTS: [&str; 6] = {
     let [applied, lost] = poll::COUNTS;
     [applied, "missed", lost, "bad", "uncertain", "mistyped"]
 };
 
-/// The `opcua` kind: reads the Value of OPC UA nodes at a fixed rate, in Read requests
-/// that each fit one message of the server, and writes at most one frame per tick.
+/// The `opcua` kind: subscribes to the Value of OPC UA nodes and writes each change at
+/// the mesh time of its timestamp, or, with `polled`, reads them at a fixed rate in
+/// Read requests that each fit one message of the server, and writes at most one frame
+/// per tick.
 #[derive(Debug, Default)]
 #[non_exhaustive]
 pub struct Kind;
@@ -59,8 +62,9 @@ impl kind::Kind for Kind {
     type Config = Config;
     const SCHEMA: Body = config::BODY;
 
-    /// Reads `address`, `rate`, and zero or more `read` blocks, each with the channel
-    /// as its label and a `node_id`, and no other key or block.
+    /// Reads `address`, `rate`, an optional bool `polled`, and zero or more `read`
+    /// blocks, each with the channel as its label and a `node_id`, and no other key or
+    /// block.
     fn parse(&self, config: &Document) -> Result<Config, Vec<Diagnostic>> {
         config::parse(config)
     }
@@ -80,20 +84,34 @@ impl kind::Kind for Kind {
         })
     }
 
-    /// Connects to the server, and reads each node once per tick of the rate until
-    /// the cancel. Each tick writes a frame of the values that are Good and of the
-    /// sample type of their channel (Boolean for `bool`, `SByte` to `UInt64` for `i8`
-    /// to `u64`, Float for `f32`, and Double for `f64`), stamped at the midpoint of the
-    /// read. It leaves out each other value: an Uncertain one adds 1 to the count
+    /// Connects to the server and, until the cancel, subscribes to each node, or with
+    /// `polled` reads each node once per tick of the rate. A frame holds the values
+    /// that are Good and of the sample type of their channel (Boolean for `bool`,
+    /// `SByte` to `UInt64` for `i8` to `u64`, Float for `f32`, and Double for `f64`).
+    /// It leaves out each other value: an Uncertain one adds 1 to the count
     /// `uncertain`, another one that is not Good adds 1 to `bad`, and one of another
     /// type adds 1 to `mistyped`. The note names the first node of another type of
-    /// the latest tick that has one, and a tick with none clears it. A tick that
-    /// leaves out each value writes no frame. When 10 s pass with no read, the run
-    /// reads the state of the server to check the connection. After a cancel or an
-    /// error, the run closes its session: it sends `CloseSession`, waits at most 1 s
-    /// for the answer, then closes the connection. So a run ends within 1 s of a
-    /// cancel. Call [`Context::clear_error`] once the run reaches the device: until
-    /// then, the status shows the error of the last run.
+    /// the latest frame that has one, and a frame with none clears it. A frame that
+    /// leaves out each value is not written.
+    ///
+    /// The subscription samples each node once per period of the rate. The server sends
+    /// the changes once per publishing interval: the period, but at least 100 ms and at
+    /// most 1 min. Each change goes in a frame at the mesh time of its device time: its
+    /// source timestamp, or its server timestamp when that is earlier or the source
+    /// timestamp is absent. The run maps the clock of the server to mesh time from a
+    /// read of its current time at the start, each 10 s, and at once when a server
+    /// timestamp is after the arrival of its change. One frame holds the changes of one
+    /// device time, one value per channel. A change after values that the server
+    /// dropped from a full queue adds 1 to `missed`.
+    ///
+    /// Each tick of `polled` writes one frame stamped at the midpoint of the read.
+    /// When 10 s pass with no read, the run reads the state of the server to check
+    /// the connection.
+    ///
+    /// After a cancel or an error, the run closes its session: it sends `CloseSession`,
+    /// waits at most 1 s for the answer, then closes the connection. So a run ends
+    /// within 1 s of a cancel. Call [`Context::clear_error`] once the run reaches the
+    /// device: until then, the status shows the error of the last run.
     ///
     /// With no `read` block, the run connects, clears the error, and shows the note
     /// that the connector reads nothing and that `browse` and `import` add reads. Then
@@ -105,11 +123,15 @@ impl kind::Kind for Kind {
     /// The error of [`Context::writer`] and of each failed write. [`Error::Config`]
     /// with `connector.index` for each channel that is an index; that error comes
     /// alone. Else [`Error::Config`] with `opcua.sample-type` for each channel whose
-    /// sample type is not `bool`, `i8` to `u64`, `f32`, or `f64`, and with
-    /// `opcua.large-read` when the Read of one node alone is past one message of the
-    /// server. [`Error::Device`] when the connect, a read, or one check fails: a check
-    /// fails on a bad service result or on no answer in 5 s. Also [`Error::Device`],
-    /// at once, when the client loses its channel or its session between two ticks.
+    /// sample type is not `bool`, `i8` to `u64`, `f32`, or `f64`, and, with `polled`,
+    /// with `opcua.large-read` when the Read of one node alone is past one message of
+    /// the server. [`Error::Device`] when the connect, a read, or one check fails: a
+    /// check fails on a bad service result or on no answer in 5 s. Also
+    /// [`Error::Device`], at once, when the client loses its channel or its session
+    /// between two ticks. With no `polled`, also [`Error::Device`] when a read of the
+    /// current time or the subscribe fails, when the server does not watch a node, and
+    /// when the subscription ends, and [`Error::Config`] with `opcua.no-timestamp` for
+    /// a change with neither timestamp.
     fn run(&self, ctx: Context<Config>) -> impl Future<Output = Result<(), Error>> {
         run(ctx)
     }
