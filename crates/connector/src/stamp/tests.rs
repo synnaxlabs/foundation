@@ -69,16 +69,15 @@ fn a_request_with_no_wait_is_stamped_after_the_one_before() {
 
 #[test]
 fn a_request_after_a_refusal_is_stamped_after_its_stamp() {
-    let (now, refused, stamp) =
-        with_writer(sim::node::Config::default(), async |writer, _| {
-            let mut stamped = stamp::Writer::new(writer);
-            let now = stamped.hub().now();
-            let refused = stamped.stamps.after(now + Span::from_nanos(20));
-            let ((), stamp) = stamped.request(future::ready(())).await;
-            (now, refused, stamp)
-        });
-    assert_eq!(refused, now + Span::from_nanos(21));
-    assert_eq!(stamp, now + Span::from_nanos(22));
+    let (ahead, (wrote, ..), groups, stamp) = with_hub(async |hub| {
+        let ahead = write_ahead(&hub, "a.restarts", Span::MILLISECOND).await;
+        let mut writer = stamp::Writer::new(open(&hub, 1, &["a.state"]).await);
+        let wrote = write(&mut writer);
+        let ((), stamp) = writer.request(future::ready(())).await;
+        (ahead, wrote, groups(&writer), stamp)
+    });
+    assert_eq!(wrote, Ok(vec![(groups[0], true)]));
+    assert_eq!(stamp, ahead + Span::from_nanos(2));
 }
 
 #[test]
@@ -112,6 +111,10 @@ fn a_request_before_the_epoch_is_stamped_at_its_midpoint_rounded_down() {
     assert!(sent.nanos() < 0, "{sent:?}");
     assert_eq!(stamp, sent + Span::SECOND);
 }
+
+// The tests from here to the property tests call `Stamps` directly: the rule is a
+// value with no hub, so its edges and each case of a property test need no node.
+// The tests of `stamp::Writer` and `poll::Writer` reach it through the writer.
 
 #[test]
 #[should_panic(expected = "stamp overflow: 9223372036854775807 ns + 1 ns")]
