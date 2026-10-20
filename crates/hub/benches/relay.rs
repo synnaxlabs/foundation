@@ -27,6 +27,10 @@
 //! - `live 1/8x(1x2)`: as `live 8x(1x2)`, with frames that hold one group.
 //!
 //! Compare two builds on one pinned core whose SMT sibling is idle.
+//!
+//! `-- --line <prefix> --rounds <n>` runs only the lines whose name starts with
+//! `prefix`, in which `_` stands for a space, and the timer, with `n` rounds in place
+//! of 50.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -54,7 +58,7 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
-use agent::Agent;
+use agent::{AGENT, Agent};
 use common::name;
 use env::tasks::Tasks;
 use fixture::{channel_name, create_hub};
@@ -76,7 +80,11 @@ static ALLOCATOR: counting::Allocator = counting::Allocator::new();
 /// Frames per round.
 const FRAMES: usize = 64;
 const WARMUP: usize = 10;
+/// Rounds per line, unless `--rounds` gives another count.
 const ROUNDS: usize = 50;
+/// Rounds between two renewals of the program's session, well inside the life of a
+/// hello in mesh time.
+const RENEW: usize = 1000;
 /// How long the bench waits between two checks of what the program did.
 const STEP: Span = Span::MILLISECOND;
 /// The keys of each case's channels start at a multiple of `LINE`.
@@ -102,7 +110,7 @@ struct Case {
     waiting: bool,
 }
 
-const CASES: [Case; 9] = [
+const CASES: [Case; 5] = [
     Case {
         name: "live 1x2",
         node: false,
@@ -148,42 +156,6 @@ const CASES: [Case; 9] = [
         series: 2,
         waiting: true,
     },
-    Case {
-        name: "live 2x(1x2)",
-        node: false,
-        count: 1,
-        groups: 2,
-        present: 2,
-        series: 2,
-        waiting: false,
-    },
-    Case {
-        name: "live 2x(1x64)",
-        node: false,
-        count: 1,
-        groups: 2,
-        present: 2,
-        series: 64,
-        waiting: false,
-    },
-    Case {
-        name: "live 8x(1x2)",
-        node: false,
-        count: 1,
-        groups: 8,
-        present: 8,
-        series: 2,
-        waiting: false,
-    },
-    Case {
-        name: "live 1/8x(1x2)",
-        node: false,
-        count: 1,
-        groups: 8,
-        present: 1,
-        series: 2,
-        waiting: false,
-    },
 ];
 
 /// The index key of case `at`: its data keys follow it.
@@ -194,6 +166,47 @@ fn base(at: usize) -> u128 {
 /// The index key of group `group` of case `at`: its data keys follow it.
 fn group(at: usize, group: u32) -> u128 {
     base(at) + u128::from(group) * LINE / 8
+}
+
+/// The lines to run and their rounds, from the arguments of the bench.
+struct Run {
+    /// The prefix of the name of each line to run, or all lines.
+    line: Option<String>,
+    rounds: usize,
+}
+
+impl Run {
+    /// The run that the arguments give. Ignores `--bench`, which cargo adds.
+    fn new() -> Self {
+        let mut run = Self {
+            line: None,
+            rounds: ROUNDS,
+        };
+        #[expect(clippy::disallowed_methods, reason = "the bench reads its lines")]
+        let mut args = std::env::args().skip(1);
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--line" => {
+                    let line = args.next().expect("a line prefix");
+                    run.line = Some(line.replace('_', " "));
+                }
+                "--rounds" => {
+                    let rounds = args.next().expect("a count of rounds");
+                    run.rounds = rounds.parse().expect("a count of rounds");
+                }
+                "--bench" => {}
+                other => panic!("unknown argument {other}"),
+            }
+        }
+        run
+    }
+
+    /// Whether the run holds the line `name`.
+    fn runs(&self, name: &str) -> bool {
+        self.line
+            .as_ref()
+            .is_none_or(|line| name.starts_with(line.as_str()))
+    }
 }
 
 /// What the program and the home tell each other.
@@ -214,12 +227,15 @@ struct Progress {
 }
 
 fn main() {
+    let run = Arc::new(Run::new());
+    let rounds = run.rounds;
     let mut sim = sim::Sim::new(sim::Config::default());
     let home = sim.node(sim::node::Config::default());
     let progress = Arc::new(Progress::default());
     let at = Address::Udp(std::net::SocketAddr::new(home.addresses()[0], net::PORT));
     let node = sim.node(sim::node::Config::default());
     let shared = Arc::clone(&progress);
+    let selected = Arc::clone(&run);
     let own = node.clone();
     let config = env::shards::Config {
         name: "program".into(),
@@ -229,24 +245,30 @@ fn main() {
         while shared.stamp.load(Ordering::Relaxed) == 0 {
             own.clock().sleep(STEP).await;
         }
-        program(&own, tasks, at, &shared).await;
+        program(&own, tasks, at, &shared, &selected).await;
     };
     drop(node.shards().start(config, main).expect("starts"));
     let (timer, lines, partial, stored) = sim
-        .run_on(&home, move |node, tasks| bench(node, tasks, progress))
+        .run_on(&home, move |node, tasks| bench(node, tasks, progress, run))
         .expect("the run ends");
     let title = format!(
-        "ns per frame over {ROUNDS} rounds of {FRAMES} frames \
+        "ns per frame over {rounds} rounds of {FRAMES} frames \
          (rounds not whole in one poll: {partial}; Stored replies: {stored})"
     );
     table::print(&title, &timer, &lines);
 }
 
-/// The home: runs the control line, then serves the program's write of each case.
+/// The home: runs the control lines of `run`, then serves the program's write of each
+/// case of `run`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the timed loop of a case reads in one place"
+)]
 async fn bench(
     node: sim::node::Node,
     tasks: Tasks,
     progress: Arc<Progress>,
+    run: Arc<Run>,
 ) -> (Line, Vec<Line>, usize, usize) {
     let transport = net::transport(&node, &tasks, &net::own_pool(), net::HOME, 1 << 16);
     let indexes = (0..=CASES.len())
@@ -260,16 +282,17 @@ async fn bench(
     let mut timer = Line::new("timer", FRAMES);
     let mut lines = Vec::new();
     let mut stamp = now - 10_000_000;
-    for (name, groups) in CONTROLS {
+    for (name, groups) in CONTROLS.into_iter().filter(|(name, _)| run.runs(name)) {
         let (line, after) =
-            control(&node, &hub, (name, groups), stamp, &mut timer).await;
+            control(&node, &hub, (name, groups), stamp, run.rounds, &mut timer).await;
         lines.push(line);
         stamp = after;
     }
     progress.stamp.store(stamp, Ordering::Relaxed);
     let (session, remote) = serving::program(&transport, &hub, &tasks).await;
     let mut partial = 0;
-    for (at, case) in CASES.iter().enumerate() {
+    let cases = CASES.iter().enumerate();
+    for (at, case) in cases.filter(|(_, case)| run.runs(case.name)) {
         let holder = if case.waiting {
             Some(holder(&hub, at).await)
         } else {
@@ -285,7 +308,7 @@ async fn bench(
         }
         node.clock().sleep(common::SETTLE).await;
         serving::poll(serving.as_mut());
-        for round in 0..WARMUP + ROUNDS {
+        for round in 0..WARMUP + run.rounds {
             let sent = progress.sent.load(Ordering::Relaxed) + FRAMES;
             let frames = progress.frames.load(Ordering::Relaxed) + FRAMES;
             progress.go.fetch_add(1, Ordering::Relaxed);
@@ -336,6 +359,7 @@ async fn control(
     hub: &Hub,
     (name, groups): (&'static str, u32),
     mut stamp: i64,
+    rounds: usize,
     timer: &mut Line,
 ) -> (Line, i64) {
     let mut line = Line::new(name, FRAMES);
@@ -350,7 +374,7 @@ async fn control(
     let series: Vec<_> = (0..writer.set().entries().len())
         .map(|entry| (entry, 8))
         .collect();
-    for round in 0..WARMUP + ROUNDS {
+    for round in 0..WARMUP + rounds {
         for _ in 0..FRAMES {
             let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
             stamp += 1;
@@ -382,19 +406,21 @@ fn write(writer: &mut Writer, draft: Draft) {
     );
 }
 
-/// The program: opens a write for each case, and sends each round when the home lets
-/// it.
+/// The program: opens a write for each case of `run`, and sends each round when the
+/// home lets it.
 async fn program(
     node: &sim::node::Node,
     tasks: Tasks,
     at: Address,
     progress: &Progress,
+    run: &Run,
 ) {
     let mut agent = Agent::dial(node, tasks, at, name(agent::SUBJECT)).await;
-    agent.admit().await;
+    let mut challenge = agent.admit().await;
     let mut stamp = progress.stamp.load(Ordering::Relaxed);
     let mut round = 0;
-    for (at, case) in CASES.iter().enumerate() {
+    let cases = CASES.iter().enumerate();
+    for (at, case) in cases.filter(|(_, case)| run.runs(case.name)) {
         let names: Vec<String> = (0..case.groups)
             .flat_map(|g| {
                 (1..case.series).map(move |data| group(at, g) + u128::from(data))
@@ -407,8 +433,12 @@ async fn program(
         let series = usize::try_from(case.series * case.groups).expect("few");
         assert_eq!(start.places.len(), series, "the places of {}", case.name);
         progress.opened.fetch_add(1, Ordering::Relaxed);
-        for _ in 0..WARMUP + ROUNDS {
+        for _ in 0..WARMUP + run.rounds {
             round += 1;
+            if round % RENEW == 0 {
+                agent.send_hello(Agent::hello(challenge), &AGENT).await;
+                challenge = agent.hello.challenge().await;
+            }
             while progress.go.load(Ordering::Relaxed) < round {
                 node.clock().sleep(Span::from_nanos(100_000)).await;
             }
