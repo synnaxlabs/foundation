@@ -94,10 +94,10 @@
   2026-10-14T04:40:48Z
   (https://github.com/synnaxlabs/foundation/issues/2583#issuecomment-6161042898).
 
-  The status of a run hides each value that `Context::secret` read in that run, the
-  last one of each source: in each text of `Context::error`, of `Context::note`, and of
-  the end of the run, it shows `<secret>` in place of the `String::from_utf8_lossy`
-  form of each value that is not empty, before the cut at 1024 bytes. So a server that
+  The status of a run hides the last value of each source that `Context::secret` read
+  in that run: in each text of `Context::error`, of `Context::note`, and of the end of
+  the run, it shows `<secret>` in place of the `String::from_utf8_lossy` form of each
+  such value that is not empty, before the cut at 1024 bytes. So a server that
   sends a token back in its answer does not put it in a status or a log. A kind does
   not hide a value itself. A form of a value that a kind makes, such as the base64 of
   `user:password`, is the duty of that kind. The trigger to hide values in the browse

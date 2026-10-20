@@ -337,8 +337,9 @@ impl<C> Context<C> {
     /// failed with the class `retry`. The status gives it within one second. The end
     /// of the run replaces it, and a call after the run returned shows nothing. Each
     /// time the status takes a show that changes its text or its class, it also
-    /// writes the log line `error` (WARN). Each value that [`Context::secret`] read in
-    /// this run shows as `<secret>`, before the cut at 1024 bytes.
+    /// writes the log line `error` (WARN). The last value of each source that
+    /// [`Context::secret`] read in this run shows as `<secret>`, before the cut at 1024
+    /// bytes.
     pub fn error(&self, error: &dyn fmt::Display) {
         self.status.show(error);
     }
@@ -360,8 +361,8 @@ impl<C> Context<C> {
     /// bytes or less at char boundaries, joined by `…`. An empty `note` shows none. The
     /// end of the run clears it, and a call after the run returned shows nothing. Each
     /// time the status takes a note that changes its note, it also writes the log line
-    /// `note` (INFO). Each value that [`Context::secret`] read in this run shows as
-    /// `<secret>`, before the cut at 1024 bytes.
+    /// `note` (INFO). The last value of each source that [`Context::secret`] read in
+    /// this run shows as `<secret>`, before the cut at 1024 bytes.
     pub fn note(&self, note: &dyn fmt::Display) {
         self.status.note(note);
     }
@@ -392,10 +393,10 @@ impl<C> Context<C> {
     /// only to the system they unlock, and never into a status or a log.
     ///
     /// The status of the run shows `<secret>` in place of the value in each text of
-    /// [`Context::error`], of [`Context::note`], and of the end of the run, until the
-    /// run ends or the next read of `source`. It hides the text form of the value
-    /// (`String::from_utf8_lossy`), not a form that the kind makes of it, such as the
-    /// base64 of `user:password`.
+    /// [`Context::error`], of [`Context::note`], and of the end of the run, until a
+    /// later read of `source` in this run gives another value. It hides the text form
+    /// of the value (`String::from_utf8_lossy`), not a form that the kind makes of it,
+    /// such as the base64 of `user:password`.
     ///
     /// # Errors
     ///
