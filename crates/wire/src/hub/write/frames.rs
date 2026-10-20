@@ -201,6 +201,15 @@ impl Frames {
         self.drafted();
     }
 
+    /// Whether the next message is the head of a frame: each frame that came is whole.
+    /// It is true before the first frame. Outside a draft, [`Frames::finish`] gives
+    /// `Ok` exactly when it is true.
+    #[must_use]
+    #[inline]
+    pub fn between(&self) -> bool {
+        matches!(self.next, Next::Head) && self.counted == self.counts
+    }
+
     /// Checks the end of the stream, when the program finished it.
     ///
     /// # Errors
@@ -212,8 +221,10 @@ impl Frames {
     /// When [`Frames::due`] gives [`Due::Draft`].
     pub fn finish(&self) -> Result<(), Error> {
         self.assembly.check_undrafted("the end of the stream");
+        if self.between() {
+            return Ok(());
+        }
         let (remain, body) = match self.next {
-            Next::Head if self.counted == self.counts => return Ok(()),
             Next::Head => (0, None),
             Next::Ends { remain } => (remain, None),
             Next::Body(body) => (0, Some(body)),
