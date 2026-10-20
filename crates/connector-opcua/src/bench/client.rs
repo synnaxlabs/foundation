@@ -16,8 +16,8 @@ use types::time::Span;
 
 use super::PORT;
 pub use crate::client::Mode;
-use crate::client::Nodes;
 use crate::client::browse::Base;
+use crate::client::{Nodes, User};
 use crate::connection;
 use crate::event;
 use crate::node::{Key, Name, Node};
@@ -49,6 +49,13 @@ const DOUBLE: f64 = 1.5;
 const SESSIONS: u16 = 4;
 /// The `MaxNodesPerRead` of a [`Server`]: a read of more nodes takes more requests.
 pub const PER_READ: u32 = 256;
+/// The password of the user of [`Server::login`].
+pub const PASSWORD: &[u8] = b"a password of the bench";
+/// The user of [`Server::login`].
+const USER: User<'_> = User {
+    name: "operator",
+    password: PASSWORD,
+};
 
 /// A variable of a [`Server`].
 #[derive(Clone, Copy, Debug)]
@@ -74,6 +81,8 @@ pub struct Server {
     rng: RefCell<Rng>,
     /// The mode of each channel, or `None` for the policy `None`.
     mode: Option<Mode>,
+    /// The user of each session, or `None` for an anonymous session.
+    user: Option<User<'static>>,
 }
 
 /// What a [`Server`] serves.
@@ -84,6 +93,8 @@ struct Setup {
     counters: usize,
     /// The mode of each channel of [`Server::secure`].
     mode: Option<Mode>,
+    /// The only user of [`Server::login`].
+    user: Option<User<'static>>,
 }
 
 impl Setup {
@@ -91,6 +102,7 @@ impl Setup {
         double: DOUBLE,
         counters: 0,
         mode: None,
+        user: None,
     };
 }
 
@@ -143,6 +155,28 @@ impl Server {
         Self::serve(clock, net, address, rng, setup, body).await
     }
 
+    /// As [`Server::secure`], and the server lets in only one user with [`PASSWORD`],
+    /// which each client of [`Server::connect`] gives.
+    ///
+    /// # Panics
+    ///
+    /// As [`Server::scope`], and if open62541 refuses the login.
+    pub async fn login<T>(
+        clock: Clock,
+        net: Net,
+        address: IpAddr,
+        rng: Rng,
+        mode: Mode,
+        body: impl AsyncFnOnce(&Self) -> T,
+    ) -> T {
+        let setup = Setup {
+            mode: Some(mode),
+            user: Some(USER),
+            ..Setup::PLAIN
+        };
+        Self::serve(clock, net, address, rng, setup, body).await
+    }
+
     /// As [`Server::scope`], with `counters` more Double variables for
     /// [`Client::subscribe`], each of which adds 1 to its value at each sample. The
     /// server grants each count of changes in a Publish answer that a client asks for.
@@ -178,6 +212,7 @@ impl Server {
             double,
             counters,
             mode,
+            user,
         } = setup;
         let local = SocketAddr::new(address, PORT);
         let this = Self {
@@ -186,6 +221,7 @@ impl Server {
             url: CString::new(format!("opc.tcp://{local}")).expect("no NUL"),
             rng: RefCell::new(rng),
             mode,
+            user,
         };
         let manager = connection::Manager::listening(
             this.time(),
@@ -201,6 +237,9 @@ impl Server {
             server.set_per_read(PER_READ);
             server.add_bytes(&BYTES, 7 << 16);
             server.set_per_publish(u32::MAX);
+            if let Some(User { name, password }) = user {
+                server.admit(&[(name, password)]);
+            }
             for index in 0..counters {
                 let mut value = 0.0;
                 server.add_source(&counter(index), move || {
@@ -277,7 +316,7 @@ impl Server {
             mode.map(|mode| crate::client::Session {
                 credentials: CLIENT_SIDE,
                 mode,
-                user: None,
+                user: self.user,
             })
             .as_ref(),
             future::pending(),

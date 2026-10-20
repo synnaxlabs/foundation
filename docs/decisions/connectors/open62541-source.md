@@ -363,14 +363,26 @@
   `laptop.architect-2`, 2026-10-20T00:39Z,
   https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6280562003).
   The copy, `shim.c`, and `server.c` allocate through the global allocator of the
-  binary. `src/alloc.h` is the `UA_ARCH_HEADER` of both builds: it declares the 4
+  binary. `src/alloc.h` is the `UA_ARCH_HEADER` of both builds: it declares the 5
   functions of `src/alloc.rs` and defines `UA_malloc`, `UA_calloc`, `UA_realloc`, and
   `UA_free` as them, before `config.h` sets the libc calls as the defaults. They keep
-  the C contract on `std::alloc`: a failure gives NULL and never panics, `malloc(0)`
-  and `realloc(p, 0)` give a unique pointer that is not NULL, and each pointer is
-  aligned to 16. No pointer crosses between the libc allocator and these: the objects of
-  the copy, `shim.c`, and `server.c` call no libc function that gives or takes a heap
-  pointer. Our change makes `UA_CertificateUtils_getThumbprint` of
+  the C contract on `std::alloc`: a failure gives NULL and never panics, `malloc(0)` and
+  `realloc(p, 0)` give a unique pointer that is not NULL, and each pointer is aligned to
+  16. `free` writes zeros over each block before it gives the block back, as
+  `OPENSSL_free` of aws-lc does in its default mode, and `realloc` always moves the
+  block and frees the old one with the same zeros. So a freed block of the copy keeps no
+  copy of the key of the node or of a password, and a copy that a later release adds
+  needs no patch. Its cost is one `memset` of each freed block. A network buffer of
+  `shim.c` holds a short message in a block of the send buffer size, so its free
+  (`connector_opcua_free_written`) clears only its `length` bytes, which open62541 sets
+  to cover each byte that it writes before it sends or frees the buffer. Lost: a patch
+  at each copy in the copy (the user token of the config, the plaintext of the encrypted
+  token, the key of the policies), which each new release needs again, with a hand
+  mutant of each line, and which misses the copies that a later release adds (#3593,
+  plan https://github.com/synnaxlabs/foundation/issues/3593#issuecomment-6294792367). No
+  pointer crosses between the libc allocator and these: the objects of the copy,
+  `shim.c`, and `server.c` call no libc function that gives or takes a heap pointer. Our
+  change makes `UA_CertificateUtils_getThumbprint` of
   `plugins/crypto/openssl/certificategroup.c` write the hex of the digest into the
   thumbprint, in place of a block from `malloc` and `free`, and makes
   `UA_CertificateUtils_getSubjectName` free the name of aws-lc with `OPENSSL_free`.

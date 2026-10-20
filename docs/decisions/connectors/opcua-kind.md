@@ -330,5 +330,6 @@
   user token would need a second form (plan:
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6230820716, and its
   details:
-  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6291339308). Not yet
-  done: open62541 frees its copies of the key and the password with no clear (#3593).
+  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6291339308). The
+  copies of the key and the password that open62541 makes are cleared when freed, as
+  OPEN62541 SOURCE says for the allocator (#3593).

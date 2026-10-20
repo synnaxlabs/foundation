@@ -994,6 +994,7 @@ unsafe extern "C" {
     ) -> *mut ConnectionManager;
     pub(crate) fn shim_cm_free(cm: *mut ConnectionManager);
     pub(crate) fn shim_buffer_free(buffer: *mut Bytes);
+    pub(crate) fn shim_network_free(buffer: *mut Bytes);
     pub(crate) fn shim_establish(
         cm: *mut ConnectionManager,
         id: usize,

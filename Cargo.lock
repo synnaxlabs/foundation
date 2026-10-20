@@ -511,6 +511,7 @@ dependencies = [
  "spec",
  "tracing",
  "types",
+ "zeroize",
 ]
 
 [[package]]

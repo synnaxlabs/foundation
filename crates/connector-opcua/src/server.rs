@@ -362,7 +362,6 @@ impl Server {
     /// # Panics
     ///
     /// If open62541 refuses the logins.
-    #[cfg(test)]
     pub(crate) fn admit(&self, users: &[(&str, &[u8])]) {
         let logins: Vec<_> = (users.iter())
             .map(|(name, password)| ffi::test::Login {
