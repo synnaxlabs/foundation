@@ -113,7 +113,10 @@
   https://github.com/synnaxlabs/foundation/issues/3559#issuecomment-6295589076).
   Lost: the member reserves after each decode, not before, so a decode can take the
   room of up to the bound of its `Opening` and the names of one message before the
-  share refuses them with `BUSY`. The overshoot is bounded: the forward already holds
+  share refuses them with `BUSY`: 48 bytes for each place on a 64-bit target, at most
+  1,572,912 bytes for an open of 32,768 channels, and fewer bytes of names than the
+  message. The refusal drops it in the same step, so at most one is live on each hub
+  thread. The overshoot is bounded: the forward already holds
   the ends and counts of the same channels, 20 bytes for each, so the room that a
   decode takes before the share refuses it is a fixed factor of what the share
   counted. A write open is at most
