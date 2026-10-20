@@ -699,6 +699,28 @@ fn a_connect_whose_rst_is_lost_is_refused_on_the_link_that_heals() {
 }
 
 #[test]
+fn a_lost_rst_goes_again_on_the_times_of_the_syn_that_it_answers() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    sim.link(&a, &b, cut());
+    sim.link(&b, &a, cut());
+    let remote = at(&b, 4433);
+    let client = start(&a, "client", move |node| async move {
+        let error = connect(&node, remote, options()).await.err();
+        (node.clock().now(), error)
+    });
+    sim.run_for(secs(2)).unwrap();
+    sim.link(&a, &b, link::Config::default());
+    sim.run_for(secs(3)).unwrap();
+    sim.link(&b, &a, link::Config::default());
+    sim.run().unwrap();
+    // The SYN is lost at 0 and 1 s and arrives at 3 s. Its RST is lost, and goes
+    // again 4 s later, as the third SYN would.
+    let error = Net::Refused { remote };
+    let at = after(Span::from_nanos(7_000_500_000));
+    assert_eq!(take(&client), (at, Some(error)));
+}
+
+#[test]
 fn a_writer_whose_bytes_meet_a_lost_rst_times_out() {
     let (mut sim, a, b) = pair(0, link::Config::default());
     let mut listener = listen(&b, 4433);
@@ -781,6 +803,94 @@ fn a_writer_whose_ack_is_lost_times_out_after_a_power_cut_of_its_peer() {
     sim.crash(&b, Crash::Power);
     sim.run().unwrap();
     assert_eq!(take(&client), Err(Net::TimedOut { remote }));
+}
+
+/// The options of an end with a window of 1 byte that sends 1 byte at a time.
+fn one_byte_window() -> tcp::Options {
+    tcp::Options {
+        recv_buffer_bytes: 1,
+        ..one_byte()
+    }
+}
+
+#[test]
+fn a_writer_that_waits_for_room_is_reset_after_the_lost_rst_of_its_peer() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen_on(&b, at(&b, 4433), one_byte_window());
+    let _server = start(&b, "server", move |node| async move {
+        let tcp = accept(&mut listener).await;
+        node.clock().sleep(millis(5)).await;
+        drop(tcp);
+    });
+    let remote = at(&b, 4433);
+    let client = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, one_byte()).await.unwrap();
+        within(&node, secs(10), write_all(&mut tcp, &[1; 8])).await
+    });
+    sim.run_for(millis(3)).unwrap();
+    sim.link(&b, &a, cut());
+    sim.run_for(millis(10)).unwrap();
+    sim.link(&b, &a, link::Config::default());
+    sim.run().unwrap();
+    assert_eq!(take(&client), Some(Err(Net::Reset { remote })));
+}
+
+#[test]
+fn a_writer_that_waits_for_room_is_reset_after_a_power_cut_of_its_peer() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen_on(&b, at(&b, 4433), one_byte_window());
+    let _server = start(&b, "server", move |_| async move {
+        let _tcp = accept(&mut listener).await;
+        pending::<()>().await;
+    });
+    let remote = at(&b, 4433);
+    let client = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, one_byte()).await.unwrap();
+        within(&node, secs(10), write_all(&mut tcp, &[1; 8])).await
+    });
+    sim.run_for(millis(5)).unwrap();
+    sim.crash(&b, Crash::Power);
+    sim.run().unwrap();
+    assert_eq!(take(&client), Some(Err(Net::Reset { remote })));
+}
+
+#[test]
+fn a_reader_of_a_peer_whose_power_is_cut_waits_until_it_writes() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    let _server = start(&b, "server", move |_| async move {
+        let _tcp = accept(&mut listener).await;
+        pending::<()>().await;
+    });
+    let remote = at(&b, 4433);
+    let client = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        let idle = within(&node, secs(1_000), read(&mut tcp, 1)).await;
+        write_all(&mut tcp, &[1]).await.unwrap();
+        (idle, read(&mut tcp, 1).await)
+    });
+    sim.run_for(millis(5)).unwrap();
+    sim.crash(&b, Crash::Power);
+    sim.run().unwrap();
+    assert_eq!(take(&client), (None, Err(Net::Reset { remote })));
+}
+
+#[test]
+fn a_syn_ack_lost_five_times_connects_on_its_sixth_try_at_31_s() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    sim.link(&b, &a, cut());
+    let _listener = listen(&b, 4433);
+    let remote = at(&b, 4433);
+    let client = start(&a, "client", move |node| async move {
+        let connected = connect(&node, remote, options()).await.is_ok();
+        (node.clock().now(), connected)
+    });
+    sim.run_for(secs(20)).unwrap();
+    sim.link(&b, &a, link::Config::default());
+    sim.run().unwrap();
+    // The SYN-ACK goes again 1, 3, 7, 15, and 31 s after the SYN arrives at 250 us.
+    let at = after(Span::from_nanos(31_000_500_000));
+    assert_eq!(take(&client), (at, true));
 }
 
 #[test]

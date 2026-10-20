@@ -230,7 +230,7 @@ impl Network {
             Crash::Power => {
                 self.wire.cut(now, node);
                 self.udp().cut_power(node);
-                self.tcp().cut_power(node)
+                self.tcp().cut_power(now, node)
             }
         }
     }
