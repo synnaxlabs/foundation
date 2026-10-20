@@ -504,11 +504,10 @@ pub(crate) fn handling(py: Python<'_>) -> PyResult<Py<PyAny>> {
 /// gives `Ok` for `warn` and `ignore`. `GroupEnded` and `Rejected` give the seqs of the
 /// lost groups in `lost`, and with `warn` also log the loss through `handling`, the
 /// function of [`handling`], so an error of a logging handler goes up chained to them.
-/// `outcomes` is the place of
-/// the index and the outcome of each group, in the order of their index places, and
-/// `frame` the places of the items of the call, of the writer of `places` and `firsts`.
-/// The channels of the frame are those of `frame` and the index of each group, each
-/// named once.
+/// `outcomes` is the place of the index and the outcome of each group, in the order of
+/// their index places, and `frame` the places of the items of the call, of the writer
+/// of `places` and `firsts`. The channels of the frame are those of `frame` and the
+/// index of each group, each named once.
 pub(crate) fn answer(
     py: Python<'_>,
     places: &[Place],
