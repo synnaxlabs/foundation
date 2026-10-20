@@ -355,21 +355,15 @@ impl<'a> Secured<'a> {
         let Some(security) = security else {
             return Ok(None);
         };
-        let (certificate, key, trust) = (
-            read(&security.certificate).await?,
-            read(&security.key).await?,
-            read(&security.trust).await?,
-        );
-        let user = match &security.user {
-            Some(user) => Some((user, read(&user.password).await?)),
-            None => None,
-        };
         Ok(Some(Self {
             security,
-            certificate,
-            key,
-            trust,
-            user,
+            certificate: read(&security.certificate).await?,
+            key: read(&security.key).await?,
+            trust: read(&security.trust).await?,
+            user: match &security.user {
+                Some(user) => Some((user, read(&user.password).await?)),
+                None => None,
+            },
         }))
     }
 

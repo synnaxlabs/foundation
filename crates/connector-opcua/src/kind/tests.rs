@@ -3375,8 +3375,9 @@ fn never_sends_a_password_in_clear() {
         ..Secure::with_user(Policy::Basic256Sha256)
     };
     let cause = format!(
-        "{UNOFFERED} Sign {POLICIES} that lets in a user name and password. Turn on one \
-         of these policies in the mode Sign with user names and passwords on the server"
+        "{UNOFFERED} Sign {POLICIES} that lets in a user name and password. Turn on \
+         one of these policies in the mode Sign with user names and passwords on the \
+         server"
     );
     connect_fails(secure, "BadIdentityTokenRejected", &cause);
 }

@@ -465,9 +465,10 @@ impl Client {
     /// the credentials and mode of `security`, or the security mode `None` when it is
     /// `None`, and with the user of the credentials, else an anonymous session. It
     /// gives the client once the session is active and it has read the
-    /// `MaxNodesPerRead` of the server, or `None` when `until` ends first. After an error, or when `until` ends first, it closes the session that
-    /// the connect made, as [`Client::close`] does, so it ends within [`GRACE`] of
-    /// either. A drop of the future drops the client.
+    /// `MaxNodesPerRead` of the server, or `None` when `until` ends first. After an
+    /// error, or when `until` ends first, it closes the session that the connect made,
+    /// as [`Client::close`] does, so it ends within [`GRACE`] of either. A drop of the
+    /// future drops the client.
     ///
     /// # Errors
     ///

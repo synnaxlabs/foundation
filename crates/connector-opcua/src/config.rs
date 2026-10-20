@@ -316,7 +316,7 @@ pub(crate) fn security(config: &Document) -> Result<Option<Security>, Vec<Diagno
             Some(Ok(trust)),
             Ok(unencrypted),
             Ok(user),
-        ) if diagnostics.is_empty() => {
+        ) => {
             let mode = if unencrypted {
                 client::Mode::Sign
             } else {

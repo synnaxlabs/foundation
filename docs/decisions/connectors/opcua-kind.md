@@ -279,12 +279,12 @@
   `BadCertificateUseNotAllowed` names `basicConstraints = CA:FALSE` as the fix of the
   certificate of the node. `BadIdentityTokenRejected` names the mode and the policies
   that the server must offer with an anonymous user, or with a user name and password
-  when the connector has `user`. A
-  server that offers only `Basic128Rsa15` or `Basic256` gives `BadIdentityTokenRejected`
-  and this text, since open62541 finds no endpoint with a policy of the client. With no
-  `certificate`, only `BadIdentityTokenRejected` gains a cause. The text is the variant
-  `Failure::Connect`, apart from the `Failure::Client` of a read, check, or browse
-  (`laptop.architect-2`, 2026-10-20T08:16:10Z, the texts:
+  when the connector has `user`. A server that offers only `Basic128Rsa15` or
+  `Basic256` gives `BadIdentityTokenRejected` and this text, since open62541 finds no
+  endpoint with a policy of the client. With no `certificate`, only
+  `BadIdentityTokenRejected` gains a cause. The text is the variant `Failure::Connect`,
+  apart from the `Failure::Client` of a read, check, or browse (`laptop.architect-2`,
+  2026-10-20T08:16:10Z, the texts:
   https://github.com/synnaxlabs/foundation/pull/3545#issuecomment-6286592579;
   2026-10-20T08:56:46Z, the texts of `BadCertificateUntrusted` and
   `BadCertificateIssuerTimeInvalid`, and the five statuses:
