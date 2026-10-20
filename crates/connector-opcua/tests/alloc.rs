@@ -220,10 +220,12 @@ fn a_realloc_clears_the_old_block() {
     }
 }
 
-/// The numbers `d`, `p`, and `q` of the key of the test client, each in the
-/// little-endian bytes that a `BIGNUM` of aws-lc holds on a 64-bit target. No block
-/// holds the DER of the key.
-fn keys() -> [(&'static str, Vec<u8>); 3] {
+/// The private numbers of the key of the test client, each in the little-endian bytes
+/// that a `BIGNUM` of aws-lc holds on a 64-bit target. No block holds the DER of the
+/// key.
+fn keys() -> [(&'static str, Vec<u8>); 6] {
+    type Get =
+        unsafe extern "C" fn(*const aws_lc_sys::RSA) -> *const aws_lc_sys::BIGNUM;
     let der = include_bytes!("../src/secure/client-key.der");
     // SAFETY: `der` lives for the call, which copies what it reads.
     let rsa =
@@ -239,16 +241,19 @@ fn keys() -> [(&'static str, Vec<u8>); 3] {
         assert_eq!(done, 1, "the number fits");
         out
     };
-    let gets = [
-        aws_lc_sys::RSA_get0_d,
-        aws_lc_sys::RSA_get0_p,
-        aws_lc_sys::RSA_get0_q,
+    let gets: [(&str, Get); 6] = [
+        ("d", aws_lc_sys::RSA_get0_d),
+        ("p", aws_lc_sys::RSA_get0_p),
+        ("q", aws_lc_sys::RSA_get0_q),
+        ("dmp1", aws_lc_sys::RSA_get0_dmp1),
+        ("dmq1", aws_lc_sys::RSA_get0_dmq1),
+        ("iqmp", aws_lc_sys::RSA_get0_iqmp),
     ];
     // SAFETY: `rsa` is a live private key, so each number lives with it.
-    let [d, p, q] = gets.map(|get| bytes(unsafe { get(rsa) }));
+    let numbers = gets.map(|(name, get)| (name, bytes(unsafe { get(rsa) })));
     // SAFETY: nothing else holds `rsa`.
     unsafe { aws_lc_sys::RSA_free(rsa) };
-    [("d", d), ("p", p), ("q", q)]
+    numbers
 }
 
 /// Connects with the user of the bench, reads, closes the client, and ends the server
