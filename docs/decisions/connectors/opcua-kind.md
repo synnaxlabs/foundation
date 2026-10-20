@@ -262,23 +262,27 @@
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6255562713).
   When the server refuses the connect, the `Error::Device` text "the connect to
   {address} failed with {status}" gains ": {cause}", which ends with its fix, for the
-  statuses of the secure channel. `BadSecurityChecksFailed` names the certificate to
-  install by its source, SHA-1 thumbprint, and subject, when the subject is not empty.
-  An open62541 server hides `BadCertificateUntrusted` behind
-  `BadSecurityChecksFailed`, and a server of another stack can send it. A server also
-  sends `BadCertificateTimeInvalid`, `BadCertificateIssuerTimeInvalid`,
-  `BadCertificateUriInvalid`, and `BadCertificateUseNotAllowed` about the certificate
-  of the node. So the text of each of these five names the certificate of the server
-  and the certificate of the node, with the source of each, and the fix of each side.
-  The text of `BadCertificateUseNotAllowed` names `basicConstraints = CA:FALSE` as the
-  fix of the certificate of the node. The connector has no `user`, so
-  `BadIdentityTokenRejected` names the mode and the policies that the server must offer
-  with an anonymous user. A server that offers only `Basic128Rsa15` or `Basic256` gives
-  `BadIdentityTokenRejected` and this text, since open62541 finds no endpoint with a
-  policy of the client. With no `certificate`, only `BadIdentityTokenRejected` gains a
-  cause. The text is the variant `Failure::Connect`, apart from the `Failure::Client`
-  of a read, check, or browse (`laptop.architect-2`, 2026-10-20T08:16:10Z, the texts:
-  https://github.com/synnaxlabs/foundation/pull/3545#issuecomment-6286592579). Lost:
+  statuses of the secure channel. `BadSecurityChecksFailed` and
+  `BadCertificateUntrusted` name the certificate of the node to install by its source,
+  SHA-1 thumbprint, and subject, when the subject is not empty. An open62541 server
+  hides `BadCertificateUntrusted` behind `BadSecurityChecksFailed`, and a server of
+  another stack can send it. A server also sends `BadCertificateTimeInvalid`,
+  `BadCertificateIssuerTimeInvalid`, `BadCertificateUriInvalid`, and
+  `BadCertificateUseNotAllowed` about the certificate of the node. So the text of each
+  of these five names the certificate of the server and the certificate of the node,
+  with the source of each, and the fix of each side. The text of
+  `BadCertificateUseNotAllowed` names `basicConstraints = CA:FALSE` as the fix of the
+  certificate of the node. The connector has no `user`, so `BadIdentityTokenRejected`
+  names the mode and the policies that the server must offer with an anonymous user. A
+  server that offers only `Basic128Rsa15` or `Basic256` gives `BadIdentityTokenRejected`
+  and this text, since open62541 finds no endpoint with a policy of the client. With no
+  `certificate`, only `BadIdentityTokenRejected` gains a cause. The text is the variant
+  `Failure::Connect`, apart from the `Failure::Client` of a read, check, or browse
+  (`laptop.architect-2`, 2026-10-20T08:16:10Z, the texts:
+  https://github.com/synnaxlabs/foundation/pull/3545#issuecomment-6286592579;
+  2026-10-20T08:56:46Z, the texts of `BadCertificateUntrusted` and
+  `BadCertificateIssuerTimeInvalid`, and the five statuses:
+  https://github.com/synnaxlabs/foundation/pull/3545#issuecomment-6287298520). Lost:
   the cause in `client::Error`, which does not know the sources
   (https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6285525305); and
   a text for each side. The node cannot tell its own check of the certificate of the

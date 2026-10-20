@@ -1,12 +1,13 @@
 //! The test peers of secure channels.
 //!
 //! The fixtures in `secure/` are RSA 2048 certificates with SHA-256 and their PKCS #1
-//! keys, in DER from Python `cryptography` 41.0.7, each self-signed and valid from
-//! [`START`] to [`END`] other than [`LASTING`], [`EXPIRED_CA`], and
-//! [`EXPIRED_CA_CLIENT`], PEM copies of them, and one P-256 certificate and its key.
-//! They are test keys only. `nameless.der` is from `openssl
-//! req -x509`: a CA certificate with an empty subject and issuer and no subject
-//! alternative name, valid from 2026-10-20 to 2027-10-20.
+//! keys, in DER from Python `cryptography` 41.0.7, PEM copies of them, and one P-256
+//! certificate and its key. They are test keys only. Each is self-signed and valid
+//! from [`START`] to [`END`], other than these: [`LASTING`] and [`EXPIRED_CA`] have
+//! their own windows, [`CLIENT`] issued [`HUGE_SUBJECT`], [`EXPIRED_CA`] issued
+//! [`EXPIRED_CA_CLIENT`], and [`NAMELESS`] is from `openssl req -x509`: a CA
+//! certificate with an empty subject and issuer and no subject alternative name, valid
+//! from 2026-10-20 to 2027-10-20.
 
 use std::ffi::CStr;
 

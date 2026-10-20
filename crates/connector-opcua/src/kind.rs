@@ -398,9 +398,10 @@ async fn session<T>(
 
 /// The likely cause, which ends with its fix, of a connect over `secured`, or in the
 /// mode None when it is `None`, that failed with `status`. `None` when the status names
-/// no cause. A server sends the time, URI, and use statuses about the certificate of
-/// the node too, so their causes name both certificates. The connector has no `user`,
-/// so `BadIdentityTokenRejected` names the endpoints of an anonymous user.
+/// no cause. A server can send the trust, time, URI, and use statuses about the
+/// certificate of the node too, so their causes name both certificates. The connector
+/// has no `user`, so `BadIdentityTokenRejected` names the endpoints of an anonymous
+/// user.
 fn cause(status: Status, secured: Option<&Secured<'_>>) -> Option<String> {
     if status == Status::BAD_IDENTITY_TOKEN_REJECTED {
         return Some(unoffered(secured.map(|secured| secured.security.mode)));

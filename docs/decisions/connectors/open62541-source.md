@@ -378,14 +378,13 @@
   https://github.com/synnaxlabs/foundation/pull/3545#issuecomment-6286349076, item 2).
   Supersedes items 1 and 3 of
   https://github.com/synnaxlabs/foundation/pull/3037#issuecomment-6236391062. A crypto
-  library that a later PR links
-  keeps its own allocator. So the counting allocator of a test or benchmark binary
-  counts C too. The copy check compiles without `alloc.h`. A test reads the archive that
-  `build.rs` makes with it, and fails on each symbol outside the copy, `shim.c`, and
-  `server.c` that its closed list does not hold. The list holds no clock function and no
-  libc function that gives or takes a heap pointer. Lost: `UA_ENABLE_MALLOC_SINGLETON`
-  (a global), `--wrap=malloc` (`std::alloc` calls `malloc`, so it recurses), and 4 `-D`
-  flags (a define gives no prototype, and C99 needs one).
+  library that a later PR links keeps its own allocator. So the counting allocator of a
+  test or benchmark binary counts C too. The copy check compiles without `alloc.h`. A
+  test reads the archive that `build.rs` makes with it, and fails on each symbol outside
+  the copy, `shim.c`, and `server.c` that its closed list does not hold. The list holds
+  no clock function and no libc function that gives or takes a heap pointer. Lost:
+  `UA_ENABLE_MALLOC_SINGLETON` (a global), `--wrap=malloc` (`std::alloc` calls `malloc`,
+  so it recurses), and 4 `-D` flags (a define gives no prototype, and C99 needs one).
   Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6067206932,
   2026-10-08 19:13 UTC; the header:
@@ -1253,10 +1252,10 @@
   The test of the names that the production code calls takes these two, as item 1 of
   the ruling above states. Our change makes `getSubjectName` read the whole name, with
   no cut at 1024 bytes, and give `BadOutOfMemory` when memory runs out or the one-line
-  name passes 1 MiB, in place of
-  `Good` and a NULL subject. Then the text names only the source. Our change makes
-  `getThumbprint` write the thumbprint with no block, in place of a write through a
-  `malloc` that it did not check (`laptop.architect-2`, 2026-10-20 08:02 UTC,
+  name passes 1 MiB, in place of `Good` and a NULL subject. Then the text names only the
+  source. Our change makes `getThumbprint` write the thumbprint with no block, in place
+  of a write through a `malloc` that it did not check (`laptop.architect-2`, 2026-10-20
+  08:02 UTC,
   https://github.com/synnaxlabs/foundation/pull/3545#issuecomment-6286349076, item 2,
   which replaces the check of a NULL subject in the shim). An empty subject is legal
   X.509: the copy gives the sentinel, and the text gives the thumbprint with no subject
