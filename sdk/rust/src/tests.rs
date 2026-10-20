@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::fs::Permissions;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
@@ -9,6 +10,7 @@ use std::time::Duration;
 use tokio::runtime::Builder;
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Dispatch, Event, Metadata, Subscriber};
+use types::time::Span;
 
 use super::*;
 
@@ -383,6 +385,81 @@ fn answering_of_port_0_is_unroutable() {
 #[test]
 fn answering_of_no_address_is_unreachable_with_no_attempt() {
     none_answering(vec![], &transport::Error::Unroutable);
+}
+
+/// Runs a transport of `private_key` on a shard of `os`, on a free port of IPv4
+/// loopback, until the sender drops. Gives its address, the sender, and the shard.
+fn serve_key(private_key: PrivateKey) -> (SocketAddr, oneshot::Sender<()>, Handle) {
+    let net = os::net();
+    let port = transport::Port::bind(&net, (Ipv4Addr::LOCALHOST, 0).into()).unwrap();
+    let [transport::Address::Udp(at)] = port.addresses()[..] else {
+        panic!("a port of one UDP socket");
+    };
+    let mut parts = port.split(NonZeroUsize::MIN);
+    let (stop, stopped) = oneshot::channel();
+    let shard = shard(move |tasks| async move {
+        let config = transport::Config {
+            private_key,
+            message_bytes_max: NonZeroUsize::new(1 << 16).unwrap(),
+            window_bytes: 1 << 20,
+            streams_max: NonZeroU32::new(16).unwrap(),
+            idle: Span::from_nanos(30 * Span::SECOND.nanos()),
+            clock: os::clock(),
+            entropy: os::entropy(),
+            tasks,
+            pool: Rc::new(block::Pool::heap(POOL)),
+        };
+        let port = parts.pop().unwrap();
+        let transport = transport::Transport::new(config, port).unwrap();
+        drop(stopped.await);
+        drop(transport);
+    });
+    (at, stop, shard.unwrap())
+}
+
+#[test]
+fn a_node_of_another_key_gives_other_key_with_both_keys() {
+    let (at, stop, shard) = serve_key(PrivateKey([9; 32]));
+    let proved = PrivateKey([9; 32]).public();
+    let pinned = PrivateKey([7; 32]).public();
+    let node = Node {
+        addresses: vec![at],
+        public_key: pinned,
+    };
+    let subject = Subject {
+        name: "plant.operator".parse().unwrap(),
+        private_key: PrivateKey([8; 32]),
+    };
+    let error = Client::connect(&node, subject).expect_err("the key is not pinned");
+    assert_eq!(error, Error::OtherKey { pinned, proved });
+    assert_eq!(
+        error.to_string(),
+        format!("the node proves public key {proved}, not the pinned {pinned}")
+    );
+    drop(stop);
+    shard.join().unwrap();
+}
+
+/// A pinned address where no node answers times out once: no second dial follows a
+/// dial that no key refused.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the time of the dials is the claim"
+)]
+fn a_pinned_address_with_no_node_gives_the_error_of_the_one_dial() {
+    let silent = transport::Port::bind(&os::net(), (Ipv4Addr::LOCALHOST, 0).into());
+    let silent = silent.unwrap();
+    let [transport::Address::Udp(at)] = silent.addresses()[..] else {
+        panic!("a port of one UDP socket");
+    };
+    let started = std::time::Instant::now();
+    unreachable(vec![at], &transport::Error::TimedOut);
+    assert!(
+        started.elapsed() < Duration::from_secs(45),
+        "{:?}",
+        started.elapsed()
+    );
 }
 
 #[test]
