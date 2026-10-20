@@ -55,6 +55,13 @@ jq -s '.[0] + .[1]' "$tmp/fill.issue.json" - > "$tmp/issue.json" <<'JSON'
   "body": "It no longer Waits on #40.", "labels": [{"name": "blocked"}]},
  {"state": "OPEN", "number": 9, "title": "two lines",
   "body": "Waits on #40.\nWaits on #41.", "labels": [{"name": "blocked"}]},
+ {"state": "OPEN", "number": 11, "title": "and the person",
+  "body": "Waits on #40, and the person.",
+  "labels": [{"name": "blocked"}, {"name": "owner:c"}]},
+ {"state": "OPEN", "number": 12, "title": "the person", "body": "Waits on the person.",
+  "labels": [{"name": "blocked"}]},
+ {"state": "OPEN", "number": 13, "title": "the person second",
+  "body": "Waits on #40.\nWaits on the person.", "labels": [{"name": "blocked"}]},
  {"state": "CLOSED", "number": 40, "title": "closed", "body": "", "labels": []},
  {"state": "OPEN", "number": 41, "title": "open", "body": "", "labels": []},
  {"state": "CLOSED", "number": 42, "title": "closed", "body": "", "labels": []}
@@ -73,10 +80,13 @@ check() {
     "$want_code" "$want_out" "$want_err" "$code" "$out" "$err"
   failed=1
 }
-check '1 - a\b
-4 - closed pr
-8 b crlf
-1000 - after 8' 0 "" all
+check '1 - ended
+4 - ended
+6 - no line
+7 - no line
+8 b ended
+10 - no line
+1000 - ended' 0 "" all
 touch "$tmp/fail.issue"
 check "" 1 "HTTP 502: Bad Gateway" "issue call fails"
 rm "$tmp/fail.issue"

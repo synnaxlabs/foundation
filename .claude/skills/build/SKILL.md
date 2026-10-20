@@ -19,10 +19,9 @@ when its PR merges, `mcp__factory__next` clears it and starts `/build` again.
    by the exact path that its task notification gives, other than after a crash or a
    restart (`docs/coordination.md`, "Worktrees"). Never loop over `.claude/worktrees` or
    `git worktree list`: the worktrees of other sessions are there too.
-2. Run the waits script. It prints each `blocked` issue whose line `Waits on #<n>.`
-   names only closed issues and PRs. Read each, and when nothing else that it waits on
-   is left, remove `blocked`, and send its link to its owner, or to `laptop.coordinator`
-   for `-`. For your own, do what Rules say for that link. Its exits mean what they
+2. Run the waits script. It prints each `blocked` issue with its owner and its state.
+   For each with your name, `ended` is a wait that has ended (Rules). Give one with
+   `no line` its line (Rules), from what the issue states. Its exits mean what they
    mean in step 4. Then an open issue labeled `owner:$FACTORY_NAME` that is not
    `blocked` comes first, one with no open PR before one with an open PR: resume it
    from its last state comment. Run "Wait once" in the background for the PR of each
@@ -34,9 +33,8 @@ when its PR merges, `mcp__factory__next` clears it and starts `/build` again.
    ```
 3. Give back each issue labeled `owner:$FACTORY_NAME` that you do not resume and that
    no open PR closes or has in its branch: comment its state, and remove your `owner:`
-   label. Remove `blocked` from one when each issue that it waits on is closed and each
-   question on it has an answer. Add `ready` to each that is not `blocked`. You then
-   hold at most one owned issue with no open PR.
+   label. Add `ready` to each that is not `blocked`. You then hold at most one owned
+   issue with no open PR.
 4. With none to resume, take the first issue that the free script prints (on the night
    lane, `sh -c "$s" free.sh night`): the oldest `ready` issue whose crates no issue
    with an `owner:` label holds. An owned issue holds its crates while an open PR
@@ -168,12 +166,14 @@ take the next issue meanwhile.
 - Ask the person in a comment on the issue or PR, then send `laptop.coordinator` the
   link to that comment at once (`docs/coordination.md`, "Messages"). A comment alone
   reaches no one. When no part of the issue is left to build, add `blocked` and take
-  other work (Take an issue). Name each issue and PR that it waits on in one line of its
-  body, `Waits on #<n>, #<m>.`, so that the waits script finds it (step 2). When the
-  answer comes and nothing else that it waits on is left, or a link from step 2 comes,
-  remove `blocked` if it is there. If no open PR closes the issue or has its number in
-  its branch, also remove your `owner:` label if it is there, and add `ready`. If you
-  build no other issue, take one (Take an issue).
+  other work (Take an issue). A `blocked` issue names each wait in one line of its body,
+  `Waits on #<n>, #<m>.`, for issues and PRs, with `the person` for a question
+  (`Waits on #12 and the person.`). When the answer comes, take `the person` out of the
+  line. A wait has ended when the line names no open issue or PR and not `the person`,
+  as `ended` of the waits script says (step 2). Then remove `blocked` if it is there.
+  If no open PR closes the issue or has its number in its branch, also remove your
+  `owner:` label if it is there, and add `ready`. If you build no other issue, take one
+  (Take an issue).
 - A key choice (`CLAUDE.md`, "The person decides the design"): send it to
   `laptop.monitor` when you make it, before work builds on it, then go on. Never add
   `blocked` for it.

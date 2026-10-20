@@ -26,8 +26,10 @@ Never read all of `docs/decisions/`: read only the records that an issue names.
   states its goal, crates, tests that must pass, and decisions section; the scenario
   needs it; and nothing blocks it. Else reply on the issue with the reason. Issues off
   the path wait without a milestone. An issue labeled `blocked` with no `owner:` label
-  is on the backlog: when each issue that it waits on is closed and each question on it
-  has an answer, remove `blocked` as you admit it.
+  is on the backlog. At each wake, run the waits script of `/build` (step 2). Give each
+  issue that it prints with `-` and `no line` its line (`/build`, Rules), from what the
+  issue states. Remove `blocked` from one with `-` whose wait has ended (`/build`,
+  Rules) only as you admit it.
 - **Refill.** On every wake, count the `ready` issues with no `owner:` label. While
   there are fewer than builders, take the next open issues on the path from the
   backlog, not only new ones, and admit each that passes. An idle builder is a failure
