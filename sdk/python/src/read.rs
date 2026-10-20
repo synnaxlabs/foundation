@@ -54,6 +54,8 @@ pub(crate) struct Reader {
     firsts: Vec<Option<Scalar>>,
     /// The name of each place, which each frame shares.
     names: Vec<Py<PyString>>,
+    /// The class `uuid.UUID`.
+    uuid: Py<PyAny>,
     loss: Loss,
     #[cfg(feature = "sim")]
     part: crate::sim::Part,
@@ -107,6 +109,7 @@ impl Reader {
             places,
             firsts,
             names,
+            uuid: py.import("uuid")?.getattr("UUID")?.unbind(),
             loss,
             #[cfg(feature = "sim")]
             part: crate::sim::Part::default(),
@@ -176,12 +179,16 @@ impl Reader {
     fn frame(&self, py: Python<'_>, copied: Copied) -> PyResult<Py<Frame>> {
         let series = PyDict::new(py);
         for (place, samples) in copied.series {
-            series.set_item(self.names[place].bind(py), samples.array(py)?)?;
+            let array = samples.array(py, self.uuid.bind(py))?;
+            series.set_item(self.names[place].bind(py), array)?;
         }
         let lost: Vec<_> = copied
             .lost
             .into_iter()
-            .map(|(place, seqs)| (self.names[place].clone_ref(py), seqs))
+            .map(|(place, seqs)| {
+                let seqs = u128::from(seqs.start)..u128::from(seqs.end);
+                (self.names[place].clone_ref(py), seqs)
+            })
             .collect();
         let frame = Py::new(
             py,
@@ -200,9 +207,9 @@ impl Reader {
         if self.loss == Loss::Raise {
             self.close(py);
         }
-        let lost = lost.iter().map(|(name, seqs)| {
-            (name.bind(py), u128::from(seqs.start)..u128::from(seqs.end))
-        });
+        let lost = lost
+            .iter()
+            .map(|(name, seqs)| (name.bind(py), seqs.clone()));
         self.loss
             .act(py, "the reader lost seqs", lost, frame.bind(py).as_any())?;
         Ok(frame)
@@ -320,7 +327,7 @@ pub(crate) struct Frame {
     /// The series of each name.
     series: Py<PyDict>,
     /// Each name with lost seqs, and those seqs.
-    lost: Vec<(Py<PyString>, Range<u64>)>,
+    lost: Vec<(Py<PyString>, Range<u128>)>,
 }
 
 #[pymethods]
@@ -337,12 +344,11 @@ impl Frame {
     /// latest reader.
     #[getter]
     fn lost<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let lost = PyDict::new(py);
-        for (name, seqs) in &self.lost {
-            let seqs = u128::from(seqs.start)..u128::from(seqs.end);
-            lost.set_item(name, crate::range(py, seqs)?)?;
-        }
-        Ok(lost)
+        let lost = self
+            .lost
+            .iter()
+            .map(|(name, seqs)| (name.bind(py), seqs.clone()));
+        crate::seqs(py, lost)
     }
 
     fn __getitem__<'py>(
@@ -413,8 +419,8 @@ enum Samples {
     F64(Vec<f64>),
     Stamp(Vec<Datetime<Nanoseconds>>),
     Span(Vec<Timedelta<Nanoseconds>>),
-    /// The `int` of each `uuid.UUID`.
-    Uuid(Vec<u128>),
+    /// The bytes of each `uuid.UUID`, as `uuid_sample` gives them.
+    Uuid(Vec<[u8; 16]>),
 }
 
 impl Samples {
@@ -438,13 +444,17 @@ impl Samples {
             Scalar::Span => Self::Span(decoded(bytes, |raw| {
                 Timedelta::from(i64::from_le_bytes(raw))
             })),
-            Scalar::Uuid => Self::Uuid(decoded(bytes, u128::from_be_bytes)),
+            Scalar::Uuid => Self::Uuid(decoded(bytes, |raw: [u8; 16]| raw)),
         }
     }
 
     /// The array of the samples, which takes them with no copy, or makes a `uuid.UUID`
-    /// of each `uuid`.
-    fn array(self, py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    /// of each `uuid` with `uuid`, the class `uuid.UUID`.
+    fn array<'py>(
+        self,
+        py: Python<'py>,
+        uuid: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         Ok(match self {
             Self::Bool(samples) => PyArray1::from_vec(py, samples).into_any(),
             Self::I8(samples) => PyArray1::from_vec(py, samples).into_any(),
@@ -460,16 +470,7 @@ impl Samples {
             Self::Stamp(samples) => PyArray1::from_vec(py, samples).into_any(),
             Self::Span(samples) => PyArray1::from_vec(py, samples).into_any(),
             Self::Uuid(samples) => {
-                let class = py.import("uuid")?.getattr("UUID")?;
-                let int = PyDict::new(py);
-                let keys = samples
-                    .into_iter()
-                    .map(|sample| {
-                        int.set_item("int", sample)?;
-                        Ok(class.call((), Some(&int))?.unbind())
-                    })
-                    .collect::<PyResult<Vec<_>>>()?;
-                PyArray1::from_vec(py, keys).into_any()
+                PyArray1::from_vec(py, crate::uuids(uuid, samples)?).into_any()
             }
         })
     }

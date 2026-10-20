@@ -531,12 +531,8 @@ impl Loss {
                 .call_method1("warning", (text,))?;
             return Ok(());
         }
-        let seqs = PyDict::new(py);
-        for (name, lost) in lost {
-            seqs.set_item(name, range(py, lost)?)?;
-        }
         let raised = DataLost::new_err(text);
-        raised.value(py).setattr("seqs", seqs)?;
+        raised.value(py).setattr("seqs", seqs(py, lost)?)?;
         raised.value(py).setattr("frame", frame)?;
         Err(raised)
     }
@@ -554,9 +550,45 @@ impl Loss {
     }
 }
 
-/// The Python `range` of `seqs`.
-fn range(py: Python<'_>, seqs: Range<u128>) -> PyResult<Bound<'_, PyAny>> {
-    py.get_type::<PyRange>().call1((seqs.start, seqs.end))
+/// A `dict` from each name of `lost` to the Python `range` of its seqs.
+fn seqs<'py, N>(
+    py: Python<'py>,
+    lost: impl Iterator<Item = (N, Range<u128>)>,
+) -> PyResult<Bound<'py, PyDict>>
+where
+    N: IntoPyObject<'py>,
+{
+    let seqs = PyDict::new(py);
+    for (name, lost) in lost {
+        let range = py.get_type::<PyRange>().call1((lost.start, lost.end))?;
+        seqs.set_item(name, range)?;
+    }
+    Ok(seqs)
+}
+
+/// The bytes of `object` as a sample of `uuid`, the `int` of a `uuid.UUID` in
+/// big-endian order, or `None` when `object` is not a `uuid.UUID`.
+fn uuid_sample(object: &Bound<'_, PyAny>) -> PyResult<Option<[u8; 16]>> {
+    let class = object.py().import("uuid")?.getattr("UUID")?;
+    if !object.is_instance(&class)? {
+        return Ok(None);
+    }
+    Ok(Some(
+        object.getattr("int")?.extract::<u128>()?.to_be_bytes(),
+    ))
+}
+
+/// The `uuid.UUID` of each of `samples`, the bytes that [`uuid_sample`] gives, made by
+/// `class`, the class `uuid.UUID`.
+fn uuids(class: &Bound<'_, PyAny>, samples: Vec<[u8; 16]>) -> PyResult<Vec<Py<PyAny>>> {
+    let int = PyDict::new(class.py());
+    samples
+        .into_iter()
+        .map(|sample| {
+            int.set_item("int", u128::from_be_bytes(sample))?;
+            Ok(class.call((), Some(&int))?.unbind())
+        })
+        .collect()
 }
 
 /// The name and the type of each of `places`, in order, the type as the spec writes it

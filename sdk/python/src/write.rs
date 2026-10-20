@@ -519,13 +519,10 @@ fn value(place: &Place, object: &Bound<'_, PyAny>) -> PyResult<Value> {
                 Value::F32(narrow)
             }
         }
-        Scalar::Uuid => {
-            let uuid = object.py().import("uuid")?.getattr("UUID")?;
-            if !object.is_instance(&uuid)? {
-                return Err(wrong(place, object)?);
-            }
-            Value::Uuid(object.getattr("int")?.extract::<u128>()?.to_be_bytes())
-        }
+        Scalar::Uuid => match crate::uuid_sample(object)? {
+            Some(sample) => Value::Uuid(sample),
+            None => return Err(wrong(place, object)?),
+        },
         Scalar::Bool => unreachable!("a bool returns above"),
     })
 }
