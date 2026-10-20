@@ -2,6 +2,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::future::poll_fn;
+use std::ops::Range;
 use std::pin::pin;
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker, ready};
@@ -209,13 +210,9 @@ async fn attempt(
         })
         .await?;
     }
-    let mut run = 0..channels;
-    while !run.is_empty() {
-        let count = run.len().min(most / places::LEN);
-        message(state, &mut to, count * places::LEN, |out| {
-            places::encode(run.by_ref(), out);
-        })
-        .await?;
+    for run in runs(channels, most) {
+        let len = run.len() * places::LEN;
+        message(state, &mut to, len, |out| places::encode(run, out)).await?;
     }
     let mut opening = Opening::default();
     loop {
@@ -230,6 +227,17 @@ async fn attempt(
             }
         }
     }
+}
+
+/// The places `0..channels` in runs whose places fit `max` bytes.
+fn runs(channels: u32, max: usize) -> impl Iterator<Item = Range<u32>> {
+    let most = u32::try_from(max / places::LEN).unwrap_or(u32::MAX);
+    let mut start = 0_u32;
+    std::iter::from_fn(move || {
+        let run = start..channels.min(start.saturating_add(most));
+        start = run.end;
+        (!run.is_empty()).then_some(run)
+    })
 }
 
 /// Sends a message of `len` bytes that `fill` writes, in a block of the home's pool.
@@ -510,4 +518,23 @@ async fn reply(
 ) -> Result<(), Error> {
     let block = alloc(state, reply.encoded_len())?;
     send(sender, block, reply).await
+}
+
+// A run of more places than a message holds needs over 12000 channels in one open, so
+// this test calls the private `runs`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runs_cut_the_places_at_the_bytes_of_a_message() {
+        let runs = |channels, max| {
+            let ends = |run: Range<u32>| (run.start, run.end);
+            runs(channels, max).map(ends).collect::<Vec<_>>()
+        };
+        assert_eq!(runs(400, 1472), [(0, 368), (368, 400)]);
+        assert_eq!(runs(368, 1472), [(0, 368)]);
+        assert_eq!(runs(369, 1475), [(0, 368), (368, 369)]);
+        assert_eq!(runs(0, 1472), []);
+    }
 }
