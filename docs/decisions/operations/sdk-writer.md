@@ -66,11 +66,11 @@
   (https://github.com/synnaxlabs/foundation/pull/3275#issuecomment-6256055880, item
   2).
   The node stamps each group of a frame with no index value at mesh time now, or 1 ns
-  after the last stamp that it gave that group. So after a stamp of the caller ahead
-  of now, a frame that the node stamps can get `Refusal::Order` (#3282). Each writer
-  holds a stream of the session, and the node bounds the streams of a session (64 by
-  default, one of them the hello): past that bound, an open waits until another stream
-  of the session ends, such as at the close or drop of a writer.
+  after the last stamp that it gave that group of the writer. So after a stamp of the
+  caller ahead of now, a frame that the node stamps can get `Refusal::Order` (#3282).
+  Each writer holds a stream of the session, and the node bounds the streams of a
+  session (64 by default, one of them the hello): past that bound, an open waits until
+  another stream of the session ends, such as at the close or drop of a writer.
   `crates/node/benches/sdk/` gives the p50 and p99 of each round of
   `sdk::Writer::write` and of `program::Writer` with 2 values, of one index and (for
   `sdk`) of two, and of each leg between the caller and the writer task, with the task
@@ -116,9 +116,10 @@
   names the places of the caller, with nothing sent, and the writer goes on. When a
   group of the frame got `Outcome::Ended`, the call gives `Error::Partial`: `written`
   holds the channels of each group that got `Taken`, `unwritten` the rest, and
-  `outcomes` each outcome of the frame. The writer goes on. `close` gives no error for a
-  group that ended before it, and `Stream(Unstored)` names the place of the index of
-  each group. Decided by `laptop.architect-2` on 2026-10-19T12:57:33Z
+  `outcomes` each outcome of the frame. The writer goes on. The end of a group alone
+  gives no error at `close`. `close` gives `Stream(Unstored)` for each group that
+  ended with a frame that the node took and that may not be on disk, with the place of
+  the index of each such group. Decided by `laptop.architect-2` on 2026-10-19T12:57:33Z
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267752091) and
   on 2026-10-20T10:51:53Z
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6289228997): no

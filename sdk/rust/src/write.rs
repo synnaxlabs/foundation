@@ -156,9 +156,9 @@ impl Writer {
     /// `Lost`, or `Refused`. The slice borrows the writer, so the next call ends it. A
     /// value at the index of a group is its stamp. The values give the stamp of each
     /// present group, or of none: then the node stamps each group, at mesh time now, or
-    /// 1 ns after the last stamp that it gave that group when now is not after it. So
-    /// after a stamp of the caller ahead of now, a frame that the node stamps can get
-    /// [`Refusal::Order`].
+    /// 1 ns after the last stamp that it gave that group of the writer when now is not
+    /// after it. So after a stamp of the caller ahead of now, a frame that the node
+    /// stamps can get [`Refusal::Order`].
     ///
     /// # Errors
     ///
@@ -246,16 +246,16 @@ impl Writer {
     }
 
     /// Finishes the stream, and blocks until each frame that the node took is on disk,
-    /// or its group ended, and the node finished the stream. Control ends then. A group
-    /// that ended before the close gives no error at the close.
+    /// or its group ended, and the node finished the stream. Control ends then. The end
+    /// of a group alone gives no error at the close.
     ///
     /// # Errors
     ///
     /// [`Error::Closed`], [`Error::Panicked`], [`Error::Session`], and
     /// [`Error::Stream`] as [`Writer::write`] gives them. [`Error::Stream`] with
-    /// [`program::Error::Unstored`] when the write of a group ended with a frame that
-    /// the node took and that may not be on disk, with the place of the index of each
-    /// such group.
+    /// [`program::Error::Unstored`] for each group that ended with a frame that the
+    /// node took and that may not be on disk, with the place of the index of each such
+    /// group.
     pub fn close(self) -> Result<(), Error> {
         if let Some(error) = self.lost {
             return Err(error);
