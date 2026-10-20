@@ -25,7 +25,7 @@ use transport::Address;
 use types::ed25519::PrivateKey;
 use types::name::Prefix;
 use types::node::SealKey;
-use types::time::Span;
+use types::time::{Monotonic, Span};
 
 /// The port each node binds, on its host's first address.
 const PORT: u16 = 7000;
@@ -49,6 +49,8 @@ pub(crate) struct Lab {
     stores: BTreeMap<String, Influx>,
     /// Each [`Lab::write`], by channel.
     writes: BTreeMap<String, Write>,
+    /// The clocks of each host.
+    truth: Truth,
     /// The simulation ran, or holds a task of a test, so a [`Lab::start`] would run
     /// it.
     ran: bool,
@@ -85,11 +87,10 @@ struct Influx {
     measurements: BTreeMap<String, String>,
 }
 
-/// A [`Lab::write`]: the name of the index of its channel, its rate, and how far its
-/// task got.
+/// A [`Lab::write`]: its node, its rate, and how far its task got.
 #[derive(Debug)]
 struct Write {
-    index: String,
+    node: Node,
     rate: u64,
     progress: Arc<Mutex<Progress>>,
 }
@@ -104,14 +105,29 @@ struct Progress {
     zero: i64,
 }
 
-/// The samples written to one channel on the live path. Sample `k` has the seq
-/// `seqs.start + k` and the value `k as f64`.
-#[derive(Debug, Clone)]
-pub(crate) struct Written {
-    /// The seqs that the home gave the samples.
-    pub seqs: Range<u64>,
-    /// The name of the channel's index, the `index` tag of its gap lines.
-    pub index: String,
+/// The clocks of the hosts of a lab. Each host's clock and wall read those of the
+/// config plus the true time since the first host was added, as the lab steps no
+/// wall.
+#[derive(Debug, Clone, Copy)]
+struct Truth(sim::node::Config);
+
+impl Truth {
+    /// The config of a new host, where `now` reads the clock of a host added before
+    /// it, if there is one.
+    fn host(self, now: Option<Monotonic>) -> sim::node::Config {
+        let since = now.map_or(Span::ZERO, |now| now - self.0.monotonic);
+        sim::node::Config {
+            monotonic: self.0.monotonic + since,
+            wall: self.0.wall + since,
+            ..self.0
+        }
+    }
+
+    /// The true time when the clock of a host reads `now`, in ns since the UNIX
+    /// epoch.
+    fn at(self, now: Monotonic) -> i64 {
+        (self.0.wall + (now - self.0.monotonic)).nanos()
+    }
 }
 
 #[derive(Debug)]
@@ -199,6 +215,7 @@ impl Lab {
             members: Vec::new(),
             stores: BTreeMap::new(),
             writes: BTreeMap::new(),
+            truth: Truth(sim::node::Config::default()),
             ran: false,
             readers: Vec::new(),
             sent: BTreeMap::new(),
@@ -221,17 +238,8 @@ impl Lab {
         );
         let byte = u8::try_from(self.members.len() + 1)
             .expect("lab failure: at most 255 nodes");
-        let config = sim::node::Config::default();
-        // The first host starts at true time zero, so each clock and each wall reads
-        // its default plus true time.
-        let since = self.members.first().map_or(Span::ZERO, |first| {
-            first.host.clock().now() - config.monotonic
-        });
-        let host = self.sim.node(sim::node::Config {
-            monotonic: config.monotonic + since,
-            wall: config.wall + since,
-            ..config
-        });
+        let now = self.members.first().map(|first| first.host.clock().now());
+        let host = self.sim.node(self.truth.host(now));
         let (key, private_key) = (
             types::node::Key::from_u128(u128::from(byte)),
             PrivateKey([byte; 32]),
@@ -490,7 +498,7 @@ impl Lab {
     ///
     /// # Panics
     ///
-    /// When `rate` is 0 or over 10^9. As the simulation runs, when the writer does not
+    /// When `rate` is 0 or over 10^7. As the simulation runs, when the writer does not
     /// open or the home does not apply a frame.
     fn spawn_write(
         &mut self,
@@ -503,23 +511,21 @@ impl Lab {
         use hub::home::Outcome;
         use types::frame::{Label, Path as Stream};
         assert!(
-            (1..=1_000_000_000).contains(&rate),
-            "lab failure: a rate of {rate} samples per second is not in 1 to 10^9"
+            (1..=10_000_000).contains(&rate),
+            "lab failure: a rate of {rate} samples per second is not in 1 to 10^7"
         );
         self.boot();
         let progress = Arc::<Mutex<Progress>>::default();
         let out = Arc::clone(&progress);
         let member = &self.members[node.0];
-        let clock = member.host.clock();
+        let (clock, truth) = (member.host.clock(), self.truth);
         let channel = channel.to_string();
-        let config = session("admin", &channel);
+        let config = writer_config("admin", &channel);
         member.node.as_ref().unwrap().spawn(move |hub| async move {
             let opened = hub.writer(config).await;
             let mut writer = opened.expect("lab failure: the writer opens");
             let open = clock.now();
-            // Each host's clock reads the default plus true time (`Lab::start`).
-            let base = sim::node::Config::default();
-            out.lock().unwrap().zero = (base.wall + (open - base.monotonic)).nanos();
+            out.lock().unwrap().zero = truth.at(open);
             let (mut next, mut last) = (0, i64::MIN);
             loop {
                 let since = clock.now() - open;
@@ -715,7 +721,7 @@ impl Lab {
         running.operate(move |ops| async move {
             *slot.lock().unwrap() = Some(task(ops).await);
         });
-        let done = self.take(&out, Duration::from_millis(100), 600);
+        let done = self.until_set(&out, Duration::from_millis(100), 600);
         done.unwrap_or_else(|| {
             panic!(
                 "lab failure: an operation on {} took 60 s",
@@ -726,7 +732,7 @@ impl Lab {
 
     /// Runs the simulation `step` at a time until `out` holds a value, at most `steps`
     /// times, and takes the value.
-    fn take<T>(
+    fn until_set<T>(
         &mut self,
         out: &Mutex<Option<T>>,
         step: Duration,
@@ -788,19 +794,36 @@ impl Lab {
     ///
     /// # Panics
     ///
-    /// When `rate` is 0 or over 10^9, `channel` is not a data channel of the spec at
-    /// `node`, or `write` wrote to `channel` before. As the simulation runs, when the
-    /// home does not apply a frame.
+    /// When `rate` is 0 or over 10^7, or `write` wrote to `channel` before. As the
+    /// simulation runs, when the writer does not open, as when `channel` is not a data
+    /// channel of the spec at `node`, or the home does not apply a frame.
     pub(crate) fn write(&mut self, node: Node, channel: &str, rate: u64, count: u64) {
-        use spec::channel::Kind;
-        use spec::definition::Definition;
         assert!(
             !self.writes.contains_key(channel),
             "lab failure: a second write to {channel}"
         );
+        #[expect(clippy::cast_precision_loss, reason = "exact below 2^53")]
+        let progress = self.spawn_write(node, channel, rate, count, |k| k as f64);
+        let write = Write {
+            node,
+            rate,
+            progress,
+        };
+        self.writes.insert(channel.to_string(), write);
+    }
+
+    /// The name of the index of the data channel `channel` in the spec at `node`. It
+    /// runs the simulation until the spec read ends.
+    ///
+    /// # Panics
+    ///
+    /// When `channel` is not a data channel of the spec at `node`.
+    fn index(&mut self, node: Node, channel: &str) -> String {
+        use spec::channel::Kind;
+        use spec::definition::Definition;
         let name: types::name::Name =
             channel.parse().expect("lab failure: a channel name");
-        let index = self.operate(node, |ops| async move {
+        self.operate(node, |ops| async move {
             let spec = ops.mesh().spec().await.expect("a spec");
             let Some(Definition::Channel(channel)) = spec.definitions.get(&name) else {
                 panic!("lab failure: no channel {name}");
@@ -816,15 +839,7 @@ impl Lab {
                 .expect("lab failure: the index is a channel")
                 .0
                 .to_string()
-        });
-        #[expect(clippy::cast_precision_loss, reason = "exact below 2^53")]
-        let progress = self.spawn_write(node, channel, rate, count, |k| k as f64);
-        let write = Write {
-            index,
-            rate,
-            progress,
-        };
-        self.writes.insert(channel.to_string(), write);
+        })
     }
 
     /// The seqs that the home gave the samples of the [`Lab::write`] to `channel`, so
@@ -835,23 +850,10 @@ impl Lab {
     /// When no [`Lab::write`] wrote to `channel`, or the home applied none of its
     /// samples.
     pub(crate) fn written(&self, channel: &str) -> Range<u64> {
-        self.wrote(channel).seqs
-    }
-
-    /// The samples of the [`Lab::write`] to `channel` that the home applied.
-    ///
-    /// # Panics
-    ///
-    /// As [`Lab::written`].
-    fn wrote(&self, channel: &str) -> Written {
-        let write = self.write_to(channel);
-        let seqs = write.progress.lock().unwrap().seqs.clone();
-        Written {
-            seqs: seqs.unwrap_or_else(|| {
-                panic!("lab failure: the home applied no sample of {channel}")
-            }),
-            index: write.index.clone(),
-        }
+        let seqs = self.write_to(channel).progress.lock().unwrap().seqs.clone();
+        seqs.unwrap_or_else(|| {
+            panic!("lab failure: the home applied no sample of {channel}")
+        })
     }
 
     /// The [`Lab::write`] to `channel`.
@@ -900,7 +902,7 @@ impl Lab {
         use hub::home::Outcome;
         use types::frame::{Label, Path as Stream};
         self.boot();
-        let config = session(subject, channel);
+        let config = writer_config(subject, channel);
         let out = Arc::new(Mutex::new(None));
         let slot = Arc::clone(&out);
         let running = self.members[node.0].node.as_ref().unwrap();
@@ -919,7 +921,7 @@ impl Lab {
             };
             *slot.lock().unwrap() = Some(written.await);
         });
-        let done = self.take(&out, Duration::from_millis(1), 10_000);
+        let done = self.until_set(&out, Duration::from_millis(1), 10_000);
         done.unwrap_or_else(|| {
             panic!("lab failure: the command on {channel} took 10 s")
         })
@@ -969,23 +971,34 @@ impl Lab {
         todo!("waits on #3634")
     }
 
-    /// What the Influx store at `address` holds for `channel`, folded by
-    /// [`influx::stored`].
+    /// What the Influx store at `address` holds for the samples of the [`Lab::write`]
+    /// to `channel`, folded by [`influx::stored`]. It runs the simulation until a read
+    /// of the spec at the node of the write ends.
     ///
     /// # Panics
     ///
-    /// When no store is at `address`, no sample was written to the channel, the
-    /// store's connector writes no measurement for it, or [`influx::stored`] panics.
-    pub(crate) fn stored(&self, address: &str, channel: &str) -> Received {
-        let influx = self
-            .stores
-            .get(address)
-            .unwrap_or_else(|| panic!("lab failure: no Influx store at {address}"));
-        let written = self.wrote(channel);
-        let measurement = influx.measurements.get(channel).unwrap_or_else(|| {
+    /// When no store is at `address`, as [`Lab::written`], when the store's connector
+    /// writes no measurement for `channel`, or when [`influx::stored`] panics.
+    pub(crate) fn stored(&mut self, address: &str, channel: &str) -> Received {
+        assert!(
+            self.stores.contains_key(address),
+            "lab failure: no Influx store at {address}"
+        );
+        let seqs = self.written(channel);
+        let measurement = self.stores[address].measurements.get(channel);
+        let measurement = measurement.unwrap_or_else(|| {
             panic!("lab failure: the connector at {address} writes no {channel}")
         });
-        influx::stored(&influx.store, &influx.connector, measurement, &written)
+        let measurement = measurement.clone();
+        let index = self.index(self.write_to(channel).node, channel);
+        let influx = &self.stores[address];
+        influx::stored(
+            &influx.store,
+            &influx.connector,
+            &measurement,
+            &seqs,
+            &index,
+        )
     }
 
     /// Cuts every link between `a` and `b`. Datagrams in flight still arrive.
@@ -1108,7 +1121,7 @@ const BATCH: u64 = 1024;
 /// # Panics
 ///
 /// When `subject` or `channel` is not a name.
-fn session(subject: &str, channel: &str) -> hub::writer::Config {
+fn writer_config(subject: &str, channel: &str) -> hub::writer::Config {
     hub::writer::Config {
         subject: subject.parse().expect("lab failure: a subject name"),
         authority: types::authority::Authority(1),
@@ -1432,10 +1445,13 @@ mod stored {
 
     fn lab() -> Lab {
         let mut lab = Lab::new(1);
+        let a = lab.start("a");
+        lab.mesh(&[a]);
+        lab.channel(a, "edge.value");
         let mut store = Store::default();
         store
             .write(
-                b"foundation_gaps,connector=influx,index=edge.time,path=live \
+                b"foundation_gaps,connector=influx,index=edge.value_time,path=live \
                   count=2i 1020\nvalue value=2 1020\n",
             )
             .unwrap();
@@ -1451,7 +1467,7 @@ mod stored {
                 zero: 0,
             };
             let write = Write {
-                index: "edge.time".into(),
+                node: a,
                 rate: 1,
                 progress: Arc::new(Mutex::new(progress)),
             };
@@ -1753,21 +1769,29 @@ fn a_write_continues_the_seqs_of_a_send() {
 }
 
 #[test]
-#[should_panic(
-    expected = "1 of 2 voters hold the chunks of the spec change, not a majority"
-)]
 fn a_spec_change_in_a_cut_mesh_does_not_commit() {
     let (mut lab, a, b) = pair();
     lab.cut(a, b);
-    lab.apply(
-        a,
-        r#"channel "x.time" { kind = "index" }
+    let hcl = r#"channel "x.time" { kind = "index" }
 placement "x" {
   select = "x.*"
   home   = "a"
 }
-"#,
+"#;
+    let files = vec![(PathBuf::from("lab.hcl"), hcl.to_owned())];
+    let (applied, held) = lab.operate(a, |ops| async move {
+        let (plan, _) = ops.plan(files).await.expect("a plan");
+        let applied = ops.apply(Path::new("lab.plan"), &plan).await;
+        let spec = ops.mesh().spec().await.expect("a spec");
+        let name: types::name::Name = "x.time".parse().unwrap();
+        (applied, spec.definitions.contains_key(&name))
+    });
+    assert_eq!(
+        applied.unwrap_err()["errors"][0]["message"],
+        "1 of 2 voters hold the chunks of the spec change, not a majority; b: a step \
+         of its put passed the deadline of 10s"
     );
+    assert!(!held, "the spec at a holds x.time");
 }
 
 #[test]
@@ -1780,11 +1804,29 @@ fn a_second_write_panics() {
 
 #[test]
 #[should_panic(
-    expected = "lab failure: a rate of 0 samples per second is not in 1 to 10^9"
+    expected = "lab failure: a rate of 0 samples per second is not in 1 to 10^7"
 )]
 fn a_write_of_rate_zero_panics() {
     let (mut lab, a, _) = pair();
     lab.write(a, "a.value", 0, 1);
+}
+
+#[test]
+#[should_panic(
+    expected = "lab failure: a rate of 10000001 samples per second is not in 1 to 10^7"
+)]
+fn a_write_over_the_top_rate_panics() {
+    let (mut lab, a, _) = pair();
+    lab.write(a, "a.value", 10_000_001, 1);
+}
+
+#[test]
+fn a_write_at_the_top_rate_applies_each_sample() {
+    let (mut lab, a, _) = pair();
+    lab.write(a, "a.value", 10_000_000, 1_000_000);
+    lab.run(Duration::from_secs(1));
+    assert_eq!(lab.written("a.value").count(), 1_000_000);
+    lab.stop();
 }
 
 #[test]
