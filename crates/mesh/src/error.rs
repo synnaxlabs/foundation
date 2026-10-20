@@ -348,7 +348,7 @@ impl fmt::Display for Missed {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Miss {
     /// A step of the put passed the deadline of 10 s: the dial, the open of its stream,
-    /// the `Stored` of one chunk, or the end of the stream.
+    /// or the `Stored` of one chunk.
     Deadline,
     /// This node has no record of the voter, so no address to dial.
     Unknown,

@@ -97,8 +97,8 @@ impl Mesh {
     }
 
     // Puts `digests` on `to` on one stream, in order, and gives why it failed. Each
-    // step ends within `DEADLINE`: the dial with the open of the stream, the `Stored`
-    // of each chunk, and the end. A step that fails on a session that ended dials once
+    // step fails after `DEADLINE`: the dial with the open of the stream, and the
+    // `Stored` of each chunk. A step that fails on a session that ended dials once
     // more and goes on from its chunk, and a session that stored a chunk earns one
     // more redial. No chunk opens no stream. The card of `to` is read once.
     async fn put_on(&self, to: node::Key, digests: &[Digest]) -> Result<(), Miss> {
@@ -135,7 +135,8 @@ impl Mesh {
     }
 
     // Puts `left` on `push`, each step within `DEADLINE`, and takes each chunk that
-    // the peer stored off `left`.
+    // the peer stored off `left`. Each chunk that got `Stored` is durable on the peer,
+    // so the end of the stream, also past `DEADLINE`, cannot fail the put.
     async fn push(
         &self,
         mut push: blob::peer::Push<'_>,
@@ -147,9 +148,8 @@ impl Mesh {
                 .map_err(Failed::Call)?;
             *left = rest;
         }
-        step(&self.clock, push.finish())
-            .await?
-            .map_err(Failed::Call)
+        drop(step(&self.clock, push.finish()).await);
+        Ok(())
     }
 }
 

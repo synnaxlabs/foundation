@@ -923,6 +923,31 @@ fn an_apply_misses_a_voter_whose_redialed_session_ends_with_no_chunk_stored() {
     assert_eq!(cluster.board().applied, [(1, base(), Err(quorum))]);
 }
 
+// Voter 3 is down, and the links of voter 2 break 1.5 s into the apply, after the
+// last `Stored` of its put and before the end of its stream. Each chunk is durable on
+// voter 2, so it is a holder, and the put opens no second stream to it.
+#[test]
+fn an_apply_counts_a_voter_whose_stream_end_fails_after_each_stored() {
+    let mut cluster = Cluster::new(0);
+    cluster.delay(Span::from_nanos(300 * Span::MILLISECOND.nanos()));
+    cluster.start_voter(1);
+    cluster.start_voter(2);
+    cluster.run(seconds(10));
+    let definitions = create_largest(1);
+    cluster.change(1, base(), &definitions);
+    cluster.run(Span::from_nanos(1500 * Span::MILLISECOND.nanos()));
+    cluster.link(1, 2, 1.0);
+    cluster.link(2, 1, 1.0);
+    cluster.run(seconds(12));
+    let board = cluster.board();
+    assert_eq!(board.applied, []);
+    assert_eq!(board.blobs, [(2, 1)].into());
+    cluster.delay(Span::from_nanos(300 * Span::MILLISECOND.nanos()));
+    cluster.run(seconds(60));
+    let moved = pointer(1, &definitions);
+    assert_eq!(cluster.board().applied, [(1, moved, Ok(moved))]);
+}
+
 // `count` subjects of 512 keys, each of which fills one chunk of 16 417 bytes.
 pub(super) fn create_largest(count: usize) -> BTreeMap<Name, Definition> {
     let labels: Vec<String> = (0..count).map(|at| format!("plant.s{at}")).collect();

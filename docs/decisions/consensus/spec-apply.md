@@ -42,7 +42,7 @@
   chunks with a `blob::peer::Push` on each other voter of both halves of
   `raft.voters()`, all at once, on one stream in order. Each step fails after
   `peer::DEADLINE` (10 s on the `env` clock) with no result: the dial with the open of
-  the stream, the `Stored` of each chunk, and the end. So a slow voter that stores a
+  the stream, and the `Stored` of each chunk. So a slow voter that stores a
   chunk within each 10 s stays a holder, and a silent one misses 10 s after its last
   `Stored`. A step that fails on a session that ended dials once more and goes on from
   its chunk, as a session to a peer that restarted ends only at its first use. A session
@@ -52,7 +52,10 @@
   https://github.com/synnaxlabs/foundation/issues/3405#issuecomment-6288473151, on the
   plan https://github.com/synnaxlabs/foundation/issues/3405#issuecomment-6288441342,
   which supersedes the calls of 16 chunks and their deadline). A miss gives the cause
-  of the last attempt.
+  of the last attempt. A voter whose chunks each got `Stored` is a holder, also when
+  the end of its stream fails or passes `peer::DEADLINE`, and the put dials it no more
+  (`laptop.architect`, 2026-10-20T10:26:52Z:
+  https://github.com/synnaxlabs/foundation/pull/3568#issuecomment-6288829862).
   A holder is the node when it is a voter, or a voter whose put ended `Ok` while a half
   that holds it lacked a majority; another failed step, also a failed read of the node's
   store for a put, leaves a voter no holder. So the holders are at most the sum of the
