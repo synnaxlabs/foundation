@@ -795,8 +795,9 @@ impl Lab {
     /// # Panics
     ///
     /// When `rate` is 0 or over 10^7, or `write` wrote to `channel` before. As the
-    /// simulation runs, when the writer does not open, as when `channel` is not a data
-    /// channel of the spec at `node`, or the home does not apply a frame.
+    /// simulation runs, when the writer does not open, as when the spec at `node`
+    /// has no `channel`, when `channel` is an index, or when the home does not apply a
+    /// frame.
     pub(crate) fn write(&mut self, node: Node, channel: &str, rate: u64, count: u64) {
         assert!(
             !self.writes.contains_key(channel),
@@ -1635,11 +1636,12 @@ fn an_index_named_as_a_channel_panics() {
 #[test]
 #[should_panic(
     expected = "the write of samples 0..1 of a.value: Ok([Refused { slot: Slot(0), \
-                refusal: Order(Backwards { path: Live"
+                refusal: Waiting }])"
 )]
 fn an_overlapping_send_panics() {
     let (mut lab, a, _) = pair();
     lab.send(a, "a.value", &[1.0, 2.0, 3.0]);
+    lab.run(Duration::from_micros(1500));
     lab.send(a, "a.value", &[4.0]);
     lab.run(Duration::from_secs(1));
 }
@@ -1733,10 +1735,61 @@ fn a_write_reads_at_another_member() {
         truth.array_windows().all(|[x, y]| y - x == 1_000_000),
         "{truth:?}"
     );
-    for (sample, truth) in got.iter().zip(&truth) {
-        assert!((sample.ns - truth).abs() <= 10_000_000, "{got:?} {truth:?}");
-    }
+    // Each host's wall has no error, so each stamp is the true time of its sample.
+    assert_eq!(
+        got.iter().map(|sample| sample.ns).collect::<Vec<_>>(),
+        truth
+    );
     lab.stop();
+}
+
+#[test]
+fn a_write_at_the_last_host_started_stamps_true_time() {
+    let mut lab = Lab::new(1);
+    let (a, b, c) = (lab.start("a"), lab.start("b"), lab.start("c"));
+    lab.mesh(&[a, b, c]);
+    lab.channel(c, "c.value");
+    let reader = lab.reader(a, "c.value");
+    lab.write(c, "c.value", 1000, 5);
+    lab.run(Duration::from_secs(1));
+    let got = lab.received(reader);
+    let stamps: Vec<i64> = got.iter().map(|sample| sample.ns).collect();
+    assert_eq!(stamps, lab.truth("c.value"));
+    lab.stop();
+}
+
+#[test]
+fn each_host_reads_true_time() {
+    let mut lab = Lab::new(1);
+    for name in ["a", "b", "c"] {
+        lab.start(name);
+    }
+    let nows: Vec<_> = lab.members.iter().map(|m| m.host.clock().now()).collect();
+    assert!(nows.iter().all(|now| *now == nows[0]), "{nows:?}");
+}
+
+#[test]
+#[should_panic(expected = "lab failure: the home applied no sample of a.value")]
+fn written_before_the_first_sample_applies_panics() {
+    let (mut lab, a, _) = pair();
+    lab.write(a, "a.value", 1000, 1);
+    lab.written("a.value");
+}
+
+#[test]
+#[should_panic(expected = "lab failure: the writer opens: Unknown(Name(\"a.none\"))")]
+fn a_write_to_no_channel_panics() {
+    let (mut lab, a, _) = pair();
+    lab.write(a, "a.none", 1000, 1);
+    lab.run(Duration::from_secs(1));
+}
+
+#[test]
+#[should_panic(expected = "lab failure: the set holds the index")]
+fn a_write_to_an_index_panics() {
+    let (mut lab, a, _) = pair();
+    lab.write(a, "a.value_time", 1000, 1);
+    lab.run(Duration::from_secs(1));
 }
 
 #[test]
@@ -1856,6 +1909,17 @@ fn a_command_at_a_node_that_is_not_the_home_fails() {
             "the home of an index of the writer is node {home}, and a writer writes \
              only at this node"
         ))
+    );
+}
+
+#[test]
+fn a_command_during_a_send_is_refused() {
+    let (mut lab, a, _) = pair();
+    lab.send(a, "a.value", &[1.0, 2.0, 3.0]);
+    lab.run(Duration::from_micros(1500));
+    assert_eq!(
+        lab.command(a, "operator", "a.value", 7.0),
+        Err("not in control: another writer holds the gate".into())
     );
 }
 
