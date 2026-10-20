@@ -31,6 +31,66 @@ const STORED_BYTES: usize = Reply::Stored {
 }
 .encoded_len();
 
+pub mod counts {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    use std::task::{Context, Poll, Wake, Waker};
+    pub static FRAMES: AtomicU64 = AtomicU64::new(0);
+    pub static POLLS: AtomicU64 = AtomicU64::new(0);
+    pub static WAKES: AtomicU64 = AtomicU64::new(0);
+    pub static SENDS: AtomicU64 = AtomicU64::new(0);
+    pub static SEND_POLLS: AtomicU64 = AtomicU64::new(0);
+    pub static PENDING: AtomicU64 = AtomicU64::new(0);
+    struct W(Waker);
+    impl Wake for W {
+        fn wake(self: Arc<Self>) {
+            WAKES.fetch_add(1, Relaxed);
+            self.0.wake_by_ref();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            WAKES.fetch_add(1, Relaxed);
+            self.0.wake_by_ref();
+        }
+    }
+    pub async fn counted<F: Future>(f: F) -> F::Output {
+        let mut f = std::pin::pin!(f);
+        let mut cached: Option<(Waker, Waker)> = None;
+        std::future::poll_fn(move |cx: &mut Context<'_>| {
+            POLLS.fetch_add(1, Relaxed);
+            let fresh = match &cached {
+                Some((outer, _)) => !outer.will_wake(cx.waker()),
+                None => true,
+            };
+            if fresh {
+                let w = Waker::from(Arc::new(W(cx.waker().clone())));
+                cached = Some((cx.waker().clone(), w));
+            }
+            let w = &cached.as_ref().unwrap().1;
+            let mut cx2 = Context::from_waker(w);
+            Pin::as_mut(&mut f).poll(&mut cx2)
+        })
+        .await
+    }
+    pub async fn send<F: Future>(f: F) -> F::Output {
+        SENDS.fetch_add(1, Relaxed);
+        let mut f = std::pin::pin!(f);
+        std::future::poll_fn(move |cx: &mut Context<'_>| {
+            SEND_POLLS.fetch_add(1, Relaxed);
+            let p = Pin::as_mut(&mut f).poll(cx);
+            if p.is_pending() {
+                PENDING.fetch_add(1, Relaxed);
+            }
+            p
+        })
+        .await
+    }
+    pub fn take() -> [u64; 6] {
+        [&FRAMES, &POLLS, &WAKES, &SENDS, &SEND_POLLS, &PENDING].map(|c| c.swap(0, Relaxed))
+    }
+}
+
 /// Serves the write of `subject` that `write` starts: verifies its open, opens its
 /// writer, and sends its places, then writes each frame of the program and sends its
 /// outcome, and `Stored` after each commit, until the program finishes the stream.
@@ -53,8 +113,15 @@ pub(super) async fn serve(
     };
     start(state, sender, &writer, names).await?;
     drop(decoded);
-    let replies = relay(state, writer, receiver, sender).await?;
-    replies.finish(state, sender).await
+    let replies = counts::counted(relay(state, writer, receiver, sender)).await?;
+    let finished = replies.finish(state, sender).await;
+    let [f, polls, wakes, sends, send_polls, pending] = counts::take();
+    let per = |n: u64| n as f64 / f as f64;
+    eprintln!(
+        "COUNTS frames {f} relay polls {polls} ({:.3}/frame) wakes {wakes} ({:.3}/frame) sends {sends} ({:.3}/frame) send polls {send_polls} ({:.3}/frame) pending {pending} ({:.4}/frame)",
+        per(polls), per(wakes), per(sends), per(send_polls), per(pending)
+    );
+    finished
 }
 
 /// Reads, verifies, and decodes the open, and holds its body in the budget until then.
@@ -197,6 +264,7 @@ async fn relay(
                 }
             }
             Due::Draft { layout, form } => {
+                counts::FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let pending = replies.head(state)?;
                 let drafted = layout.draft(state.borrow().home.pool(), form);
                 match drafted {
@@ -483,7 +551,7 @@ async fn send(
 ) -> Result<(), Error> {
     let start = block.len() - reply.encoded_len();
     reply.encode(&mut block[start..]);
-    sender.send(block.freeze().skip(start)).await?;
+    counts::send(sender.send(block.freeze().skip(start))).await?;
     Ok(())
 }
 
