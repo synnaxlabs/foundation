@@ -54,6 +54,7 @@ mod peer;
 mod propose;
 mod send;
 mod stream;
+mod ticket;
 mod turn;
 
 pub(crate) use peer::{DEADLINE, within};
@@ -1556,6 +1557,11 @@ mod tests {
         /// Each call of `set_addresses` that returned, in order: its node, what the
         /// call gave, and the card of that node at the return.
         moved: Vec<(u8, Result<(), Error>, card::Card)>,
+        /// The options that each node gives `Mesh::ticket` next.
+        tickets: BTreeMap<u8, Options>,
+        /// Each call of `Mesh::ticket` that returned, in order: its node and what the
+        /// call gave.
+        made: Vec<(u8, Result<ticket::Ticket, Error>)>,
         /// The voters that each node proposes next.
         configurations: BTreeMap<u8, BTreeSet<u8>>,
         /// The spec change that each node proposes next.
@@ -2004,6 +2010,20 @@ mod tests {
         }
     }
 
+    /// Makes a ticket with the options that the board gives node `id`, and puts the
+    /// result on the board.
+    async fn make(mesh: Mesh, clock: Clock, id: u8, board: Arc<Mutex<Board>>) -> ! {
+        loop {
+            clock.sleep(TICK).await;
+            let options = board.lock().unwrap().tickets.remove(&id);
+            let Some(options) = options else {
+                continue;
+            };
+            let result = mesh.ticket(options).await;
+            board.lock().unwrap().made.push((id, result));
+        }
+    }
+
     /// Proposes the voters that the board gives node `id`, and waits for the write.
     async fn configure(
         mesh: Mesh,
@@ -2230,6 +2250,10 @@ mod tests {
                 let mut board = watched.lock().unwrap();
                 board.watched.entry(id).or_default().push(spec.pointer);
             }
+        });
+        let (making, clock, tickets) = (mesh.clone(), node.clock(), Arc::clone(board));
+        tasks.spawn(async move {
+            make(making, clock, id, tickets).await;
         });
     }
 
@@ -3167,6 +3191,7 @@ mod tests {
     mod learner;
     mod send;
     mod serve;
+    mod tickets;
     mod version;
 
     /// The entries in the log of `node`, which had a power cut.

@@ -161,6 +161,30 @@ fn a_node_that_asks_gets_the_founding_and_each_voter_applies_its_join() {
     }
 }
 
+#[test]
+fn a_ticket_that_a_voter_makes_admits_a_node_that_asks_by_it() {
+    for seed in 0..4 {
+        let (mut cluster, _, follower, _) = Cluster::led(seed);
+        let options = Options {
+            expiry: LAST,
+            ..common::options("plant", false)
+        };
+        cluster
+            .board
+            .lock()
+            .unwrap()
+            .tickets
+            .insert(follower, options);
+        cluster.run(seconds(5));
+        let (_, made) = cluster.board().made.pop().unwrap();
+        let ticket = Ticket::decode(&made.unwrap().encode()).unwrap();
+        let asked = ask_each(&mut cluster.sim, vec![ticket]);
+        cluster.run(seconds(10));
+        let asked: Vec<_> = asked.lock().unwrap().drain(..).map(|(a, _)| a).collect();
+        assert_eq!(asked, [Ok(founding_of(&IDS, &IDS))], "run {seed}");
+    }
+}
+
 // Node 4 is a member that is not a voter.
 #[test]
 fn a_node_that_asks_a_member_that_is_not_a_voter_asks_the_next_voter() {

@@ -9,7 +9,7 @@ use spec::Pointer;
 use spec::definition::Definition;
 use types::channel;
 use types::ed25519::PublicKey;
-use types::name::Name;
+use types::name::{Name, Prefix};
 use types::node;
 
 use crate::change::Unknown;
@@ -56,6 +56,13 @@ pub enum Error {
     Claim(claim::Error),
     /// A call names a node that is not a member of the region.
     NotMember(node::Key),
+    /// The prefix of a ticket is not under the region's prefix.
+    Outside {
+        /// The ticket's prefix.
+        prefix: Name,
+        /// The region's prefix.
+        region: Prefix,
+    },
     /// This node is not a voter of its configuration, and only a voter proposes a
     /// change. Call it on a voter.
     NoVote,
@@ -236,6 +243,10 @@ impl fmt::Display for Error {
             Self::NotMember(key) => {
                 write!(f, "node {key} is not a member of the region")
             }
+            Self::Outside { prefix, region } => write!(
+                f,
+                "the ticket's prefix {prefix} is not under the region's prefix {region}"
+            ),
             Self::NoVote => f.write_str(
                 "this node is not a voter, and only a voter proposes a change",
             ),
