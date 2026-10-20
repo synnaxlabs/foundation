@@ -484,7 +484,7 @@ mod tests {
     use sim::{Sim, node};
     use types::time::Span;
 
-    use super::{Mode, PORT, Security, Server, Variable};
+    use super::{Mode, PORT, Security, Server, USER, Variable};
     use crate::client::Error;
     use crate::client::tests::common::channel;
     use crate::ffi::{self, Status};
@@ -724,25 +724,27 @@ mod tests {
         assert_eq!(results, [refused(), refused(), refused()]);
     }
 
-    /// The server of [`Server::login`] lets in no anonymous client. The test calls the
-    /// private `Server::dial`: each public call connects with the user.
+    /// The server of [`Server::login`] lets in its user in `mode` and no anonymous
+    /// client. The test calls the private `Server::dial`: each public call connects
+    /// with the user.
     #[test]
-    fn a_login_server_refuses_an_anonymous_client() {
+    fn a_login_server_lets_in_only_its_user() {
         for mode in [Mode::Sign, Mode::SignAndEncrypt] {
             let result = run(async move |node| {
                 let (clock, net, address) =
                     (node.clock(), node.net(), node.addresses()[0]);
                 let body = async |server: &Server| {
-                    server
-                        .dial(Some(Security { mode, user: None }))
-                        .await
-                        .map(drop)
+                    let dial = async |user| {
+                        let client = server.dial(Some(Security { mode, user })).await;
+                        client.map(|client| client.is_some())
+                    };
+                    (dial(Some(USER)).await, dial(None).await)
                 };
                 Server::login(clock, net, address, node.entropy().rng(), mode, body)
                     .await
             });
             let refused = Err(Error::Failed(Status::BAD_IDENTITY_TOKEN_REJECTED));
-            assert_eq!(result, Ok(refused), "{mode:?}");
+            assert_eq!(result, Ok((Ok(true), refused)), "{mode:?}");
         }
     }
 
