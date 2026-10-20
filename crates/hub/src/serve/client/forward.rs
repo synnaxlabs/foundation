@@ -12,15 +12,14 @@ use wire::hub::client::Signed;
 use wire::hub::client::write::{Open, Write};
 use wire::hub::forward::{Forward, places};
 
-use super::Reserved;
 use super::write::{self, Origin};
 use crate::State;
 use crate::serve::Error;
 use crate::serve::admission::Admission;
 
 /// Serves the forward from `via` that `forward` starts: admits the program's hello
-/// that `via` carries, verifies the open, takes the group at its places, and serves
-/// it as a program's write, until the hello ends or `via` finishes the stream.
+/// that `via` carries, and serves the write of the group of `forward` as a program's
+/// write, until the hello ends or `via` finishes the stream.
 pub(in crate::serve) async fn serve(
     state: &Rc<RefCell<State>>,
     via: node::Key,
@@ -34,9 +33,20 @@ pub(in crate::serve) async fn serve(
         return Ok(());
     };
     admission.admit(state, Signed::decode(&message)?)?;
+    let subject = admission
+        .subject()
+        .expect("invariant: an admitted hello has a subject");
     let mut expiry = pin!(admission.expiry(state));
+    let mut served = pin!(async {
+        let Some(message) = receiver.recv().await? else {
+            sender.finish()?;
+            return Ok(());
+        };
+        let write = Write::decode(&message)?;
+        let origin = Origin::Forward { via, forward };
+        write::serve(state, &admission, origin, subject, write, receiver, sender).await
+    });
     // The write polls first, so a renewal moves the end in the poll that admits it.
-    let mut served = pin!(group(state, &admission, forward, receiver, sender));
     poll_fn(|cx| match served.as_mut().poll(cx) {
         Poll::Ready(written) => Poll::Ready(written),
         Poll::Pending => expiry.as_mut().poll(cx).map(Err),
@@ -44,38 +54,9 @@ pub(in crate::serve) async fn serve(
     .await
 }
 
-/// Serves the write of the group of `forward`, once `admission` admitted its hello.
-async fn group(
-    state: &Rc<RefCell<State>>,
-    admission: &Admission,
-    forward: Forward,
-    receiver: &mut Receiver,
-    sender: &mut Sender,
-) -> Result<(), Error> {
-    let subject = admission
-        .subject()
-        .expect("invariant: a forward is served after its hello");
-    let Some(message) = receiver.recv().await? else {
-        sender.finish()?;
-        return Ok(());
-    };
-    let write = Write::decode(&message)?;
-    let open = write::open(state, admission, subject.clone(), write, receiver).await?;
-    let places = write::bytes(places::LEN * open.channels.len());
-    let decoded = write::held(&open.channels) + places;
-    let decoded = Reserved::new(state, subject.clone(), decoded)?;
-    let Some(open) = take(forward, open, receiver).await? else {
-        sender.finish()?;
-        return Ok(());
-    };
-    let _ends = write::ends(state, subject.clone(), &open)?;
-    let origin = Origin::Forward(admission);
-    write::opened(state, subject, open, origin, decoded, receiver, sender).await
-}
-
 /// The open of the group at the places of the run of `forward`, or `None` when the
 /// stream ends before the last place.
-async fn take(
+pub(super) async fn take(
     forward: Forward,
     mut open: Open,
     receiver: &mut Receiver,

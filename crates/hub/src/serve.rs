@@ -40,12 +40,13 @@ pub use client::{Reply, Request};
 /// the open of a read until it decodes after the wait for the home of its index, the
 /// open of a write until it decodes, and the ends and counts of each write stream, 20
 /// bytes for each channel of its open and one for its index, from the decode of the
-/// open until the stream ends, and its decoded names, 16 bytes and the length of each,
-/// and the places of a forward, 4 bytes for each channel of its open, with its names,
-/// from that decode until it sends its places. A body that does not fit stops with
-/// `BUSY` before the hub reads a byte of it, and ends or names that do not fit stop
-/// with `BUSY` before the writer opens. The bodies of one subject hold at most
-/// [`BODY_BYTES_MAX`] of it ([`Error::Share`]).
+/// open until the stream ends (for a forward, from its last place, for the channels of
+/// its group), and its decoded names, 16 bytes and the length of each, and the places
+/// of a forward, 4 bytes for each channel of its open, with its names, from that
+/// decode until it sends its places. A body that does not fit stops with `BUSY` before
+/// the hub reads a byte of it, and ends or names that do not fit stop with `BUSY`
+/// before the writer opens. The bodies of one subject hold at most [`BODY_BYTES_MAX`]
+/// of it ([`Error::Share`]).
 pub const BODIES_BYTES_MAX: u64 = 2 * BODY_BYTES_MAX;
 
 /// Why [`Link::serve`](crate::Link::serve) ended a stream.
@@ -297,9 +298,9 @@ impl From<transport::Error> for Error {
     }
 }
 
-/// Serves the stream `incoming` from the node `holder`, a member of the hub's region:
-/// a forward or a reader session, by its first message. Stops the stream with the code
-/// of the error that ends it.
+/// Serves the stream `incoming` from a node, a forward or a reader session by its
+/// first message. `holder` is the node when the hub's region holds it as a member.
+/// Stops the stream with the code of the error that ends it.
 ///
 /// # Panics
 ///
@@ -311,35 +312,26 @@ pub(crate) async fn run(
 ) -> Result<(), Error> {
     let class = incoming.class;
     let (mut receiver, mut sender) = halves(incoming)?;
-    let served = first(state, holder, class, &mut receiver, &mut sender).await;
+    // No async level between this and the reader's serve, which polls once a frame.
+    let served = match receiver.recv().await {
+        Ok(Some(message)) => match Forward::decode(&message) {
+            Ok(forward) => {
+                let via = holder.expect("invariant: a forward comes from a member");
+                client::forward::serve(state, via, forward, &mut receiver, &mut sender)
+                    .await
+            }
+            Err(wire::hub::Error::Kind { .. }) => {
+                serve(state, class, &message, &mut receiver, &mut sender).await
+            }
+            Err(error) => Err(error.into()),
+        },
+        Ok(None) => sender.finish().map_err(Error::from),
+        Err(error) => Err(error.into()),
+    };
     if let Err(error) = &served {
         stop(receiver, sender, error);
     }
     served
-}
-
-/// Serves a forward or a reader session, by the first message.
-async fn first(
-    state: &Rc<RefCell<State>>,
-    holder: Option<node::Key>,
-    class: Class,
-    receiver: &mut Receiver,
-    sender: &mut Sender,
-) -> Result<(), Error> {
-    let Some(message) = receiver.recv().await? else {
-        sender.finish()?;
-        return Ok(());
-    };
-    match Forward::decode(&message) {
-        Ok(forward) => {
-            let via = holder.expect("invariant: a forward comes from a member");
-            client::forward::serve(state, via, forward, receiver, sender).await
-        }
-        Err(wire::hub::Error::Kind { .. }) => {
-            serve(state, class, &message, receiver, sender).await
-        }
-        Err(error) => Err(error.into()),
-    }
 }
 
 /// The two halves of `incoming`. Stops a one-way stream.

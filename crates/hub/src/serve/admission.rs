@@ -58,11 +58,6 @@ impl Admission {
         Ok(())
     }
 
-    /// The node that carries each hello of the session.
-    pub(crate) fn peer(&self) -> node::Key {
-        self.peer
-    }
-
     /// The subject of the admitted hello, or `None` before one. A renewal never
     /// changes the subject.
     pub(crate) fn subject(&self) -> Option<Name> {
