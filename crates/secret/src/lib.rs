@@ -28,6 +28,9 @@ impl Value {
         Self(Zeroizing::new(bytes))
     }
 
+    /// The text that `Debug` prints in place of the bytes.
+    pub const MARK: &'static str = "<secret>";
+
     /// The bytes. Send them only to the system they unlock.
     #[must_use]
     pub fn expose(&self) -> &[u8] {
@@ -37,7 +40,7 @@ impl Value {
 
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("<secret>")
+        f.write_str(Self::MARK)
     }
 }
 
