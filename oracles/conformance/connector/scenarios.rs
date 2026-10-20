@@ -282,9 +282,7 @@ const UNDEFINED: &str = "conformance.undefined";
 const SECRET: &str = "conformance.marker";
 /// The value of [`SECRET`], which no status shows.
 const MARKER: &str = "c0nformance-marker-5e7c41";
-/// How long [`keeps_each_secret_from_the_status`] watches most of its steps.
-const WATCH: Span = Span::from_nanos(10_000_000_000);
-/// How long [`keeps_each_secret_from_the_status`] watches its short steps.
+/// How long [`keeps_each_secret_from_the_status`] watches after each error.
 const GLANCE: Span = Span::from_nanos(5_000_000_000);
 
 /// The plant side of a scenario.
@@ -1077,10 +1075,11 @@ async fn faulted(scene: Rc<Scene>, seed: u64) {
 
 /// For a kind with [`Suite::secrets`], whose config reads each secret from
 /// [`SECRET`], no status, no end of a run, and no check shows [`MARKER`], its value.
-/// One run meets in turn: no device for 10 s, the simulator for 5 s, and its stop
-/// for 10 s. A second run meets the echo of [`Suite::echo`]: an error within 10 s,
-/// and 5 s more. Then each config of [`Suite::refused`], and the read and write
-/// forms of scenario 5, each for 5 s. A kind with no secret passes with no check.
+/// One run meets the simulator, and is Running with progress within [`START`], then
+/// its stop, and gives an error within [`LOST`] and 5 s more. A second run meets no
+/// device: an error within [`START`], and 5 s more. A third meets the echo of
+/// [`Suite::echo`]: an error within [`START`], and 5 s more. Then the write form of
+/// scenario 5 for 5 s. A kind with no secret passes with no check.
 pub(crate) fn keeps_each_secret_from_the_status(suite: &'static Suite) {
     let Some(marked) = suite.secrets else {
         return;
@@ -1094,20 +1093,30 @@ pub(crate) fn keeps_each_secret_from_the_status(suite: &'static Suite) {
         let kinds = (suite.kinds)();
         let checked = kinds.check(suite.kind(), None, &config);
         let writes = checked.expect("the config with secrets checks").writes;
-        let mut run = scene.supervise(config.clone()).await;
-        scene.watch(&mut run, WATCH).await;
+        let failed = |reading: &Reading| {
+            unmarked(reading);
+            reading.error.is_some()
+        };
         let served = scene.serve();
-        scene.watch(&mut run, GLANCE).await;
+        let mut run = scene.supervise(config.clone()).await;
+        let started = |reading: &Reading| {
+            unmarked(reading);
+            reading.state == State::Running
+                && reading.error.is_none()
+                && scene.progress(reading) > 0
+        };
+        run.until(START, started).await;
         scene.stop(served).await;
-        scene.watch(&mut run, WATCH).await;
+        run.until(LOST, failed).await;
+        scene.watch(&mut run, GLANCE).await;
+        ended_unmarked(&run.stop().await);
+        let mut run = scene.supervise(config.clone()).await;
+        run.until(START, failed).await;
+        scene.watch(&mut run, GLANCE).await;
         ended_unmarked(&run.stop().await);
         if let Some(echo) = suite.echo {
             let served = scene.start(echo);
             let mut run = scene.supervise(config.clone()).await;
-            let failed = |reading: &Reading| {
-                unmarked(reading);
-                reading.error.is_some()
-            };
             run.until(START, failed).await;
             scene.watch(&mut run, GLANCE).await;
             ended_unmarked(&run.stop().await);
@@ -1122,7 +1131,8 @@ pub(crate) fn keeps_each_secret_from_the_status(suite: &'static Suite) {
     });
 }
 
-/// Panics when the Debug text of `shown` holds [`MARKER`].
+/// Panics when the Debug text of `shown` holds [`MARKER`]. The Debug text holds each
+/// field, also one that a later change adds, so a secret in any field fails.
 fn unmarked(shown: &impl Debug) {
     let text = format!("{shown:?}");
     assert!(!text.contains(MARKER), "the secret shows: {text}");

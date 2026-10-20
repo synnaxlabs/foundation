@@ -3,8 +3,9 @@
 The scenarios that each connector kind passes, on two sim nodes: the plant, with the
 rig of `connector::testing` and the connector, and the device, with the kind's
 simulator. The scenarios use only public items: the rig of `connector::testing`,
-`hub::testing::Env`, the sim, `env`, `document`, `types`, and the `kind`, `status`,
-`reader`, and `cancel` modules of `connector`. The record CONNECTOR CONFORMANCE
+`hub::testing::Env`, the sim, `env`, `document`, `types`, `create_secret` of
+`connector::testing`, and the `kind`, `status`, `reader`, and `cancel` modules of
+`connector`. The record CONNECTOR CONFORMANCE
 (`docs/decisions/connectors/connector-conformance.md`) gives each scenario.
 
 `scenarios.rs` holds the scenarios, the input type `Suite`, and `suite!`, which expands
@@ -35,7 +36,8 @@ heals_after_random_faults`. A range `<start>..<end>` in hex, the end excluded, s
 - A new scenario goes into `suite!`, so it reaches each kind at once.
 - A kind gives plain inputs: its table, a setup, its simulator, the name of its
   progress count, its backoff form, the configs that its check refuses, a form of its
-  config that reads each secret, and an echo simulator. A kind that needs a hook to
-  pass a scenario has a scenario that is wrong.
+  config that reads each secret, and an echo simulator when its device can answer with a
+  text of its own. A kind that needs a hook to pass a scenario has a scenario that is
+  wrong.
 - The simulator of a kind that subscribes changes its data at least every 100 ms.
 - A new kind adds `<kind>/main.rs` and its `[[test]]` entry.
