@@ -9,8 +9,8 @@ use std::task::Poll;
 use transport::stream::{Receiver, Sender};
 use types::node;
 use wire::hub::client::Signed;
-use wire::hub::client::write::{Open, Write};
-use wire::hub::forward::{Forward, places};
+use wire::hub::client::write::Write;
+use wire::hub::forward::Forward;
 
 use super::write::{self, Origin};
 use crate::State;
@@ -52,32 +52,4 @@ pub(in crate::serve) async fn serve(
         Poll::Pending => expiry.as_mut().poll(cx).map(Err),
     })
     .await
-}
-
-/// The open of the group at the places of the run of `forward`, or `None` when the
-/// stream ends before the last place.
-pub(super) async fn take(
-    forward: Forward,
-    mut open: Open,
-    receiver: &mut Receiver,
-) -> Result<Option<Open>, Error> {
-    let channels = u32::try_from(open.channels.len())
-        .expect("invariant: an open names fewer than u32::MAX channels");
-    let mut run = places::Run::new(forward, channels);
-    // The run gives at most one place for each channel.
-    let mut taken = Vec::with_capacity(open.channels.len());
-    while !run.ended() {
-        let Some(message) = receiver.recv().await? else {
-            return Ok(None);
-        };
-        taken.extend(run.decode(&message)?);
-    }
-    let mut taken = taken.into_iter().peekable();
-    open.channels = open
-        .channels
-        .into_iter()
-        .zip(0..)
-        .filter_map(|(name, at)| taken.next_if_eq(&at).map(|_| name))
-        .collect();
-    Ok(Some(open))
 }

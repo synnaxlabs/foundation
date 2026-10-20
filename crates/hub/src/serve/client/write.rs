@@ -68,8 +68,7 @@ pub(super) async fn serve(
         Origin::Forward { forward, .. } => {
             let places = bytes(places::LEN * open.channels.len());
             let decoded = Reserved::new(state, subject.clone(), held + places)?;
-            let Some(open) = super::forward::take(forward, open, receiver).await?
-            else {
+            let Some(open) = take(forward, open, receiver).await? else {
                 sender.finish()?;
                 return Ok(());
             };
@@ -89,16 +88,42 @@ pub(super) async fn serve(
     // renewal.
     let replies = match origin {
         Origin::Program => {
-            relay(state, writer, |_, _| Ok(false), receiver, sender).await?
+            relay::<false>(state, writer, |_| Ok(false), receiver, sender).await?
         }
         Origin::Forward { .. } => {
-            let renewal = |frames: &Frames, message: &[u8]| {
-                renewal(admission, state, frames, message)
-            };
-            relay(state, writer, renewal, receiver, sender).await?
+            let renewal = |message: &[u8]| renewal(admission, state, message);
+            relay::<true>(state, writer, renewal, receiver, sender).await?
         }
     };
     replies.finish(state, sender).await
+}
+
+/// The open of the group at the places of the run of `forward`, or `None` when the
+/// stream ends before the last place.
+async fn take(
+    forward: Forward,
+    mut open: Open,
+    receiver: &mut Receiver,
+) -> Result<Option<Open>, Error> {
+    let channels = u32::try_from(open.channels.len())
+        .expect("invariant: an open names fewer than u32::MAX channels");
+    let mut run = places::Run::new(forward, channels);
+    // The run gives at most one place for each channel.
+    let mut taken = Vec::with_capacity(open.channels.len());
+    while !run.ended() {
+        let Some(message) = receiver.recv().await? else {
+            return Ok(None);
+        };
+        taken.extend(run.decode(&message)?);
+    }
+    let mut taken = taken.into_iter().peekable();
+    open.channels = open
+        .channels
+        .into_iter()
+        .zip(0..)
+        .filter_map(|(name, at)| taken.next_if_eq(&at).map(|_| name))
+        .collect();
+    Ok(Some(open))
 }
 
 /// Reads, verifies with `admission`, and decodes the open, and holds its body in the
@@ -226,12 +251,12 @@ async fn start(
 /// frame, so a pool with no block for it stops the stream before the home takes the
 /// frame. The block of the next `Stored` comes after the body, right before the home
 /// takes the frame, and a frame that finds none is refused as `Full`, as a frame whose
-/// draft finds none is. A whole message for which `renewal` gives `true` is no part of
-/// a frame.
-async fn relay(
+/// draft finds none is. With `RENEWS`, between frames, a message for which `renewal`
+/// gives `true` is no part of a frame.
+async fn relay<const RENEWS: bool>(
     state: &RefCell<State>,
     mut writer: Writer,
-    renewal: impl Fn(&Frames, &[u8]) -> Result<bool, Error>,
+    renewal: impl Fn(&[u8]) -> Result<bool, Error>,
     receiver: &mut Receiver,
     sender: &mut Sender,
 ) -> Result<Replies, Error> {
@@ -248,7 +273,7 @@ async fn relay(
                     frames.finish()?;
                     return Ok(replies);
                 };
-                if renewal(&frames, &message)? {
+                if RENEWS && frames.between() && renewal(&message)? {
                     continue;
                 }
                 frames.decode(&message)?
@@ -310,19 +335,14 @@ fn refusal(error: &block::Error) -> Refusal {
     }
 }
 
-/// Renews the hello of `admission` with `message` when it is a hello between two
-/// `frames`, and gives whether it was. Gives `false` for a message inside a frame, or
-/// of another kind, which a frame decodes: a message of a run of ends or counts has
-/// no kind.
+/// Renews the hello of `admission` with `message`, a message between frames, when it
+/// is a hello, and gives whether it was. Gives `false` for a message of another kind,
+/// which a frame decodes.
 fn renewal(
     admission: &Admission,
     state: &RefCell<State>,
-    frames: &Frames,
     message: &[u8],
 ) -> Result<bool, Error> {
-    if !frames.between() {
-        return Ok(false);
-    }
     match Signed::decode(message) {
         Ok(signed) => admission.admit(state, signed).map(|()| true),
         Err(
