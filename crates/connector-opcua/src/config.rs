@@ -70,13 +70,24 @@ pub(crate) const BODY: Body = Body {
         label: Some("the channel"),
         forms: &[READ],
     }],
-    examples: &[EXAMPLE],
+    examples: &[EXAMPLE, POLLED],
 };
 
 /// A connector to one server.
 const EXAMPLE: &str = "\
 address = \"opc.tcp://plc:4840\"
 rate    = \"10Hz\"
+
+read \"plant.pressure\" {
+  node_id = \"ns=3;s=Pressure\"
+}
+";
+
+/// A connector that reads each node at each tick.
+const POLLED: &str = "\
+address = \"opc.tcp://plc:4840\"
+rate    = \"10Hz\"
+polled  = true
 
 read \"plant.pressure\" {
   node_id = \"ns=3;s=Pressure\"
