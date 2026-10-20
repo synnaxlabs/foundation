@@ -11,9 +11,13 @@
   by indexes and writes each part. The home never splits a frame, because a frame
   applies whole (B7). Each handoff goes in its own append, so a handoff never makes a
   frame large. The size decides before the room, also when a handoff of the frame
-  finds no room: `Shard::write` then checks the frozen entries against `Layout::check`
-  and `Buffer::block_max`, as `append` checks an entry with tag 0, and a frame whose
-  draft no block of the shard's pool holds gives `Large` too. A backfill frame over a
+  finds no room or the pool has no block for an index frame or a header:
+  `Shard::write` then checks the lengths of the split against `Layout::check`,
+  `Buffer::block_max`, and the largest block of the shard's pool, as `append` checks
+  an entry with tag 0, and a frame whose draft no block of the shard's pool holds
+  gives `Large` too. The check of the lengths of the split, which needs no block, is
+  decided by `laptop.architect` (2026-10-20T11:45:27Z):
+  https://github.com/synnaxlabs/foundation/pull/3578#issuecomment-6290103893. A backfill frame over a
   limit gets `Large`, not `Full`. The order is `Resend`, `Disk`, `Large`, then no room
   (`Lost` live, `Full` backfill). Decided by `laptop.architect` (2026-10-20T10:19:44Z):
   https://github.com/synnaxlabs/foundation/issues/3366#issuecomment-6288713154. It
@@ -30,10 +34,21 @@
   sentence departs from that ruling on the bound, approved by `laptop.architect`
   (2026-10-12T20:04:12Z):
   https://github.com/synnaxlabs/foundation/pull/2464#issuecomment-6131705729.
-  `Shard::write_body_max(set)` gives the most body bytes of a frame of `set`, raw or
-  encoded, that `Shard::write` never refuses with `Large`: the least of the largest
-  block of the pool less the frame overhead, and for each group, of one record and
-  `Buffer::block_max` less the stored header, through `codec::len_within`.
+  `Shard::write_body_max(set)` gives body bytes of a frame of `set`, raw or encoded,
+  that `Shard::write` never refuses with `Large` and that an idle shard applies, as a
+  lower bound of the most such bytes: the least of the largest block of the pool less the frame overhead; for
+  each group, of `Buffer::block_max` less the stored header and of the largest block
+  less the overhead of its frame; of one record for the entries of all groups; and of
+  `Pool::budget` less the footprints, by `block::footprint`, of the blocks that the
+  pool holds at once: the draft of an encoded frame of more than one group, the index
+  frame and header of each group, and the newest frame of each index, which the shard
+  keeps at rest. Each term goes through `codec::len_within`. The batch term is
+  decided by `laptop.architect` (2026-10-20T11:30:31Z):
+  https://github.com/synnaxlabs/foundation/pull/3578#issuecomment-6289857046. The
+  pool term is decided by `laptop.architect` (2026-10-20T11:45:27Z):
+  https://github.com/synnaxlabs/foundation/pull/3578#issuecomment-6290103893. Lost: a
+  `buffer::Layout` function that gives the room of a batch of entries. Trigger to look
+  again: a second caller, or a change of the entry table.
   `Shard::read_body_max` gives the longest body of one stored entry. `home` owns the
   entry layout, so it computes both (#3366). Decided by `laptop.architect`
   (2026-10-20T10:07:34Z):

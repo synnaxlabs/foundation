@@ -48,9 +48,10 @@ pub fn max_len(data_type: Type, len: usize) -> usize {
     Shape::of(data_type).max_len(len)
 }
 
-/// The most bytes of values that one series of each of `types` holds in all, split
-/// among them in any way, such that one [`Encoder`] for each writes at most `bytes`
-/// in all. 0 when the headers alone pass `bytes`.
+/// Bytes of values that one series of each of `types` holds in all, split among them
+/// in any way, such that one [`Encoder`] for each writes at most `bytes` in all. It is
+/// a lower bound of the most such bytes, with no search. 0 when the headers alone pass
+/// `bytes`.
 #[must_use]
 #[expect(
     clippy::missing_panics_doc,
