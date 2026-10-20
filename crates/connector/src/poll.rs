@@ -201,7 +201,7 @@ impl Writer {
     ///
     /// When the last stamp is `i64::MAX` ns.
     pub fn sample(&mut self, time: Interval, held: Stamp) -> (Stamp, Span) {
-        self.stamps.sample(time, held)
+        self.stamped.sample(time, held)
     }
 
     /// Writes one frame at `stamp` with the value of each channel that `values` gives,

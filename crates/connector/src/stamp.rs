@@ -167,6 +167,11 @@ impl Writer {
         self.stamps.next(stamp)
     }
 
+    /// As [`Stamps::sample`].
+    pub(crate) fn sample(&mut self, time: Interval, held: Stamp) -> (Stamp, Span) {
+        self.stamps.sample(time, held)
+    }
+
     /// Writes one frame of `series`, as [`hub::writer::Writer::draft`] takes them, at
     /// `stamp` on the live path. Each series holds one sample: the stamp of the frame
     /// in each index, and what `fill` puts for each other entry, from the stamp of the
