@@ -174,6 +174,22 @@ fn reads_a_key_file_whose_body_has_any_width() {
     }
 }
 
+/// OpenSSH skips white space in the body: space and tab around each line, and a
+/// vertical tab or a form feed in a line.
+#[test]
+fn reads_a_key_file_with_white_space_in_its_body() {
+    let mut lines: Vec<String> = KEYGEN.lines().map(str::to_owned).collect();
+    let last = lines.len() - 1;
+    for (i, line) in lines[1..last].iter_mut().enumerate() {
+        let mid = line.len() / 2;
+        let c = if i % 2 == 0 { '\x0b' } else { '\x0c' };
+        *line = format!("  {}{c}{}\t ", &line[..mid], &line[mid..]);
+    }
+    let text = lines.join("\n") + "\n";
+    let key = openssh::private_key(&text).unwrap();
+    assert_eq!(openssh::line(key.public()), KEYGEN_PUB, "{text:?}");
+}
+
 #[test]
 fn refuses_an_ecdsa_key_by_its_family() {
     assert_eq!(

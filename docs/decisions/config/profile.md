@@ -45,11 +45,13 @@
   refuses another algorithm by its name (an ECDSA key as `ECDSA`, which `ssh-key` reads
   only with its `ecdsa` feature), an encrypted key, a public key that is not the key of
   the private key (`Mismatch`), and a text that is not a key file. It reads each such
-  file that OpenSSH 9.6p1 reads, with a body of any width and any text after the end
-  mark, and also one with CRLF line ends or no line end after the end mark, which
-  OpenSSH refuses (`laptop.architect-2`, 2026-10-20T01:51:26Z, item 2 of 6281458911, and
-  2026-10-20T01:53:14Z, item 4 of 6281480378). The formats are a key choice of kind (f)
-  that `laptop.architect-2` sent to `laptop.monitor` (plan review, 2026-10-19T23:24:32Z,
+  file that OpenSSH 9.6p1 reads, with a body of any width or with white space, and any
+  text after the end mark, and also one with CRLF line ends or no line end after the end
+  mark, which OpenSSH refuses (`laptop.architect-2`, 2026-10-20T02:08:10Z,
+  https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6281670865, in place
+  of item 2 of 6281458911; and 2026-10-20T01:53:14Z, item 4 of 6281480378). The formats
+  are a key choice of kind (f) that `laptop.architect-2` sent to `laptop.monitor` (plan
+  review, 2026-10-19T23:24:32Z,
   https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279566176). The
   profile is in `config`, beside `config::subject`, which takes the same key line; lost:
   a crate of its own for the profile, which must take `config::openssh` with it, to save

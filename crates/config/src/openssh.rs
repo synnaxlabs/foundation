@@ -201,9 +201,9 @@ impl fmt::Display for Unreadable {
 
 /// Reads the OpenSSH private key file of an Ed25519 key with no passphrase, as
 /// `ssh-keygen -t ed25519 -N ""` and [`key_file`] write it. It reads each such file
-/// that OpenSSH reads, with a body of any width and any text after the end mark, and
-/// also one with CRLF line ends or no line end after the end mark. The comment is not
-/// kept.
+/// that OpenSSH reads, with a body of any width or with white space, and any text after
+/// the end mark, and also one with CRLF line ends or no line end after the end mark.
+/// The comment is not kept.
 ///
 /// # Errors
 ///
@@ -240,16 +240,18 @@ pub fn private_key(text: &str) -> Result<PrivateKey, Unreadable> {
     Ok(key)
 }
 
-/// `text` up to its end mark as `ssh-key` takes it: the body in lines of 70 characters,
-/// and each line end as `\n`. `ssh-key` 0.6.7 reads only lines of 70, as `ssh-keygen`
-/// writes them, and OpenSSH reads any width and skips the text after the end mark.
+/// `text` up to its end mark as `ssh-key` takes it: the body with no white space, in
+/// lines of 70 characters, and each line end as `\n`. `ssh-key` 0.6.7 reads only lines
+/// of 70, as `ssh-keygen` writes them, and OpenSSH reads any width, skips white space
+/// in the body as C `isspace` finds it, and skips the text after the end mark.
 fn lines(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let end = lines.iter().position(|line| line.starts_with("-----END"));
     let Some([begin, body @ .., end]) = end.map(|end| &lines[..=end]) else {
         return text.to_owned();
     };
-    let body: Vec<char> = body.concat().chars().collect();
+    let space = |c: &char| c.is_ascii_whitespace() || *c == '\x0b';
+    let body: Vec<char> = body.concat().chars().filter(|c| !space(c)).collect();
     let mut file = format!("{begin}\n");
     for line in body.chunks(70) {
         file.extend(line);
