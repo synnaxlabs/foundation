@@ -330,6 +330,14 @@ impl fmt::Display for Credential {
     }
 }
 
+/// The names of the security policies of a secure channel, in the order of `POLICIES`
+/// of `shim.c`.
+pub(crate) const POLICIES: [&str; 3] = [
+    "Basic256Sha256",
+    "Aes128_Sha256_RsaOaep",
+    "Aes256_Sha256_RsaPss",
+];
+
 /// The mode of a secure channel. open62541 takes the endpoint in the mode of the
 /// highest security level that the server offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

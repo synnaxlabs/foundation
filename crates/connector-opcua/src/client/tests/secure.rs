@@ -19,8 +19,8 @@ use crate::ffi::{self, Status};
 use crate::secure::{
     ANONYMOUS, BROKEN_TRUST, CLIENT, CLIENT_ONLY_SERVER, CLIENT_PEM, EC, EMPTY_URI,
     END, HEADED_TRUST, HIGH_PEM, Identity, LASTING, LINE_TRUST, LONG_BLOCK_TRUST,
-    LONG_KEY, NAMELESS, ONE_BLOCK_TRUST, OTHER, Policy, REJECTED_SERVER, SERVER, START,
-    TRUST, TWO_URIS, UNNAMED,
+    LONG_ENTRY, LONG_KEY, LONG_SUBJECT, NAMELESS, ONE_BLOCK_TRUST, OTHER, Policy,
+    REJECTED_SERVER, SERVER, START, TRUST, TWO_URIS, UNNAMED,
 };
 use crate::server::Limits;
 use crate::value::{Fault, Value};
@@ -1277,4 +1277,22 @@ fn names_give_the_thumbprint_and_subject_of_a_der_or_pem_certificate() {
     assert_eq!(names(NAMELESS), Some(nameless));
     assert_eq!(names(b"no certificate"), None);
     assert_eq!(names(b""), None);
+}
+
+#[test]
+fn names_give_the_whole_of_a_subject_past_1024_bytes() {
+    let units = (0..18)
+        .map(|i| format!("/OU={i:02}{}", "x".repeat(58)))
+        .collect::<Vec<_>>()
+        .concat();
+    let long = Names {
+        thumbprint: "4F26D153E01B0F222E188BCDFE717BBBEE37CFEC".into(),
+        subject: format!("/CN=client{units}"),
+    };
+    assert_eq!(names(LONG_SUBJECT), Some(long));
+    let entry = Names {
+        thumbprint: "6E0DF71E5F904D1DE160A94D8C296977ACE53D27".into(),
+        subject: format!("/description={}/CN=client", "d".repeat(1100)),
+    };
+    assert_eq!(names(LONG_ENTRY), Some(entry));
 }

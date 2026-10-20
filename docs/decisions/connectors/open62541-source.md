@@ -371,8 +371,10 @@
   aligned to 16. No pointer crosses between the libc allocator and these: the objects of
   the copy, `shim.c`, and `server.c` call no libc function that gives or takes a heap
   pointer. Our change makes `UA_CertificateUtils_getThumbprint` of
-  `plugins/crypto/openssl/certificategroup.c` give and take its block with `UA_malloc`
-  and `UA_free`, in place of `malloc` and `free`. Our change: decided by
+  `plugins/crypto/openssl/certificategroup.c` write the hex of the digest into the
+  thumbprint, in place of a block from `malloc` and `free`, and makes
+  `UA_CertificateUtils_getSubjectName` free the name of aws-lc with `OPENSSL_free`.
+  Our change: decided by
   `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/3037#issuecomment-6236391062,
   2026-10-17 16:11 UTC). A crypto library that a later PR links
@@ -982,7 +984,7 @@
   `checkTrust`, `getApplicationUri`, `getSubjectName`, `getThumbprint`, and `keyLine`,
   and the stubs of `shim.c` (`laptop.architect-2`, 2026-10-18 21:39 UTC,
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255470380, item 1;
-  the full list, 2026-10-20,
+  the full list, 2026-10-20 07:27:55 UTC,
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6285738820).
   A test fails when the objects of `shim.c` or `server.c` name aws-lc or a symbol of
   `PLUGINS`. `UA_Openssl_Init` of `securitypolicy_common.c` keeps
@@ -1248,10 +1250,13 @@
   thumbprint and its subject, from `UA_CertificateUtils_getThumbprint` and
   `UA_CertificateUtils_getSubjectName` of the copy, through `shim_certificate_names`.
   The test of the names that the production code calls takes these two, as item 1 of
-  the ruling above states. `getSubjectName` gives `Good` and a NULL subject when its
-  copy runs out of memory, so the shim gives `BadOutOfMemory` for a NULL subject, and
-  the text names only the source. An empty subject is legal X.509: the copy gives the
+  the ruling above states. Our change makes `getSubjectName` read the whole name, with
+  no cut at 1024 bytes, and give `BadOutOfMemory` when memory runs out, in place of
+  `Good` and a NULL subject. Then the text names only the source. Our change makes
+  `getThumbprint` write the thumbprint with no block, in place of a write through a
+  `malloc` that it did not check. An empty subject is legal X.509: the copy gives the
   sentinel, and the text gives the thumbprint with no subject (`laptop.architect-2`,
+  2026-10-20 07:32:19 UTC,
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6285815315, which
   corrects condition 2 of
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6285738820).

@@ -949,14 +949,24 @@ UA_CertificateUtils_getSubjectName(UA_ByteString *certificate,
         sn = X509_CRL_get_issuer(x509_crl);
     }
 
-    char buf[1024];
-    *subjectName = UA_STRING_ALLOC(X509_NAME_oneline(sn, buf, 1024));
+    /* With no buffer, aws-lc writes the whole name. It gives NULL when memory runs
+     * out or the name passes 1 MiB. */
+    char *line = X509_NAME_oneline(sn, NULL, 0);
+    UA_StatusCode res = UA_STATUSCODE_BADOUTOFMEMORY;
+    if(line) {
+        UA_String name = UA_STRING_ALLOC(line);
+        if(name.data) {
+            *subjectName = name;
+            res = UA_STATUSCODE_GOOD;
+        }
+        OPENSSL_free(line);
+    }
 
     if(x509)
         X509_free(x509);
     if(x509_crl)
         X509_CRL_free(x509_crl);
-    return UA_STATUSCODE_GOOD;
+    return res;
 }
 
 UA_StatusCode
@@ -986,19 +996,11 @@ UA_CertificateUtils_getThumbprint(UA_ByteString *certificate,
         X509_CRL_free(crl);
     }
 
-    UA_String thumb = UA_STRING_NULL;
-    thumb.length = (SHA1_DIGEST_LENGTH * 2) + 1;
-    thumb.data = (UA_Byte*)UA_malloc(sizeof(UA_Byte) * thumb.length);
-
-    /* Create a string containing a hex representation */
-    char *p = (char*)thumb.data;
-    for(size_t i = 0; i < digestLen; i++) {
-        p += sprintf(p, "%.2X", digest[i]);
+    static const char hex[] = "0123456789ABCDEF";
+    for(size_t i = 0; i < SHA1_DIGEST_LENGTH; i++) {
+        thumbprint->data[2 * i] = (UA_Byte)hex[digest[i] >> 4];
+        thumbprint->data[2 * i + 1] = (UA_Byte)hex[digest[i] & 0x0F];
     }
-
-    memcpy(thumbprint->data, thumb.data, thumbprint->length);
-    UA_free(thumb.data);
-
     return UA_STATUSCODE_GOOD;
 }
 

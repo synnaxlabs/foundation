@@ -3,7 +3,9 @@
 //! The fixtures in `secure/` are self-signed RSA 2048 certificates with SHA-256 and
 //! their PKCS #1 keys, in DER from Python `cryptography` 41.0.7, each valid from
 //! [`START`] to [`END`] other than [`LASTING`], PEM copies of them, and one P-256
-//! certificate and its key. They are test keys only.
+//! certificate and its key. They are test keys only. `nameless.der` is from `openssl
+//! req -x509`: a CA certificate with an empty subject and issuer and no subject
+//! alternative name, valid from 2026-10-20 to 2027-10-20.
 
 use std::ffi::CStr;
 
@@ -41,6 +43,17 @@ pub(crate) const UNNAMED: Identity = Identity {
 
 /// A certificate on the key of [`CLIENT`] with an empty subject.
 pub(crate) const NAMELESS: &[u8] = include_bytes!("secure/nameless.der");
+
+/// [`CLIENT`] as the certificate of a CA.
+pub(crate) const CA_CLIENT: &[u8] = include_bytes!("secure/ca-client.der");
+
+/// A certificate on the key of [`CLIENT`] whose subject is `/CN=client` and 18 units
+/// `/OU=<nn>` with 58 `x`, past 1024 bytes in the one-line form.
+pub(crate) const LONG_SUBJECT: &[u8] = include_bytes!("secure/long-subject.der");
+
+/// A certificate on the key of [`CLIENT`] whose subject is a description of 1100 `d`,
+/// then `/CN=client`.
+pub(crate) const LONG_ENTRY: &[u8] = include_bytes!("secure/long-entry.der");
 
 /// A client on the key of [`CLIENT`] whose first URI is empty.
 pub(crate) const EMPTY_URI: Identity = Identity {
