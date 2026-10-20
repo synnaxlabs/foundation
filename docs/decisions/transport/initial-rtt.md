@@ -8,11 +8,22 @@
   of noq-proto lowers the initial RTT to a tenth of the negotiated idle timeout, the
   lesser of the two sides' timeouts. The client gets them before it sends its Finished,
   and the server in the client's first Initial, so the bound holds also when the two
-  sides have different idle timeouts. Lost: a cap of PROBE GAP below the PTO base with
-  no sample (it changes a ruled decision, and leaves a dialer of 1 s to a node of 30 s);
-  this record narrowed to equal idle timeouts (a program dials with 30 s, so it is
-  outside the bound with each node of an idle under 3.33 s). Decided by
-  `laptop.architect-2` (2026-10-20T05:06:07Z:
+  sides have different idle timeouts. Outside the bound: a dial whose client gets no
+  transport parameters of the server, as the server's first answer is lost. Until they
+  come, the client probes at the initial RTT and the PROBE GAP cap of its own idle
+  timeout, so a node whose idle timeout is shorter than that gap forgets the dial when a
+  probe in the gap is lost too (42 of the 4096 masks of the first 6 datagrams of each
+  side, for a program of 30 s and a node of 1 s, on the virtual time pair of the `quic`
+  tests). Of the 42, none connects at a later probe, and each ends with `TimedOut` at
+  the program's idle timeout, 24 at 31.04 s and 18 at 33.05 s. Lost: a node that keeps a
+  dial for the client's idle timeout until its handshake ends (it keeps the state of an
+  address that it has not validated for longer than its own setting); a lower initial
+  RTT on each client (as below). Decided by `laptop.architect-2` (2026-10-20T05:39:16Z:
+  https://github.com/synnaxlabs/foundation/pull/3498#issuecomment-6284239465). Lost: a
+  cap of PROBE GAP below the PTO base with no sample (it changes a ruled decision, and
+  leaves a dialer of 1 s to a node of 30 s); this record narrowed to equal idle timeouts
+  (a program dials with 30 s, so it is outside the bound with each node of an idle under
+  3.33 s). Decided by `laptop.architect-2` (2026-10-20T05:06:07Z:
   https://github.com/synnaxlabs/foundation/pull/3498#issuecomment-6283832539). An idle
   timeout of 3.33 s or more keeps 333 ms, so the node's default of 30 s does not change.
   `Config` keeps any positive idle timeout, as a short one is a fast check for a dead
