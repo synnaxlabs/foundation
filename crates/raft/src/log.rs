@@ -220,18 +220,19 @@ impl Log {
         self.voters_through(self.committed.min(self.first_of(term) - 1))
     }
 
-    // The configuration entries with a term below `term`, oldest first, as the chain
-    // of a message of `term`.
-    pub(crate) fn links(&self, term: Term) -> Vec<Link> {
-        self.configs
-            .iter()
-            .map(|&index| self.config(index))
-            .take_while(|(at, _)| at.term < term)
-            .map(|(at, change)| Link {
+    // The configuration entries with a term below `term`, newest first, as the chain
+    // of a message of `term`. Each is cloned when the iterator gives it.
+    pub(crate) fn links(&self, term: Term) -> impl Iterator<Item = Link> + '_ {
+        let below = self
+            .configs
+            .partition_point(|&index| self.config(index).0.term < term);
+        self.configs[..below].iter().rev().map(|&index| {
+            let (at, change) = self.config(index);
+            Link {
                 at,
                 change: change.clone(),
-            })
-            .collect()
+            }
+        })
     }
 
     // The last configuration entry at or below `index`, or the configuration before
@@ -1007,7 +1008,9 @@ mod tests {
                 entries.push(Entry { at, data: change(voters(0)) });
             }
             let fresh = Log::new(voters(9), entries.clone(), 0).unwrap();
-            prop_assert_eq!(log.links(Term(below)), links_in(&entries, Term(below)));
+            let mut links: Vec<_> = log.links(Term(below)).collect();
+            links.reverse();
+            prop_assert_eq!(links, links_in(&entries, Term(below)));
             prop_assert_eq!(log.voters(), fresh.voters());
             for index in 0..=u64::try_from(entries.len()).unwrap() {
                 prop_assert_eq!(log.voters_through(index), fresh.voters_through(index));
