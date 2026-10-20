@@ -93,6 +93,10 @@ jq -s '.[0] + .[1]' "$tmp/fill.json" - > "$tmp/issue.json" <<'JSON'
  {"state": "OPEN", "number": 17, "body": "Waits on #40.\nWaits on #44.",
   "labels": [{"name": "blocked"}, {"name": "owner:e"}]},
  {"state": "CLOSED", "number": 18, "body": "Waits on #40.",
+  "labels": [{"name": "blocked"}]},
+ {"state": "OPEN", "number": 19, "body": "Waits on #40, #42\nand #41.",
+  "labels": [{"name": "blocked"}]},
+ {"state": "OPEN", "number": 20, "body": "Waits on #40. It builds x.",
   "labels": [{"name": "blocked"}]}
 ]
 JSON
@@ -118,6 +122,8 @@ check '1 - ended
 14 d ended
 15 - dropped
 17 e dropped
+19 - no line
+20 - no line
 1000 - ended' 0 "" all
 touch "$tmp/fail.issue"
 check "" 1 "HTTP 502: Bad Gateway" "issue call fails"

@@ -12,7 +12,7 @@ set -eu
 out=$(gh issue list --state open --label blocked --limit 1000 \
   --json number,body,labels --jq '[.[]
     | [.body | split("\n")[] | rtrimstr("\r") | select(test(
-        "^Waits on (#[0-9]+|the person)((,| and|, and) (#[0-9]+|the person))*\\.?$"))]
+        "^Waits on (#[0-9]+|the person)((,| and|, and) (#[0-9]+|the person))*\\.$"))]
       as $lines
     | {n: .number, line: ($lines != []), person: any($lines[]; test("the person")),
        on: [$lines[] | scan("#([0-9]+)")[0]],
