@@ -871,7 +871,7 @@ fn a_polled_bad_value_is_left_out_and_counted() {
 /// `bad` or `uncertain`.
 #[test]
 fn a_bad_value_is_left_out_and_counted() {
-    left_out_and_counted(false);
+    left_out_and_counted(|plant| plant.opcua.change(TICKS, BAD));
 }
 
 /// As [`a_bad_value_is_left_out_and_counted`], with the node stopped for most of the
@@ -880,7 +880,10 @@ fn a_bad_value_is_left_out_and_counted() {
 /// first read of the server time, so after a slow first read it can drop none.
 #[test]
 fn a_bad_value_is_counted_after_a_stall() {
-    left_out_and_counted(true);
+    left_out_and_counted(|plant| {
+        plant.opcua.change(3, BAD);
+        plant.rig.stalled(|| plant.opcua.change(TICKS - 3, BAD));
+    });
 }
 
 /// The reads of `served` whose value differs from the read before, with `quality`.
@@ -892,10 +895,9 @@ fn changes_to(served: &[Sample], quality: Quality) -> u64 {
     u64::try_from(steps.count()).expect("a few")
 }
 
-/// Changes the value 20 times Bad, 10 times Uncertain, and once Good, with the node
-/// stopped for the last 17 Bad changes when `stalled`, and asserts the counts of `plc`
-/// and the samples that InfluxDB holds.
-fn left_out_and_counted(stalled: bool) {
+/// Changes the value 20 times Bad through `bad`, then 10 times Uncertain and once Good,
+/// and asserts the counts of `plc` and the samples that InfluxDB holds.
+fn left_out_and_counted(bad: impl FnOnce(&Plant)) {
     let plant = create_plant(QUALITY);
     let [(variable, channel)] = VARIABLES[..1] else {
         panic!("one variable");
@@ -911,12 +913,7 @@ fn left_out_and_counted(stalled: bool) {
             }
         });
     };
-    if stalled {
-        plant.opcua.change(3, BAD);
-        plant.rig.stalled(|| plant.opcua.change(TICKS - 3, BAD));
-    } else {
-        plant.opcua.change(TICKS, BAD);
-    }
+    bad(&plant);
     counted("bad");
     plant.opcua.change(TICKS / 2, UNCERTAIN);
     counted("uncertain");
