@@ -103,7 +103,11 @@ impl Frames {
     ///
     /// When a draft is due, each [`types::frame::Error`] of [`Layout::from_ends`]. The
     /// caller then stops the stream as `MALFORMED`.
-    #[inline]
+    #[expect(
+        clippy::inline_always,
+        reason = "as a call, it adds about 60 instructions to each frame of a relay"
+    )]
+    #[inline(always)]
     pub fn due(&mut self) -> Result<Due<'_>, types::frame::Error> {
         if self.assembly.drafting() {
             let Some(Head { form, .. }) = self.head else {
