@@ -56,9 +56,10 @@
   configuration entry binds the public key of each voter it adds, under the signature of
   the leader that writes it. A node answers `removed` only to a sender that a
   configuration in its own
-  log held, when its committed configuration lacks the sender and the request proves no
-  newer configuration that holds it. Each other sender that is not a voter gets
-  `Error::NotVoter`, and does not stop. The person chose A, 2026-10-07T04:49:33Z
+  log held, when its committed configuration lacks the sender, the request proves no
+  newer configuration that holds it, and the last `Raft::set_learners` left it out. Each
+  other sender that is not a voter gets `Error::NotVoter`, and does not stop. The person
+  chose A, 2026-10-07T04:49:33Z
   (https://github.com/synnaxlabs/foundation/issues/1096#issuecomment-6031153921; the
   text, https://github.com/synnaxlabs/foundation/issues/1096#issuecomment-6031072285).
   Supersedes the first version, which the person approved on 2026-10-06
@@ -68,9 +69,10 @@
   only with its last position. A node answers `removed` only to a `PreVote` or a `Vote`
   whose `last.index` is at or below its own commit index, or whose `last.term` is below
   the term of the entry at that index, from a sender that `Start.voters` or a committed
-  `Voters` entry held, when the last committed configuration lacks it. A sender that
-  holds entries past the commit of the receiver, at a term at or above the term at that
-  commit, can hold a newer committed configuration that adds it back, and a heartbeat or
+  `Voters` entry held, when the last committed configuration lacks it and the last
+  `Raft::set_learners` left it out. A sender that holds entries past the commit of the
+  receiver, at a term at or above the term at that commit, can hold a newer committed
+  configuration that adds it back, and a heartbeat or
   an append names only entries that the receiver can lack, so each other request of a
   sender that is not a voter gets `NotVoter`. This supersedes "a request proves no newer
   configuration" of the interim rule below (decided by the architect,
@@ -78,8 +80,16 @@
   https://github.com/synnaxlabs/foundation/issues/1822#issuecomment-6054242092). The
   term clause adds to the last-index rule of that comment (`laptop.architect`,
   2026-10-19T18:56:00Z:
-  https://github.com/synnaxlabs/foundation/pull/3407#issuecomment-6274855859). A sender
-  that only an uncommitted entry held gets `NotVoter`: the entry can still be truncated,
+  https://github.com/synnaxlabs/foundation/pull/3407#issuecomment-6274855859). The
+  learner clause adds a condition inside the "only" of the rule that the person chose: a
+  voter that a `Voters` change removes, and that stays a member, is a learner. It gets
+  `NotVoter`, follows the log, and does not stop. Only a leave that ends its membership
+  (#3355) can stop it (`laptop.architect`, 2026-10-20T02:17:41Z:
+  https://github.com/synnaxlabs/foundation/pull/3411#issuecomment-6281787838). Known
+  gap: a demoted member that missed its change, and whose configuration lacks the
+  leader, gets no log until #1107 (#1096). It sends a `PreVote` to each voter at each
+  election timeout. Before, it stopped. A sender that only an uncommitted entry held
+  gets `NotVoter`: the entry can still be truncated,
   and a node whose commit lags would stop a voter that no committed configuration
   removed, the failure of #1054 (decided by the architect, 2026-10-08T02:21:15Z:
   https://github.com/synnaxlabs/foundation/issues/1105#issuecomment-6050855747). `mesh`
@@ -130,7 +140,7 @@
   the node: it commits an entry of its term, which commits the leave, and steps down,
   and the voters follow it until their election timeout. That gap stays in `raft`,
   pinned by `it::change::the_voters_elect_a_removed_node_once_the_leader_fails`. In
-  `mesh`, the admission check and the `removed` answer close it for each voter whose log
+  `mesh`, the admission check closes it for each voter whose log
   holds the leave; a voter whose log lacks the leave entry admits the request until
   #1107. #483 keeps the stop on applying a committed configuration without itself.
   Keeping readmit until then lost. The person decided on 2026-10-05 ("(a)"), #482.

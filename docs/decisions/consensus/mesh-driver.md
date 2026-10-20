@@ -9,7 +9,8 @@
   (`Raft::admission`: `Error::Removed` for a `PreVote` or a `Vote` at or below the
   commit, or below the term at it (`laptop.architect`, 2026-10-19T18:56:00Z:
   https://github.com/synnaxlabs/foundation/pull/3407#issuecomment-6274855859), of a
-  sender that a committed configuration removed, else `Error::NotVoter`), and each claim
+  sender that a committed configuration removed and that is not a member, else
+  `Error::NotVoter`), and each claim
   holds (`Error::Claim`), the claims being what `Raft::claims` gives, so a link that the
   node does not read is not checked. So a node with a configuration refuses a leader
   that is not a voter of that configuration, when a change that the node does not hold
@@ -220,7 +221,11 @@
   stops when a write of the log fails, when a committed change has 0 bytes or a kind
   that this build does not know, or when each `Mesh` drops: this build cannot judge such
   an entry, and a newer build can. A group also stops (`Stopped::Removed`, with the
-  voters that answered) when `Raft::removed_by` gives the voters (RAFT VOTERS). An entry
+  voters that answered) when `Raft::removed_by` gives the voters (RAFT VOTERS). Each
+  member is a learner, so no member gets a `removed` answer: a voter that a change
+  removes keeps its group and follows the log. So `Stopped::Removed` needs the leave of
+  #3355 (`laptop.architect`, 2026-10-20T02:17:41Z:
+  https://github.com/synnaxlabs/foundation/pull/3411#issuecomment-6281787838). An entry
   with no change (the first entry of a leader) is not a change of 0 bytes. A committed
   entry of a known kind whose body does not decode is `Refused::Body` on every node, and
   the group goes on, so one voter that proposes bad bytes cannot halt the region. One
