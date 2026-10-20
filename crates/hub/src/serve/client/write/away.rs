@@ -266,7 +266,7 @@ impl Cut {
             return End::Failed;
         };
         match refusal(error) {
-            Some(Refusal::Refused | Refusal::Changed) => End::Refused,
+            Some(Refusal::Refused | Refusal::Via | Refusal::Changed) => End::Refused,
             Some(Refusal::Unknown) => End::Removed,
             _ => End::Failed,
         }

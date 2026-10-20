@@ -18,7 +18,7 @@ use types::time::Span;
 use wire::header::MALFORMED;
 use wire::hub::client::write::{Open, Write};
 use wire::hub::client::{
-    CHANGED, Challenge, EXPIRED, Place, Places, REFUSED, Refusal, Signed, place,
+    CHANGED, Challenge, EXPIRED, Place, Places, REFUSED, Refusal, Signed, VIA, place,
 };
 use wire::hub::forward::{Forward, places};
 use wire::hub::write::{End, Head, Outcome, Reply, Time};
@@ -466,6 +466,11 @@ fn ends_the_write_as_refused_when_the_home_refuses_it() {
 #[test]
 fn ends_the_write_as_refused_when_the_home_sees_another_subject() {
     ends_the_write(4, CHANGED, End::Refused);
+}
+
+#[test]
+fn ends_the_write_as_refused_when_the_home_sees_another_carrier() {
+    ends_the_write(15, VIA, End::Refused);
 }
 
 #[test]
