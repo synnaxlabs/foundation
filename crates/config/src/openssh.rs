@@ -223,9 +223,10 @@ pub fn private_key(text: &str) -> Result<PrivateKey, Unreadable> {
         Err(ssh_key::Error::AlgorithmUnknown) => {
             return Err(Unreadable::Algorithm("ECDSA"));
         }
-        // `ssh-key` does not export the type of this error, so its text names it.
-        Err(ssh_key::Error::Encoding(error))
-            if error.to_string() == "character encoding invalid" =>
+        // The error that `ssh-key` gives for a text that is not UTF-8.
+        Err(error)
+            if String::from_utf8(vec![0xe9])
+                .is_err_and(|text| error == text.utf8_error().into()) =>
         {
             return Err(Unreadable::Comment);
         }
