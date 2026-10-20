@@ -181,7 +181,7 @@ impl Writer {
         self.frame.parts.clear();
         self.frame.bytes.clear();
         let mut stamped = false;
-        for &(place, value) in values {
+        for &(place, value) in self.bounded(values) {
             let (node, group, data_type) = self.place(place)?;
             let scalar = value.scalar();
             if data_type != Type::Scalar(scalar) {
@@ -237,7 +237,7 @@ impl Writer {
             place,
             count,
             bytes,
-        } in series
+        } in self.bounded(series)
         {
             let (node, group, _) = self.place(place)?;
             self.frame.copy(node, group, place, count, bytes);
@@ -272,6 +272,13 @@ impl Writer {
             }
             error => error,
         })
+    }
+
+    /// The first items of a call, at most one more than the places. A frame holds no
+    /// place twice, so each item past the places repeats one of these, and the sort
+    /// gives `Unordered` with the kept frame bounded by the places.
+    fn bounded<'a, T>(&self, items: &'a [T]) -> &'a [T] {
+        &items[..items.len().min(self.places.len() + 1)]
     }
 
     /// The place of the node of `place`, the place of the node of its group's index,

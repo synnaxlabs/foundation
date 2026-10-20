@@ -552,6 +552,34 @@ fn a_call_of_two_series_of_one_channel_gives_unordered_in_its_places_and_sends_n
 }
 
 #[test]
+fn a_call_of_more_items_than_places_keeps_a_frame_bounded_by_the_places() {
+    let (mut writer, served) = writer(WAITING);
+    let bound = 2 * (writer.places().len() + 1);
+    let unordered = |entry, last| layout(frame::Error::Unordered { entry, last });
+    let one_more = [
+        (0, Value::I64(1)),
+        (1, Value::F64(1.0)),
+        (2, Value::Stamp(Stamp::from_nanos(9))),
+        (0, Value::I64(2)),
+    ];
+    assert_eq!(writer.write(&one_more), unordered(0, 0));
+    assert_eq!(
+        writer.write(&vec![(0, Value::I64(1)); 100_000]),
+        unordered(0, 0)
+    );
+    assert!(writer.frame.parts.capacity() <= bound);
+    assert!(writer.frame.bytes.capacity() <= 8 * bound);
+    assert_eq!(
+        writer.write_series(&vec![of(1, 0, &[]); 100_000]),
+        unordered(1, 1)
+    );
+    assert!(writer.frame.parts.capacity() <= bound);
+    assert!(writer.frame.series.capacity() <= bound);
+    assert_eq!(writer.close(), Ok(()));
+    assert_eq!(served.join().unwrap().len(), 0);
+}
+
+#[test]
 fn a_write_of_series_with_none_of_the_index_gives_index_absent_and_sends_nothing() {
     let (mut writer, served) = writer(WAITING);
     let (level, count) = (1.5_f64.to_le_bytes(), 2_i64.to_le_bytes());
