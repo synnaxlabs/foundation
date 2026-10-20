@@ -130,10 +130,14 @@
   (`laptop.architect`, 2026-10-20T12:40:40Z,
   https://github.com/synnaxlabs/foundation/pull/3581#issuecomment-6291063333, item 1;
   `laptop.architect-2`, 2026-10-20T12:42:39Z,
-  https://github.com/synnaxlabs/foundation/pull/3581#issuecomment-6291098613). When a
-  group of the frame got `Outcome::Ended`, the call gives `Error::Partial`: `written`
-  holds the channels of each group that got `Taken`, `unwritten` the rest, and
-  `outcomes` each outcome of the frame. The writer goes on. The end of a group alone
+  https://github.com/synnaxlabs/foundation/pull/3581#issuecomment-6291098613; in the
+  text of `laptop.architect-2`, 2026-10-20T13:10:44Z,
+  https://github.com/synnaxlabs/foundation/pull/3581#issuecomment-6291633233, and
+  `laptop.architect`, 2026-10-20T13:11:04Z,
+  https://github.com/synnaxlabs/foundation/pull/3581#issuecomment-6291639697, item 2).
+  When a group of the frame got `Outcome::Ended`, the call gives `Error::Partial`:
+  `written` holds the channels of each group that got `Taken`, `unwritten` the rest,
+  and `outcomes` each outcome of the frame. The writer goes on. The end of a group alone
   gives no error at `close`. `close` gives `Stream(Unstored)` for each group that
   ended with a frame that the node took and that may not be on disk, with the place of
   the index of each such group (`laptop.architect-2`, 2026-10-19T13:14:55Z,
@@ -144,12 +148,8 @@
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267752091) and
   on 2026-10-20T10:51:53Z
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6289228997): no
-  `sdk::Error::Count`. Until #3283 PR 4, `sdk-python` opens one index: an open of
-  channels of more than one index drops the `sdk` writer and raises `Stopped`, code
-  `malformed`, "channels of more than one index (plant.time, demo.time): open one
-  writer for each index", which names each index once, in place order
-  (`laptop.architect-2`, 2026-10-20T10:53:39Z,
-  https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6289256688). Lost:
+  `sdk::Error::Count`. `sdk-python` opens channels of any index (SDK PYTHON WRITER,
+  https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6292172439). Lost:
   one frame for each group, sent in turn, because one call is then no longer one frame
   and each group costs a round trip; `program::Place` re-exported as `sdk::Place`,
   because its `index` would be a place of the node (6267752091, item 1); and

@@ -229,8 +229,8 @@ impl Reader {
 
 #[pymethods]
 impl Reader {
-    /// The name and the type of each place, in place order, the type as the spec
-    /// writes it (`f64`, `timestamp`).
+    /// The name, the type, and the place of the index of each place, in place order,
+    /// the type as the spec writes it (`f64`, `timestamp`).
     #[getter]
     fn places<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         crate::places(py, &self.places)

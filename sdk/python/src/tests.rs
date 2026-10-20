@@ -1,5 +1,5 @@
 use std::env;
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -8,10 +8,13 @@ use std::time::Duration;
 
 use pyo3::exceptions::PyConnectionError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyCFunction, PyDict, PyTuple};
 use pyo3::wrap_pymodule;
+use sdk::write::{End, Outcome, Refusal};
+use types::channel;
 use types::ed25519::PrivateKey;
 use types::frame;
+use types::sample::{Scalar, Type};
 
 use crate::profile::Profile;
 
@@ -352,26 +355,678 @@ fn raised_raises_connection_error_for_an_error_of_the_pool_of_a_reader() {
     });
 }
 
-/// Maps a write that ended with a frame that may not be on disk to `Stopped`, with the
-/// code of a stream that the node stopped for the cause of its group's end, and its
-/// text.
+/// The places of a writer of the indexes `plant.time`, `cell.time`, `line.time`, and
+/// `other.time`, with one channel of each, the channels first.
+fn grouped() -> Vec<sdk::Place> {
+    let names = [
+        "plant.a",
+        "cell.a",
+        "line.a",
+        "other.a",
+        "plant.time",
+        "cell.time",
+        "line.time",
+        "other.time",
+    ];
+    let scalars = [Scalar::F64, Scalar::Stamp];
+    (0..names.len())
+        .map(|place| sdk::Place {
+            key: channel::Key::from_u128(u128::try_from(place).unwrap() + 1),
+            data_type: Type::Scalar(scalars[place / 4]),
+            name: names[place].parse().unwrap(),
+            index: place % 4 + 4,
+        })
+        .collect()
+}
+
+/// The outcome of a group whose frame got the seqs from `seq`, `count` of them.
+fn range(seq: u64, count: u32) -> frame::Range {
+    frame::Range { seq, count }
+}
+
+/// The class, the text, and the `code`, `written` and `unwritten`, and `ended` of an
+/// exception, when it has them.
+type Raised = (
+    String,
+    String,
+    Option<String>,
+    Option<(Vec<String>, Vec<String>)>,
+    Option<Vec<String>>,
+);
+
+/// What `answer` raises for a frame of the items at `frame` of a writer of `places`,
+/// with `outcomes`.
+fn untaken(
+    places: &[sdk::Place],
+    loss: crate::Loss,
+    outcomes: &[(usize, Outcome)],
+    frame: &[usize],
+) -> Raised {
+    Python::initialize();
+    Python::attach(|py| {
+        let firsts = crate::write::firsts(places, &crate::write::named(places));
+        let handling = crate::write::handling(py).unwrap().into_bound(py);
+        let frame = frame.to_vec();
+        let error =
+            crate::write::answer(py, places, &firsts, loss, &handling, outcomes, frame)
+                .unwrap_err();
+        let value = error.value(py);
+        let code = value
+            .getattr("code")
+            .ok()
+            .map(|code| code.extract().unwrap());
+        let names = |name: &str| {
+            let names = value.getattr(name).ok()?;
+            assert!(names.is_instance_of::<PyTuple>(), "{name}");
+            Some(names.extract::<Vec<String>>().unwrap())
+        };
+        let written = names("written").zip(names("unwritten"));
+        let class = error.get_type(py).name().unwrap().to_string();
+        (class, value.to_string(), code, written, names("ended"))
+    })
+}
+
+/// The names of `names`, owned.
+fn names(names: &[&str]) -> Vec<String> {
+    names.iter().map(|&name| name.to_owned()).collect()
+}
+
+/// A frame with an end, a refusal, and a loss raises `GroupEnded` for the end, with the
+/// refused group alone in `unwritten`, and its text names the cause of each group that
+/// the node did not take.
 #[test]
-fn error_raises_stopped_with_the_code_of_the_end_of_an_unstored_write() {
+fn answer_names_the_cause_of_each_group_that_the_node_did_not_take() {
+    let outcomes = [
+        (4, Outcome::Ended(End::Removed)),
+        (5, Outcome::Refused(Refusal::Full)),
+        (
+            6,
+            Outcome::Lost {
+                range: range(10, 3),
+            },
+        ),
+        (7, Outcome::Taken { range: range(0, 3) }),
+    ];
+    let raised = untaken(&grouped(), crate::Loss::Raise, &outcomes, &[3, 0, 2, 1]);
+    assert_eq!(
+        raised,
+        (
+            "GroupEnded".to_owned(),
+            "the write of plant.time ended (unknown: a channel of its group was \
+             removed); the node refused the frame of cell.time (full: a backfill frame \
+             found no room in the log, or the frame found no block of the node's pool: \
+             write it again later); the frame of line.time lost 3 samples; channels \
+             plant.a, cell.a, line.a, plant.time, cell.time, line.time were not \
+             written; channels other.a, other.time were; each later frame of an ended \
+             group raises again, and the other groups go on"
+                .to_owned(),
+            Some("unknown".to_owned()),
+            Some((
+                names(&["other.a", "other.time"]),
+                names(&["cell.a", "cell.time"])
+            )),
+            Some(names(&["plant.a", "plant.time"])),
+        )
+    );
+    Python::attach(|py| {
+        let class = py.get_type::<crate::GroupEnded>();
+        assert!(class.is_subclass_of::<crate::Stopped>().unwrap());
+    });
+}
+
+/// With no end, a refusal raises `Rejected` with the code of the first refused group,
+/// and an end with no group taken raises `GroupEnded` with the code of the first end.
+/// `unwritten` holds the refused groups only, never a lost or an ended one. `ended`
+/// holds each channel of the writer in an ended group, also one that is not in the
+/// frame, and not those of a refused group.
+#[test]
+fn answer_raises_for_an_end_then_a_refusal() {
+    let refused = [
+        (5, Outcome::Refused(Refusal::Waiting)),
+        (6, Outcome::Refused(Refusal::Large)),
+        (
+            7,
+            Outcome::Lost {
+                range: range(10, 3),
+            },
+        ),
+    ];
+    assert_eq!(
+        untaken(&grouped(), crate::Loss::Raise, &refused, &[1, 2, 3]),
+        (
+            "Rejected".to_owned(),
+            "the node refused the frame of cell.time (waiting: another writer holds \
+             control); the node refused the frame of line.time (large: the frame is \
+             too large for one write: split it); the frame of other.time lost 3 \
+             samples; channels cell.a, line.a, other.a, cell.time, line.time, \
+             other.time were not written; no channel was"
+                .to_owned(),
+            Some("waiting".to_owned()),
+            Some((
+                Vec::new(),
+                names(&["cell.a", "line.a", "cell.time", "line.time"])
+            )),
+            None,
+        )
+    );
+    let ended = [
+        (4, Outcome::Refused(Refusal::Order)),
+        (5, Outcome::Ended(End::Failed)),
+        (6, Outcome::Ended(End::Refused)),
+    ];
+    assert_eq!(
+        untaken(&grouped(), crate::Loss::Raise, &ended, &[0, 2]),
+        (
+            "GroupEnded".to_owned(),
+            "the node refused the frame of plant.time (order: a stamp is not after the \
+             stamp before it); the write of cell.time ended (failed: the home of its \
+             group failed); the write of line.time ended (refused: the home of its \
+             group refused the proof of the program); channels plant.a, line.a, \
+             plant.time, cell.time, line.time were not written; no channel was; each \
+             later frame of an ended group raises again, and the other groups go on"
+                .to_owned(),
+            Some("failed".to_owned()),
+            Some((Vec::new(), names(&["plant.a", "plant.time"]))),
+            Some(names(&["cell.a", "line.a", "cell.time", "line.time"])),
+        )
+    );
+}
+
+/// The end of the group of a writer of one index raises `GroupEnded` with the code of
+/// a stream that the node stopped for the same cause, each channel of the writer in
+/// `ended`, and none in `unwritten`.
+#[test]
+fn answer_raises_group_ended_for_the_end_of_the_group_of_a_writer_of_one_index() {
+    let grouped = grouped();
+    let places = [0, 4].map(|place| sdk::Place {
+        index: 1,
+        ..grouped[place].clone()
+    });
     let ends = [
-        (program::write::End::Removed, "unknown"),
-        (program::write::End::Failed, "failed"),
+        (
+            End::Removed,
+            "unknown",
+            "a channel of its group was removed",
+        ),
+        (End::Failed, "failed", "the home of its group failed"),
+        (
+            End::Refused,
+            "refused",
+            "the home of its group refused the proof of the program",
+        ),
+    ];
+    for (end, code, why) in ends {
+        let outcomes = [(1, Outcome::Ended(end))];
+        assert_eq!(
+            untaken(&places, crate::Loss::Raise, &outcomes, &[0]),
+            (
+                "GroupEnded".to_owned(),
+                format!(
+                    "the write of plant.time ended ({code}: {why}); channels plant.a, \
+                     plant.time were not written; no channel was; each later frame of \
+                     an ended group raises again, and the other groups go on"
+                ),
+                Some(code.to_owned()),
+                Some((Vec::new(), Vec::new())),
+                Some(names(&["plant.a", "plant.time"])),
+            )
+        );
+    }
+}
+
+/// A loss with no end and no refusal does what the loss says with the channels of the
+/// lost groups only, the index of each included.
+#[test]
+fn answer_gives_the_seqs_of_the_lost_groups_only() {
+    let outcomes = [
+        (5, Outcome::Taken { range: range(0, 2) }),
+        (
+            6,
+            Outcome::Lost {
+                range: range(10, 2),
+            },
+        ),
+        (
+            7,
+            Outcome::Lost {
+                range: range(20, 3),
+            },
+        ),
+    ];
+    let places = grouped();
+    Python::initialize();
+    Python::attach(|py| {
+        let firsts = crate::write::firsts(&places, &crate::write::named(&places));
+        let handling = crate::write::handling(py).unwrap().into_bound(py);
+        let raised = crate::write::answer(
+            py,
+            &places,
+            &firsts,
+            crate::Loss::Raise,
+            &handling,
+            &outcomes,
+            vec![7, 3, 1, 2],
+        );
+        let error = raised.unwrap_err();
+        assert_eq!(error.get_type(py).name().unwrap().to_string(), "DataLost");
+        let value = error.value(py);
+        assert_eq!(
+            value.to_string(),
+            "samples were lost: line.a (2), other.a (3), line.time (2), other.time (3)"
+        );
+        let seqs = value.getattr("seqs").unwrap();
+        let expected = PyDict::new(py);
+        let range = py.get_type::<pyo3::types::PyRange>();
+        for (name, start, end) in [
+            ("line.a", 10, 12),
+            ("other.a", 20, 23),
+            ("line.time", 10, 12),
+            ("other.time", 20, 23),
+        ] {
+            expected
+                .set_item(name, range.call1((start, end)).unwrap())
+                .unwrap();
+        }
+        assert!(seqs.eq(expected).unwrap(), "{seqs}");
+        crate::write::answer(
+            py,
+            &places,
+            &firsts,
+            crate::Loss::Ignore,
+            &handling,
+            &outcomes,
+            vec![2, 3],
+        )
+        .unwrap();
+    });
+}
+
+/// The class and `lost` of what `answer` raises for a frame of the items at `frame` of
+/// a writer of `places`, with `loss` and `outcomes`, and each text that it logged on
+/// the `foundation` logger.
+fn logged(
+    places: &[sdk::Place],
+    loss: crate::Loss,
+    outcomes: &[(usize, Outcome)],
+    frame: &[usize],
+) -> (String, Vec<(String, u64, u64)>, Vec<String>) {
+    Python::initialize();
+    Python::attach(|py| {
+        let foundation = py
+            .import("logging")
+            .unwrap()
+            .call_method1("getLogger", ("foundation",))
+            .unwrap();
+        let handler = py
+            .import("logging.handlers")
+            .unwrap()
+            .getattr("BufferingHandler")
+            .unwrap()
+            .call1((100,))
+            .unwrap();
+        foundation.call_method1("addHandler", (&handler,)).unwrap();
+        let firsts = crate::write::firsts(places, &crate::write::named(places));
+        let handling = crate::write::handling(py).unwrap().into_bound(py);
+        let frame = frame.to_vec();
+        let error =
+            crate::write::answer(py, places, &firsts, loss, &handling, outcomes, frame)
+                .unwrap_err();
+        foundation
+            .call_method1("removeHandler", (&handler,))
+            .unwrap();
+        let seqs = error.value(py).getattr("lost").unwrap();
+        let seqs = seqs
+            .cast::<PyDict>()
+            .unwrap()
+            .iter()
+            .map(|(name, seqs)| {
+                let start = seqs.getattr("start").unwrap().extract().unwrap();
+                let stop = seqs.getattr("stop").unwrap().extract().unwrap();
+                (name.extract().unwrap(), start, stop)
+            })
+            .collect();
+        let texts = handler
+            .getattr("buffer")
+            .unwrap()
+            .try_iter()
+            .unwrap()
+            .map(|record| {
+                let record = record.unwrap();
+                record
+                    .call_method0("getMessage")
+                    .unwrap()
+                    .extract()
+                    .unwrap()
+            })
+            .collect();
+        (error.get_type(py).name().unwrap().to_string(), seqs, texts)
+    })
+}
+
+/// A frame and the indexes of the frame that `write::answer` answers.
+type Answer<'a> = (&'a [(usize, Outcome)], &'a [usize]);
+
+/// A logging handler whose `emit` runs `{body}`, and `run`, which answers `count`
+/// frames by `mode`: `plain`; `excepted`, in an `except` block of the program; or in a
+/// generator that the program resumes in an `except` block. It checks that the program
+/// keeps the error that it handles.
+const FAILING: &str = "
+import logging, sys
+stored = OSError('stored')
+class Failing(logging.Handler):
+    def emit(self, record):
+{body}
+handler = Failing()
+def run(answer, count, mode):
+    for n in range(count):
+        if mode == 'plain':
+            error = answer(n)
+            assert sys.exception() is None
+        elif mode == 'excepted':
+            try:
+                raise ValueError('program')
+            except ValueError as program:
+                error = answer(n)
+                assert sys.exception() is program
+                assert program.__context__ is None
+        else:
+            def resumed():
+                yield
+                yield answer(n)
+                yield sys.exception()
+            generator = resumed()
+            next(generator)
+            try:
+                raise KeyError('caller')
+            except KeyError:
+                error = next(generator)
+            assert next(generator) is None
+    return error
+";
+
+/// The classes, joined by `, `, of the context chain of the error of the last of
+/// `answers` under `warn`, with a handler of the `foundation` logger whose `emit` runs
+/// `body`, and the `unwritten` of the one error of the chain that has it. Each answer
+/// runs by `mode`, as `run` of `FAILING` says.
+fn failing(
+    places: &[sdk::Place],
+    answers: &[Answer<'_>],
+    body: &str,
+    mode: &str,
+) -> (String, Vec<String>) {
+    Python::initialize();
+    Python::attach(|py| {
+        let globals = PyDict::new(py);
+        let body: Vec<_> = body.lines().map(|line| format!("        {line}")).collect();
+        let source = FAILING.replace("{body}", &body.join("\n"));
+        py.run(&CString::new(source).unwrap(), Some(&globals), None)
+            .unwrap();
+        let handler = globals.get_item("handler").unwrap().unwrap();
+        let foundation = py
+            .import("logging")
+            .unwrap()
+            .call_method1("getLogger", ("foundation",))
+            .unwrap();
+        foundation.call_method1("addHandler", (&handler,)).unwrap();
+        let places = places.to_vec();
+        let owned: Vec<_> = answers
+            .iter()
+            .map(|(outcomes, frame)| (outcomes.to_vec(), frame.to_vec()))
+            .collect();
+        let count = owned.len();
+        let handling = crate::write::handling(py).unwrap();
+        let answer = PyCFunction::new_closure(py, None, None, move |args, _| {
+            let (outcomes, frame) = &owned[args.get_item(0)?.extract::<usize>()?];
+            let firsts = crate::write::firsts(&places, &crate::write::named(&places));
+            let answered = crate::write::answer(
+                args.py(),
+                &places,
+                &firsts,
+                crate::Loss::Warn,
+                handling.bind(args.py()),
+                outcomes,
+                frame.clone(),
+            );
+            PyResult::Ok(answered.unwrap_err().into_value(args.py()))
+        })
+        .unwrap();
+        let run = globals.get_item("run").unwrap().unwrap();
+        let error = run.call1((answer, count, mode)).unwrap();
+        foundation
+            .call_method1("removeHandler", (&handler,))
+            .unwrap();
+        chained(error)
+    })
+}
+
+/// The classes, joined by `, `, of the context chain of `error`, and the `unwritten`
+/// of the one error of the chain that has it.
+fn chained(error: Bound<'_, PyAny>) -> (String, Vec<String>) {
+    let chain: Vec<_> = std::iter::successors(Some(error), |raised| {
+        Some(raised.getattr("__context__").unwrap()).filter(|next| !next.is_none())
+    })
+    .take(8)
+    .collect();
+    let listed: Vec<_> = chain
+        .iter()
+        .filter(|raised| raised.hasattr("unwritten").unwrap())
+        .collect();
+    assert_eq!(listed.len(), 1);
+    (
+        chain
+            .iter()
+            .map(|raised| raised.get_type().name().unwrap().to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+        listed[0].getattr("unwritten").unwrap().extract().unwrap(),
+    )
+}
+
+/// The error of a logging handler that raises goes up, chained to `Rejected` or
+/// `GroupEnded` as in an `except` block of it.
+fn chains(
+    places: &[sdk::Place],
+    refused: &[(usize, Outcome)],
+    ended: &[(usize, Outcome)],
+) {
+    let chain = |classes: &str, unwritten: &[&str]| {
+        let unwritten = unwritten.iter().map(|&name| name.to_owned()).collect();
+        (classes.to_owned(), unwritten)
+    };
+    let cell = ["cell.a", "cell.time"];
+    let rejected = |body, mode| failing(places, &[(refused, &[1, 2, 3])], body, mode);
+    let raises = "raise RuntimeError('the handler failed')";
+    assert_eq!(
+        rejected(raises, "plain"),
+        chain("RuntimeError, Rejected", &cell)
+    );
+    let over = failing(places, &[(ended, &[0, 2])], raises, "excepted");
+    assert_eq!(over, chain("RuntimeError, GroupEnded, ValueError", &[]));
+    let interrupt = rejected("raise KeyboardInterrupt", "plain");
+    assert_eq!(interrupt, chain("KeyboardInterrupt, Rejected", &cell));
+    let own = "try:\n    raise OSError('disk')\n\
+               except OSError:\n    raise RuntimeError('x')";
+    let full = chain("RuntimeError, OSError, Rejected, ValueError", &cell);
+    assert_eq!(rejected(own, "excepted"), full);
+    let cycle = "a = RuntimeError('a')\nb = OSError('b')\n\
+                 a.__context__ = b\nb.__context__ = a\nraise a";
+    assert_eq!(
+        rejected(cycle, "plain"),
+        chain("RuntimeError, Rejected", &cell)
+    );
+    let twice = [(refused, &[1, 2, 3][..]), (ended, &[0, 2])];
+    let stored = failing(places, &twice, "raise stored", "excepted");
+    assert_eq!(stored, chain("OSError, GroupEnded, ValueError", &[]));
+    let resumed = rejected(raises, "resumed");
+    assert_eq!(resumed, chain("RuntimeError, Rejected, KeyError", &cell));
+}
+
+/// A frame with a refusal and a loss raises `Rejected` with the seqs of the lost group
+/// in `lost` for each loss, and with `warn` also logs the warning of the loss. A frame
+/// with an end and a loss raises `GroupEnded` with `lost`, and one with no loss gives
+/// an empty `lost` and logs nothing. A handler error goes up as `chains` states, in
+/// this test, as the two share the `foundation` logger.
+#[test]
+fn answer_gives_the_seqs_of_the_lost_groups_in_lost_for_each_loss() {
+    let places = grouped();
+    let lost = |seq, count| Outcome::Lost {
+        range: range(seq, count),
+    };
+    let refused = [
+        (5, Outcome::Refused(Refusal::Full)),
+        (6, lost(10, 3)),
+        (7, Outcome::Taken { range: range(0, 3) }),
+    ];
+    let line = |start, stop| {
+        vec![
+            ("line.a".to_owned(), start, stop),
+            ("line.time".to_owned(), start, stop),
+        ]
+    };
+    assert_eq!(
+        logged(&places, crate::Loss::Warn, &refused, &[1, 2, 3]),
+        (
+            "Rejected".to_owned(),
+            line(10, 13),
+            vec!["samples were lost: line.a (3), line.time (3)".to_owned()]
+        )
+    );
+    for loss in [crate::Loss::Raise, crate::Loss::Ignore] {
+        assert_eq!(
+            logged(&places, loss, &refused, &[1, 2, 3]),
+            ("Rejected".to_owned(), line(10, 13), Vec::new()),
+            "{loss:?}"
+        );
+    }
+    let ended = [(4, Outcome::Ended(End::Removed)), (6, lost(20, 2))];
+    assert_eq!(
+        logged(&places, crate::Loss::Warn, &ended, &[0, 2]),
+        (
+            "GroupEnded".to_owned(),
+            line(20, 22),
+            vec!["samples were lost: line.a (2), line.time (2)".to_owned()]
+        )
+    );
+    let whole = [(5, Outcome::Refused(Refusal::Order))];
+    assert_eq!(
+        logged(&places, crate::Loss::Warn, &whole, &[1]),
+        ("Rejected".to_owned(), Vec::new(), Vec::new())
+    );
+    chains(&places, &refused, &ended);
+}
+
+/// A writer of `plant.time`, `plant.a`, and `plant.time` whose frame gives the stamp at
+/// place 2, the repeat of the index, names the index once, also in `ended`.
+#[test]
+fn answer_names_a_repeat_of_the_index_once() {
+    let grouped = grouped();
+    let places = [4, 0, 4].map(|place| sdk::Place {
+        index: 0,
+        ..grouped[place].clone()
+    });
+    let refused = [(0, Outcome::Refused(Refusal::Order))];
+    assert_eq!(
+        untaken(&places, crate::Loss::Raise, &refused, &[1, 2]),
+        (
+            "Rejected".to_owned(),
+            "the node refused the frame of plant.time (order: a stamp is not after the \
+             stamp before it); channels plant.time, plant.a were not written; no \
+             channel was"
+                .to_owned(),
+            Some("order".to_owned()),
+            Some((Vec::new(), names(&["plant.time", "plant.a"]))),
+            None,
+        )
+    );
+    let lost = [(
+        0,
+        Outcome::Lost {
+            range: range(10, 1),
+        },
+    )];
+    assert_eq!(
+        untaken(&places, crate::Loss::Raise, &lost, &[1, 2]).1,
+        "samples were lost: plant.time (1), plant.a (1)"
+    );
+    let ended = [(0, Outcome::Ended(End::Removed))];
+    let ended = untaken(&places, crate::Loss::Raise, &ended, &[1]);
+    assert_eq!(ended.4, Some(names(&["plant.time", "plant.a"])));
+}
+
+/// The writer's map of an error names the channels at its places: a close that gives
+/// `Unstored` raises `Stopped` with the code of the end of its first group and names
+/// the index and the end of each group; a refusal of the stream says that the writer
+/// has ended; and a count, an absent index, and a channel given twice raise
+/// `ValueError`. Another error raises as each call does.
+#[test]
+fn raised_names_the_channels_at_the_places_of_each_error_of_a_writer() {
+    let places = grouped();
+    let stream = sdk::Error::Stream;
+    let layout = |error| stream(program::Error::Layout(error));
+    let cases = [
+        (
+            stream(program::Error::Unstored(vec![(4, End::Removed)])),
+            "Stopped",
+            "the write of plant.time (unknown) ended: a frame that the node took may \
+             not be on disk",
+            Some("unknown"),
+        ),
+        (
+            stream(program::Error::Unstored(vec![
+                (6, End::Failed),
+                (4, End::Removed),
+            ])),
+            "Stopped",
+            "the writes of line.time (failed), plant.time (unknown) ended: a frame \
+             that the node took may not be on disk",
+            Some("failed"),
+        ),
+        (
+            stream(program::Error::Refused(program::Refusal::Busy)),
+            "Stopped",
+            "the node had no memory for a response, a request body, a read, or a \
+             write; the writer has ended",
+            Some("busy"),
+        ),
+        (
+            stream(program::Error::Count {
+                place: 0,
+                count: 2,
+                other: 4,
+                other_count: 3,
+            }),
+            "ValueError",
+            "channels plant.a and plant.time are of one index but hold 2 and 3 samples",
+            None,
+        ),
+        (
+            layout(frame::Error::IndexAbsent { entry: 1, index: 5 }),
+            "ValueError",
+            "the frame holds cell.a but not its index, cell.time",
+            None,
+        ),
+        (
+            layout(frame::Error::Unordered { entry: 2, last: 2 }),
+            "ValueError",
+            "the frame holds line.a twice",
+            None,
+        ),
+        (
+            sdk::Error::Closed,
+            "RuntimeError",
+            "the client is closed",
+            None,
+        ),
     ];
     Python::initialize();
     Python::attach(|py| {
-        for (end, code) in ends {
-            let unstored = program::Error::Unstored(vec![(1, end)]);
-            let text = unstored.to_string();
-            let error = super::error(py, &sdk::Error::Stream(unstored));
-            assert_eq!(error.get_type(py).name().unwrap().to_string(), "Stopped");
-            let value = error.value(py);
+        for (error, class, text, code) in cases {
+            let raised = crate::write::raised(py, &places, &error);
+            assert_eq!(raised.get_type(py).name().unwrap().to_string(), class);
+            let value = raised.value(py);
             assert_eq!(value.to_string(), text);
-            let given: String = value.getattr("code").unwrap().extract().unwrap();
-            assert_eq!(given, code, "{end:?}");
+            let given = value.getattr("code").ok().map(|code| code.to_string());
+            assert_eq!(given.as_deref(), code, "{error:?}");
         }
     });
 }

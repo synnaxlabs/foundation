@@ -14,8 +14,11 @@
   #3464. The overloads of `Frame.get` in the stub wait on #3481. `laptop.architect-2`
   deferred both at 2026-10-20T01:33:55Z
   (https://github.com/synnaxlabs/foundation/pull/3436#issuecomment-6281242356). Only a
-  channel of a type that is not a scalar raises `TypeError` at the open. The reader
-  follows the writer (SDK PYTHON WRITER): one `Mutex` taken with
+  channel of a type that is not a scalar raises `TypeError` at the open.
+  `Reader.places` gives `(name, type, index)` for each place, `index` the place of its
+  index, as `Writer.places` does (`laptop.architect-2`, 2026-10-20T13:37:38Z,
+  https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6292172439). The
+  reader follows the writer (SDK PYTHON WRITER): one `Mutex` taken with
   `MutexExt::lock_py_attached`, a check of the process before the lock, and no Python
   code while a call holds the lock. The plan
   (https://github.com/synnaxlabs/foundation/issues/3321#issuecomment-6272864204) was

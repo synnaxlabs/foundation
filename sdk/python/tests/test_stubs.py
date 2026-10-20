@@ -112,8 +112,16 @@ def assert_stated(test: unittest.TestCase, value: object) -> None:
 def registered(stub: type, module: type) -> list[type]:
     """Each base of the class `stub` of the stub that the class `module` of the module
     is not built on: an ABC that the module registers it with, which a type checker
-    reads only from the stub."""
-    return [base for base in stub.__bases__ if base not in module.__mro__]
+    reads only from the stub. A base that the stub defines is the class of its name in
+    the module."""
+    return [base for base in stub.__bases__ if built_on(base) not in module.__mro__]
+
+
+def built_on(base: type) -> type:
+    """The class of the module that the base `base` of a class of the stub names."""
+    if base.__module__ == "_native_stub":
+        return getattr(_native, base.__name__)
+    return base
 
 
 def public(name: str) -> bool:
