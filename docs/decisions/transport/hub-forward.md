@@ -45,9 +45,11 @@
   end of the stream before the last place finishes the stream and opens nothing. The
   group is the channels of the open at the places, and the write goes on as a program's
   write, with the member as the `via` of its handoff. A message of kind 4 is a renewal
-  only during the wait for the home and between frames, where `write::Frames::finish`
-  gives `Ok`. A message inside a frame has no kind byte, so a first byte of 4 there is
-  data. A refusal of the proof stops the stream with its code. PR 4 gives `REFUSED`,
+  only during the wait for the home and between frames, where
+  `write::Frames::between` is true (`laptop.architect`, 2026-10-20T01:49:00Z:
+  https://github.com/synnaxlabs/foundation/pull/3480#issuecomment-6281429498). A
+  message inside a frame has no kind byte, so a first byte of 4 there is data. A refusal
+  of the proof stops the stream with its code. PR 4 gives `REFUSED`,
   `VIA`, and `CHANGED` to the program as `wire::hub::write::End::Refused` (code 3), and
   `EXPIRED` as `End::Failed`. Plan:
   https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6280544339 with
