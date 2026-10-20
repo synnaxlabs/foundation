@@ -81,9 +81,9 @@ pub fn bound(ticket: &Ticket) -> Span {
 /// `join` in it, durable. The file holds the card and the ticket's admission, a
 /// signature over this card only, and never the private key of the ticket. When the
 /// file holds a request for the public key of `config.ticket` and the public key that
-/// `config.transport` proves, `ask` sends that request, and does not send
-/// `config.card`. Else it writes the new request over it. So a node that stops after
-/// a voter applied its join, and before the answer came, is admitted at the next
+/// `config.transport` proves, `ask` sends that request, and does not send `config.card`
+/// or `config.status`. Else it writes the new request over it. So a node that stops
+/// after a voter applied its join, and before the answer came, is admitted at the next
 /// call. When a voter refuses the stored request for its card, its ticket, or its
 /// status, `ask` writes the request of `config.card` and `config.status` over it and
 /// asks with that. The file stays for the life of `config.dir`: each

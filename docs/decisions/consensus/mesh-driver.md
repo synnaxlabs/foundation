@@ -257,10 +257,13 @@
   write that waits for a block ends at the next tick; until then a new open gives
   `Error::Log`. Each open applies the log from index 1, until snapshots (#253). A watch
   does not keep the group running, and a dropped watch leaves no waker. `open` refuses a
-  node or a voter that is not a member (`Error::NotMember`), and a private key that is
-  not the key of this node's member (`Error::WrongKey`). `Config.founding.members` is a
-  list, and the region state holds each record under the key of its card, so the key of
-  a member has one copy. `open` is the one check of a list for two records of one node:
+  node or a voter that is not a member (`Error::NotMember`), other than this node when
+  the join file of `Config.dir` holds its card (MEMBER RECORD, 2026-10-20T09:51:13Z,
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6288239430), and a
+  private key that is not the key of this node's member (`Error::WrongKey`).
+  `Config.founding.members` is a list, and the region state holds each record under the
+  key of its card, so the key of a member has one copy. `open` is the one check of a
+  list for two records of one node:
   a decoder of a join answer passes its records on and does not check them again
   (decided by `laptop.architect`, 2026-10-07T08:07:47Z:
   https://github.com/synnaxlabs/foundation/issues/1259#issuecomment-6033747312, which
@@ -545,3 +548,12 @@
   entry proposes again, as the entry can be gone from the log (`laptop.architect`,
   2026-10-18T08:28:03Z:
   https://github.com/synnaxlabs/foundation/pull/3155#issuecomment-6247634446).
+  Amended (2026-10-20, PR 5e of #336): the mesh directory also holds the file `join`,
+  which `join::ask` writes before its first ask (MEMBER RECORD). Its check, version,
+  and frame are those of `founding`, and a body over `change::BYTES_MAX` bytes gives
+  `Error::JoinFile` with no read. A founding never holds a node that joined, so the file
+  stays for the life of the directory: each open of a founding that lacks this node
+  reads it. An `ask` in a directory that holds `founding` gives `Error::Founded`, so a
+  node that opened a region never writes over its join file (`laptop.architect`,
+  2026-10-20T11:14:16Z, item B of
+  https://github.com/synnaxlabs/foundation/pull/3571#issuecomment-6289593633).

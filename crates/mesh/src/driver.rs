@@ -169,8 +169,8 @@ impl Mesh {
     /// moved, as at a follower behind the leader.
     ///
     /// `config.founding.members` can lack this node when `config.dir` holds the join
-    /// file of this node: the node opens as a member that is not a voter, and its
-    /// member record comes when it applies its join.
+    /// file of this node: the node opens with no member record of its own, and its log
+    /// alone makes it a voter. Its member record comes when it applies its join.
     ///
     /// The group sends its messages on a session to each member. It dials a member at
     /// the addresses of its card, at the first message for it, and again after the

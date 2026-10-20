@@ -123,8 +123,9 @@ pub enum Error {
     },
     /// A call of this node's chunk store failed.
     Blob(blob::Error),
-    /// A file call on the founding file, on the join file, on the directory of the
-    /// spec in use, or on a file in it, failed.
+    /// A file call on the founding file, on the join file, on the file of the last
+    /// signed card version, on the mesh directory or its parent, on the directory of
+    /// the spec in use, or on a file in it, failed.
     Files(files::Error),
     /// A file in the directory of the spec in use does not name a pointer.
     Stray {
