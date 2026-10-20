@@ -1,5 +1,7 @@
 //! Checks core definitions in Documents, expands templates, hands connector blocks to
-//! kinds, and computes plans, explains, and exports.
+//! kinds, and computes plans, explains, and exports. Decodes the profile of a
+//! program's host, and reads and writes the text of an OpenSSH Ed25519 key file, with
+//! no file I/O.
 
 mod access;
 mod channel;

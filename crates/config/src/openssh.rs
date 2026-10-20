@@ -3,11 +3,15 @@
 
 use std::fmt;
 
+use document::diagnostic::{Code, Diagnostic};
+use document::value::{Kind, Value};
 use ssh_key::private::{Ed25519Keypair, Ed25519PrivateKey, KeypairData};
 use ssh_key::public::Ed25519PublicKey;
 use ssh_key::{HashAlg, LineEnding};
 use types::ed25519::{PrivateKey, PublicKey};
 
+const BAD_PUBLIC_KEY: Code = Code::new("config.bad-public-key");
+const PUBLIC_KEY_ALGORITHM: Code = Code::new("config.public-key-algorithm");
 const ALGORITHM: &str = "ssh-ed25519";
 /// The name of each other algorithm of an OpenSSH public key. A message names only
 /// these, since another first word can be a secret.
@@ -34,13 +38,71 @@ const OTHER_ALGORITHMS: [&str; 17] = [
 const LINE_BREAKS: [char; 7] =
     ['\n', '\x0b', '\x0c', '\r', '\u{85}', '\u{2028}', '\u{2029}'];
 
-/// Why a text is not the line of an OpenSSH `.pub` file of an Ed25519 key. Its message
-/// quotes no part of the text after the first word, since that part can be a secret.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Error {
+/// What holds a public key: its noun in a message, and the fixes of its caller.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Holder {
+    /// The holder in a message, such as "a subject".
+    pub noun: &'static str,
+    /// The fix of a key that is not the line of a `.pub` file of an Ed25519 key.
+    pub fix: &'static str,
+    /// The fix of a key of another algorithm.
+    pub algorithm_fix: &'static str,
+}
+
+/// Reads the public key of `holder`: the line of an OpenSSH `.pub` file of an Ed25519
+/// key. A message quotes no part of the text after the first word, since that part can
+/// be a secret.
+pub(crate) fn key(value: &Value, holder: Holder) -> Result<PublicKey, Diagnostic> {
+    let Holder {
+        noun,
+        fix,
+        algorithm_fix,
+    } = holder;
+    let Kind::String(text) = &value.kind else {
+        let message = format!("a public key is a string, not {}", value.kind.noun());
+        return Err(Diagnostic::new(
+            BAD_PUBLIC_KEY,
+            value.span,
+            message,
+            fix.into(),
+        ));
+    };
+    public_key(text).map_err(|error| {
+        let (code, message, fix) = match error {
+            Error::Algorithm(algorithm) => (
+                PUBLIC_KEY_ALGORITHM,
+                format!(
+                    "the public key is {algorithm:?}, and {noun} takes only \
+                     `{ALGORITHM}`"
+                ),
+                algorithm_fix,
+            ),
+            Error::NotALine => (
+                BAD_PUBLIC_KEY,
+                "the public key is not the line of a `.pub` file".into(),
+                fix,
+            ),
+            Error::Lines => (
+                BAD_PUBLIC_KEY,
+                "the public key is more than one line".into(),
+                fix,
+            ),
+            Error::NotEd25519 => (
+                BAD_PUBLIC_KEY,
+                "the base64 of the public key is not an Ed25519 key".into(),
+                fix,
+            ),
+            Error::SmallOrder(error) => (BAD_PUBLIC_KEY, error.to_string(), fix),
+        };
+        Diagnostic::new(code, value.span, message, fix.into())
+    })
+}
+
+/// Why a text is not the line of an OpenSSH `.pub` file of an Ed25519 key.
+enum Error {
     /// It has no algorithm and key, or its first word is no known algorithm.
     NotALine,
-    /// The key is of another algorithm: its name, or `ECDSA` for an ECDSA key.
+    /// The key is of another known algorithm, by its name.
     Algorithm(&'static str),
     /// It is more than one line.
     Lines,
@@ -51,29 +113,10 @@ pub(crate) enum Error {
     SmallOrder(types::ed25519::SmallOrder),
 }
 
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotALine => {
-                f.write_str("the public key is not the line of a `.pub` file")
-            }
-            Self::Algorithm(algorithm) => {
-                let only = "and a subject takes only";
-                write!(f, "the public key is {algorithm:?}, {only} `{ALGORITHM}`")
-            }
-            Self::Lines => f.write_str("the public key is more than one line"),
-            Self::NotEd25519 => {
-                f.write_str("the base64 of the public key is not an Ed25519 key")
-            }
-            Self::SmallOrder(error) => error.fmt(f),
-        }
-    }
-}
-
 /// Reads the line of an OpenSSH `.pub` file of an Ed25519 key: `ssh-ed25519`, the
 /// base64 of the key, and a comment, which is optional and not kept. As OpenSSH reads
 /// it, the comment is the rest of the line, so it may hold another key.
-pub(crate) fn public_key(text: &str) -> Result<PublicKey, Error> {
+fn public_key(text: &str) -> Result<PublicKey, Error> {
     let mut words = text.split_ascii_whitespace();
     let (Some(algorithm), Some(encoded)) = (words.next(), words.next()) else {
         return Err(Error::NotALine);
@@ -112,8 +155,9 @@ pub fn fingerprint(key: PublicKey) -> String {
         .to_string()
 }
 
-/// The line of an OpenSSH `.pub` file of `key`, with no comment. [`public_key`] reads
-/// it back as `key`.
+/// The line of an OpenSSH `.pub` file of `key`, with no comment. A `node` block of
+/// [`crate::profile::node`] holds it, and [`crate::profile::decode`] reads it back as
+/// `key`.
 #[must_use]
 pub fn line(key: PublicKey) -> String {
     ssh_key::PublicKey::from(Ed25519PublicKey(key.to_bytes()))
@@ -156,16 +200,19 @@ impl fmt::Display for Unreadable {
 }
 
 /// Reads the OpenSSH private key file of an Ed25519 key with no passphrase, as
-/// `ssh-keygen -t ed25519 -N ""` and [`key_file`] write it. The comment is
-/// not kept.
+/// `ssh-keygen -t ed25519 -N ""` and [`key_file`] write it. It reads each such file
+/// that OpenSSH reads, with a body of any width or with white space, and any text after
+/// the end mark, and also one with CRLF line ends or no line end after the end mark.
+/// The comment is not kept.
 ///
 /// # Errors
 ///
 /// [`Unreadable`] says why the text is not such a file.
 pub fn private_key(text: &str) -> Result<PrivateKey, Unreadable> {
-    let file = match ssh_key::PrivateKey::from_openssh(text) {
+    let file = match ssh_key::PrivateKey::from_openssh(lines(text)) {
         Ok(file) => file,
-        // With no `ecdsa` feature, `ssh-key` reads no ECDSA private key.
+        // With no `ecdsa` feature, `ssh-key` reads no ECDSA private key. A `none` KDF
+        // with options, which a corrupt file can hold, also gives this error.
         Err(ssh_key::Error::AlgorithmUnknown) => {
             return Err(Unreadable::Algorithm("ECDSA"));
         }
@@ -184,13 +231,35 @@ pub fn private_key(text: &str) -> Result<PrivateKey, Unreadable> {
         return Err(Unreadable::Passphrase);
     }
     let KeypairData::Ed25519(pair) = file.key_data() else {
-        return Err(Unreadable::Format);
+        unreachable!("invariant: the key data of an Ed25519 key with no passphrase")
     };
     let key = PrivateKey(pair.private.to_bytes());
     if key.public().to_bytes() != pair.public.0 {
         return Err(Unreadable::Mismatch);
     }
     Ok(key)
+}
+
+/// `text` up to its end mark as `ssh-key` takes it: the body with no white space, in
+/// lines of 70 characters, and each line end as `\n`. `ssh-key` 0.6.7 reads only lines
+/// of 70, as `ssh-keygen` writes them, and OpenSSH reads any width, skips white space
+/// in the body as C `isspace` finds it, and skips the text after the end mark.
+fn lines(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let end = lines.iter().position(|line| line.starts_with("-----END"));
+    let Some([begin, body @ .., end]) = end.map(|end| &lines[..=end]) else {
+        return text.to_owned();
+    };
+    let space = |c: &char| c.is_ascii_whitespace() || *c == '\x0b';
+    let body: Vec<char> = body.concat().chars().filter(|c| !space(c)).collect();
+    let mut file = format!("{begin}\n");
+    for line in body.chunks(70) {
+        file.extend(line);
+        file.push('\n');
+    }
+    file.push_str(end);
+    file.push('\n');
+    file
 }
 
 /// The OpenSSH private key file of `key` with no passphrase and with `comment`, as

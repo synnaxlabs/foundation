@@ -13,13 +13,25 @@ use document::{Attribute, Block, Document, Label, Map, read};
 use types::ed25519::PublicKey;
 use types::name::Name;
 
-use crate::openssh;
+use crate::openssh::{self, Holder};
 
 const BAD_ADDRESS: Code = Code::new("config.bad-address");
 const BAD_PATH: Code = Code::new("config.bad-path");
-const NOT_BOOL: Code = Code::new("config.not-bool");
-const REPEATED_NODE: Code = Code::new("config.repeated-node");
+const BAD_STRICT: Code = Code::new("config.bad-strict");
+const DUPLICATE_NODE: Code = Code::new("config.duplicate-node");
+const PRIVATE_KEY_WITHOUT_SUBJECT: Code =
+    Code::new("config.private-key-without-subject");
+const PRINTED: &str = "Use the line that `foundation profile` prints";
+const NODE_KEY: Holder = Holder {
+    noun: "a node",
+    fix: PRINTED,
+    algorithm_fix: PRINTED,
+};
 
+/// The fix of a pasted private key: the one key that a profile names is the key file
+/// of its subject.
+const PASTED_KEY: &str = "Remove the private key from this file now, and write \
+                          the path of its key file as `private_key`";
 const BODY: Body = Body {
     summary: "The subject that a program on a client host acts as, and the public \
               key of each node that it connects to.",
@@ -28,21 +40,24 @@ const BODY: Body = Body {
             name: "subject",
             value: "a name",
             presence: Presence::Optional,
-            summary: "The subject that the program acts as. Without it, the login \
-                      name of the user.",
+            summary: "The subject that the program acts as. Without it, `connect` \
+                      takes the next source: the first admin of the data directory, \
+                      else the login name of the user.",
         },
         schema::Attribute {
             name: "private_key",
             value: "the path of an OpenSSH Ed25519 private key file",
             presence: Presence::Optional,
-            summary: "The key of the subject. Without it, \
+            summary: "The key file of `subject`, which it needs. A relative path is \
+                      relative to the directory of the profile, and a path that \
+                      starts with `~/` to the home directory. Without it, \
                       `~/.foundation/<subject>.key`, made when it is not there.",
         },
         schema::Attribute {
             name: "strict",
             value: "a bool",
             presence: Presence::Default("false"),
-            summary: "Whether a node with no `node` block is refused, not trusted on \
+            summary: "Whether a node that no source pins is refused, not trusted on \
                       first use.",
         },
     ],
@@ -84,10 +99,12 @@ node \"10.0.0.5:7400\" {
 pub struct Profile {
     /// The subject that a program acts as, if the profile names one.
     pub subject: Option<Name>,
-    /// The file of the subject's private key as the profile writes it, if it names
-    /// one.
+    /// The key file of `subject` as the profile writes it, if it names one. A relative
+    /// path is relative to the directory of the profile, and a path that starts with
+    /// `~/` to the home directory; the program joins it. When it is `Some`, so is
+    /// `subject`.
     pub private_key: Option<PathBuf>,
-    /// Whether a node with no `node` block is refused, not trusted on first use.
+    /// Whether a node that no source pins is refused, not trusted on first use.
     pub strict: bool,
     /// The public key that each node proves in the handshake, by the address that a
     /// program dials.
@@ -98,10 +115,19 @@ pub struct Profile {
 ///
 /// # Errors
 ///
-/// The diagnostic of each problem, by span: an attribute or block that a profile does
-/// not take, a value of a wrong type or that does not parse, a `node` block without
-/// one label or its `public_key`, and each later `node` block of an address.
+/// Only `config.private-key` at each string that holds a private key, when one does.
+/// Else the diagnostic of each problem, by span: an attribute or block that a profile
+/// does not take, a value of a wrong type or that does not parse, a `private_key` with
+/// no `subject`, a `node` block without one label or its `public_key`, and each later
+/// `node` block of an address.
 pub fn decode(document: &Document) -> Result<Profile, Vec<Diagnostic>> {
+    let mut alarms = crate::private_key::alarms(std::slice::from_ref(document));
+    if !alarms.is_empty() {
+        for alarm in &mut alarms {
+            alarm.fix = PASTED_KEY.into();
+        }
+        return Err(alarms);
+    }
     let mut diagnostics = read::unknown(document, "the profile", &BODY);
     let mut profile = Profile::default();
     let attributes = &document.attributes;
@@ -115,9 +141,19 @@ pub fn decode(document: &Document) -> Result<Profile, Vec<Diagnostic>> {
     }
     if let Some(path) = attributes.get("private_key") {
         keep(self::path(&path.value).map(|path| profile.private_key = Some(path)));
+        if attributes.get("subject").is_none() {
+            keep(Err(Diagnostic::new(
+                PRIVATE_KEY_WITHOUT_SUBJECT,
+                path.key_span,
+                "the profile names `private_key` with no `subject`".into(),
+                "Add `subject`, the name whose key the file holds, or remove \
+                 `private_key`"
+                    .into(),
+            )));
+        }
     }
-    if let Some(strict) = attributes.get("strict") {
-        keep(bool(&strict.value).map(|strict| profile.strict = strict));
+    if let Some(value) = attributes.get("strict") {
+        keep(strict(&value.value).map(|strict| profile.strict = strict));
     }
     let mut firsts = BTreeMap::new();
     for block in &document.blocks {
@@ -133,7 +169,7 @@ pub fn decode(document: &Document) -> Result<Profile, Vec<Diagnostic>> {
                 profile.nodes.insert(address, public_key);
             }
             Entry::Occupied(first) => {
-                diagnostics.push(repeated(address, block, *first.get()));
+                diagnostics.push(duplicate(address, block, *first.get()));
             }
         }
     }
@@ -144,7 +180,8 @@ pub fn decode(document: &Document) -> Result<Profile, Vec<Diagnostic>> {
     Err(diagnostics)
 }
 
-/// The `node` block that pins `public_key` at `address`. [`decode`] reads it back.
+/// The `node` block that pins `public_key` at `address`. [`decode`] reads it back, with
+/// the flow label of a V6 address as 0.
 #[must_use]
 #[expect(
     clippy::missing_panics_doc,
@@ -205,7 +242,7 @@ fn node_block(
         of,
         at,
         "public_key",
-        crate::subject::key,
+        |value| openssh::key(value, NODE_KEY),
         fix.into(),
     );
     match (address, public_key) {
@@ -239,12 +276,12 @@ fn path(value: &Value) -> Result<PathBuf, Diagnostic> {
     }
 }
 
-/// Reads `true` or `false`.
-fn bool(value: &Value) -> Result<bool, Diagnostic> {
+/// Reads `strict`: `true` or `false`.
+fn strict(value: &Value) -> Result<bool, Diagnostic> {
     match value.kind {
-        Kind::Bool(bool) => Ok(bool),
+        Kind::Bool(strict) => Ok(strict),
         ref kind => Err(Diagnostic::new(
-            NOT_BOOL,
+            BAD_STRICT,
             value.span,
             format!("`strict` is a bool, not {}", kind.noun()),
             "Write true or false".into(),
@@ -252,15 +289,15 @@ fn bool(value: &Value) -> Result<bool, Diagnostic> {
     }
 }
 
-/// `config.repeated-node` at the label of `block`, a later `node` block of `address`,
+/// `config.duplicate-node` at the label of `block`, a later `node` block of `address`,
 /// with a note at `first`, the label of the first.
-fn repeated(
+fn duplicate(
     address: SocketAddr,
     block: &Block,
     first: Option<document::Span>,
 ) -> Diagnostic {
     let mut diagnostic = Diagnostic::new(
-        REPEATED_NODE,
+        DUPLICATE_NODE,
         block.labels[0].span,
         format!("the profile has another `node` block of {address}"),
         "Remove one of the two".into(),
@@ -270,4 +307,23 @@ fn repeated(
         text: "the first `node` block".into(),
     }));
     diagnostic
+}
+
+#[cfg(test)]
+mod tests {
+    use document::Source;
+
+    use super::*;
+
+    /// The example of the reference decodes to what it shows.
+    #[test]
+    fn the_example_decodes() {
+        let document =
+            config_hcl::read(Source(0), EXAMPLE).expect("the example is HCL");
+        let profile = decode(&document).expect("the example decodes");
+        assert_eq!(profile.subject, Some("alice".parse().unwrap()));
+        assert!(!profile.strict);
+        let address: SocketAddr = "10.0.0.5:7400".parse().unwrap();
+        assert_eq!(profile.nodes.keys().collect::<Vec<_>>(), [&address]);
+    }
 }
