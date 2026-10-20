@@ -29,11 +29,13 @@
   `node` label that is not `ip:port`, a key line that is not `ssh-ed25519`, and a second
   block of one address, with a note at the first. A string that holds a private key
   gives only `config.private-key`, as in a config file (SUBJECT KEYS), with the fix to
-  write the path of its key file as `private_key` (`laptop.architect-2`,
-  2026-10-20T01:51:26Z, item 1 of
-  https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6281458911; the fix,
-  2026-10-20T02:08:10Z, item 3 of
-  https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6281670865). A pin
+  write the path of its key file as `private_key`, or, in a `node` block, to use the
+  line that `foundation profile` prints (`laptop.architect-2`, 2026-10-20T01:51:26Z,
+  item 1 of https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6281458911;
+  the fix, 2026-10-20T02:08:10Z, item 3 of
+  https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6281670865; the fix in
+  a `node` block, 2026-10-20T02:36:54Z, item 3 of
+  https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6282027387). A pin
   whose key holds such text also gives it: a key holds it with a chance under 10^-19,
   and an exception would pass a private key in the comment of the line
   (`laptop.architect-2`, 2026-10-20T01:53:14Z,
@@ -46,10 +48,16 @@
   ed25519 -N ""` writes it. `config::openssh` reads and writes it with `ssh-key`, and
   refuses another algorithm by its name (an ECDSA key as `ECDSA`, which `ssh-key` reads
   only with its `ecdsa` feature), an encrypted key, a public key that is not the key of
-  the private key (`Mismatch`), and a text that is not a key file. It reads each such
-  file that OpenSSH 9.6p1 reads, with a body of any width or with white space, and any
-  text after the end mark, and also one with CRLF line ends or no line end after the end
-  mark, which OpenSSH refuses (`laptop.architect-2`, 2026-10-20T02:08:10Z,
+  the private key (`Mismatch`), a comment that is not UTF-8 (`Comment`), and a text that
+  is not a key file. It reads each such file that `ssh-key` 0.6.7 reads, also one with a
+  body of any width or with white space, any text after the end mark, CRLF line ends, or
+  no line end after the end mark. It refuses some files that OpenSSH reads: a comment
+  that is not UTF-8 (`Comment`), padding of a block or more, options of the `none` KDF,
+  and a NUL in the body (`laptop.director`, 2026-10-20T02:19:48Z,
+  https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6281813278;
+  `laptop.architect-2`, 2026-10-20T02:36:54Z, item 2 of
+  https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6282027387; the line
+  ends and white space, `laptop.architect-2`, 2026-10-20T02:08:10Z,
   https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6281670865, in place
   of item 2 of 6281458911; and 2026-10-20T01:53:14Z, item 4 of 6281480378). The formats
   are a key choice of kind (f) that `laptop.architect-2` sent to `laptop.monitor` (plan
