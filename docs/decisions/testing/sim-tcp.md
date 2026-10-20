@@ -26,37 +26,41 @@
   Each try draws once, at its send, and a try of a lost answer twice, as below. A link
   with no loss makes no draw. A lost segment other than an ACK or an RST holds the later
   segments of its stream in its direction other than ACKs and RSTs, and goes again after
-  its RTO: 1 s for a SYN or a SYN-ACK, else the delay and jitter of both legs plus 200
-  ms, twice as long after each loss, to at most 120 s. A lost ACK or RST (an answer)
+  its RTO: 1 s for a SYN or a SYN-ACK, else the delay and jitter of both legs plus
+  200 ms, twice as long after each loss, to at most 120 s. A lost ACK or RST (an answer)
   holds nothing. The next segment of its stream in its direction sent after a lost ACK
   carries it, and the ACK goes again after its RTO only when none arrives first. An
   answer that goes takes the place of the lost answer of its stream and direction. A
-  lost answer in place of one with a timer keeps that timer, its count, and its 924.6 s.
-  A lost answer has the RTO and the limit of the end that gets it at each try: of a SYN
-  to an end that connects, of a SYN-ACK to an end that accepts, and of bytes to another
-  end. It goes again only while that end waits, and else has no timer until the end
-  waits, and then goes after its RTO with a new count. It goes as the try of that end
-  that meets it would: it is lost as the loss of the link from that end draws, and else
-  as the loss of its own link draws. An RST that answers a segment at a closed port or a
-  refusal continues the count and the 924.6 s of that segment. A connect gives up 127 s
-  after its first SYN (7 tries), when its SYN, the SYN-ACK, or the answering RST is lost
-  each time, and a SYN-ACK goes at most 6 times. Another segment goes until the first
-  try 924.6 s or more after its first send, or after its hold for a held segment, as
-  Linux bounds `tcp_retries2` by time. Then the end that waits on it times out with
-  `TimedOut` and sends no RST: the sender of a SYN-ACK, bytes, or a FIN, and the
-  receiver of an ACK or an RST that waits on one. The client of a SYN-ACK that times out
-  does not know that its SYN arrived, and gives up 127 s after its first SYN. When an
-  end leaves its pair before its stream closed (a timeout, a drop, or a power cut of its
-  node), its held segments drop, and its peer gets one RST: its lost answer or its held
-  SYN-ACK as an RST, with its next try and its count, or else a new RST. The RST of an
-  abort (a drop before close, or a listener that fails or drops) goes at once. The RST
-  of a timeout or a power cut is lost, as the peer meets the closed port only when a try
-  of it arrives there: a peer that only reads waits forever, as on Linux with no
-  keepalive, and a peer that cannot reach the node times out. A lost answer to an end
-  that left drops. An end that leaves at an RST only drops its held segments, as no peer
-  is left. A peer that connects gets none while a listener receives at its port, and
-  gives up 127 s after its first SYN. A clean close keeps the lost segments of the end,
-  as TIME_WAIT does. After a power cut, the lost segments from the node other than RSTs
+  lost answer in place of one with a timer keeps that timer, and the count and the
+  924.6 s of the two that began first. A lost answer has the RTO and the limit of the
+  end that gets it at each try: of a SYN to an end that connects, of a SYN-ACK to an end
+  that accepts, and of bytes to another end. It goes again only while that end waits,
+  and else has no timer until the end waits, and then goes after its RTO with a new
+  count. It goes as the try of that end that meets it would: it is lost as the loss of
+  the link from that end draws, and else as the loss of its own link draws. An ACK of a
+  segment, and an RST that answers a segment at a closed port or a refusal, continue the
+  count and the 924.6 s of that segment. A lost RST to an end that connects, due while a
+  listener receives at its source, goes as the next SYN of that end with its count, and
+  the listener takes it. A connect gives up 127 s after its first SYN (7 tries), when
+  its SYN, the SYN-ACK, or the answering RST is lost each time, and a SYN-ACK goes at
+  most 6 times. Another segment goes until the first try 924.6 s or more after its first
+  send, or after its hold for a held segment, as Linux bounds `tcp_retries2` by time.
+  Then the end that waits on it times out with `TimedOut` and sends no RST: the sender
+  of a SYN-ACK, bytes, or a FIN, and the receiver of an ACK or an RST that waits on one.
+  The client of a SYN-ACK that times out does not know that its SYN arrived, and gives
+  up 127 s after its first SYN. When an end leaves its pair before its stream closed (a
+  timeout, a drop, or a power cut of its node), its held segments drop, and its peer
+  gets one RST: its lost answer or its held SYN-ACK as an RST, with its next try and its
+  count, or else a new RST. The RST of an abort (a drop of an open end before its close
+  or with bytes unread, or a listener that fails or drops) goes at once. The RST of
+  bytes to an orphan goes at once and continues the count of the bytes. The RST of a
+  timeout or a power cut is lost, as the peer meets the closed port only when a try of
+  it arrives there: a peer that only reads waits forever, as on Linux with no keepalive,
+  and a peer that cannot reach the node times out. A lost answer to an end that left
+  drops. An end that leaves at an RST only drops its held segments, as no peer is left.
+  A peer that connects gets none while a listener receives at its port, and gives up
+  127 s after its first SYN. A clean close keeps the lost segments of the end, as
+  TIME_WAIT does. After a power cut, the lost segments from the node other than RSTs
   drop. Not as Linux: no fast retransmit (a lost segment waits for its RTO, where Linux
   sends it again about one round trip after three duplicate ACKs); no congestion window;
   a SYN that arrives does not go again, so a SYN-ACK gets no extra try from it, and a
