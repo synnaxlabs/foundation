@@ -103,8 +103,8 @@ Labels:
 - `owner:<name>` -> the session that took the task.
 - `crate:<name>` -> which crates it changes.
 - `ready` -> on the milestone path, complete, and not blocked, so a builder may take it.
-  Only the coordinator adds it, and a builder that gives an issue back or removes
-  `blocked` from one (`/build`).
+  Only the coordinator adds it, and a builder to an issue that it gives back
+  (`/build`).
 - `night` -> ready for the night lane. Only the architect adds it.
 - `model:fable` -> runs on Fable. Only the person or the architect adds it.
 - `interface` -> a request to change a public surface or a crate dependency.

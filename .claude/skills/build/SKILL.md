@@ -20,9 +20,9 @@ when its PR merges, `mcp__factory__next` clears it and starts `/build` again.
    restart (`docs/coordination.md`, "Worktrees"). Never loop over `.claude/worktrees` or
    `git worktree list`: the worktrees of other sessions are there too.
 2. Run the waits script. It prints each `blocked` issue with its owner and its state.
-   For each with your name, `ended` is a wait that has ended (Rules). Give one with
-   `no line` its line (Rules), from what the issue states. Its exits mean what they
-   mean in step 4. Then an open issue labeled `owner:$FACTORY_NAME` that is not
+   For each with your name or `-`, `ended` is a wait that has ended (Rules). Give one
+   with `no line` its line (Rules), from what the issue states. Its exits mean what
+   they mean in step 4. Then an open issue labeled `owner:$FACTORY_NAME` that is not
    `blocked` comes first, one with no open PR before one with an open PR: resume it
    from its last state comment. Run "Wait once" in the background for the PR of each
    other one that has auto-merge on.
@@ -169,11 +169,12 @@ take the next issue meanwhile.
   other work (Take an issue). A `blocked` issue names each wait in one line of its body,
   `Waits on #<n>, #<m>.`, for issues and PRs, with `the person` for a question
   (`Waits on #12 and the person.`). When the answer comes, take `the person` out of the
-  line. A wait has ended when the line names no open issue or PR and not `the person`,
-  as `ended` of the waits script says (step 2). Then remove `blocked` if it is there.
-  If no open PR closes the issue or has its number in its branch, also remove your
-  `owner:` label if it is there, and add `ready`. If you build no other issue, take one
-  (Take an issue).
+  line, and delete the line when nothing is left. A wait has ended when the line names
+  no open issue or PR and not `the person`, as `ended` of the waits script says
+  (step 2). Then remove `blocked` if it is there. If the issue has your `owner:` label
+  and no open PR closes it or has its number in its branch, also remove that label and
+  add `ready`. `/coordinate` admits an issue with no `owner:` label. If you build no
+  other issue, take one (Take an issue).
 - A key choice (`CLAUDE.md`, "The person decides the design"): send it to
   `laptop.monitor` when you make it, before work builds on it, then go on. Never add
   `blocked` for it.
