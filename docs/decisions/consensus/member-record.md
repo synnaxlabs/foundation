@@ -177,6 +177,24 @@
   https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6257042845). A
   failed read of the file after the admission ends the reply half with no mesh code,
   because the node is a member, and it can ask again.
+  Amended (2026-10-20, PR 5e of #336): before its first ask, `join::ask` keeps the
+  request in the file `join` of the mesh directory, durable. The file holds the card
+  and the ticket's admission, never the private key of the ticket. An ask sends the
+  stored request when it is for the public key of the ticket and the public key that
+  the transport proves, and does not send its own card. Else it writes its request
+  over it. So a node that stops after a voter applied its join, and before the answer
+  came, is admitted at the next ask, where it got `Unfit::Duplicate`. A write removes
+  `join`, writes `join.new`, renames it to `join`, which makes its bytes durable, and
+  syncs the directory, as for the file `founding`. So a crash leaves the old request,
+  the new one, or none, and `Error::JoinFile` names only a file that changed on disk.
+  A crash before the rename can lose an old request, but `ask` writes over a request
+  only when its ticket or key is not that of the call. `Mesh::open` of a founding
+  that lacks this node reads the file: the node opens as a member that is not a
+  voter, and its member record comes when it applies its join (`laptop.architect`,
+  2026-10-20T07:51:19Z, items 3 to 5 of
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6286140973; the
+  surface and its condition 1: 2026-10-20T09:51:13Z,
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6288239430).
   Until snapshots (#253), a region whose founders all left cannot admit a node. `secret`
   finds no key itself: `ops` and `node` read the member and pass its seal key. A
   rotation and `Remove` wait for a caller; a rotation that only the node signs lets a

@@ -79,12 +79,18 @@ fn ask_each(sim: &mut Sim, tickets: Vec<Ticket>) -> Asked {
 
 /// Starts [`JOINER`] on a new node of `sim`, which asks by each ticket of `asks` with
 /// its card, in turn. Gives the node and what each ask gave.
-#[expect(clippy::arithmetic_side_effects, reason = "a test may panic")]
 fn asks_on(
     sim: &mut Sim,
     asks: Vec<(Ticket, card::Signed)>,
 ) -> (sim::node::Node, Asked) {
     let node = sim.node(sim::node::Config::default());
+    let asked = asks_at(&node, asks);
+    (node, asked)
+}
+
+/// As [`asks_on`], on `node`.
+#[expect(clippy::arithmetic_side_effects, reason = "a test may panic")]
+fn asks_at(node: &sim::node::Node, asks: Vec<(Ticket, card::Signed)>) -> Asked {
     let asked = Asked::default();
     let (own, slot) = (node.clone(), Arc::clone(&asked));
     let main = move |tasks: Tasks| async move {
@@ -108,7 +114,7 @@ fn asks_on(
         core: None,
     };
     drop(node.shards().start(config, main).unwrap());
-    (node, asked)
+    asked
 }
 
 /// A cluster of `ids` that recorded ticket 8, which admits `plant.*` any number of
@@ -736,5 +742,240 @@ fn ask_gives_the_error_of_a_join_file_that_does_not_read_back_whole() {
                 "{at}"
             );
         });
+    }
+}
+
+/// What `body` gives on a new shard of `node`, which runs for 1 s of `cluster`.
+fn on<T: Send + 'static, F: Future<Output = T> + 'static>(
+    cluster: &mut Cluster,
+    node: &sim::node::Node,
+    body: impl FnOnce(sim::node::Node) -> F + Send + 'static,
+) -> T {
+    let slot = Arc::new(Mutex::new(None));
+    let (own, given) = (node.clone(), Arc::clone(&slot));
+    let main = move |_| async move {
+        let out = body(own).await;
+        *given.lock().unwrap() = Some(out);
+    };
+    let config = env::shards::Config {
+        name: "on".into(),
+        core: None,
+    };
+    drop(node.shards().start(config, main).unwrap());
+    cluster.run(seconds(1));
+    slot.lock()
+        .unwrap()
+        .take()
+        .expect("the body ends within 1 s")
+}
+
+/// What the join file of [`JOINER`] holds after a crash by `crash` at `span` into an
+/// ask by ticket 8 over the request of ticket 9, in a cluster of [`IDS`]. The next
+/// ask joins.
+fn crash_in_write(seed: u64, span: Span, crash: Crash) -> Option<region::Request> {
+    let mut cluster = recorded_cluster(seed, &IDS, &[]);
+    let joiner = cluster.sim.node(sim::node::Config::default());
+    let card = common::member(JOINER).card;
+    let first = (ticket_to(9, &IDS), card.clone());
+    let request = |(ticket, card): &(Ticket, card::Signed)| region::Request {
+        ticket: ticket.public_key(),
+        admission: ticket.admission(card),
+        card: card.clone().into(),
+        status: common::names([]),
+    };
+    let stored_first = request(&first);
+    on(&mut cluster, &joiner, |node| async move {
+        let blocks = crate::file::Blocks::new(create_pool()).unwrap();
+        let files = node.files();
+        join::file::write(&files, Path::new(""), &blocks, &stored_first)
+            .await
+            .unwrap();
+    });
+    let second = || (ticket_to(TICKET, &IDS), card.clone());
+    drop(asks_at(&joiner, vec![second()]));
+    cluster.sim.run_for(span).unwrap();
+    cluster.sim.crash(&joiner, crash);
+    let left = on(
+        &mut cluster,
+        &joiner,
+        |node| async move { stored(&node).await },
+    );
+    let left = left.unwrap_or_else(|error| panic!("run {seed}, {span:?}: {error}"));
+    let outcomes = [Some(request(&first)), Some(request(&second())), None];
+    assert!(outcomes.contains(&left), "run {seed}, {span:?}: {left:?}");
+    let asked = asks_at(&joiner, vec![second()]);
+    cluster.run(seconds(20));
+    let asked: Vec<_> = asked.lock().unwrap().drain(..).map(|(a, _)| a).collect();
+    assert_eq!(asked, [Ok(founding_of(&IDS, &IDS))], "run {seed}, {span:?}");
+    left
+}
+
+// A crash at each step of the write of a new request leaves the old request, the new
+// one, or none, and the next ask joins.
+#[test]
+fn a_crash_in_the_write_of_the_join_file_leaves_a_whole_request_and_the_node_joins() {
+    for crash in [Crash::Process, Crash::Power] {
+        let mut left = Vec::new();
+        for step in 0..64_i64 {
+            let span = Span::from_nanos(step.saturating_mul(25_000));
+            let stored = crash_in_write(step.unsigned_abs(), span, crash);
+            left.push(stored.map(|request| request.ticket));
+        }
+        for ticket in [None, Some(public(9)), Some(public(TICKET))] {
+            assert!(
+                left.contains(&ticket),
+                "{crash:?}: no crash left {ticket:?}"
+            );
+        }
+    }
+}
+
+/// What [`Mesh::start`] of [`JOINER`] with the founding of [`IDS`] gives, after
+/// `before` ran on its node.
+#[expect(clippy::unwrap_in_result, reason = "a test may panic")]
+fn open_joiner<F: Future<Output = ()> + 'static>(
+    before: impl FnOnce(sim::node::Node) -> F + Send + 'static,
+) -> Result<Option<Member>, Error> {
+    let mut sim = Sim::new(common::simulation(0));
+    let node = sim.node(sim::node::Config::default());
+    sim.run_on(&node, |node, tasks| async move {
+        before(node.clone()).await;
+        let config = config(&node, &tasks, JOINER, &IDS, &IDS).await;
+        let mesh = Mesh::start(config).await?;
+        Ok(mesh.member(key(JOINER)))
+    })
+    .unwrap()
+}
+
+/// Writes the join file of `card` by ticket 8 on `node`.
+async fn write_join(node: &sim::node::Node, card: card::Signed) {
+    let ticket = ticket_to(TICKET, &IDS);
+    let request = region::Request {
+        ticket: ticket.public_key(),
+        admission: ticket.admission(&card),
+        card: card.into(),
+        status: common::names([]),
+    };
+    let blocks = crate::file::Blocks::new(create_pool()).unwrap();
+    join::file::write(&node.files(), Path::new(""), &blocks, &request)
+        .await
+        .unwrap();
+}
+
+#[test]
+fn an_open_of_a_founding_without_this_node_reads_its_join_file() {
+    let none = open_joiner(|_| async {});
+    assert_eq!(none, Err(Error::NotMember(key(JOINER))));
+    let other = open_joiner(|node| async move {
+        write_join(&node, common::member(6).card).await;
+    });
+    assert_eq!(other, Err(Error::NotMember(key(JOINER))));
+    let rotated = open_joiner(|node| async move {
+        write_join(&node, member_signed(JOINER, 6, 1).card).await;
+    });
+    assert_eq!(rotated, Err(Error::WrongKey));
+    // It opens as a member that is not a voter, with no record until its join applies.
+    let joined = open_joiner(|node| async move {
+        write_join(&node, common::member(JOINER).card).await;
+    });
+    assert_eq!(joined, Ok(None));
+}
+
+#[test]
+fn an_open_of_a_founding_without_this_node_gives_the_error_of_its_join_file() {
+    let torn = open_joiner(|node| async move {
+        write_join(&node, common::member(JOINER).card).await;
+        let file = node
+            .files()
+            .open(Path::new("join"), Mode::Write)
+            .await
+            .unwrap();
+        let pool = create_pool();
+        let byte = file.read_at(10, pool.alloc(1).unwrap()).await.unwrap();
+        let block = pool.copy(&[byte.first().unwrap() ^ 1]).unwrap();
+        file.write_at(10, &[block]).await.unwrap();
+        file.sync().await.unwrap();
+        file.close().await;
+    });
+    let path = PathBuf::from("join");
+    assert_eq!(torn, Err(Error::JoinFile { path }));
+}
+
+/// Starts [`JOINER`] on `node` of `cluster`. With no founding file it asks by ticket
+/// 8 first. It opens with the founding, and puts what it applies on the board.
+fn start_joiner(cluster: &Cluster, node: &sim::node::Node) {
+    let (own, board) = (node.clone(), Arc::clone(&cluster.board));
+    let main = move |tasks: Tasks| async move {
+        let node = own;
+        let base = config_at(&node, &tasks, JOINER, PORT, BYTES_MAX, &[], &[]).await;
+        let transport = Rc::clone(&base.transport);
+        let pool = Rc::clone(&base.pool);
+        let stored = founding(&base.files, &base.dir, pool).await.unwrap();
+        let founding = if let Some(founding) = stored {
+            founding
+        } else {
+            let ticket = ticket_to(TICKET, &IDS);
+            let asking = config_of(&node, Rc::clone(&transport), ticket);
+            join::ask(asking).await.unwrap()
+        };
+        let mesh = Mesh::open(Config { founding, ..base }).await.unwrap();
+        run_member(mesh, transport, node, tasks, JOINER, board).await;
+    };
+    let config = env::shards::Config {
+        name: "joiner".into(),
+        core: None,
+    };
+    drop(node.shards().start(config, main).unwrap());
+}
+
+/// The home that node `id` last applied.
+fn last_home(cluster: &Cluster, id: u8) -> Option<node::Key> {
+    let board = cluster.board.lock().unwrap();
+    board.homes.get(&id)?.last().copied().flatten()
+}
+
+/// A cluster of [`IDS`] and [`JOINER`], which joined by ticket 8 with no address on
+/// its card, in which each voter proposes itself as the home. Gives the cluster, the
+/// node of [`JOINER`], and the leader.
+fn joined_cluster(seed: u64) -> (Cluster, sim::node::Node, u8) {
+    let mut cluster = recorded_cluster(seed, &IDS, &[]);
+    let joiner = cluster.sim.node(sim::node::Config::default());
+    start_joiner(&cluster, &joiner);
+    cluster.run(seconds(10));
+    cluster.script(home_to);
+    cluster.run(seconds(10));
+    let leader = *cluster.board.lock().unwrap().led.last().unwrap();
+    assert_eq!(last_home(&cluster, JOINER), Some(key(leader)), "run {seed}");
+    (cluster, joiner, leader)
+}
+
+// No leader can dial the node, so it dials the voters in turn until it reaches the
+// one that leads.
+#[test]
+fn a_node_that_joins_by_ticket_applies_the_changes_of_each_leader() {
+    for seed in 0..4 {
+        let (mut cluster, _, leader) = joined_cluster(seed);
+        let node = cluster.node(leader).clone();
+        cluster.sim.crash(&node, Crash::Process);
+        cluster.script(|_| home_to(9));
+        cluster.run(seconds(20));
+        assert_eq!(last_home(&cluster, JOINER), Some(key(9)), "run {seed}");
+    }
+}
+
+// The node opens again from its founding file and its join file, with no ask.
+#[test]
+fn a_node_that_joins_and_restarts_applies_the_change_that_it_missed() {
+    for seed in 0..4 {
+        let (mut cluster, joiner, leader) = joined_cluster(seed);
+        cluster.sim.crash(&joiner, Crash::Process);
+        cluster.script(|_| home_to(9));
+        cluster.run(seconds(10));
+        let homes = IDS.map(|id| last_home(&cluster, id));
+        assert_eq!(homes, [Some(key(9)); 3], "run {seed}");
+        assert_eq!(last_home(&cluster, JOINER), Some(key(leader)), "run {seed}");
+        start_joiner(&cluster, &joiner);
+        cluster.run(seconds(20));
+        assert_eq!(last_home(&cluster, JOINER), Some(key(9)), "run {seed}");
     }
 }

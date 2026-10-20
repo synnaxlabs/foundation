@@ -31,6 +31,7 @@ use crate::applied::Applied;
 use crate::change::{Change, Join, Malformed};
 use crate::claim::{self, Known, Signer};
 use crate::error::{Error, Stopped};
+use crate::file::Blocks;
 use crate::log::{self, Log};
 use crate::member::Member;
 use crate::message::{self, Message};
@@ -166,6 +167,10 @@ impl Mesh {
     /// node applies the log. Until then, a watch can give a founding home that the log
     /// moved, as at a follower behind the leader.
     ///
+    /// `config.founding.members` can lack this node when `config.dir` holds the join
+    /// file of this node: the node opens as a member that is not a voter, and its
+    /// member record comes when it applies its join.
+    ///
     /// The group sends its messages on a session to each member. It dials a member at
     /// the addresses of its card, at the first message for it, and again after the
     /// session fails. It never closes a session.
@@ -174,17 +179,20 @@ impl Mesh {
     ///
     /// - [`Error::Member`] when the region cannot hold one of
     ///   `config.founding.members`, or two name one node.
-    /// - [`Error::NotMember`] when `config.founding.members` lacks this node, a voter,
-    ///   or the node of a home.
+    /// - [`Error::NotMember`] when `config.founding.members` lacks a voter or the node
+    ///   of a home, or lacks this node and `config.dir` holds no join file of this
+    ///   node key.
     /// - [`Error::WrongKey`] when `config.private_key` is not the key of this node in
-    ///   `config.founding.members`.
+    ///   `config.founding.members`, or of the card in the join file.
+    /// - [`Error::JoinFile`] when `config.founding.members` lacks this node and the
+    ///   join file does not read back whole.
     /// - [`Error::Limit`] when this node takes messages of fewer than the bytes of an
     ///   append of the largest record: the smaller of the limit of `config.transport`
     ///   and the largest block of `config.pool`.
     /// - [`Error::Voters`] when the voters that the node starts with are more than one
     ///   set can hold.
-    /// - [`Error::Pool`] when the pool has no block for a chunk or the founding file,
-    ///   and [`Error::Blob`] when a call of the store fails.
+    /// - [`Error::Pool`] when the pool has no block for a chunk, the founding file, or
+    ///   the join file, and [`Error::Blob`] when a call of the store fails.
     /// - [`Error::Unjoinable`] when the log holds no record and the byte form of
     ///   `config.founding` is over the most bytes that a join answer holds.
     /// - [`Error::Founding`] when the log holds a record and `config.dir` holds another
@@ -193,9 +201,9 @@ impl Mesh {
     ///   founding that reads back whole.
     /// - [`Error::Log`] when the log does not open.
     /// - [`Error::Raft`] when `raft` refuses the log.
-    /// - [`Error::Files`] when a call on the founding file, on `<config.dir>/spec`, or
-    ///   on its files fails, and [`Error::Stray`] when that directory holds a file
-    ///   that does not name a pointer.
+    /// - [`Error::Files`] when a call on the founding file, on the join file, on
+    ///   `<config.dir>/spec`, or on its files fails, and [`Error::Stray`] when that
+    ///   directory holds a file that does not name a pointer.
     ///
     /// # Panics
     ///
@@ -245,7 +253,7 @@ impl Mesh {
         let state =
             region::State::new(prefix, members, tree.root, voters.clone(), homes)
                 .map_err(Error::Member)?;
-        check_members(&state, config.key, &config.private_key, &voters)?;
+        check_members(&state, &config, &voters).await?;
         put(&config.store, &config.pool, &chunks, &tree.chunks).await?;
         let pool = Rc::clone(&config.pool);
         let files = &config.files;
@@ -1253,20 +1261,28 @@ fn check_voters(voters: usize) -> Result<(), Error> {
     Ok(())
 }
 
-// Checks that `own`, each of `voters`, and the node of each home are members of
-// `state`, and that `private_key` is the key of `own`.
-fn check_members(
+// Checks that this node is a member of `state`, or that the join file of `config.dir`
+// holds its card, that `config.private_key` is the key of that member or card, and
+// that each of `voters` and the node of each home are members of `state`.
+async fn check_members(
     state: &region::State,
-    own: node::Key,
-    private_key: &PrivateKey,
+    config: &Config,
     voters: &BTreeSet<node::Key>,
 ) -> Result<(), Error> {
-    match state.member(own) {
-        None => return Err(Error::NotMember(own)),
-        Some(record) if record.public_key() != private_key.public() => {
-            return Err(Error::WrongKey);
+    let public_key = if let Some(record) = state.member(config.key) {
+        record.public_key()
+    } else {
+        let blocks = Blocks::new(Rc::clone(&config.pool)).map_err(Error::Pool)?;
+        let (files, dir, mode) = (&config.files, &config.dir, env::files::Mode::Read);
+        match crate::join::file::read(files, dir, &blocks, mode).await? {
+            Some(request) if request.card.key == config.key => {
+                request.card.card.public_key
+            }
+            _ => return Err(Error::NotMember(config.key)),
         }
-        Some(_) => {}
+    };
+    if public_key != config.private_key.public() {
+        return Err(Error::WrongKey);
     }
     let mut others = voters.iter().copied().chain(state.homes());
     if let Some(key) = others.find(|&key| state.member(key).is_none()) {
@@ -2217,6 +2233,19 @@ mod tests {
         config.founding.members = ids.iter().copied().map(member).collect();
         config.founding.definitions = founding;
         let mesh = Mesh::open(config).await.unwrap();
+        run_member(mesh, transport, node, tasks, id, board).await
+    }
+
+    /// Serves the streams of `mesh` on `transport`, proposes the script of node `id`,
+    /// and puts what it applies on `board`.
+    async fn run_member(
+        mesh: Mesh,
+        transport: Rc<Transport>,
+        node: sim::node::Node,
+        tasks: Tasks,
+        id: u8,
+        board: Arc<Mutex<Board>>,
+    ) -> ! {
         let (serving, streams, serves) =
             (mesh.clone(), tasks.clone(), Arc::clone(&board));
         tasks.spawn(async move {
