@@ -318,7 +318,7 @@ fn marked(file: &[u8]) -> &[u8] {
             .windows(12)
             .position(|window| window == b"\n-----BEGIN ")
         {
-            Some(newline) => newline + 1,
+            Some(newline) => newline,
             None => return file,
         }
     };
