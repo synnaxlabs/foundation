@@ -134,10 +134,12 @@
      status and no end of a run shows the marker. Two runs meet the simulator, and are
      Running with progress within 10 s. Then the simulator stops for the first, and the
      device node crashes for the second (`Sim::crash`), and each gives an error within
-     30 s and 5 s more. A third run meets no device: an error within 10 s, and 5 s more.
-     A fourth meets the echo simulator, which answers each request with an error whose
-     text holds each header of the request, as a gateway in debug mode does: an error
-     within 10 s, and 5 s more. Then the write form of scenario 5, with the same
+     30 s and 5 s more. At the seed that CI runs (`SEED`), the error of the next try
+     replaces the error of the loss before a status shows it, so the error of a loss
+     gets its check with #3614. A third run meets no device: an error within 10 s, and 5
+     s more. A fourth meets the echo simulator, which answers each request with an error
+     whose text holds each header of the request, as a gateway in debug mode does: an
+     error within 10 s, and 5 s more. Then the write form of scenario 5, with the same
      secrets, for 5 s. No kind runs the write form yet: `influx` gives no writes, and
      `opcua` comes with #3610. The suite asserts that the marked config differs from the
      setup, that the kind gives at least one secret, and that each value holds the
