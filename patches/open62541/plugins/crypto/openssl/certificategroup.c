@@ -446,11 +446,11 @@ openSSLCertificateLabel(const char *name) {
  * is DER certificates back to back, and bytes after the last one are one more. Else
  * it is PEM: each block of `CERTIFICATE`, `X509 CERTIFICATE`, or `TRUSTED
  * CERTIFICATE`, in the pieces that `UA_OpenSSL_PemBio` states, which fails on a
- * piece that each target reads in another way. aws-lc skips other text and a block
- * of another label, but fails on a block of any label that it cannot read, such as
- * an empty one, damaged base64, or an `END` line that does not name its label,
- * which gives `UA_TRUSTLOAD_DAMAGED`. A certificate block with a header, such as of
- * encryption, is `UA_TRUSTLOAD_INVALID`, as no password reads it. A block with any
+ * piece that each target reads in another way. It skips other text and a block of
+ * another label. A block of any label that `PEM_read_bio` cannot read, such as an
+ * empty one, damaged base64, or an `END` line that does not name its label, gives
+ * `UA_TRUSTLOAD_DAMAGED`. A certificate block whose header aws-lc refuses, such as of
+ * encryption, as no password reads it, is `UA_TRUSTLOAD_INVALID`. A block with any
  * byte after its certificate fails, also trust settings, which the verify of the
  * group does not apply. Clears the error queue of the thread.
  */
@@ -479,13 +479,15 @@ openSSLLoadEachCertificate(const UA_ByteString cert, STACK_OF(X509) *stack,
     char *header;
     unsigned char *der;
     long length;
+    EVP_CIPHER_INFO cipher;
     while(load == UA_TRUSTLOAD_GOOD &&
           PEM_read_bio(bio, &name, &header, &der, &length)) {
         if(openSSLCertificateLabel(name)) {
             (*number)++;
             at = der;
-            /* aws-lc reads a header only as a Proc-Type that needs a password */
-            if(header[0] != '\0')
+            if(!PEM_get_EVP_CIPHER_INFO(header, &cipher) ||
+               !PEM_do_header(&cipher, der, &length, UA_OpenSSL_refusePassword,
+                              NULL))
                 load = UA_TRUSTLOAD_INVALID;
             else
                 load = openSSLPushCertificate(&at, der + length, stack);
