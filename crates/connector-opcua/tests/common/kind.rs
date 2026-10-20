@@ -197,6 +197,23 @@ pub(crate) fn writes(
             measures: Arc::clone(&measures),
         },
     };
+    let readings = offline(kind, nodes, scalars);
+    let measures = measures.lock().expect("no panic under the lock");
+    (measures.clone(), readings)
+}
+
+/// Runs `kind` as the connector of `nodes` reads of the channels of `scalars` in
+/// turn, with no server, and gives each status of the connector that the home
+/// applied, in order.
+///
+/// # Panics
+///
+/// If the run ends with an error.
+fn offline(
+    kind: impl kind::Kind,
+    nodes: usize,
+    scalars: &'static [Scalar],
+) -> Vec<Reading> {
     let mut sim = sim::Sim::new(sim::Config::default());
     let node = sim.node(sim::node::Config::default());
     let run = sim.run_on(&node, move |node, tasks| async move {
@@ -212,8 +229,7 @@ pub(crate) fn writes(
     });
     let (result, readings) = run.expect("the run ends");
     assert!(result.is_ok(), "the run ends ok: {result:?}");
-    let measures = measures.lock().expect("no panic under the lock");
-    (measures.clone(), readings)
+    readings
 }
 
 /// A rig on `node` with `kind` as `opcua`, which defines the channels of
@@ -307,7 +323,7 @@ fn read(key: u128) -> (String, String) {
     (format!("plant.v{key}"), format!("ns=2;i={}", key - 1))
 }
 
-/// The config of a connector of `address` at 10 Hz that reads `nodes` nodes, from
+/// The config of a connector of `address` that polls `nodes` nodes at 10 Hz, from
 /// `ns=2;i=1` into the channel of key 2 on.
 pub(crate) fn config(address: &str, nodes: usize) -> Document {
     let text = |text: &str| value::Kind::String(text.into());
