@@ -9,7 +9,8 @@ and `cancel` modules of `connector`. The record CONNECTOR CONFORMANCE
 
 `scenarios.rs` holds the scenarios, the input type `Suite`, and `suite!`, which expands
 to one `#[test]` for each scenario, and two that check that a scenario that is not done
-at `RING` fails. `<kind>/main.rs` is the root of the test binary of one kind: its
+at `RING` fails. Its `tests` module tests how a run of scenario 6 picks and replays
+its seeds. `<kind>/main.rs` is the root of the test binary of one kind: its
 `Suite`, one `suite!` line, and each test of that kind alone, which uses
 `scenarios::run` and the `pub(crate)` items of `scenarios.rs`. Each kind crate runs its
 suite as its `conformance` test.
@@ -24,7 +25,8 @@ cargo test -p connector-influx --all-features --test conformance
 
 A failed run of `heals_after_random_faults` prints the command that replays it, such as
 `CONFORMANCE_SEED=0x2a cargo test -p connector-modbus --all-features --test conformance
-heals_after_random_faults`.
+heals_after_random_faults`. A range, such as `CONFORMANCE_SEED=0x0..0xf4240`, runs more
+seeds than the 1000 of each merge.
 
 ## Rules
 

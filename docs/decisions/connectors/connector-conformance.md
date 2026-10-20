@@ -38,10 +38,12 @@
   fails. The 4 MiB ring of `home::testing::shard` fills after about 100 s for `opcua`
   and for `influx` (finding 7 of
   https://github.com/synnaxlabs/foundation/pull/3068#issuecomment-6241787008), and then
-  can lose a status, so a check of an absence can pass. The longest scenario runs 20.2 s
-  of plant time (`influx`, the device does not answer), and scenario 2 of `influx` runs
-  19.7 s (box1, at 2026-10-17). A later suite measures its own fill. The longest
-  scenario of `modbus` runs 6.1 s (box1, at 2026-10-18). The trigger is the
+  can lose a status, so a check of an absence can pass. The longest of scenarios 1 to 5
+  runs 20.2 s of plant time (`influx`, the device does not answer), and scenario 2 of
+  `influx` runs 19.7 s (box1, at 2026-10-17). A later suite measures its own fill. The
+  longest of scenarios 1 to 5 of `modbus` runs 6.1 s (box1, at 2026-10-18). The
+  longest run of scenario 6 takes 50.2 s for `modbus` and `opcua` (seed 0x138), and
+  45.9 s for `influx` (seed 0x370) (box1, at 2026-10-20). The trigger is the
   merge of #3050, which trims the ring and adds the two tests that fail now
   (https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6241900155). #3050
   removes `RING`, its check in `run`, and the `suite!` tests `fails_past_the_ring` and
@@ -84,16 +86,20 @@
      A kind whose check gives no writes passes with no check, until the read form of
      #2642.
 
-  6. **Random faults.** Over 1000 seeds, each a run of its own: the connector runs,
-     then meets 1 to 8 faults at random times in 15 s, each one of: new links to and
-     from the device (a delay below 2 s, a jitter below 500 ms, a loss of 0 to 1 in
-     quarters, and a duplication of 0 to 0.5), a stop of the simulator, a crash of the
-     device node, or a start of the simulator. The seed draws the faults and seeds the
-     sim. While they come: no panic, never class Config, each error text at most 1024
-     bytes, and no count and no restart count goes down. After the last fault, both
-     links are as at the start and the simulator serves: heals. A failed run panics
-     with its replay command, which sets `CONFORMANCE_SEED` to its seed in hex. The
-     longest run takes 67.1 s of plant time (`modbus`, box1, at 2026-10-20).
+  6. **Random faults.** Over seeds 0 to 999 on each merge, each a run of its own: the
+     connector runs, then meets 1 to 8 faults at random times in 15 s, each one of:
+     new links to and from the device (a delay below 2 s, a jitter below 500 ms, and a
+     loss of 0 to 1 in quarters), a stop of the simulator, a crash of the device node,
+     or a start of the simulator. The seed draws the faults and seeds the sim. While
+     they come: no panic, never class Config, each error text at most 1024 bytes, and
+     no count and no restart count goes down. After the last fault, both links are as
+     at the start and the simulator serves: heals. `CONFORMANCE_SEED` gives other
+     seeds in hex: one seed, or a range such as `0x0..0xf4240` for a nightly run. A
+     failed run panics with its replay command, which sets `CONFORMANCE_SEED` to its
+     seed. The plan's duplication is not drawn: the sim never duplicates a TCP
+     segment, so it reaches no kind of this suite. No run of the three kinds gives an
+     error text near the bound (112 bytes at most, box1, at 2026-10-20): the check
+     holds each kind to the cut of 1024 bytes that the supervisor makes.
 
   Scenario 7 (no secret in a status) comes in #2642. The
   numbers are tunable by the architect of `connector`. Plan of `laptop.architect-2` at
