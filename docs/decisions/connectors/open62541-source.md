@@ -373,21 +373,33 @@
   block and frees the old one with the same zeros. So a freed block of the copy keeps no
   copy of the key of the node or of a password, and a copy that a later release adds
   needs no patch. Its cost is one `memset` of each freed block. A network buffer of
-  `shim.c` holds a short message in a block of the send buffer size. A chunk that is not
-  final can hold, past its `length`, the part of a value that `encodeWithExchangeBuffer`
-  moved to the next chunk, so the free of a sent buffer (`shim_send_free`) clears the
-  whole block of such a chunk, which the encode filled to near its end. A final chunk
-  holds no byte past `length`, so its free (`connector_opcua_free_written`) clears only
-  those. Each release update checks that only the exchange of a buffer moves a part
-  encode to the next chunk, and that the exchange sends the chunk as one that is not
-  final. Lost: a patch at each copy in the copy (the user token of the config, the
-  plaintext of the encrypted token, the key of the policies), which each new release
-  needs again, with a hand mutant of each line, and which misses the copies that a later
-  release adds. Lost: a patch that clears the part encode before the exchange, which
-  each release needs again (#3593; `laptop.architect-2`, 2026-10-20 15:42 UTC,
+  `shim.c` holds a short message in a block of the send buffer size. The invariant: a
+  sent buffer holds bytes past its `length` only when it is a chunk that is not final.
+  `encodeWithExchangeBuffer` (`ua_types_encoding_binary.c:112-118`) moves `pos` back
+  only to call the exchange, after `Array_encodeBinaryOverlayable` (lines 447-455)
+  filled the block to its end. The exchange, `sendSymmetricEncodingCallback`
+  (`ua_securechannel.c:506`), sends the chunk with `final` false, and only
+  `UA_MessageContext_finish` (line 581) sets `final`. A send with no exchange (OPN, HEL)
+  fails the encode of a part and frees the buffer through `freeNetworkBuffer` (lines
+  329, 376). So the free of a sent buffer (`shim_send_free`) clears only its `length`
+  (`connector_opcua_free_written`) when byte 3 is `F`, and the whole block for each
+  other byte. Each other free of a network buffer (`cm_free_buffer`) clears the whole
+  block. A chunk that is not final filled its block to near its end, so its whole clear
+  costs about the bytes that it sends. Each release update reads each call of the
+  exchange and each move of `pos` back in the encode, and checks that only
+  `UA_MessageContext_finish` sets `final`. Lost: a patch at each copy in the copy (the
+  user token of the config, the plaintext of the encrypted token, the key of the
+  policies), which each new release needs again, with a hand mutant of each line, and
+  which misses the copies that a later release adds. Lost: a local patch that writes
+  zeros over `[oldpos, pos)` before the move back. Each release needs it again with a
+  hand mutant (LOCAL PATCHES), and it misses a later site that moves `pos` back before
+  an exchange, which the read of byte 3 covers (#3593; `laptop.architect-2`,
+  2026-10-20 15:42 UTC,
   https://github.com/synnaxlabs/foundation/issues/3593#issuecomment-6294839523; the
   cost, 2026-10-20 16:22 UTC,
-  https://github.com/synnaxlabs/foundation/pull/3622#issuecomment-6295683844). No
+  https://github.com/synnaxlabs/foundation/pull/3622#issuecomment-6295683844; the
+  invariant and the clear by byte 3, 2026-10-20 16:45 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3622#issuecomment-6296154748). No
   pointer crosses between the libc allocator and these: the objects of the copy,
   `shim.c`, and `server.c` call no libc function that gives or takes a heap pointer. Our
   change makes `UA_CertificateUtils_getThumbprint` of

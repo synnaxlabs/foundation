@@ -186,8 +186,8 @@ fn sent(kind: u8, length: usize) -> u64 {
     found
 }
 
-/// A final chunk clears its `length` bytes, and a chunk that is not final its whole
-/// block, past its `length` too.
+/// A final chunk clears its `length` bytes, and each other buffer its whole block, past
+/// its `length` too.
 fn a_send_free_clears_what_its_chunk_can_hold() {
     let whole = 4 + SECRET.len();
     assert_eq!(
@@ -201,6 +201,7 @@ fn a_send_free_clears_what_its_chunk_can_hold() {
         "a final chunk with the secret past its length"
     );
     assert_eq!(sent(b'C', 4), 0, "a chunk that is not final");
+    assert_eq!(sent(b'A', 4), 0, "an abort chunk");
     assert_eq!(sent(b'F', 3), 0, "a buffer shorter than a header");
 }
 

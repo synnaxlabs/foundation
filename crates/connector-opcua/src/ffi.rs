@@ -997,8 +997,9 @@ unsafe extern "C" {
     ) -> *mut ConnectionManager;
     pub(crate) fn shim_cm_free(cm: *mut ConnectionManager);
     pub(crate) fn shim_buffer_free(buffer: *mut Bytes);
-    /// Frees a buffer that a send gives Rust, and empties `buffer`. It clears the whole
-    /// block of a chunk that is not final, and only the `length` bytes of a final one.
+    /// Frees a buffer that a send gives Rust, and empties `buffer`. It clears only the
+    /// `length` bytes of a final chunk (byte 3 is `F`), and the whole block of each
+    /// other buffer.
     pub fn shim_send_free(buffer: *mut Bytes);
     pub(crate) fn shim_establish(
         cm: *mut ConnectionManager,

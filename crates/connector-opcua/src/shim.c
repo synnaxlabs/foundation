@@ -692,8 +692,8 @@ void shim_buffer_free(UA_ByteString *buffer) { UA_ByteString_clear(buffer); }
 
 /* Frees a buffer of `allocNetworkBuffer` that a send gives Rust. A chunk that is not
  * final can hold, past `length`, the part of a value that the encode moved to the next
- * chunk, so its free clears the whole block. A final chunk holds no byte past `length`,
- * so its free clears only those. */
+ * chunk. Only a final chunk (byte 3 is `F`) holds no byte past `length`, so only its
+ * free clears only those, and each other free clears the whole block. */
 void shim_send_free(UA_ByteString *buffer) {
     if(buffer->length < 4 || buffer->data[3] != 'F') {
         UA_ByteString_clear(buffer);
