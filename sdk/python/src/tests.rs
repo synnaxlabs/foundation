@@ -405,8 +405,10 @@ fn untaken(
     Python::initialize();
     Python::attach(|py| {
         let firsts = crate::write::firsts(places, &crate::write::named(places));
+        let handling = crate::write::handling(py).unwrap().into_bound(py);
+        let frame = frame.to_vec();
         let error =
-            crate::write::answer(py, places, &firsts, loss, outcomes, frame.to_vec())
+            crate::write::answer(py, places, &firsts, loss, &handling, outcomes, frame)
                 .unwrap_err();
         let value = error.value(py);
         let code = value
@@ -595,11 +597,13 @@ fn answer_gives_the_seqs_of_the_lost_groups_only() {
     Python::initialize();
     Python::attach(|py| {
         let firsts = crate::write::firsts(&places, &crate::write::named(&places));
+        let handling = crate::write::handling(py).unwrap().into_bound(py);
         let raised = crate::write::answer(
             py,
             &places,
             &firsts,
             crate::Loss::Raise,
+            &handling,
             &outcomes,
             vec![7, 3, 1, 2],
         );
@@ -629,6 +633,7 @@ fn answer_gives_the_seqs_of_the_lost_groups_only() {
             &places,
             &firsts,
             crate::Loss::Ignore,
+            &handling,
             &outcomes,
             vec![2, 3],
         )
@@ -661,8 +666,10 @@ fn logged(
             .unwrap();
         foundation.call_method1("addHandler", (&handler,)).unwrap();
         let firsts = crate::write::firsts(places, &crate::write::named(places));
+        let handling = crate::write::handling(py).unwrap().into_bound(py);
+        let frame = frame.to_vec();
         let error =
-            crate::write::answer(py, places, &firsts, loss, outcomes, frame.to_vec())
+            crate::write::answer(py, places, &firsts, loss, &handling, outcomes, frame)
                 .unwrap_err();
         foundation
             .call_method1("removeHandler", (&handler,))
@@ -700,8 +707,9 @@ fn logged(
 type Answer<'a> = (&'a [(usize, Outcome)], &'a [usize]);
 
 /// A logging handler whose `emit` runs `{body}`, and `run`, which answers `count`
-/// frames, each in an `except` block of the program when `excepted` holds, and checks
-/// that the program keeps its error.
+/// frames by `mode`: `plain`; `excepted`, in an `except` block of the program; or in a
+/// generator that the program resumes in an `except` block. It checks that the program
+/// keeps the error that it handles.
 const FAILING: &str = "
 import logging, sys
 stored = OSError('stored')
@@ -709,30 +717,42 @@ class Failing(logging.Handler):
     def emit(self, record):
 {body}
 handler = Failing()
-def run(answer, count, excepted):
+def run(answer, count, mode):
     for n in range(count):
-        if not excepted:
+        if mode == 'plain':
             error = answer(n)
             assert sys.exception() is None
-            continue
-        try:
-            raise ValueError('program')
-        except ValueError as program:
-            error = answer(n)
-            assert sys.exception() is program
-            assert program.__context__ is None
+        elif mode == 'excepted':
+            try:
+                raise ValueError('program')
+            except ValueError as program:
+                error = answer(n)
+                assert sys.exception() is program
+                assert program.__context__ is None
+        else:
+            def resumed():
+                yield
+                yield answer(n)
+                yield sys.exception()
+            generator = resumed()
+            next(generator)
+            try:
+                raise KeyError('caller')
+            except KeyError:
+                error = next(generator)
+            assert next(generator) is None
     return error
 ";
 
 /// The classes, joined by `, `, of the context chain of the error of the last of
 /// `answers` under `warn`, with a handler of the `foundation` logger whose `emit` runs
-/// `body`, and the `unwritten` of the one error of the chain that has it. With
-/// `excepted`, each answer runs in an `except` block of the program.
+/// `body`, and the `unwritten` of the one error of the chain that has it. Each answer
+/// runs by `mode`, as `run` of `FAILING` says.
 fn failing(
     places: &[sdk::Place],
     answers: &[Answer<'_>],
     body: &str,
-    excepted: bool,
+    mode: &str,
 ) -> (String, Vec<String>) {
     Python::initialize();
     Python::attach(|py| {
@@ -754,15 +774,16 @@ fn failing(
             .map(|(outcomes, frame)| (outcomes.to_vec(), frame.to_vec()))
             .collect();
         let count = owned.len();
+        let handling = crate::write::handling(py).unwrap();
         let answer = PyCFunction::new_closure(py, None, None, move |args, _| {
             let (outcomes, frame) = &owned[args.get_item(0)?.extract::<usize>()?];
             let firsts = crate::write::firsts(&places, &crate::write::named(&places));
-            let warn = crate::Loss::Warn;
             let answered = crate::write::answer(
                 args.py(),
                 &places,
                 &firsts,
-                warn,
+                crate::Loss::Warn,
+                handling.bind(args.py()),
                 outcomes,
                 frame.clone(),
             );
@@ -770,7 +791,7 @@ fn failing(
         })
         .unwrap();
         let run = globals.get_item("run").unwrap().unwrap();
-        let error = run.call1((answer, count, excepted)).unwrap();
+        let error = run.call1((answer, count, mode)).unwrap();
         foundation
             .call_method1("removeHandler", (&handler,))
             .unwrap();
@@ -813,30 +834,31 @@ fn chains(
         (classes.to_owned(), unwritten)
     };
     let cell = ["cell.a", "cell.time"];
-    let rejected =
-        |body, excepted| failing(places, &[(refused, &[1, 2, 3])], body, excepted);
+    let rejected = |body, mode| failing(places, &[(refused, &[1, 2, 3])], body, mode);
     let raises = "raise RuntimeError('the handler failed')";
     assert_eq!(
-        rejected(raises, false),
+        rejected(raises, "plain"),
         chain("RuntimeError, Rejected", &cell)
     );
-    let over = failing(places, &[(ended, &[0, 2])], raises, true);
+    let over = failing(places, &[(ended, &[0, 2])], raises, "excepted");
     assert_eq!(over, chain("RuntimeError, GroupEnded, ValueError", &[]));
-    let interrupt = rejected("raise KeyboardInterrupt", false);
+    let interrupt = rejected("raise KeyboardInterrupt", "plain");
     assert_eq!(interrupt, chain("KeyboardInterrupt, Rejected", &cell));
     let own = "try:\n    raise OSError('disk')\n\
                except OSError:\n    raise RuntimeError('x')";
     let full = chain("RuntimeError, OSError, Rejected, ValueError", &cell);
-    assert_eq!(rejected(own, true), full);
+    assert_eq!(rejected(own, "excepted"), full);
     let cycle = "a = RuntimeError('a')\nb = OSError('b')\n\
                  a.__context__ = b\nb.__context__ = a\nraise a";
     assert_eq!(
-        rejected(cycle, false),
+        rejected(cycle, "plain"),
         chain("RuntimeError, Rejected", &cell)
     );
     let twice = [(refused, &[1, 2, 3][..]), (ended, &[0, 2])];
-    let stored = failing(places, &twice, "raise stored", true);
+    let stored = failing(places, &twice, "raise stored", "excepted");
     assert_eq!(stored, chain("OSError, GroupEnded, ValueError", &[]));
+    let resumed = rejected(raises, "resumed");
+    assert_eq!(resumed, chain("RuntimeError, Rejected, KeyError", &cell));
 }
 
 /// A frame with a refusal and a loss raises `Rejected` with the seqs of the lost group

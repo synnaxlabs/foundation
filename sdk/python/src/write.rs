@@ -1,10 +1,10 @@
 //! `foundation.Writer`: a writer of `sdk`, for Python.
 
+use std::ffi::CStr;
 use std::fmt::Display;
 use std::mem;
 use std::ops::Range;
 use std::process;
-use std::ptr;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use numpy::datetime::{Datetime, Timedelta, units::Nanoseconds};
@@ -16,10 +16,9 @@ use program::write::End;
 use pyo3::exceptions::{
     PyKeyError, PyOverflowError, PyRuntimeError, PyTypeError, PyValueError,
 };
-use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::sync::MutexExt;
-use pyo3::types::{PyBool, PyDict, PyInt, PyString, PyTuple};
+use pyo3::types::{PyBool, PyCFunction, PyDict, PyInt, PyString, PyTuple};
 use sdk::Place;
 use sdk::write::{Outcome, Refusal};
 use types::frame;
@@ -52,6 +51,9 @@ pub(crate) struct Writer {
     /// The most bytes of one frame, which the series of a call do not go over.
     bytes_max: usize,
     loss: Loss,
+    /// The function of [`handling`], which runs the warning of a loss in a frame that
+    /// raises.
+    handling: Py<PyAny>,
     #[cfg(feature = "sim")]
     part: crate::sim::Part,
 }
@@ -73,8 +75,14 @@ struct Buffers {
 }
 
 impl Writer {
-    /// The Python writer of `writer`, opened in `process`.
-    pub(crate) fn new(writer: sdk::write::Writer, process: u32, loss: Loss) -> Self {
+    /// The Python writer of `writer`, opened in `process`, with the function of
+    /// [`handling`].
+    pub(crate) fn new(
+        writer: sdk::write::Writer,
+        process: u32,
+        loss: Loss,
+        handling: Py<PyAny>,
+    ) -> Self {
         let places = writer.places();
         let named = named(places);
         let firsts = firsts(places, &named);
@@ -92,6 +100,7 @@ impl Writer {
             })),
             process,
             loss,
+            handling,
             #[cfg(feature = "sim")]
             part: crate::sim::Part::default(),
         }
@@ -157,7 +166,9 @@ impl Writer {
         match untaken {
             Ok(None) => Ok(()),
             Ok(Some(outcomes)) => {
-                answer(py, &self.places, &self.firsts, self.loss, &outcomes, frame)
+                let handling = self.handling.bind(py);
+                let (places, firsts) = (&self.places, &self.firsts);
+                answer(py, places, firsts, self.loss, handling, &outcomes, frame)
             }
             Err(e) => Err(raised(py, &self.places, &e)),
         }
@@ -466,32 +477,34 @@ fn untaken(written: Result<&[(usize, Outcome)], sdk::Error>) -> Untaken {
 /// What the text of a loss in a frame of a writer names.
 const LOST: &str = "samples were lost";
 
-/// Runs `act` with `raised` as the error that Python handles, so Python chains an
-/// error raised in `act` to `raised` as in an `except` block of it, and then gives back
-/// the error that Python handled before.
-#[expect(
-    unsafe_code,
-    reason = "PyO3 has no safe call that sets the error that Python handles"
-)]
-fn handling<T>(py: Python<'_>, raised: &PyErr, act: impl FnOnce() -> T) -> T {
-    // SAFETY: `py` proves that the GIL is held; the call gives a new reference or null.
-    let before = unsafe { ffi::PyErr_GetHandledException() };
-    // SAFETY: `before` is a new reference or null, and the `Bound` takes it.
-    let before = unsafe { Bound::<PyAny>::from_owned_ptr_or_opt(py, before) };
-    // SAFETY: the GIL is held, and the call takes its own reference to `raised`.
-    unsafe { ffi::PyErr_SetHandledException(raised.value(py).as_ptr()) };
-    let acted = act();
-    let before = before.as_ref().map_or(ptr::null_mut(), Bound::as_ptr);
-    // SAFETY: the GIL is held, and the call takes its own reference to `before`.
-    unsafe { ffi::PyErr_SetHandledException(before) };
-    acted
+/// Calls `act` in an `except` block of `raised`, and keeps the `__context__` and
+/// `__traceback__` of `raised`.
+const HANDLING: &CStr = c"
+def handling(raised, act):
+    context, traceback = raised.__context__, raised.__traceback__
+    try:
+        raise raised
+    except BaseException:
+        raised.__context__, raised.__traceback__ = context, traceback
+        act()
+";
+
+/// The Python function `handling(raised, act)`, which calls `act` in an `except` block
+/// of `raised`, so Python chains an error that `act` raises to `raised`, and leaves the
+/// error that its caller handles as it was.
+pub(crate) fn handling(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let globals = PyDict::new(py);
+    py.run(HANDLING, Some(&globals), None)?;
+    Ok(globals.as_any().get_item("handling")?.unbind())
 }
 
 /// Answers a frame whose groups did not all get `Taken`, by the first rule that holds:
 /// a group whose write ended raises `GroupEnded`; a refused group raises `Rejected`;
 /// and a lost group does what `loss` says, with the channels of the lost groups, so it
 /// gives `Ok` for `warn` and `ignore`. `GroupEnded` and `Rejected` give the seqs of the
-/// lost groups in `lost`, and with `warn` also log the loss. `outcomes` is the place of
+/// lost groups in `lost`, and with `warn` also log the loss through `handling`, the
+/// function of [`handling`], so an error of a logging handler goes up chained to them.
+/// `outcomes` is the place of
 /// the index and the outcome of each group, in the order of their index places, and
 /// `frame` the places of the items of the call, of the writer of `places` and `firsts`.
 /// The channels of the frame are those of `frame` and the index of each group, each
@@ -501,6 +514,7 @@ pub(crate) fn answer(
     places: &[Place],
     firsts: &[usize],
     loss: Loss,
+    handling: &Bound<'_, PyAny>,
     outcomes: &[(usize, Outcome)],
     frame: Vec<usize>,
 ) -> PyResult<()> {
@@ -540,11 +554,15 @@ pub(crate) fn answer(
         value.setattr("unwritten", PyTuple::new(py, unwritten)?)?;
         value.setattr("lost", crate::seqs(py, gone())?)?;
         if loss == Loss::Warn && gone().next().is_some() {
-            // The error of a logging handler goes up, with `raised` in its context
-            // chain, so the program can still reach the lists.
-            handling(py, &raised, || {
-                loss.act(py, LOST, gone(), py.None().bind(py))
+            // The error of a logging handler goes up, chained to `raised` as in an
+            // `except` block of it, so the program can still reach the lists.
+            let dropped: Vec<_> =
+                gone().map(|(name, seqs)| (name.to_owned(), seqs)).collect();
+            let act = PyCFunction::new_closure(py, None, None, move |args, _| {
+                let py = args.py();
+                loss.act(py, LOST, dropped.iter().cloned(), py.None().bind(py))
             })?;
+            handling.call1((raised.value(py), act))?;
         }
         Err(raised)
     };

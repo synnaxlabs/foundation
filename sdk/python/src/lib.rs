@@ -243,6 +243,7 @@ fn connect(
         session: Mutex::new(Some(client)),
         process: process::id(),
         address,
+        handling: write::handling(py)?,
     })
 }
 
@@ -541,6 +542,8 @@ struct Client {
     process: u32,
     /// The address that `connect` dialed.
     address: SocketAddr,
+    /// The function of [`write::handling`], built once for the writers of the client.
+    handling: Py<PyAny>,
 }
 
 #[pymethods]
@@ -613,7 +616,8 @@ impl Client {
         config.authority = authority.0;
         config.lease = lease.map(|lease| lease.0);
         let writer = self.open(py, &names, |client| client.open_writer(config))?;
-        Ok(write::Writer::new(writer, self.process, loss))
+        let handling = self.handling.clone_ref(py);
+        Ok(write::Writer::new(writer, self.process, loss, handling))
     }
 
     /// Opens a reader of `channels` at the home of their index, and blocks until the
