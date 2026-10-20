@@ -552,6 +552,7 @@ fn ask_takes_the_parts_of_a_join_and_names_each_miss() {
         | join::Miss::Refused(_) => {}
     };
     let _: fn(&join::Miss) = cases;
+    let _: fn(&mesh::ticket::Ticket) -> Span = join::bound;
 }
 
 #[test]

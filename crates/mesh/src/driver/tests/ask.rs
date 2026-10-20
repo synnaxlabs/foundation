@@ -198,41 +198,61 @@ fn a_node_whose_voters_commit_no_join_is_unjoined_within_the_bound() {
             (key(3), Miss::Deadline),
         ];
         assert_eq!(asked, Err(Error::Unjoined { missed }), "run {seed}");
-        assert!(took <= seconds(248), "run {seed}: after {took}");
+        let bound = join::bound(&ticket_to(TICKET, &IDS));
+        assert!(took <= bound, "run {seed}: after {took}");
     }
 }
 
+// 8 rounds of 3 deadlines of 10 s, and 7 pauses of 1 s.
 #[test]
 fn a_node_whose_voters_are_all_down_is_unjoined_within_the_bound() {
     let (asked, took) = ask_with_crashed(0, &IDS);
     let missed = IDS.map(|id| (key(id), Miss::Deadline)).to_vec();
     assert_eq!(asked, Err(Error::Unjoined { missed }));
-    assert!(took > seconds(240) && took <= seconds(248), "after {took}");
+    assert!(near(took, seconds(247)), "after {took}");
+    assert!(took < join::bound(&ticket_to(TICKET, &IDS)));
+}
+
+#[test]
+fn the_bound_of_a_ticket_is_8_rounds_of_10_s_for_each_voter_and_1_s() {
+    assert_eq!(join::bound(&ticket_to(TICKET, &[1])), seconds(88));
+    assert_eq!(join::bound(&ticket_to(TICKET, &IDS)), seconds(248));
+}
+
+/// Whether `took` is at least `at`, and less than 500 ms after it: the most time that
+/// the dials and the messages of these tests add to a sum of deadlines and pauses.
+#[expect(clippy::arithmetic_side_effects, reason = "a test may panic")]
+fn near(took: Span, at: Span) -> bool {
+    took >= at && took.nanos() < at.nanos() + 500 * Span::MILLISECOND.nanos()
 }
 
 /// What a scripted voter sends on each join stream, after it read the request.
 struct Script {
     messages: Vec<Vec<u8>>,
-    /// Whether the voter holds the reply half open after the messages.
-    held: bool,
+    /// The time before each message.
+    gap: Span,
+    /// The time after the messages before the voter finishes the reply half.
+    hold: Span,
 }
 
-/// Runs [`JOINER`], which asks node 1 to join by a ticket of node 1 alone, against node 1,
-/// which answers each stream with `script`. Gives what the ask gave, and what the
-/// finish of each reply half gave, in order.
-fn scripted(
-    script: Script,
-) -> (
+/// What [`scripted`] gives: what the ask gave, the time it took, and what the finish of
+/// each reply half gave, in order.
+type Scripted = (
     Result<region::Founding, Error>,
+    Span,
     Vec<Result<(), transport::Error>>,
-) {
+);
+
+/// Runs [`JOINER`], which asks node 1 to join by a ticket of node 1 alone, against
+/// node 1, which answers each stream with `script`. Gives what [`Scripted`] states.
+fn scripted(script: Script) -> Scripted {
     let mut sim = Sim::new(common::simulation(0));
     let node = sim.node(sim::node::Config::default());
     let at = SocketAddr::new(node.addresses()[0], PORT);
     let finished = Arc::new(Mutex::new(Vec::new()));
     let (own, ends) = (node.clone(), Arc::clone(&finished));
     let main = move |tasks: Tasks| async move {
-        let node = own;
+        let (node, script) = (own, Rc::new(script));
         let pool = create_pool();
         let transport = bind(
             &node,
@@ -240,27 +260,30 @@ fn scripted(
             transport_config(&node, &tasks, 1, Rc::clone(&pool)),
         );
         let session = transport.accept().await.unwrap();
-        let mut held = Vec::new();
         while let Ok(mut incoming) = session.accept().await {
-            let header = incoming.receiver.recv().await.unwrap().unwrap();
-            let protocol = wire::header::decode(&header).unwrap();
-            assert_eq!(protocol, (Protocol::Mesh, &[][..]));
-            let join = incoming.receiver.recv().await.unwrap().unwrap();
-            let Some(Message::Join { request }) = Message::decode(&join) else {
-                panic!("not a join");
-            };
-            assert_eq!(request.card, unchecked(&common::member(JOINER).card));
-            assert!(incoming.receiver.recv().await.unwrap().is_none());
-            let mut sender = incoming.sender.unwrap();
-            for message in &script.messages {
-                sender.send(pool.copy(message).unwrap()).await.unwrap();
-            }
-            if script.held {
-                held.push(sender);
-                continue;
-            }
-            node.clock().sleep(seconds(1)).await;
-            ends.lock().unwrap().push(sender.finish());
+            let (node, pool, ends) =
+                (node.clone(), Rc::clone(&pool), Arc::clone(&ends));
+            let script = Rc::clone(&script);
+            tasks.spawn(async move {
+                let header = incoming.receiver.recv().await.unwrap().unwrap();
+                let protocol = wire::header::decode(&header).unwrap();
+                assert_eq!(protocol, (Protocol::Mesh, &[][..]));
+                let join = incoming.receiver.recv().await.unwrap().unwrap();
+                let Some(Message::Join { request }) = Message::decode(&join) else {
+                    panic!("not a join");
+                };
+                assert_eq!(request.card, unchecked(&common::member(JOINER).card));
+                assert!(incoming.receiver.recv().await.unwrap().is_none());
+                let mut sender = incoming.sender.unwrap();
+                for message in &script.messages {
+                    node.clock().sleep(script.gap).await;
+                    if sender.send(pool.copy(message).unwrap()).await.is_err() {
+                        break;
+                    }
+                }
+                node.clock().sleep(script.hold).await;
+                ends.lock().unwrap().push(sender.finish());
+            });
         }
     };
     let config = env::shards::Config {
@@ -271,10 +294,10 @@ fn scripted(
     let ticket =
         Ticket::new(private(1), "plant".parse().unwrap(), vec![voter_at(1, at)]);
     let asked = ask_each(&mut sim, vec![ticket]);
-    sim.run_for(seconds(200)).unwrap();
-    let (asked, _) = asked.lock().unwrap().pop().unwrap();
+    sim.run_for(seconds(300)).unwrap();
+    let (asked, took) = asked.lock().unwrap().pop().unwrap();
     let finished = finished.lock().unwrap().drain(..).collect();
-    (asked, finished)
+    (asked, took, finished)
 }
 
 fn joined(bytes: usize) -> Vec<u8> {
@@ -299,10 +322,12 @@ fn answered(
     Result<region::Founding, Error>,
     Vec<Result<(), transport::Error>>,
 ) {
-    scripted(Script {
+    let (asked, _, finished) = scripted(Script {
         messages,
-        held: false,
-    })
+        gap: Span::ZERO,
+        hold: seconds(1),
+    });
+    (asked, finished)
 }
 
 fn unjoined_by(miss: Miss) -> Result<region::Founding, Error> {
@@ -386,12 +411,60 @@ fn ask_gives_the_miss_of_each_refusal() {
 #[test]
 fn ask_misses_a_voter_that_holds_its_answer_past_the_deadline() {
     for messages in [vec![], vec![joined(4)], vec![joined(8), part(&[1; 4])]] {
-        let (asked, finished) = scripted(Script {
+        let (asked, took, finished) = scripted(Script {
             messages,
-            held: true,
+            gap: Span::ZERO,
+            hold: seconds(1000),
         });
         assert_eq!(asked, unjoined_by(Miss::Deadline));
+        assert!(near(took, seconds(87)), "{took}");
         assert_eq!(finished, []);
+    }
+}
+
+// 1 MiB has 10 s + 10.24 s from its `Joined`, which comes at 9 s.
+#[test]
+fn ask_misses_a_founding_that_comes_slower_than_100_kib_each_second() {
+    let mut messages = vec![joined(1 << 20)];
+    messages.extend((0..100).map(|_| part(&[1])));
+    let (asked, took, _) = scripted(Script {
+        messages,
+        gap: seconds(9),
+        hold: seconds(1000),
+    });
+    assert_eq!(asked, unjoined_by(Miss::Deadline));
+    let at = Span::from_nanos((8 * 29_240 + 7_000) * Span::MILLISECOND.nanos());
+    assert!(near(took, at), "{took}");
+}
+
+// The founding of 1 MiB has 20.24 s, but each message only 10 s after the one before.
+#[test]
+fn ask_misses_a_founding_whose_voter_stops_sending_after_10_s() {
+    let (asked, took, _) = scripted(Script {
+        messages: vec![joined(1 << 20), part(&[1])],
+        gap: Span::ZERO,
+        hold: seconds(1000),
+    });
+    assert_eq!(asked, unjoined_by(Miss::Deadline));
+    assert!(near(took, seconds(87)), "{took}");
+}
+
+// The refusal comes at 9 s, and its half has not ended at 10 s.
+#[test]
+fn a_refusal_whose_half_does_not_end_in_time_gives_its_miss_and_stops_the_half() {
+    let stopped = Err(transport::Error::Stopped { code: MALFORMED });
+    for (refusal, miss) in [
+        (Refusal::Contested, Miss::Contested),
+        (Refusal::Unsynced, Miss::Unsynced),
+    ] {
+        let (asked, took, finished) = scripted(Script {
+            messages: vec![unjoined(refusal)],
+            gap: seconds(9),
+            hold: seconds(11),
+        });
+        assert_eq!(asked, unjoined_by(miss));
+        assert!(near(took, seconds(87)), "{took}");
+        assert_eq!(finished, vec![stopped.clone(); 8]);
     }
 }
 
@@ -405,10 +478,7 @@ fn the_text_of_each_miss_names_its_cause() {
             Miss::Stream(transport::Error::TimedOut),
             format!("the stream failed: {}", transport::Error::TimedOut),
         ),
-        (
-            Miss::Deadline,
-            "no answer came within the deadline of 10 s".into(),
-        ),
+        (Miss::Deadline, "no answer came within its deadline".into()),
         (
             Miss::Malformed,
             "the answer is not one of a join stream".into(),
@@ -436,6 +506,41 @@ fn the_text_of_each_miss_names_its_cause() {
     for (miss, text) in cases {
         assert_eq!(miss.to_string(), text);
     }
+}
+
+#[test]
+fn ask_gives_the_error_of_a_pool_with_no_block_for_the_request() {
+    solo(|node, tasks| async move {
+        let transport = transport_of(&node, &tasks, JOINER);
+        let config = config_of(&node, transport, ticket_to(TICKET, &IDS));
+        let held = fill(&config.pool);
+        let asked = join::ask(config).await;
+        drop(held);
+        let header = wire::header::encode(Protocol::Mesh).len();
+        assert_eq!(asked, Err(exhausted(header)));
+    });
+}
+
+// The voter at the address of node 1 does not prove the public key of node 2.
+#[test]
+fn ask_gives_the_miss_of_a_dial_that_fails() {
+    let mut cluster = recorded_cluster(0, &IDS, &[]);
+    let voter = Voter {
+        public_key: public(2),
+        ..voter_at(1, address(1))
+    };
+    let ticket = Ticket::new(private(TICKET), "plant".parse().unwrap(), vec![voter]);
+    let asked = ask_each(&mut cluster.sim, vec![ticket]);
+    cluster.run(seconds(300));
+    let (asked, _) = asked.lock().unwrap().pop().unwrap();
+    let expected = transport::Error::Authentication {
+        expected: public(2),
+    };
+    let unreachable = transport::Error::Unreachable {
+        peer: Some(public(2)),
+        attempts: Box::new([(Address::Udp(address(1)), expected)]),
+    };
+    assert_eq!(asked, unjoined_by(Miss::Stream(unreachable)));
 }
 
 #[test]

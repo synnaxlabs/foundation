@@ -54,7 +54,7 @@ mod send;
 mod stream;
 mod turn;
 
-pub(crate) use peer::{CHUNKS, DEADLINE, within};
+pub(crate) use peer::{CHUNKS, within};
 pub(crate) mod used;
 mod version;
 

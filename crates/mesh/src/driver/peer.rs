@@ -16,7 +16,7 @@ use super::{Call, Mesh};
 use crate::error::{Error, Miss, Missed};
 
 /// How long one get or put of chunks on a peer may take, its dial included.
-pub(crate) const DEADLINE: Span = Span::from_nanos(10 * Span::SECOND.nanos());
+pub(super) const DEADLINE: Span = Span::from_nanos(10 * Span::SECOND.nanos());
 
 /// The most chunks that one put on a peer carries, so that a call of the largest
 /// chunks ends within [`DEADLINE`] over links of 100 ms.
