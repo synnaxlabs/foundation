@@ -84,6 +84,13 @@ struct State {
     /// The status of each answer of the state of the server, at first Good.
     #[cfg(test)]
     answer: Quality,
+    /// The only logins that a server lets in, set before it starts.
+    #[cfg(test)]
+    users: Option<&'static [(&'static str, &'static [u8])]>,
+    /// Whether the user token policy of a server has the policy `None`, set before it
+    /// starts.
+    #[cfg(test)]
+    cleartext: bool,
     /// The credentials and the one policy and mode of a server, set before it starts.
     security: Option<(Credentials<'static>, Policy, Mode)>,
 }
@@ -121,15 +128,6 @@ pub(crate) enum Fixed {
     /// An array of two Doubles.
     Doubles,
 }
-
-/// What [`Variables::hooks`] gives.
-#[cfg(test)]
-type Limits = (
-    Option<u32>,
-    Option<Span>,
-    Option<(u32, f64)>,
-    Vec<Option<Fixed>>,
-);
 
 impl Variables {
     /// The variables at the node ids `nodes`, each with the value 0 and the status
@@ -172,6 +170,10 @@ impl Variables {
             states: 0,
             #[cfg(test)]
             answer: Quality::GOOD,
+            #[cfg(test)]
+            users: None,
+            #[cfg(test)]
+            cleartext: false,
             security: None,
         })))
     }
@@ -279,6 +281,20 @@ impl Variables {
         self.state().security = Some((credentials, policy, mode));
     }
 
+    /// Makes a server that starts later let in only the user names and passwords of
+    /// `users`, and no anonymous session.
+    #[cfg(test)]
+    pub(crate) fn admit(&self, users: &'static [(&'static str, &'static [u8])]) {
+        self.state().users = Some(users);
+    }
+
+    /// Makes a server that starts later take a password in clear, as
+    /// [`Server::cleartext`] says.
+    #[cfg(test)]
+    pub(crate) fn cleartext(&self) {
+        self.state().cleartext = true;
+    }
+
     /// Gives each later answer of the state of the server the status `quality`.
     #[cfg(test)]
     pub(crate) fn answer_states(&self, quality: Quality) {
@@ -291,14 +307,53 @@ impl Variables {
         self.state().states
     }
 
-    /// The most nodes of a Read of [`Variables::refuse_reads_past`], the timeout of
-    /// [`Variables::time_out_sessions`], the limits of [`Variables::limit_queues`], and
-    /// the value of [`Variables::fix`] of each variable.
+    /// The value of [`Variables::fix`] of each variable.
     #[cfg(test)]
-    fn hooks(&self) -> Limits {
+    fn fixed(&self) -> Vec<Option<Fixed>> {
         let state = self.state();
-        let fixed = state.variables.iter().map(|v| v.hooks.fixed).collect();
-        (state.most, state.session, state.queues, fixed)
+        state.variables.iter().map(|v| v.hooks.fixed).collect()
+    }
+
+    /// Gives `server` the most nodes of a Read of [`Variables::refuse_reads_past`], the
+    /// timeout of [`Variables::time_out_sessions`], the limits of
+    /// [`Variables::limit_queues`], the logins of [`Variables::admit`], and the token
+    /// policy of [`Variables::cleartext`], and makes it answer the reads of its state.
+    #[cfg(test)]
+    fn hook(&self, server: &Server) {
+        let (most, session, queues, users, cleartext) = {
+            let state = self.state();
+            let State {
+                most,
+                session,
+                queues,
+                users,
+                cleartext,
+                ..
+            } = *state;
+            (most, session, queues, users, cleartext)
+        };
+        if let Some(most) = most {
+            server.refuse_reads_past(most);
+        }
+        if let Some(most) = session {
+            server.set_session_timeout(most);
+        }
+        if let Some((most, ms)) = queues {
+            server.set_queues(most);
+            server.set_publishing(ms);
+        }
+        if let Some(users) = users {
+            server.admit(users);
+        }
+        if cleartext {
+            server.cleartext();
+        }
+        let variables = Variables::clone(self);
+        server.set_source(&state_node(), move || {
+            let mut state = variables.state();
+            state.states += 1;
+            (Value::I32(0), state.answer)
+        });
     }
 
     /// Calls `change` on the variable of `text`.
@@ -415,30 +470,13 @@ pub async fn serve(
         .map(|variable| variable.node.clone())
         .collect();
     #[cfg(test)]
-    let (most, session, queues, fixed) = variables.hooks();
+    let fixed = variables.fixed();
     let security = variables.state().security;
     let add = |server: &mut Server| {
         server.cap_references(tree::REFERENCES);
         tree::add(server);
         #[cfg(test)]
-        {
-            if let Some(most) = most {
-                server.refuse_reads_past(most);
-            }
-            if let Some(most) = session {
-                server.set_session_timeout(most);
-            }
-            if let Some((most, ms)) = queues {
-                server.set_queues(most);
-                server.set_publishing(ms);
-            }
-            let variables = Variables::clone(variables);
-            server.set_source(&state_node(), move || {
-                let mut state = variables.state();
-                state.states += 1;
-                (Value::I32(0), state.answer)
-            });
-        }
+        variables.hook(server);
         let top = nodes.iter().map(|node| node.namespace).max().unwrap_or(0);
         for namespace in 2..=top {
             let uri = CString::new(format!("urn:foundation:sim:{namespace}"))

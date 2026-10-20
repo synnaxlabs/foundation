@@ -9,6 +9,13 @@ use super::{
 #[repr(C)]
 pub(crate) struct Server([u8; 0]);
 
+/// `UA_UsernamePasswordLogin`, which borrows its bytes.
+#[repr(C)]
+pub(crate) struct Login {
+    pub(crate) name: Bytes,
+    pub(crate) password: Bytes,
+}
+
 /// `PublishArena` of open62541: the memory of the decode of a Publish answer.
 #[repr(C)]
 pub(crate) struct Arena {
@@ -369,6 +376,12 @@ unsafe extern "C" {
         source: *mut c_void,
     ) -> u32;
     pub(crate) fn shim_server_session_timeout(server: *mut Server, ms: u32);
+    pub(crate) fn shim_server_users(
+        server: *mut Server,
+        logins: *const Login,
+        count: usize,
+    ) -> u32;
+    pub(crate) fn shim_server_cleartext(server: *mut Server) -> u32;
     pub(crate) fn shim_server_data_type(
         server: *mut Server,
         node: Node<'_>,

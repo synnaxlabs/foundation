@@ -7,6 +7,7 @@
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #include <open62541/client.h>
+#include <open62541/plugin/accesscontrol_default.h>
 #include <open62541/plugin/certificategroup_default.h>
 #include <open62541/server_config_default.h>
 /* For the Publish decode memory of a client. */
@@ -425,6 +426,41 @@ UA_StatusCode shim_server_set_source(UA_Server *server, shim_node node,
 /* Sets the most session timeout of `server`, in ms. */
 void shim_server_session_timeout(UA_Server *server, UA_UInt32 ms) {
     UA_Server_getConfig(server)->maxSessionTimeout = ms;
+}
+
+/* Lets in a later session of `server` only with one of the `count` logins of `logins`,
+ * which it copies, and no anonymous session. */
+UA_StatusCode shim_server_users(UA_Server *server,
+                                const UA_UsernamePasswordLogin *logins, size_t count) {
+    return UA_AccessControl_default(UA_Server_getConfig(server), false, NULL, count,
+                                    logins);
+}
+
+/* Gives each endpoint of `server` one user token policy, a user name with the policy
+ * None, and lets in its password on a channel in the policy None. */
+UA_StatusCode shim_server_cleartext(UA_Server *server) {
+    UA_ServerConfig *config = UA_Server_getConfig(server);
+    config->allowNonePolicyPassword = true;
+    for(size_t i = 0; i < config->endpointsSize; i++) {
+        UA_EndpointDescription *endpoint = &config->endpoints[i];
+        UA_Array_delete(endpoint->userIdentityTokens, endpoint->userIdentityTokensSize,
+                        &UA_TYPES[UA_TYPES_USERTOKENPOLICY]);
+        endpoint->userIdentityTokensSize = 0;
+        endpoint->userIdentityTokens = UA_UserTokenPolicy_new();
+        if(!endpoint->userIdentityTokens)
+            return UA_STATUSCODE_BADOUTOFMEMORY;
+        endpoint->userIdentityTokensSize = 1;
+        UA_UserTokenPolicy *policy = endpoint->userIdentityTokens;
+        policy->tokenType = UA_USERTOKENTYPE_USERNAME;
+        /* An ActivateSession takes the policy of the token from the end of its key,
+         * after the last `#`. */
+        policy->policyId = UA_STRING_ALLOC("open62541-username-policy#None");
+        policy->securityPolicyUri =
+            UA_STRING_ALLOC("http://opcfoundation.org/UA/SecurityPolicy#None");
+        if(!policy->policyId.data || !policy->securityPolicyUri.data)
+            return UA_STATUSCODE_BADOUTOFMEMORY;
+    }
+    return UA_STATUSCODE_GOOD;
 }
 
 /* Gives in `id` the number of the DataType of the variable `node` of `server`.
