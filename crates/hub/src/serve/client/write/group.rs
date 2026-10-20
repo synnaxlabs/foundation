@@ -229,7 +229,9 @@ impl Group {
 }
 
 /// The series of each group of a frame of a stream of more than one group, in group
-/// order, in buffers reused across frames.
+/// order, in buffers reused across frames. The default holds no buffer, for a
+/// `mem::take` while a frame borrows the parts.
+#[derive(Default)]
 pub(super) struct Parts {
     /// The group of each entry of the stream's set, and its entry in the set of the
     /// writer of that group, which holds the entries of the group in the same order.
