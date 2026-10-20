@@ -39,6 +39,11 @@
   `hub::writer::Writer` (the hub then knows that a request has two ends); the
   nanosecond after the later of the two (it puts the refused frame after a frame from
   a later read); `now` as a closure (a caller can pass a clock that is not mesh time).
+  A kind that subscribes stamps each sample at the mesh time that `Fit` gives for its
+  device time, through `poll::Writer::sample`, in place of the midpoint of a request:
+  the `opcua` kind unless `polled = true` (OPCUA SUBSCRIBE; `laptop.architect-2`,
+  2026-10-19T23:36:41Z,
+  https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6279727836).
 - **STAMP FIT (#2622)** `connector::stamp::Fit` fits one device clock to mesh time, and
   `Stamps::sample` stamps a sample from the mesh time that a fit gives
   (`laptop.architect-2`, 2026-10-14T01:37:20Z, PR 2:

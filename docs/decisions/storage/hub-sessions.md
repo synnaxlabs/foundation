@@ -274,11 +274,12 @@
   key it checked, from that check. A removal of one of them ends it at once, in the
   call, with `serve::Error::Removed` of the first channel of the open that a call
   removed, and code `UNKNOWN`: also a rename, a move to another index, another data type
-  at the same key, and a removal that a later call undoes. While it reads its keys and
-  while it waits for the home, the call wakes it, as a peer can send nothing more and a
-  removed index can get no home. It reads its removal before it checks each later key
-  and after the wait, and then carries the index and opens with no `await` between. So
-  its index changes only at a removal, and it waits once. A key that a call changes
+  at the same key, and a removal that a later call undoes. A client write ends only the
+  group of the channel once its writers open (HUB CLIENT, PR 2). While it reads its keys
+  and while it waits for the home, the call wakes it, as a peer can send nothing more
+  and a removed index can get no home. It reads its removal before it checks each later
+  key and after the wait, and then carries the index and opens with no `await` between.
+  So its index changes only at a removal, and it waits once. A key that a call changes
   before the open checks it is checked against the new definitions. While a local open
   waits for the home, it is registered on each channel that its check gave, as a served
   open is, and on no other index. A spec that removes an index removes or moves each

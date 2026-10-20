@@ -3,9 +3,10 @@
 //! decode that fails. A read through the connection manager makes a fixed count of
 //! allocations, and a drive with nothing ready makes none. A tick of the `opcua` kind
 //! allocates only what its read allocates, and the write of its frame allocates
-//! nothing for a channel of any width. A Publish answer allocates a fixed count for
-//! any count of changes, and the first drives of a subscription allocate no memory
-//! for its changes. The count covers each thread, so this binary has no test harness.
+//! nothing for a channel of any width, as does a drive of the changes of a
+//! subscription. A Publish answer allocates a fixed count for any count of changes,
+//! and the first drives of a subscription allocate no memory for its changes. The
+//! count covers each thread, so this binary has no test harness.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -36,6 +37,7 @@ fn main() {
     the_first_drives_allocate_no_change_buffer();
     a_tick_of_the_kind_allocates_what_its_read_allocates();
     a_write_of_a_frame_of_any_type_allocates_nothing();
+    a_drive_of_changes_allocates_nothing();
 }
 
 fn sim() -> (Sim, env::clock::Clock, Rng) {
@@ -365,6 +367,33 @@ fn a_write_of_a_frame_of_any_type_allocates_nothing() {
             writes[20..],
             [0; 80],
             "writes 21 to 100 of {scalars:?}, Bad values: {bads}"
+        );
+    }
+}
+
+/// Drives 21 to 100 of the changes of a subscription allocate nothing: the take, the
+/// sort, and the write of the frames, for one change or a change of each of 64 reads,
+/// into channels of one type or of each type in turn, at one device time or at a
+/// device time for each change, 1 ns or 10 us apart. Each change is before its drive:
+/// a time after it would end the run. The drive grows its buffers in drive 1, and the
+/// test home grows its groups in the first 20, as for writes.
+fn a_drive_of_changes_allocates_nothing() {
+    let one = Span::from_nanos(1);
+    let runs: [(&[Scalar], usize, Span); 6] = [
+        (&[Scalar::F64], 1, Span::ZERO),
+        (&[Scalar::F64], 64, Span::ZERO),
+        (&[Scalar::F64], 64, one),
+        (&[Scalar::F64], 64, Span::from_nanos(10_000)),
+        (&[Scalar::Bool], 64, Span::ZERO),
+        (connector_opcua::bench::kind::SCALARS, 64, Span::ZERO),
+    ];
+    for (scalars, moved, spread) in runs {
+        let count = |work: &mut dyn FnMut()| ALLOCATOR.count(work).1;
+        let drives = kind::drives(64, scalars, 100, moved, spread, count);
+        assert_eq!(
+            drives[20..],
+            [0; 80],
+            "drives 21 to 100 of {moved} changes {spread:?} apart of 64 reads of {scalars:?}"
         );
     }
 }

@@ -68,8 +68,8 @@ pub struct Open {
     /// How long the writer may go without a write and keep control, or `None` for no
     /// limit.
     pub lease: Option<Span>,
-    /// The channels the writer writes, at least one, all on one index. The cap of the
-    /// open keeps them under [`PLACES_MAX`](super::PLACES_MAX).
+    /// The channels the writer writes, at least one, on one index or more. The cap of
+    /// the open keeps them under [`PLACES_MAX`](super::PLACES_MAX).
     pub channels: Vec<Name>,
 }
 

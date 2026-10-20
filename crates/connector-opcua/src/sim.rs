@@ -74,6 +74,10 @@ struct State {
     /// The most session timeout of a server, set before it starts.
     #[cfg(test)]
     session: Option<Span>,
+    /// The largest queue of a monitored item and the shortest publishing interval
+    /// that a server grants, set before it starts.
+    #[cfg(test)]
+    queues: Option<(u32, f64)>,
     /// The reads of the state of the server (`ns=0;i=2259`) that a server answered.
     #[cfg(test)]
     states: u32,
@@ -118,6 +122,15 @@ pub(crate) enum Fixed {
     Doubles,
 }
 
+/// What [`Variables::hooks`] gives.
+#[cfg(test)]
+type Limits = (
+    Option<u32>,
+    Option<Span>,
+    Option<(u32, f64)>,
+    Vec<Option<Fixed>>,
+);
+
 impl Variables {
     /// The variables at the node ids `nodes`, each with the value 0 and the status
     /// Good.
@@ -153,6 +166,8 @@ impl Variables {
             most: None,
             #[cfg(test)]
             session: None,
+            #[cfg(test)]
+            queues: None,
             #[cfg(test)]
             states: 0,
             #[cfg(test)]
@@ -244,6 +259,14 @@ impl Variables {
         self.state().session = Some(most);
     }
 
+    /// Makes a server that starts later grant each monitored item a queue of at most
+    /// `most` values, and each subscription a publishing interval of at least `ms`
+    /// ms.
+    #[cfg(test)]
+    pub(crate) fn limit_queues(&self, most: u32, ms: f64) {
+        self.state().queues = Some((most, ms));
+    }
+
     /// Makes a server offer only `policy` in `mode`, and no endpoint in `None`, on the
     /// certificate and key of `credentials`, and trust only their `trust`.
     #[cfg(test)]
@@ -269,13 +292,13 @@ impl Variables {
     }
 
     /// The most nodes of a Read of [`Variables::refuse_reads_past`], the timeout of
-    /// [`Variables::time_out_sessions`], and the value of [`Variables::fix`] of each
-    /// variable.
+    /// [`Variables::time_out_sessions`], the limits of [`Variables::limit_queues`], and
+    /// the value of [`Variables::fix`] of each variable.
     #[cfg(test)]
-    fn hooks(&self) -> (Option<u32>, Option<Span>, Vec<Option<Fixed>>) {
+    fn hooks(&self) -> Limits {
         let state = self.state();
         let fixed = state.variables.iter().map(|v| v.hooks.fixed).collect();
-        (state.most, state.session, fixed)
+        (state.most, state.session, state.queues, fixed)
     }
 
     /// Calls `change` on the variable of `text`.
@@ -392,21 +415,23 @@ pub async fn serve(
         .map(|variable| variable.node.clone())
         .collect();
     #[cfg(test)]
-    let (most, session, fixed) = variables.hooks();
+    let (most, session, queues, fixed) = variables.hooks();
     let security = variables.state().security;
     let add = |server: &mut Server| {
         server.cap_references(tree::REFERENCES);
         tree::add(server);
         #[cfg(test)]
-        if let Some(most) = most {
-            server.refuse_reads_past(most);
-        }
-        #[cfg(test)]
-        if let Some(most) = session {
-            server.set_session_timeout(most);
-        }
-        #[cfg(test)]
         {
+            if let Some(most) = most {
+                server.refuse_reads_past(most);
+            }
+            if let Some(most) = session {
+                server.set_session_timeout(most);
+            }
+            if let Some((most, ms)) = queues {
+                server.set_queues(most);
+                server.set_publishing(ms);
+            }
             let variables = Variables::clone(variables);
             server.set_source(&state_node(), move || {
                 let mut state = variables.state();

@@ -71,7 +71,7 @@ fn create_plant(hcl: &str) -> Plant {
     let mut opcua = Opcua::default();
     let mut influx = Influx::default();
     let rig = Rig::new();
-    rig.config(&served(hcl, opcua.serve(), influx.serve()));
+    rig.config(&served(&polled(hcl), opcua.serve(), influx.serve()));
     let plant = Plant::start(rig, opcua, influx);
     plant.rig.apply();
     plant
@@ -94,7 +94,7 @@ fn create_token_plant(source: impl FnOnce(&Rig) -> String) -> Plant {
     let mut rig = Rig::new();
     rig.var("INFLUX_TOKEN", "t0ken");
     let hcl = with_token(&source(&rig));
-    rig.config(&served(&hcl, opcua.serve(), influx.serve()));
+    rig.config(&served(&polled(&hcl), opcua.serve(), influx.serve()));
     Plant::start(rig, opcua, influx)
 }
 
@@ -131,11 +131,20 @@ fn influx_error(rig: &Rig) -> Error {
     })
 }
 
-/// `hcl` with `opcua` in place of `localhost:50000` and `influx` in place of
+/// `hcl` with `opcua` in place of `localhost:50000`, and `influx` in place of
 /// `localhost:8086`.
 fn served(hcl: &str, opcua: SocketAddr, influx: SocketAddr) -> String {
-    hcl.replace("localhost:50000", &opcua.to_string())
+    (hcl.replace("localhost:50000", &opcua.to_string()))
         .replace("localhost:8086", &influx.to_string())
+}
+
+/// `hcl` with its OPC UA connector polled, so that it reads each node at each tick, as
+/// the trace of [`held`] asks.
+fn polled(hcl: &str) -> String {
+    let rate = "  rate    = \"10Hz\"\n";
+    let polled = hcl.replacen(rate, &format!("{rate}  polled  = true\n"), 1);
+    assert_ne!(polled, hcl, "the config has an OPC UA connector at 10 Hz");
+    polled
 }
 
 /// The reads that the server answered of one variable, from the first to the end of
@@ -770,6 +779,62 @@ fn a_plant_starts_before_its_first_read() {
     );
 }
 
+/// `Ok` once `stored` holds the last value of `served`, the reads of one variable by a
+/// subscription. Each stored sample is a value that the server served, after the
+/// sample before it, at a time within [`BOUND`] of the first read of that value.
+fn subscribed(served: &[Sample], stored: &[Sample]) -> Result<(), String> {
+    let last = served.last().ok_or("no read")?.value;
+    if stored.last().map(|sample| sample.value) != Some(last) {
+        return Err(format!("no sample of the last value {last} in {stored:?}"));
+    }
+    if let Some(pair) = stored
+        .windows(2)
+        .find(|pair| matches!(pair, [a, b] if a.value >= b.value))
+    {
+        return Err(format!("{pair:?} does not step the value"));
+    }
+    for sample in stored {
+        let first = (served.iter())
+            .find(|read| read.value.to_bits() == sample.value.to_bits())
+            .ok_or_else(|| format!("{sample:?} is no served value"))?;
+        let offset = sample.time.checked_since(first.time);
+        let near = |offset: Span| offset.nanos().abs() <= BOUND.nanos();
+        if !offset.is_some_and(near) {
+            return Err(format!("{sample:?} is {offset:?} from its read {first:?}"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_subscribed_plant_stores_each_change_at_its_read() {
+    let mut opcua = Opcua::default();
+    let mut influx = Influx::default();
+    let rig = Rig::new();
+    // A sampling interval equal to the period of the changes lets two changes fall
+    // in one interval.
+    let rate = "  rate    = \"10Hz\"\n";
+    let hcl = plant().replacen(rate, "  rate    = \"20Hz\"\n", 1);
+    assert_ne!(hcl, plant(), "the config has an OPC UA connector at 10 Hz");
+    rig.config(&served(&hcl, opcua.serve(), influx.serve()));
+    let plant = Plant::start(rig, opcua, influx);
+    plant.rig.apply();
+    first_stored(&plant, &VARIABLES);
+    plant.opcua.change(TICKS, Quality::GOOD);
+    plant.rig.wait("InfluxDB holds each change", || {
+        let (served, stored) = (plant.opcua.served(), plant.influx.stored());
+        VARIABLES.iter().try_for_each(|&(variable, channel)| {
+            let stored = stored.get(channel).map_or(&[][..], Vec::as_slice);
+            subscribed(&served[variable], stored).map_err(|e| format!("{channel}: {e}"))
+        })
+    });
+    let stored = plant.influx.stored();
+    for (_, channel) in VARIABLES {
+        let changes = stored[channel].len() - 1;
+        assert!(changes >= TICKS / 2, "{channel}: {changes} changes stored");
+    }
+}
+
 #[test]
 fn a_bad_value_is_left_out_and_counted() {
     let plant = create_plant(QUALITY);
@@ -839,7 +904,7 @@ fn a_wrong_endpoint_shows_in_status_and_heals() {
     let opcua_address = opcua.serve();
     let influx_address = influx.serve();
     influx.stop();
-    rig.config(&served(plant(), opcua_address, influx_address));
+    rig.config(&served(&polled(plant()), opcua_address, influx_address));
     let mut plant = Plant::start(rig, opcua, influx);
     let rig = &plant.rig;
     rig.apply();
