@@ -32,7 +32,9 @@ use super::write::{stored, taken};
 use super::{AREA, BODY_MAX, I64, NODE, POOL, STAMP, TIME, Test};
 use crate::agent::{AGENT, Agent, SUBJECT, Stream, name, place as at, reset_with};
 use crate::forwarded::{Forwarded, accept_hub, send_places};
-use crate::net::{HOME, PEER, PORT, own_pool, public_key, transport, transport_sized};
+use crate::net::{
+    HOME, PEER, PORT, STREAMS, own_pool, public_key, transport, transport_sized,
+};
 use crate::sessions::{Got, Kept, closed_with, recorded, rules, serve_each};
 
 /// The bytes of a message that the transport of each node takes, unless a test says
@@ -217,7 +219,8 @@ where
     let (node, ends) = (nodes[1].clone(), Arc::clone(&done));
     let main = move |tasks: env::tasks::Tasks| async move {
         let sizes = (message, 1 << 20);
-        let transport = transport_sized(&node, &tasks, &own_pool(), PEER, sizes);
+        let transport =
+            transport_sized(&node, &tasks, &own_pool(), PEER, sizes, STREAMS);
         let transport = Rc::new(transport);
         let session = transport.accept().await.expect("a session");
         let raw = Raw {

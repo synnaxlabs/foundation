@@ -30,7 +30,7 @@ use super::{
     unnamed, without, write, write_samples, write_series, write_wide,
 };
 use crate::forwarded::accept_hub;
-use crate::net::{HOME, PEER, PORT, own_pool, public_key, transport_sized};
+use crate::net::{self, HOME, PEER, PORT, own_pool, public_key, transport_sized};
 
 /// The fewest bytes that a transport takes in one message.
 const MESSAGE_MIN: usize = 1472;
@@ -121,7 +121,8 @@ fn remote_sized<H, R>(
     };
     let (node, kept) = (nodes[0].clone(), Arc::clone(&steps));
     let main = move |tasks: Tasks| async move {
-        let transport = transport_sized(&node, &tasks, &own_pool(), HOME, sizes[0]);
+        let transport =
+            transport_sized(&node, &tasks, &own_pool(), HOME, sizes[0], net::STREAMS);
         let region = super::region::open(
             &node,
             &tasks,
@@ -147,7 +148,8 @@ fn remote_sized<H, R>(
     );
     let node = nodes[1].clone();
     let main = move |tasks: Tasks| async move {
-        let transport = transport_sized(&node, &tasks, &own_pool(), PEER, sizes[1]);
+        let transport =
+            transport_sized(&node, &tasks, &own_pool(), PEER, sizes[1], net::STREAMS);
         home(node, tasks, transport, steps).await;
     };
     drop(

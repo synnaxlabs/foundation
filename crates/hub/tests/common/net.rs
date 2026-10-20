@@ -28,6 +28,9 @@ pub(crate) fn public_key(key: &PrivateKey) -> PublicKey {
         .expect("a public key")
 }
 
+/// The streams that the peer of each session may open at once, unless a test sets it.
+pub(crate) const STREAMS: u32 = 16;
+
 /// A transport of `node` at `PORT` that proves `key` and takes messages of at most
 /// `message` bytes.
 pub(crate) fn transport(
@@ -37,24 +40,12 @@ pub(crate) fn transport(
     key: PrivateKey,
     message: usize,
 ) -> Transport {
-    transport_sized(node, tasks, pool, key, (message, 1 << 20))
+    transport_sized(node, tasks, pool, key, (message, 1 << 20), STREAMS)
 }
 
-/// As [`transport`], with messages of at most `sizes.0` bytes and a window of
-/// `sizes.1` bytes.
+/// As [`transport`], with messages of at most `sizes.0` bytes, a window of `sizes.1`
+/// bytes, and `streams` streams that the peer of each session may open at once.
 pub(crate) fn transport_sized(
-    node: &sim::node::Node,
-    tasks: &Tasks,
-    pool: &Rc<Pool>,
-    key: PrivateKey,
-    sizes: (usize, usize),
-) -> Transport {
-    transport_with(node, tasks, pool, key, sizes, 16)
-}
-
-/// As [`transport_sized`], where the peer of each session may open `streams` streams
-/// at once.
-pub(crate) fn transport_with(
     node: &sim::node::Node,
     tasks: &Tasks,
     pool: &Rc<Pool>,

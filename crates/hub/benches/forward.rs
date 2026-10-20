@@ -16,11 +16,16 @@
 //! - `member 1x2 one+62`: as `member 1x2 one`, while 62 more forwards of the program's
 //!   session wait for a renewal of its hello, so the timed forward keeps its waker in
 //!   a set of 63.
+//! - `direct 1x2`, `direct 1x64`, `direct 1x2 one`: the serve of a program's write of
+//!   the frames of the member line of the same name at the home of its index, with no
+//!   forward.
 //! - `home 1x2`, `home 1x64`, `home 1x2 one`: the home's serve of a forward of the
 //!   frames of the member line of the same name, which a member by hand sends.
 //!
-//! The hop of a frame costs its member line and its home line. Compare two builds on
-//! one pinned core whose SMT sibling is idle.
+//! A forward adds the member line to a frame, and its home line less its direct line.
+//! Each line runs on the `sim` driver and leaves out the carrier task of each
+//! transport, which seals and decodes the packets (#3584). Compare two builds on one
+//! pinned core whose SMT sibling is idle.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -35,7 +40,6 @@ mod fixture;
 #[expect(dead_code, reason = "the bench uses only some of the helpers")]
 #[path = "../tests/common/forwarded.rs"]
 mod forwarded;
-#[expect(dead_code, reason = "the bench uses only some of the helpers")]
 #[path = "../tests/common/net.rs"]
 mod net;
 #[path = "../tests/common/node.rs"]
@@ -133,6 +137,27 @@ const MEMBER: [Case; 4] = [
     },
 ];
 
+const DIRECT: [Case; 3] = [
+    Case {
+        name: "direct 1x2",
+        series: 2,
+        frames: 64,
+        idle: 0,
+    },
+    Case {
+        name: "direct 1x64",
+        series: 64,
+        frames: 64,
+        idle: 0,
+    },
+    Case {
+        name: "direct 1x2 one",
+        series: 2,
+        frames: 1,
+        idle: 0,
+    },
+];
+
 const HOME: [Case; 3] = [
     Case {
         name: "home 1x2",
@@ -172,6 +197,8 @@ struct Progress {
 fn main() {
     let timer = Line::new("timer", 1);
     let (timer, mut lines) = member(timer);
+    let (timer, direct) = direct(timer);
+    lines.extend(direct);
     let (timer, home) = home(timer);
     lines.extend(home);
     let title = format!("ns per frame over {ROUNDS} rounds");
@@ -204,7 +231,7 @@ fn member(timer: Line) -> (Line, Vec<Line>) {
     let main = move |tasks| answer_member(node, tasks);
     drop(home.shards().start(shard("home"), main).expect("starts"));
     let (node, kept) = (program.clone(), Arc::clone(&progress));
-    let main = move |tasks| write(node, tasks, at, kept);
+    let main = move |tasks| write(node, tasks, at, &MEMBER, kept);
     drop(
         program
             .shards()
@@ -212,7 +239,29 @@ fn member(timer: Line) -> (Line, Vec<Line>) {
             .expect("starts"),
     );
     sim.run_on(&member, move |node, tasks| {
-        serve_member(node, tasks, other, progress, timer)
+        let others = vec![other];
+        serve_program(node, tasks, others, region::OTHER, &MEMBER, progress, timer)
+    })
+    .expect("the run ends")
+}
+
+/// The direct half: a program writes each case of [`DIRECT`] at the home of its
+/// index. Gives as [`member`] does.
+fn direct(timer: Line) -> (Line, Vec<Line>) {
+    let progress = Arc::new(Progress::default());
+    let mut sim = sim::Sim::new(sim::Config::default());
+    let [home, program] = [(); 2].map(|()| sim.node(sim::node::Config::default()));
+    let at = address(&home);
+    let (node, kept) = (program.clone(), Arc::clone(&progress));
+    let main = move |tasks| write(node, tasks, at, &DIRECT, kept);
+    drop(
+        program
+            .shards()
+            .start(shard("program"), main)
+            .expect("starts"),
+    );
+    sim.run_on(&home, move |node, tasks| {
+        serve_program(node, tasks, Vec::new(), net::NODE, &DIRECT, progress, timer)
     })
     .expect("the run ends")
 }
@@ -238,38 +287,32 @@ fn home(timer: Line) -> (Line, Vec<Line>) {
     .expect("the run ends")
 }
 
-/// The member at [`net::NODE`], whose region names [`region::OTHER`] at `other` the
-/// home of [`TIME`]: serves the program's write of each case.
-async fn serve_member(
+/// The node [`net::NODE`] of a region of the nodes at `others`, which names `home`
+/// the home of [`TIME`]: serves the program's write of each of `cases`.
+async fn serve_program(
     node: sim::node::Node,
     tasks: Tasks,
-    other: Address,
+    others: Vec<Address>,
+    home: types::node::Key,
+    cases: &[Case],
     progress: Arc<Progress>,
     mut timer: Line,
 ) -> (Line, Vec<Line>) {
     let pool = net::own_pool();
     let sizes = (MESSAGE, 1 << 20);
     let transport =
-        net::transport_with(&node, &tasks, &pool, net::HOME, sizes, STREAMS);
+        net::transport_sized(&node, &tasks, &pool, net::HOME, sizes, STREAMS);
     let transport = Rc::new(transport);
-    let region = region::open(
-        &node,
-        &tasks,
-        Rc::clone(&transport),
-        vec![other],
-        definitions(),
-    )
-    .await;
+    let region =
+        region::open(&node, &tasks, Rc::clone(&transport), others, definitions()).await;
     let mesh = region.mesh.clone();
     let (hub, now) = fixture::create_hub_in(&node, tasks.clone(), region).await;
     hub.set_rules(sessions::rules());
-    mesh.set_home(TIME, region::OTHER)
-        .await
-        .expect("sets the home");
+    mesh.set_home(TIME, home).await.expect("sets the home");
     progress.stamp.store(now - 10_000_000, Ordering::Relaxed);
     let (session, link) = serving::program(&transport, &hub, &tasks).await;
     let mut lines = Vec::new();
-    for case in &MEMBER {
+    for case in cases {
         for _ in 0..case.idle {
             let incoming = net::stream(&session).await;
             let served = link.serve(incoming);
@@ -405,9 +448,8 @@ impl<F: Future<Output = Result<Served, serve::Error>>> Serving<F> {
             let sent = progress.sent.load(Ordering::Relaxed) + case.frames;
             let due = progress.taken.load(Ordering::Relaxed) + case.frames;
             progress.go.fetch_add(1, Ordering::Relaxed);
-            while progress.sent.load(Ordering::Relaxed) < sent {
-                node.clock().sleep(STEP).await;
-            }
+            let sending = || progress.sent.load(Ordering::Relaxed) >= sent;
+            wait(node, sending, &format!("round {round} is not sent")).await;
             node.clock().sleep(common::SETTLE).await;
             let end = node.clock().now() + ROUND_MAX;
             while progress.taken.load(Ordering::Relaxed) < due {
@@ -437,18 +479,19 @@ impl<F: Future<Output = Result<Served, serve::Error>>> Serving<F> {
     }
 }
 
-/// The program: writes each case of [`MEMBER`] at the member at `at`, and sends each
-/// round when the bench lets it.
+/// The program: writes each of `cases` at the node at `at`, and sends each round when
+/// the bench lets it.
 async fn write(
     node: sim::node::Node,
     tasks: Tasks,
     at: Address,
+    cases: &'static [Case],
     progress: Arc<Progress>,
 ) {
     let mut agent = Agent::dial(&node, tasks, at, name(SUBJECT)).await;
     agent.admit().await;
     let mut sender = Sender::new(&progress);
-    for case in &MEMBER {
+    for case in cases {
         let names = channels(case);
         let select: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut idle = Vec::new();
@@ -467,6 +510,15 @@ async fn write(
     node.clock().sleep(STEP).await;
 }
 
+/// Waits until `done`, and panics with `stuck` after [`ROUND_MAX`].
+async fn wait(node: &sim::node::Node, done: impl Fn() -> bool, stuck: &str) {
+    let end = node.clock().now() + ROUND_MAX;
+    while !done() {
+        assert!(node.clock().now() < end, "{stuck}");
+        node.clock().sleep(STEP).await;
+    }
+}
+
 /// The member by hand at [`region::OTHER`]: forwards a write of each case of [`HOME`]
 /// to the home at `at`, and sends each round when the bench lets it.
 async fn forward(
@@ -478,9 +530,9 @@ async fn forward(
     let (clock, mesh) = clock::Clock::new(node.clock());
     let wall = node.wall();
     tasks.spawn(async move { clock.run(wall).await });
-    while progress.stamp.load(Ordering::Relaxed) == 0 || mesh.now().mesh.is_none() {
-        node.clock().sleep(STEP).await;
-    }
+    let ready =
+        || progress.stamp.load(Ordering::Relaxed) != 0 && mesh.now().mesh.is_some();
+    wait(&node, ready, "the home and the mesh time are not ready").await;
     let pool = net::own_pool();
     let transport = net::transport(&node, &tasks, &pool, net::PEER, MESSAGE);
     let public_key = net::public_key(&net::HOME);
@@ -546,9 +598,8 @@ impl Sender {
         };
         for _ in 0..WARMUP + ROUNDS {
             self.round += 1;
-            while progress.go.load(Ordering::Relaxed) < self.round {
-                node.clock().sleep(Span::from_nanos(100_000)).await;
-            }
+            let go = || progress.go.load(Ordering::Relaxed) >= self.round;
+            wait(node, go, &format!("round {} does not go", self.round)).await;
             for _ in 0..case.frames {
                 let (ends, body) = frame(&start.places, self.stamp);
                 self.stamp += 1;
@@ -612,7 +663,7 @@ fn frame(places: &[Place], stamp: i64) -> (Vec<(u32, u32)>, Vec<u8>) {
 async fn answer_member(node: sim::node::Node, tasks: Tasks) {
     let (pool, sizes) = (net::own_pool(), (MESSAGE, 1 << 20));
     let transport =
-        net::transport_with(&node, &tasks, &pool, net::PEER, sizes, STREAMS);
+        net::transport_sized(&node, &tasks, &pool, net::PEER, sizes, STREAMS);
     let session = transport.accept().await.expect("a session");
     for case in &MEMBER {
         let mut idle = Vec::with_capacity(case.idle);
