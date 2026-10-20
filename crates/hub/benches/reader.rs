@@ -33,6 +33,9 @@
 //! - `lost write`: after the rounds above, the bench writes until the ring has no
 //!   room, as nothing frees it until #160. Then each `Writer::write` of its own rounds
 //!   finds no room, gives `Outcome::Lost`, and wakes the latest reader with its frame.
+//! - `lost handoff write`: then a writer of a higher authority takes control, and its
+//!   handoff finds no room. Each of its writes checks the size of its frame before the
+//!   room, and gives `Outcome::Lost`.
 //!
 //! A `next` that gives `Pending` while a frame waits is the yield after a run of
 //! frames: it is polled again, and only the poll that gives the frame is timed. Any
@@ -118,13 +121,7 @@ impl Count {
 /// The `timer` line and the lines that it is the floor of.
 async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> (Line, Vec<Line>) {
     let (hub, mut stamp) = common::hub(&node, tasks).await;
-    let config = writer::Config {
-        subject: name("bench"),
-        authority: Authority(1),
-        lease: None,
-        channels: vec![name("value")],
-    };
-    let mut writer = hub.writer(config).await.expect("opens");
+    let mut writer = hub.writer(config("bench", 1)).await.expect("opens");
     let channels = ["value"];
     let latest = unnamed(&channels, Mode::Latest);
     let mut latest_reader = hub.reader(latest).await.expect("opens");
@@ -181,8 +178,22 @@ async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> (Line, Vec<Li
     }
     fill(&node, &mut writer, &mut complete_reader, &mut stamp).await;
     let mut lines = Vec::from(lines);
-    lines.push(lose(&mut writer, &mut latest_reader, stamp));
+    let lost = lose(&mut writer, &mut latest_reader, &mut stamp, "lost write");
+    lines.push(lost);
+    let mut taker = hub.writer(config("taker", 2)).await.expect("opens");
+    let name = "lost handoff write";
+    lines.push(lose(&mut taker, &mut latest_reader, &mut stamp, name));
     (timer, lines)
+}
+
+/// The config of a writer of the `value` channel.
+fn config(subject: &str, authority: u8) -> writer::Config {
+    writer::Config {
+        subject: name(subject),
+        authority: Authority(authority),
+        lease: None,
+        channels: vec![name("value")],
+    }
 }
 
 /// Takes and acks the `FRAMES` frames that wait for `reader`, a complete reader, then
@@ -206,13 +217,18 @@ fn drain(reader: &mut Reader, [next, gap, ack, grant, wait]: &mut [Line; 5]) {
     }
 }
 
-/// The `lost write` line, from `stamp`, once the ring has no room.
-fn lose(writer: &mut Writer, latest: &mut Reader, mut stamp: i64) -> Line {
-    let mut line = Line::new("lost write", FRAMES);
+/// The line `name` of the writes of `writer`, from `stamp`, once the ring has no room.
+fn lose(
+    writer: &mut Writer,
+    latest: &mut Reader,
+    stamp: &mut i64,
+    name: &'static str,
+) -> Line {
+    let mut line = Line::new(name, FRAMES);
     for round in 0..WARMUP + ROUNDS {
         for _ in 0..FRAMES {
-            let draft = common::draft(writer, stamp);
-            stamp += 1;
+            let draft = common::draft(writer, *stamp);
+            *stamp += 1;
             let (outcome, figures) = timed_write(writer, draft);
             assert!(
                 matches!(outcome, Outcome::Lost { .. }),
