@@ -30,6 +30,19 @@ fn a_voter_admits_a_join_and_admits_it_again_after_it_applied() {
     });
 }
 
+#[test]
+fn a_leader_sends_a_member_that_joins_the_log() {
+    solo(|node, tasks| async move {
+        let mesh = recorded(&node, &tasks, &[ticket_of(8, "plant", false, LAST)]).await;
+        let admitted = mesh.admit(public(4), request(4, 8, &[])).await;
+        assert_eq!(admitted, Ok(Ok(())));
+        let clock = node.clock();
+        let sent = within(&clock, seconds(10), pin!(mesh.outgoing(key(4)))).await;
+        let to = sent.map(|message| message.map(|message| message.to));
+        assert_eq!(to, Some(Ok(key(4))));
+    });
+}
+
 // Only the holder of the card's private key proves its public key, so no other
 // peer asks for a join in its name.
 #[test]
@@ -142,6 +155,41 @@ fn a_join_whose_entry_the_region_refuses_gives_the_refusal() {
         assert_eq!(second.await, Ok(Err(refused)));
         assert_eq!(mesh.member(key(5)), None);
     });
+}
+
+#[test]
+fn a_voter_stamps_no_join_to_a_full_region() {
+    solo(|node, tasks| async move {
+        let mesh = holding(&node, &tasks, region::MEMBERS_MAX).await;
+        let stamped = mesh.stamp(request(200, 8, &[])).err();
+        let full = Refusal::Refused(region::Refused::Unfit(Unfit::Full));
+        assert_eq!(stamped, Some(full));
+    });
+}
+
+// Both joins stamp at 127 members, so only the apply refuses the second.
+#[test]
+fn the_apply_refuses_the_second_of_two_joins_that_fill_a_region() {
+    solo(|node, tasks| async move {
+        let mesh = holding(&node, &tasks, region::MEMBERS_MAX - 1).await;
+        let mut calls =
+            [200, 201].map(|id| Box::pin(mesh.admit(public(id), request(id, 8, &[]))));
+        let polls = poll_each(&mut calls).await;
+        assert!(polls.iter().all(Poll::is_pending));
+        let [first, second] = calls;
+        assert_eq!(first.await, Ok(Ok(())));
+        let full = Refusal::Refused(region::Refused::Unfit(Unfit::Full));
+        assert_eq!(second.await, Ok(Err(full)));
+        assert_eq!(mesh.member(key(201)), None);
+        assert_eq!(mesh.names().len(), region::MEMBERS_MAX);
+    });
+}
+
+// A mesh of `count` founding members, led by member 1, with reusable ticket 8.
+async fn holding(node: &sim::node::Node, tasks: &Tasks, count: usize) -> Mesh {
+    let ids: Vec<u8> = (1..=u8::try_from(count).unwrap()).collect();
+    let config = config(node, tasks, 1, &ids, &[1]).await;
+    recorded_with(node, config, &[ticket_of(8, "plant", true, LAST)]).await
 }
 
 // A member of the same card key and public key that another ticket admitted is no

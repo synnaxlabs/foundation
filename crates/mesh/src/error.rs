@@ -37,8 +37,9 @@ pub enum Error {
         /// The sender.
         from: node::Key,
     },
-    /// A `PreVote` or a `Vote` from `from`, which a committed configuration removed
-    /// (`raft::Admission::Removed`). The stream stops with the `removed` code. `from`
+    /// A `PreVote` or a `Vote` from `from`, which a committed configuration removed and
+    /// which is not a member (`raft::Admission::Removed`), with no join in the log that
+    /// this node has not applied. The stream stops with the `removed` code. `from`
     /// stops its group when a majority of the other voters of the incoming half of its
     /// configuration give this answer inside the window of `Raft::removed_by`.
     Removed {
