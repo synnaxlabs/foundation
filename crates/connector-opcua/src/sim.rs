@@ -43,7 +43,7 @@ use env::rng::Rng;
 use types::quality::Quality;
 use types::time::{Monotonic, Span, Stamp};
 
-use crate::client::Credentials;
+use crate::client::{Credentials, Mode};
 use crate::connection::Manager;
 use crate::event;
 pub use crate::log::call_refused;
@@ -79,8 +79,8 @@ struct State {
     /// The status of each answer of the state of the server, at first Good.
     #[cfg(test)]
     answer: Quality,
-    /// The credentials and the one policy of a server, set before it starts.
-    security: Option<(Credentials<'static>, Policy)>,
+    /// The credentials and the one policy and mode of a server, set before it starts.
+    security: Option<(Credentials<'static>, Policy, Mode)>,
 }
 
 #[derive(Debug)]
@@ -228,11 +228,16 @@ impl Variables {
         self.state().session = Some(most);
     }
 
-    /// Makes a server offer `policy` in `Sign` and in `SignAndEncrypt` on the
+    /// Makes a server offer only `policy` in `mode`, and no endpoint in `None`, on the
     /// certificate and key of `credentials`, and trust only their `trust`.
     #[cfg(test)]
-    pub(crate) fn secure(&self, credentials: Credentials<'static>, policy: Policy) {
-        self.state().security = Some((credentials, policy));
+    pub(crate) fn secure(
+        &self,
+        credentials: Credentials<'static>,
+        policy: Policy,
+        mode: Mode,
+    ) {
+        self.state().security = Some((credentials, policy, mode));
     }
 
     /// Gives each later answer of the state of the server the status `quality`.
@@ -407,8 +412,13 @@ pub async fn serve(
             server.add_source(node, move || variables.read(index, clock.now()));
         }
     };
-    let security = (security.as_ref())
-        .map(|(credentials, policy)| (credentials, std::slice::from_ref(policy)));
+    let security = (security.as_ref()).map(|(credentials, policy, mode)| {
+        (
+            credentials,
+            std::slice::from_ref(policy),
+            std::slice::from_ref(mode),
+        )
+    });
     Server::serve(manager, SESSIONS, security, add, until.wait()).await
 }
 

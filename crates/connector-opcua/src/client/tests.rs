@@ -239,8 +239,9 @@ async fn serve<T>(
     serve_on(node, sessions, time, None, body).await
 }
 
-/// [`serve`], on a loop that reads `time`, with an endpoint of each policy of
-/// `security`, in its order, on its credentials, when it is given.
+/// [`serve`], on a loop that reads `time`, with an endpoint in `Sign` and in
+/// `SignAndEncrypt` of each policy of `security`, in its order, on its credentials,
+/// and none in `None`, when it is given.
 async fn serve_on<T>(
     node: &node::Node,
     sessions: u16,
@@ -255,7 +256,8 @@ async fn serve_on<T>(
     let mut server = match security {
         // SAFETY: the close below deletes the server before the manager drops.
         Some((credentials, policies)) => unsafe {
-            Server::start_secure(&manager, c"", sessions, credentials, policies)
+            let modes = [Mode::Sign, Mode::SignAndEncrypt];
+            Server::start_secure(&manager, c"", sessions, credentials, policies, &modes)
         },
         // SAFETY: as above.
         None => unsafe { Server::start(&manager, c"", sessions) },

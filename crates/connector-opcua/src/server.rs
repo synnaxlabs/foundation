@@ -14,6 +14,14 @@ use std::thread;
 use env::net;
 
 use crate::connection::Manager;
+
+/// The credentials, policies, and modes of [`Server::start_secure`], for
+/// [`Server::serve`].
+pub(crate) type Security<'a> = (
+    &'a crate::client::Credentials<'a>,
+    &'a [crate::secure::Policy],
+    &'a [crate::client::Mode],
+);
 use crate::event;
 use crate::ffi::{self, Status};
 use crate::node::{Key, Node, ns0};
@@ -91,13 +99,13 @@ impl Server {
     /// refuses the server or its start.
     pub(crate) unsafe fn start(manager: &Manager, host: &CStr, sessions: u16) -> Self {
         // SAFETY: as the caller ensures.
-        unsafe { Self::started(manager, host, sessions, std::ptr::null(), &[]) }
+        unsafe { Self::started(manager, host, sessions, std::ptr::null(), &[], &[]) }
     }
 
-    /// Makes and starts the test server as [`Server::start`] does, which also has an
-    /// endpoint in `Sign` and in `SignAndEncrypt` for each of `policies`, in that
-    /// order, on the certificate and key of `credentials`, and whose channels trust
-    /// only the certificates of `credentials`.
+    /// Makes and starts the test server as [`Server::start`] does, which has no
+    /// endpoint in `None`, but an endpoint in each of `modes` for each of `policies`,
+    /// in that order, on the certificate and key of `credentials`, and whose channels
+    /// trust only the certificates of `credentials`.
     ///
     /// # Safety
     ///
@@ -112,18 +120,22 @@ impl Server {
         sessions: u16,
         credentials: &crate::client::Credentials<'_>,
         policies: &[crate::secure::Policy],
+        modes: &[crate::client::Mode],
     ) -> Self {
         let raw = credentials.raw();
         let uris: Vec<_> = policies
             .iter()
             .map(|policy| policy.uri().as_ptr())
             .collect();
-        // SAFETY: as the caller ensures, and the server copies `raw` and `uris`.
-        unsafe { Self::started(manager, host, sessions, &raw const raw, &uris) }
+        let modes: Vec<_> = modes.iter().map(|&mode| ffi::Mode::from(mode)).collect();
+        // SAFETY: as the caller ensures, and the server copies `raw`, `uris`, and
+        // `modes`.
+        unsafe { Self::started(manager, host, sessions, &raw const raw, &uris, &modes) }
     }
 
-    /// [`Server::start`], with the policies of `security` and an endpoint for each of
-    /// the policy URIs `policies` when `security` is not null.
+    /// [`Server::start`], with the policies of `security` and an endpoint in each of
+    /// `modes` for each of the policy URIs `policies`, in place of the endpoint in
+    /// `None`, when `security` is not null.
     ///
     /// # Safety
     ///
@@ -135,6 +147,7 @@ impl Server {
         sessions: u16,
         security: *const ffi::Security<'_>,
         policies: &[*const std::ffi::c_char],
+        modes: &[ffi::Mode],
     ) -> Self {
         let port = manager
             .port()
@@ -152,6 +165,8 @@ impl Server {
                 security,
                 policies.as_ptr(),
                 policies.len(),
+                modes.as_ptr(),
+                modes.len(),
             )
         };
         let raw = NonNull::new(raw).expect("open62541 refused the server");
@@ -598,10 +613,10 @@ impl Server {
 
     /// Starts a server on `manager` with an empty host and room for `sessions`
     /// sessions, as [`Server::start`] does, or as [`Server::start_secure`] does on the
-    /// credentials and policies of `security`, and gives it to `add`. Then drives
-    /// `manager` until `until` completes or the accept of its listener fails, closes
-    /// the server as [`Server::close`] does, drops `manager`, and gives the output of
-    /// `until`.
+    /// credentials, policies, and modes of `security`, and gives it to `add`. Then
+    /// drives `manager` until `until` completes or the accept of its listener fails,
+    /// closes the server as [`Server::close`] does, drops `manager`, and gives the
+    /// output of `until`.
     ///
     /// # Errors
     ///
@@ -617,7 +632,7 @@ impl Server {
     pub(crate) async fn serve<T>(
         manager: Manager,
         sessions: u16,
-        security: Option<(&crate::client::Credentials<'_>, &[crate::secure::Policy])>,
+        security: Option<Security<'_>>,
         add: impl FnOnce(&mut Self),
         until: impl Future<Output = T>,
     ) -> Result<T, net::Error> {
@@ -625,8 +640,15 @@ impl Server {
         let server = match security {
             // SAFETY: each close deletes the server before the manager drops. A panic
             // out of the start leaks the manager, and the server if open62541 made it.
-            Some((credentials, policies)) => unsafe {
-                Self::start_secure(&manager, c"", sessions, credentials, policies)
+            Some((credentials, policies, modes)) => unsafe {
+                Self::start_secure(
+                    &manager,
+                    c"",
+                    sessions,
+                    credentials,
+                    policies,
+                    modes,
+                )
             },
             // SAFETY: as above.
             None => unsafe { Self::start(&manager, c"", sessions) },

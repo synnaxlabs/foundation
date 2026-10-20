@@ -272,6 +272,8 @@ unsafe extern "C" {
         security: *const super::Security<'_>,
         policies: *const *const std::ffi::c_char,
         count: usize,
+        modes: *const super::Mode,
+        kinds: usize,
     ) -> *mut Server;
     pub(crate) fn shim_client_uri(client: *mut super::Client) -> *const Bytes;
     pub(crate) fn shim_client_channel(

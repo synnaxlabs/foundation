@@ -31,8 +31,8 @@ use types::name::Selector;
 use types::quality::Quality;
 
 use super::*;
-use crate::client::GRACE;
 use crate::client::tests::common::{env, rig};
+use crate::client::{self, GRACE};
 use crate::gate::Gate;
 use crate::secure::{CLIENT, HIGH_PEM, LASTING, OTHER, Policy, SERVER, START};
 use crate::sim::{Served, Variables, serve};
@@ -552,7 +552,12 @@ impl Secure {
             key: SERVER.key,
             trust: CLIENT.certificate,
         };
-        variables.secure(served, self.policy);
+        let mode = if self.unencrypted {
+            client::Mode::Sign
+        } else {
+            client::Mode::SignAndEncrypt
+        };
+        variables.secure(served, self.policy, mode);
     }
 }
 
@@ -2029,6 +2034,24 @@ fn reads_over_a_secure_channel_of_each_policy_in_each_mode() {
             assert_eq!(values(&outcome.frames, 2), served(&outcome, A), "{at}");
         }
     }
+}
+
+/// A run with no `read` block keeps its session over the secure channel, on a server
+/// with no endpoint in `None`.
+#[test]
+fn a_run_with_no_read_keeps_its_session_over_a_secure_channel() {
+    let setup = Setup {
+        reads: Vec::new(),
+        ..Setup::three()
+    };
+    let secure = Secure::of(Policy::Basic256Sha256);
+    let outcome = run_on("10Hz", setup, Some(secure), |scene| async move {
+        scene.supervise(ms(1_050)).await
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    assert_eq!(errors(&outcome.statuses), []);
+    assert_eq!(notes(&outcome.statuses), [NO_READ]);
+    assert_eq!(outcome.frames, []);
 }
 
 /// A server that trusts only [`CLIENT`] accepts no channel of another certificate on
