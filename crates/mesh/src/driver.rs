@@ -7655,9 +7655,10 @@ mod tests {
         }
 
         // Node 5 holds only the change to {1, 2, 3, 4}, and nodes 2 and 3 refuse its
-        // campaign: 2 of 4. Leader 4 then commits the change
-        // that adds node 5 back, which node 5 cannot get (the links 4-5 and 1-4 are
-        // cut). Past the window, lagging node 1 answers too: no stop.
+        // campaign. Leader 4 then commits the change that adds node 5 back, which
+        // node 5 cannot get (the links 4-5 and 1-4 are cut). Past the window, lagging
+        // node 1 answers too, `NotVoter` to a member: no stop. The window is pinned
+        // in `raft` until a leave of #3355 makes a node that is not a member.
         #[test]
         fn stale_answers_do_not_stop_a_voter_that_was_added_back() {
             let mut run = Run::new();
@@ -7720,7 +7721,9 @@ mod tests {
         // As above, and nodes 1 and 3 elect node 4. Nodes 1, 3, and 4 hold the add,
         // so it is committed, and only node 4 holds a later entry, so only it can
         // win. Node 2 starts after that, and refuses the appends and heartbeats of
-        // node 4 as from a node that is not a voter.
+        // node 4 as from a node that is not a voter. Node 2 answers a member
+        // `NotVoter` at each commit, so the commit check is pinned in `raft` until a
+        // leave of #3355 makes a node that is not a member.
         #[test]
         fn a_leader_that_was_added_back_keeps_its_group_at_a_lagging_voter() {
             let mut run = Run::new();
