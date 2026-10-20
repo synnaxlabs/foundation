@@ -1,5 +1,6 @@
 - **INITIAL RTT (#1723, 2026-10-08)** The initial RTT of a QUIC connection is the lesser
-  of 333 ms and a tenth of the idle timeout. From an idle timeout of 5 ms, with no
+  of 333 ms and a tenth of the idle timeout, which QUIC counts in whole milliseconds,
+  rounded up, so an idle of 4.5 ms counts as 5 ms. From an idle timeout of 5 ms, with no
   round-trip sample, the first PTO comes at 3 initial RTTs and the second by 9, as PROBE
   GAP only makes the gap shorter. Both come within 9/10 of the idle timeout, so a lost
   Finished goes again before the server's idle timer forgets the connection. An idle
