@@ -404,9 +404,9 @@ fn untaken(
 ) -> Raised {
     Python::initialize();
     Python::attach(|py| {
-        let first = crate::write::named(places);
+        let firsts = crate::write::firsts(places, &crate::write::named(places));
         let error =
-            crate::write::answer(py, places, &first, loss, outcomes, frame.to_vec())
+            crate::write::answer(py, places, &firsts, loss, outcomes, frame.to_vec())
                 .unwrap_err();
         let value = error.value(py);
         let code = value
@@ -594,11 +594,11 @@ fn answer_gives_the_seqs_of_the_lost_groups_only() {
     let places = grouped();
     Python::initialize();
     Python::attach(|py| {
-        let named = crate::write::named(&places);
+        let firsts = crate::write::firsts(&places, &crate::write::named(&places));
         let raised = crate::write::answer(
             py,
             &places,
-            &named,
+            &firsts,
             crate::Loss::Raise,
             &outcomes,
             vec![7, 3, 1, 2],
@@ -627,7 +627,7 @@ fn answer_gives_the_seqs_of_the_lost_groups_only() {
         crate::write::answer(
             py,
             &places,
-            &named,
+            &firsts,
             crate::Loss::Ignore,
             &outcomes,
             vec![2, 3],
@@ -660,9 +660,9 @@ fn logged(
             .call1((100,))
             .unwrap();
         foundation.call_method1("addHandler", (&handler,)).unwrap();
-        let named = crate::write::named(places);
+        let firsts = crate::write::firsts(places, &crate::write::named(places));
         let error =
-            crate::write::answer(py, places, &named, loss, outcomes, frame.to_vec())
+            crate::write::answer(py, places, &firsts, loss, outcomes, frame.to_vec())
                 .unwrap_err();
         foundation
             .call_method1("removeHandler", (&handler,))

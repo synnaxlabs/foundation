@@ -42,6 +42,8 @@ pub(crate) struct Writer {
     /// The place of each channel name: the first place of a name that two places
     /// hold.
     named: hash::Map<String, usize>,
+    /// The first place of the channel at each place.
+    firsts: Vec<usize>,
     /// The one place that is not an index, for a value with no key, when the writer
     /// has one.
     only: Option<usize>,
@@ -73,11 +75,13 @@ impl Writer {
     pub(crate) fn new(writer: sdk::write::Writer, process: u32, loss: Loss) -> Self {
         let places = writer.places();
         let named = named(places);
+        let firsts = firsts(places, &named);
         let mut values = (0..places.len()).filter(|&place| !indexed(places, place));
         let only = values.next().filter(|_| values.next().is_none());
         Self {
             places: places.to_vec(),
             named,
+            firsts,
             only,
             bytes_max: writer.bytes_max(),
             state: Mutex::new(Some(State {
@@ -151,7 +155,7 @@ impl Writer {
         match untaken {
             Ok(None) => Ok(()),
             Ok(Some(outcomes)) => {
-                answer(py, &self.places, &self.named, self.loss, &outcomes, frame)
+                answer(py, &self.places, &self.firsts, self.loss, &outcomes, frame)
             }
             Err(e) => Err(raised(py, &self.places, &e)),
         }
@@ -466,18 +470,17 @@ const LOST: &str = "samples were lost";
 /// gives `Ok` for `warn` and `ignore`. `GroupEnded` and `Rejected` give the seqs of the
 /// lost groups in `lost`, and with `warn` also log the loss. `outcomes` is the place of
 /// the index and the outcome of each group, in the order of their index places, and
-/// `frame` the places of the items of the call, of the writer of `places` and `named`.
+/// `frame` the places of the items of the call, of the writer of `places` and `firsts`.
 /// The channels of the frame are those of `frame` and the index of each group, each
 /// named once.
 pub(crate) fn answer(
     py: Python<'_>,
     places: &[Place],
-    named: &hash::Map<String, usize>,
+    firsts: &[usize],
     loss: Loss,
     outcomes: &[(usize, Outcome)],
     frame: Vec<usize>,
 ) -> PyResult<()> {
-    let frame = channels(places, named, outcomes, frame);
     let end = outcomes.iter().find_map(|&(_, outcome)| match outcome {
         Outcome::Ended(end) => Some(end),
         _ => None,
@@ -486,6 +489,10 @@ pub(crate) fn answer(
         Outcome::Refused(refusal) => Some(refusal),
         _ => None,
     });
+    if end.is_none() && refused.is_none() && loss == Loss::Ignore {
+        return Ok(());
+    }
+    let frame = channels(firsts, outcomes, frame);
     let split = || {
         let (mut written, mut unwritten, mut missed) =
             (Vec::new(), Vec::new(), Vec::new());
@@ -522,7 +529,7 @@ pub(crate) fn answer(
                  other groups go on"
             );
             let raised = crate::coded(py, GroupEnded::new_err(text), stop(end));
-            let ended = PyTuple::new(py, ended(places, named, outcomes))?;
+            let ended = PyTuple::new(py, ended(places, firsts, outcomes))?;
             raised.value(py).setattr("ended", ended)?;
             listed(raised, written, unwritten)
         }
@@ -575,11 +582,19 @@ pub(crate) fn named(places: &[Place]) -> hash::Map<String, usize> {
     named
 }
 
-/// The name of each channel of the writer of `places` and `named` in a group whose
+/// The first place of the channel at each place of `places`, by `named`.
+pub(crate) fn firsts(places: &[Place], named: &hash::Map<String, usize>) -> Vec<usize> {
+    places
+        .iter()
+        .map(|place| named[place.name.as_str()])
+        .collect()
+}
+
+/// The name of each channel of the writer of `places` and `firsts` in a group whose
 /// write ended, by `outcomes`, once each, in place order.
 fn ended<'a>(
     places: &'a [Place],
-    named: &hash::Map<String, usize>,
+    firsts: &[usize],
     outcomes: &[(usize, Outcome)],
 ) -> Vec<&'a str> {
     let ended = |index: usize| {
@@ -590,23 +605,21 @@ fn ended<'a>(
     places
         .iter()
         .enumerate()
-        .filter(|&(at, place)| ended(place.index) && named[place.name.as_str()] == at)
+        .filter(|&(at, place)| ended(place.index) && firsts[at] == at)
         .map(|(_, place)| place.name.as_str())
         .collect()
 }
 
 /// The first place of each channel of a frame of the items at `frame` of a writer of
-/// `places` and `named` and of the index of each group of `outcomes`, once each, in
-/// place order.
+/// `firsts` and of the index of each group of `outcomes`, once each, in place order.
 fn channels(
-    places: &[Place],
-    named: &hash::Map<String, usize>,
+    firsts: &[usize],
     outcomes: &[(usize, Outcome)],
     mut frame: Vec<usize>,
 ) -> Vec<usize> {
     frame.extend(outcomes.iter().map(|&(index, _)| index));
     for place in &mut frame {
-        *place = named[places[*place].name.as_str()];
+        *place = firsts[*place];
     }
     frame.sort_unstable();
     frame.dedup();
