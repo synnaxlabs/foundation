@@ -248,9 +248,9 @@ fn reads_a_key_file_with_each_line_end_and_text_after_the_end_mark() {
     }
 }
 
-/// OpenSSH skips the bytes after the end mark, so they need not be UTF-8, with each line
-/// end. A byte before it that is not UTF-8, also before the begin mark, makes the file
-/// no key file.
+/// OpenSSH skips the bytes after the end mark, so they need not be UTF-8, with each
+/// line end. A byte before it that is not UTF-8, also before the begin mark, makes the
+/// file no key file.
 #[test]
 fn reads_any_bytes_after_the_end_mark_and_refuses_others_before_it() {
     for end in ["\n", "\r\n", "\r"] {
