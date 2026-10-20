@@ -263,7 +263,7 @@ class ReaderTest(unittest.TestCase):
         no room for one, then frames of one sample of 1.5 until one fits, then one of
         2.5, which the reader has not read yet."""
         logger = logging.getLogger("foundation")
-        logged = logging.handlers.BufferingHandler(100)
+        logged = logging.handlers.BufferingHandler(sys.maxsize)
         logger.addHandler(logged)
         self.addCleanup(logger.removeHandler, logged)
         # The node does not trim its buffer yet (#160), so a full ring has room only at
