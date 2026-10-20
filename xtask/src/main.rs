@@ -913,20 +913,71 @@ mod tests {
                 "          ${{ join(matrix.untested, ' ') }} --all-features",
             ]
         );
+    }
+
+    #[test]
+    fn arm_runs_both_parts_of_the_tests_at_once_and_fails_when_one_fails() {
         let arm =
             std::fs::read_to_string(fixture().join("../../.github/workflows/arm.yaml"))
                 .unwrap();
-        let arm: Vec<String> =
-            yaml_lines(&arm).into_iter().map(str::to_owned).collect();
+        let arm = yaml_lines(&arm);
+        let jobs = under(&arm, "jobs:");
+        let changed =
+            "    if: \"!cancelled() && needs.changes.outputs.code != 'false'\"";
         assert_eq!(
-            step(&arm, "Test"),
+            under(&jobs, "  parts:"),
             [
+                "    needs: changes",
+                changed,
+                "    name: ${{ matrix.part }} arm",
+                "    strategy:",
+                "      fail-fast: false",
+                "      matrix:",
+                "        part: [nextest, serial]",
+                "    runs-on: ubuntu-24.04-arm",
+                "    steps:",
+                "      - uses: actions/checkout@v4",
+                "      - uses: Swatinem/rust-cache@v2",
+                "        with:",
+                "          key: ${{ matrix.part }}",
+                "      - if: matrix.part == 'nextest'",
+                "        uses: taiki-e/install-action@v2",
+                "        with:",
+                "          tool: cargo-nextest@0.9.146",
+                "      - uses: actions/setup-python@v5",
+                "        with:",
+                "          python-version: '3.11'",
+                "      - run: |",
+                "          python -m pip install numpy==2.4.6",
+                concat!(
+                    "          echo \"PYO3_PYTHON=$(command -v python)\"",
+                    " >> \"$GITHUB_ENV\"",
+                ),
+                concat!(
+                    "          echo \"FOUNDATION_NODE=$PWD/target/debug/foundation\"",
+                    " >> \"$GITHUB_ENV\"",
+                ),
                 "      - name: Test",
+                "        run: cargo xtask test ${{ matrix.part }}",
+            ]
+        );
+        // The required check `test` skips with `parts`, which passes it.
+        assert_eq!(
+            under(&jobs, "  test:"),
+            [
+                "    needs: [changes, parts]",
+                changed,
+                "    runs-on: ubuntu-24.04",
+                "    steps:",
+                "      - name: The result of the parts",
+                "        env:",
+                "          RESULT: ${{ needs.parts.result }}",
                 "        run: |",
-                "          failed=0",
-                "          cargo xtask test nextest || failed=1",
-                "          cargo xtask test serial || failed=1",
-                "          exit \"$failed\"",
+                "          [ \"$RESULT\" = success ] ||",
+                concat!(
+                    "            { echo \"::error::A part of test ended",
+                    " in $RESULT.\"; exit 1; }",
+                ),
             ]
         );
     }
