@@ -1,17 +1,19 @@
 - **SDK WRITER** `sdk::Client::open_writer(write::Config)` opens a `sdk::write::Writer`
   at the client's node, which must be the home of each index of its channels (BQ12,
-  until #3104). `write::Config::new(channels)` gives authority 0 and no lease, so a
-  writer of a higher authority, such as a connector, takes control from it. The client's
-  thread opens a `program::Writer` in a task of its own, which serves the calls of its
-  writer until the writer closes or drops, or the client ends. Each call copies its
-  samples into a frame that the writer keeps, sends it to the task on a channel of 1,
-  and blocks on a `std` channel of 1 for the outcome and the frame. So a warm write
-  makes no allocation on the caller's thread (`crates/node/tests/it/sdk.rs`, with
+  until #3104; `laptop.architect-2`, 2026-10-19T12:57:33Z,
+  https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267752091, items 1
+  and 3). `write::Config::new(channels)` gives authority 0 and no lease, so a writer of
+  a higher authority, such as a connector, takes control from it. The client's thread
+  opens a `program::Writer` in a task of its own, which serves the calls of its writer
+  until the writer closes or drops, or the client ends. Each call copies its samples
+  into a frame that the writer keeps, sends it to the task on a channel of 1, and blocks
+  on a `std` channel of 1 for the outcomes and the frame. So a warm write makes no
+  allocation on the caller's thread (`crates/node/tests/it/sdk.rs`, with
   `counting::Local`), and no draft is held across calls. The client's thread makes the
   ACK of each frame in `record_sent_frame` of noq, about 1.1 to 1.2 allocations a write
   (a `program::Writer` alone makes about 1.04; a sampled count on box2, Xeon 8488C,
-  before 706b6689b), until #3281; `sdk` makes no other.
-  `Writer` is `Send` and holds no borrow of `Client`. The plan
+  before 706b6689b), until #3281; `sdk` makes no other. `Writer` is `Send` and holds no
+  borrow of `Client`. The plan
   (https://github.com/synnaxlabs/foundation/issues/3266#issuecomment-6255057555) was
   approved by `laptop.architect-2` at 2026-10-18T21:04:06Z
   (https://github.com/synnaxlabs/foundation/issues/3266#issuecomment-6255123001), with
@@ -22,7 +24,9 @@
      `Client::close` or a drop of the client.
   2. A `Value::Stamp` at the place of an index is the stamp of its group, sent with
      `Time::Frame(Path::Live)`. With no value at the place of any index, the frame
-     goes with `Time::Node`.
+     goes with `Time::Node` (each group:
+     https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267752091, items
+     1 and 3).
   3. `write` and `write_series` take the places in any order. `sdk` sorts them in the
      kept frame. A place given twice gives `Stream(Layout)`.
   4. A place past the places gives `Stream(Layout(OutOfRange))`, so `Error::Value {
@@ -36,9 +40,11 @@
   Python close could not end a session with a live writer.
   Place order: place `n` of `write` and `write_series` is `Config::channels[n]`. Then
   comes the index of each group that `channels` does not name, in the order of the
-  first channel of each group. `Writer::places` gives the places in that order, each
-  an `sdk::Place` whose `index` is the first place of its index in that order, also
-  for a repeat of the index (`laptop.architect-2`, 2026-10-19T18:33:43Z,
+  first channel of each group
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267752091, item
+  2). `Writer::places` gives the places in that order, each an `sdk::Place` whose
+  `index` is the first place of its index in that order, also for a repeat of the index
+  (`laptop.architect-2`, 2026-10-19T18:33:43Z,
   https://github.com/synnaxlabs/foundation/pull/3365#issuecomment-6274422348).
   `Writer::index` is gone (`laptop.architect-2`, 2026-10-19T12:57:33Z,
   https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267752091, items
@@ -56,8 +62,10 @@
   2026-10-18T22:20:44Z
   (https://github.com/synnaxlabs/foundation/pull/3275#issuecomment-6255869839, item
   3). `Error::Stream` states the errors that leave the writer going (`Layout`,
-  `Count`, `Unsent`, and `Pool`, as `program` leaves it going) and those that end it
-  and come again at each call (item 5 of that comment, and
+  `Count`
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6289228997),
+  `Unsent`, and `Pool`, as `program` leaves it going) and those that end it and come
+  again at each call (item 5 of that comment, and
   https://github.com/synnaxlabs/foundation/pull/3275#issuecomment-6255939595).
   `program::Refusal` is the stop code that `program::Error::Refused` holds, at the root
   of `program`, as `Place` is; `program::write::Refusal` is the outcome of one frame.
@@ -66,12 +74,13 @@
   (https://github.com/synnaxlabs/foundation/pull/3275#issuecomment-6256055880, item
   2).
   The node stamps each group of a frame with no index value at mesh time now, or 1 ns
-  after the last stamp that it gave that group of the writer. So after a stamp of the
-  caller ahead of now, a frame that the node stamps can get `Refusal::Order` (#3282).
-  Each writer holds a stream of the session, and the node bounds the streams of a
-  session (64 by default, one of them the hello): past that bound, an open waits until
-  another stream of the session ends, such as at the close or drop of a writer.
-  `crates/node/benches/sdk/` gives the p50 and p99 of each round of
+  after the last stamp that it gave that group of the writer
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267752091, item
+  3). So after a stamp of the caller ahead of now, a frame that the node stamps can get
+  `Refusal::Order` (#3282). Each writer holds a stream of the session, and the node
+  bounds the streams of a session (64 by default, one of them the hello): past that
+  bound, an open waits until another stream of the session ends, such as at the close or
+  drop of a writer. `crates/node/benches/sdk/` gives the p50 and p99 of each round of
   `sdk::Writer::write` and of `program::Writer` with 2 values, of one index and (for
   `sdk`) of two, and of each leg between the caller and the writer task, with the task
   parked before each call. Decided by `laptop.architect-2` on 2026-10-18T22:28:03Z
@@ -130,8 +139,12 @@
   (`laptop.architect-2`, 2026-10-20T10:53:39Z,
   https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6289256688). Lost:
   one frame for each group, sent in turn, because one call is then no longer one frame
-  and each group costs a round trip. The P1 check of the change: the p50 and p99 of
-  the `sdk` write lines on a quiet host, at `3dcd1dcf6`, the merge-base, and the head
+  and each group costs a round trip; `program::Place` re-exported as `sdk::Place`,
+  because its `index` would be a place of the node (6267752091, item 1); and
+  `Outcome::Ended` in the slice with no `Partial`, because the person's words are "the
+  error names the channels written and not written" (6267752091, item 4). The P1 check
+  of the change: the p50 and p99 of the `sdk` write lines on a quiet host, at
+  `3dcd1dcf6`, the merge-base, and the head
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6287954485, as
   `laptop.architect-2` amended it on 2026-10-20T10:29:54Z,
   https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6288879072).
