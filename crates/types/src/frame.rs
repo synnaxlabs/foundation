@@ -365,9 +365,11 @@ impl<'a> Layout<'a> {
     /// # Errors
     ///
     /// The pool's error when it cannot give the block.
-    // Without the hint, fat LTO stops inlining it into `Draft::new` once it has a
-    // second caller.
-    #[inline]
+    #[expect(
+        clippy::inline_always,
+        reason = "with `inline`, fat LTO made it a call once it had a second caller"
+    )]
+    #[inline(always)]
     pub fn draft(self, pool: &block::Pool, form: Form) -> Result<Draft, block::Error> {
         let Self {
             set,
