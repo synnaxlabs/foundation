@@ -267,6 +267,52 @@ fn a_change_each_8_s_with_a_silent_first_voter_keeps_no_voter_behind() {
     assert_eq!(behind, Vec::new());
 }
 
+// Voter 3 lacks the chunks of the first change. With 400 ms each way on the link of
+// voters 1 and 3 and voter 2 silent, voter 3 gets some of them from voter 1, which then
+// goes silent while voter 2 answers. Voter 2 then applies a change each 8 s. A get
+// that a newer pointer drops at voter 1, which gave no chunk for that pointer, makes
+// the next get start at voter 2.
+#[test]
+fn a_last_giver_that_goes_silent_keeps_no_voter_behind() {
+    let mut late = Vec::new();
+    for seed in 0..8 {
+        let (mut cluster, first) = lacking(seed);
+        cluster.board.lock().unwrap().silent = [2].into();
+        let config = link::Config {
+            delay: Span::from_nanos(400 * Span::MILLISECOND.nanos()),
+            ..link::Config::default()
+        };
+        let (a, b) = (cluster.node(1).clone(), cluster.node(3).clone());
+        cluster.sim.link(&a, &b, config);
+        cluster.sim.link(&b, &a, config);
+        cluster.start_voter(3);
+        cluster.run(seconds(12));
+        let blobs = cluster.board().blobs;
+        assert!(
+            blobs.get(&1).is_some_and(|served| *served > 0),
+            "seed {seed}"
+        );
+        cluster.board.lock().unwrap().silent = [1].into();
+        let mut definitions = first.clone();
+        let mut base = pointer(1, &first);
+        let mut used = Vec::new();
+        for version in 2..10 {
+            let label = format!("plant.z{version}");
+            definitions.extend(create_subjects(&[label.as_str()], 1));
+            cluster.change(2, base, &definitions);
+            base = pointer(version, &definitions);
+            cluster.run(seconds(8));
+            let board = cluster.board.lock().unwrap();
+            let seen = board.specs.get(&3).and_then(|seen| seen.pointer);
+            used.push(seen.map(|pointer| pointer.version));
+        }
+        if used.last() != Some(&Some(9)) {
+            late.push((seed, used));
+        }
+    }
+    assert_eq!(late, Vec::new());
+}
+
 // As the 8 s test, with 400 ms each way on the link of voters 2 and 3, so that a newer
 // pointer often drops a get while voter 2 gives. The next get starts at voter 2 again,
 // not at silent voter 1.

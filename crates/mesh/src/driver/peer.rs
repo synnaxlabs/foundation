@@ -116,9 +116,8 @@ pub(super) type Contact = (PublicKey, Vec<Address>);
 /// Gets each chunk of `digests` from `peers`, in order, and puts it in `store`. Each
 /// peer gets the chunks still missing in calls of at most [`CHUNKS`], each within
 /// [`DEADLINE`]. A chunk that a peer does not give goes to the next peer, and a call
-/// that fails or passes the deadline gives the rest to the next peer. Returns the key
-/// of the last peer that gave a chunk, or `None` when no peer gave one. `asking`
-/// holds the key of the peer that it asks, so that a caller that drops it knows.
+/// that fails or passes the deadline gives the rest to the next peer. `progress`
+/// holds where the get is at each step, so that a caller that drops it knows.
 ///
 /// # Errors
 ///
@@ -130,12 +129,41 @@ pub(super) async fn get(
     clock: &Clock,
     digests: &[Digest],
     peers: &[(node::Key, Contact)],
-    asking: &Cell<Option<node::Key>>,
-) -> Result<Option<node::Key>, blob::Error> {
+    progress: &Cell<Progress>,
+) -> Result<(), blob::Error> {
+    let got = walk(store, transport, clock, digests, peers, progress).await;
+    progress.set(Progress {
+        asking: None,
+        ..progress.get()
+    });
+    got
+}
+
+/// Where a get is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Progress {
+    /// The peer that it asks, or `None` before the first and after the get ends.
+    pub(super) asking: Option<node::Key>,
+    /// The last peer that gave it a chunk, or `None` while no peer gave one.
+    pub(super) gave: Option<node::Key>,
+}
+
+// The body of `get`, which leaves `asking` set when it returns.
+async fn walk(
+    store: &blob::Store,
+    transport: &Transport,
+    clock: &Clock,
+    digests: &[Digest],
+    peers: &[(node::Key, Contact)],
+    progress: &Cell<Progress>,
+) -> Result<(), blob::Error> {
     let mut missing = digests.to_vec();
-    let mut gave = None;
     for (key, contact) in peers {
-        asking.set(Some(*key));
+        let asking = Some(*key);
+        progress.set(Progress {
+            asking,
+            ..progress.get()
+        });
         let mut left = Vec::new();
         let mut calls = missing.chunks(CHUNKS);
         for chunks in calls.by_ref() {
@@ -144,7 +172,10 @@ pub(super) async fn get(
             match ask(transport, clock, contact, get).await {
                 Ok(misses) => {
                     if misses.len() != chunks.len() {
-                        gave = Some(*key);
+                        progress.set(Progress {
+                            asking,
+                            gave: asking,
+                        });
                     }
                     left.extend(misses.iter().map(|miss| miss.digest));
                 }
@@ -163,7 +194,7 @@ pub(super) async fn get(
             break;
         }
     }
-    Ok(gave)
+    Ok(())
 }
 
 // Why a call on a peer gave no result.

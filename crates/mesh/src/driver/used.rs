@@ -20,7 +20,7 @@ use types::name::{Name, Prefix};
 use types::node;
 use types::time::Span;
 
-use super::peer::{self, Contact};
+use super::peer::{self, Contact, Progress};
 use super::{Call, Group, Mesh, Slot};
 use crate::error::{Error, Stopped};
 use crate::used::{Behind, Cause, Spec};
@@ -42,10 +42,10 @@ pub(super) struct Used {
     pub(super) chunks: Chunks,
     pub(super) newest: Option<Newest>,
     // The peer that gave the last chunk that a get got, of this pointer or an earlier
-    // one, where the next get starts.
-    gave: Option<node::Key>,
-    // The peer that the last get was asking when a newer pointer dropped it. The next
-    // get starts after it.
+    // one, where the next get starts, and the pointer of that get.
+    gave: Option<(node::Key, Pointer)>,
+    // The peer that a get was asking when a newer pointer dropped it, when that peer
+    // gave no chunk to a get of that pointer. The next get starts after it.
     dropped: Option<node::Key>,
     // The task of `keep`, while it waits for a pointer to read.
     task: Option<Waker>,
@@ -193,7 +193,9 @@ impl Used {
             Step::Get(digests) => {
                 let from = match self.dropped {
                     Some(dropped) => voters.partition_point(|(key, _)| *key <= dropped),
-                    None => voters.partition_point(|(key, _)| Some(*key) < self.gave),
+                    None => voters.partition_point(|(key, _)| {
+                        Some(*key) < self.gave.map(|(key, _)| key)
+                    }),
                 };
                 voters.rotate_left(from);
                 Job::Get(digests.clone(), voters)
@@ -210,13 +212,25 @@ impl Used {
         Poll::Ready((newest.pointer, job))
     }
 
+    // Records where a get of `pointer` got to, also one that a newer pointer dropped.
+    // The next get starts after the voter that a dropped get was asking when that voter
+    // gave no chunk to a get of `pointer`, or else at the voter that gave the last
+    // chunk.
+    fn asked(&mut self, pointer: Pointer, Progress { asking, gave }: Progress) {
+        if let Some(gave) = gave {
+            (self.gave, self.dropped) = (Some((gave, pointer)), None);
+        }
+        if let Some(asking) = asking
+            && self.gave != Some((asking, pointer))
+        {
+            self.dropped = Some(asking);
+        }
+    }
+
     // Records what the job for `pointer` gave. A read for a pointer that a newer one
     // replaced still sets the spec in use or `Spec::behind`. A get for one changes
     // nothing. Returns whether the spec in use changed.
     fn settle(&mut self, pointer: Pointer, done: Done) -> bool {
-        if let Done::Got(Ok(Some(gave))) = done {
-            (self.gave, self.dropped) = (Some(gave), None);
-        }
         let newest = self
             .newest
             .as_mut()
@@ -418,12 +432,12 @@ async fn run(
     clock: &Clock,
     prefix: &Prefix,
     pointer: Pointer,
-    asking: &Cell<Option<node::Key>>,
+    progress: &Cell<Progress>,
 ) -> Gave {
     match job {
         Job::Get(digests, peers) => {
-            let got = peer::get(store, transport, clock, &digests, &peers, asking);
-            Gave::Got(got.await)
+            let got = peer::get(store, transport, clock, &digests, &peers, progress);
+            Gave::Got(got.await.map(|()| progress.get().gave))
         }
         Job::Read { listed, chunks } => {
             let (mut got, mut lacked) = (Vec::new(), Vec::new());
@@ -472,8 +486,8 @@ pub(super) async fn keep(
         let Some((pointer, job, prefix, retried)) = next.await else {
             return;
         };
-        let asking = Cell::new(None);
-        let run = run(job, &store, &transport, &clock, &prefix, pointer, &asking);
+        let progress = Cell::default();
+        let run = run(job, &store, &transport, &clock, &prefix, pointer, &progress);
         let mut gave = pin!(run);
         // The store part of a job stops when the group stops or drops, and that of a
         // retry also when a newer pointer replaces its own, so that a call never waits
@@ -493,15 +507,11 @@ pub(super) async fn keep(
             group.used.task = Some(cx.waker().clone());
             Poll::Pending
         });
-        let Some(gave) = gave.await else {
-            if let (Some(group), Some(key)) = (group.upgrade(), asking.get()) {
-                let used = &mut group.borrow_mut().used;
-                if used.gave != Some(key) {
-                    used.dropped = Some(key);
-                }
-            }
-            continue;
-        };
+        let gave = gave.await;
+        if let Some(group) = group.upgrade() {
+            group.borrow_mut().used.asked(pointer, progress.get());
+        }
+        let Some(gave) = gave else { continue };
         let done = hold(gave, &files, &held, pointer).await;
         let Some(group) = group.upgrade() else { return };
         let mut group = group.borrow_mut();
@@ -698,11 +708,15 @@ impl Watch {
 mod tests {
     use super::*;
 
-    // A get that ends after a newer pointer replaced its own still sets where the next
-    // get starts.
-    #[test]
-    fn a_get_of_a_replaced_pointer_keeps_the_voter_that_gave() {
-        let (one, two) = (node::Key::from_u128(1), node::Key::from_u128(2));
+    type Start = (Option<(node::Key, Pointer)>, Option<node::Key>);
+
+    // Where the next get starts after a get of `pointer` that ends with `progress`,
+    // when voter 1 gave the last chunk to a get of `OLD`.
+    fn start(
+        pointer: Pointer,
+        progress: Progress,
+        dropped: Option<node::Key>,
+    ) -> Start {
         let mut used = Used {
             spec: Spec {
                 pointer: None,
@@ -711,21 +725,62 @@ mod tests {
             },
             chunks: Chunks::default(),
             newest: None,
-            gave: None,
-            dropped: Some(one),
+            gave: Some((key(1), OLD)),
+            dropped,
             task: None,
         };
-        let old = Pointer {
-            version: 1,
-            root: Digest::of(b"old"),
+        used.asked(pointer, progress);
+        (used.gave, used.dropped)
+    }
+
+    const OLD: Pointer = Pointer {
+        version: 1,
+        root: Digest([1; 32]),
+    };
+
+    const NEW: Pointer = Pointer {
+        version: 2,
+        root: Digest([2; 32]),
+    };
+
+    fn key(id: u128) -> node::Key {
+        node::Key::from_u128(id)
+    }
+
+    #[test]
+    fn a_get_starts_at_the_last_giver_unless_a_drop_found_it_silent() {
+        let at = |asking: Option<u128>, gave: Option<u128>| Progress {
+            asking: asking.map(key),
+            gave: gave.map(key),
         };
-        let new = Pointer {
-            version: 2,
-            root: Digest::of(b"new"),
-        };
-        used.committed(old, BTreeSet::new());
-        used.committed(new, BTreeSet::new());
-        assert!(!used.settle(old, Done::Got(Ok(Some(two)))));
-        assert_eq!((used.gave, used.dropped), (Some(two), None));
+        let (one, two, three) = (key(1), key(2), key(3));
+        assert_eq!(
+            start(NEW, at(None, Some(2)), Some(one)),
+            (Some((two, NEW)), None)
+        );
+        assert_eq!(
+            start(NEW, at(Some(2), Some(2)), None),
+            (Some((two, NEW)), None)
+        );
+        assert_eq!(
+            start(NEW, at(Some(3), Some(2)), None),
+            (Some((two, NEW)), Some(three))
+        );
+        assert_eq!(
+            start(NEW, at(Some(2), None), None),
+            (Some((one, OLD)), Some(two))
+        );
+        assert_eq!(
+            start(NEW, at(Some(1), None), None),
+            (Some((one, OLD)), Some(one))
+        );
+        assert_eq!(
+            start(OLD, at(Some(1), None), None),
+            (Some((one, OLD)), None)
+        );
+        assert_eq!(
+            start(NEW, at(None, None), Some(three)),
+            (Some((one, OLD)), Some(three))
+        );
     }
 }
