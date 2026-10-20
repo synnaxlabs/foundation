@@ -3724,6 +3724,42 @@ mod tests {
         });
     }
 
+    /// A frame whose later group no block holds is `Large` on both paths when the pool
+    /// has no block for its earlier group, and moves no seq (#770, #1309).
+    #[test]
+    fn refuses_a_frame_over_the_block_as_large_when_an_earlier_group_finds_no_block() {
+        run(240, |test| async move {
+            let set = intern(&[
+                Group {
+                    index: key(Slot::new(0)),
+                    data: &[],
+                },
+                Group {
+                    index: key(Slot::new(2)),
+                    data: &[(key(Slot::new(3)), Type::Scalar(Scalar::I64))],
+                },
+            ]);
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let writers = create_pool(4 * POOL);
+            let stamps: Vec<i64> = (10..).take(240_000).collect();
+            let values = scattered(stamps.len());
+            for (label, stamp) in [(LIVE, 300_000), (BACKFILL, 5)] {
+                let series = [(0, &[stamp][..]), (1, &stamps), (2, &values)];
+                let blocks = test.fill();
+                let written = shard.write(a, label, frame(&writers, &set, &series));
+                drop(blocks);
+                assert_eq!(
+                    written.map(<[Outcome]>::to_vec),
+                    Err(Error::Large),
+                    "{label:?}"
+                );
+                let small = frame(&test.pool, &set, &[(0, &[stamp])]);
+                assert_eq!(shard.write(a, label, small), Ok(&[applied(0, 0, 1)][..]));
+            }
+        });
+    }
+
     /// A live frame over the record that the pool has no header block for reaches no
     /// latest reader.
     #[test]
