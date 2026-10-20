@@ -299,6 +299,20 @@ impl From<transport::Error> for Error {
     }
 }
 
+/// Gives the serve that `serve` makes in a box, behind a trait object, so that its frame
+/// path has a poll of its own. Out of line, so that its future, which is built on the
+/// stack before it moves into the box, adds nothing to the stack frame of each poll of
+/// the caller.
+#[inline(never)]
+fn boxed<'a, F>(
+    serve: impl FnOnce() -> F,
+) -> Pin<Box<dyn Future<Output = Result<(), Error>> + 'a>>
+where
+    F: Future<Output = Result<(), Error>> + 'a,
+{
+    Box::pin(serve())
+}
+
 /// Serves the stream `incoming` from a node, a forward or a reader session by its
 /// first message. `peer` is the public key that the node's transport session proved,
 /// and `holder` is the node when the hub's region holds `peer` as a member.
@@ -316,23 +330,23 @@ pub(crate) async fn run(
     let class = incoming.class;
     let (mut receiver, mut sender) = halves(incoming)?;
     // No async level between this and the reader's serve, which polls once a frame,
-    // and a forward behind a trait object, so that the reader's poll inlines none of
-    // it.
+    // and a forward in a box of its own, so that the reader's poll holds none of it.
     let served = match receiver.recv().await {
         Ok(Some(message)) => match Forward::decode(&message) {
             Ok(forward) => {
                 drop(message);
                 let via = holder.expect("invariant: a forward comes from a member");
-                let forward: Pin<Box<dyn Future<Output = _>>> =
-                    Box::pin(client::forward::serve(
+                boxed(|| {
+                    client::forward::serve(
                         state,
                         via,
                         peer,
                         forward,
                         &mut receiver,
                         &mut sender,
-                    ));
-                forward.await
+                    )
+                })
+                .await
             }
             Err(wire::hub::Error::Kind { .. }) => {
                 serve(state, class, message, &mut receiver, &mut sender).await

@@ -2,7 +2,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::future::poll_fn;
-use std::pin::{Pin, pin};
+use std::pin::pin;
 use std::rc::Rc;
 use std::task::Poll;
 
@@ -19,7 +19,7 @@ use wire::hub::client::{
 };
 
 use super::admission::Admission;
-use super::{BODIES_BYTES_MAX, Error, alloc, halves, stop};
+use super::{BODIES_BYTES_MAX, Error, alloc, boxed, halves, stop};
 use crate::State;
 use crate::link::{Served, Session};
 
@@ -355,17 +355,17 @@ pub(crate) async fn later(
         }
         Ok(Some((subject, First::Write(open)))) => {
             let (state, admission) = (&session.state, &session.client.admission);
-            // A trait object, so that the write's frame path has its own poll, apart
-            // from the shape of the forward's code.
-            let write: Pin<Box<dyn Future<Output = _>>> = Box::pin(write::serve(
-                state,
-                admission,
-                subject,
-                open,
-                &mut receiver,
-                &mut sender,
-            ));
-            write.await.map(|()| Served::Ended)
+            let write = || {
+                write::serve(
+                    state,
+                    admission,
+                    subject,
+                    open,
+                    &mut receiver,
+                    &mut sender,
+                )
+            };
+            boxed(write).await.map(|()| Served::Ended)
         }
         Err(error) => Err(error),
     };
