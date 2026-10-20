@@ -85,22 +85,24 @@
   Part 7), the kind closes that session and polls on a new session for the rest of
   that connect, as `polled = true` does, so the server keeps no subscription, with the
   note "polls: the server has no subscriptions ({status})". The next connect tries
-  a subscription again, since the server can change. The fallback connects only
-  through the run value of the first connect, over its secure channel, and no other
-  path takes the secure channel as an argument. So no test runs the fallback over a
-  secure channel: a relay cannot change a signed message, and open62541 has no hook
-  of one server that refuses a subscribe (`laptop.architect-2`, 2026-10-20T12:29:05Z,
-  https://github.com/synnaxlabs/foundation/issues/3539#issuecomment-6290852770).
-  Other statuses end the run with `kind::Error::Device`. The person ("Ok what you
-  choose is ok", 2026-10-13, through `laptop.monitor`, 2026-10-13T23:43:30Z,
+  a subscription again, since the server can change. Other statuses end the run with
+  `kind::Error::Device`. The person ("Ok what you choose is ok", 2026-10-13, through
+  `laptop.monitor`, 2026-10-13T23:43:30Z,
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6157559393), and
   `laptop.architect-2`, 2026-10-13T23:43:18Z,
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6157556938, with
   the note in place of a count `polled` at 2026-10-13T23:48:43Z,
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6157622562. Lost: a
   Device error (it never ends); a Config error that asks for `polled = true`; a read of
-  `ServerProfileArray` first. The opcua conformance suite runs the subscribed path,
-  and crate tests run the polled path (`laptop.architect-2`, item 4 of 6279727836,
+  `ServerProfileArray` first. The fallback connects only through the run value of the
+  first connect, over its secure channel. No path builds a second run value, and no
+  stage of a run takes the secure channel as an argument. No test runs the fallback over
+  a secure channel: a relay cannot change a signed message, and open62541 has one
+  service table for the process, so no hook of one server refuses a subscribe
+  (`laptop.architect-2`, 2026-10-20T12:29:05Z,
+  https://github.com/synnaxlabs/foundation/issues/3539#issuecomment-6290852770). The
+  opcua conformance suite runs the subscribed path, and crate tests run the polled path
+  (`laptop.architect-2`, item 4 of 6279727836,
   approved without its "only" in item 2 of
   https://github.com/synnaxlabs/foundation/pull/3507#issuecomment-6285209512). A ONE
   NODE test runs the polled path only when it needs a sample at each tick (a trace of
