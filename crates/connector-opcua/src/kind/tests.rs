@@ -3366,7 +3366,9 @@ fn rejected(mode: client::Mode) -> String {
 #[test]
 fn a_wrong_password_names_the_user_and_the_password() {
     let secure = Secure {
-        user: Some(("operator", Some(b"pass"))),
+        // The status hides each value that the run read, so no value is a word of
+        // the error.
+        user: Some(("operator", Some(b"bad-pw"))),
         ..Secure::with_user(Policy::Basic256Sha256)
     };
     let cause = format!("the server {REFUSED}");
@@ -3594,7 +3596,7 @@ fn refuses_a_certificate_outside_its_window_at_the_mesh_time() {
 #[test]
 fn refuses_a_trust_with_no_certificate_with_the_secret_of_the_trust() {
     let mut secure = Secure::of(Policy::Basic256Sha256);
-    secure.credentials[2] = Some(b"no certificate");
+    secure.credentials[2] = Some(b"not a certificate");
     let text = "the trust holds no certificate in DER or PEM";
     assert_eq!(refusals(secure), [credentials(TRUST, text, TRUST_FIX)]);
 }
@@ -3646,7 +3648,7 @@ fn a_replaced_key_heals_the_run() {
 #[test]
 fn a_replaced_trust_heals_the_run() {
     let mut secure = Secure::of(Policy::Basic256Sha256);
-    secure.credentials[2] = Some(b"no certificate");
+    secure.credentials[2] = Some(b"not a certificate");
     let stage = Stage::POLL.over(secure);
     let outcome = scene(Setup::three(), stage, |scene| async move {
         scene.after(ms(1_050), |scene| async move {
