@@ -16,8 +16,8 @@ docker run -d --name opcua -p 50000:50000 \
 docker run -d --name influxdb -p 8086:8086 -e INFLUXDB_DB=plant influxdb:1.8
 ```
 
-`--ct=200` makes the server change each value 5 times a second, slower than the `rate`
-of step 2.
+`--ct=200` sets the cycle of the server to 200 ms, so each value changes at most 5 times
+a second, slower than the `rate` of step 2.
 
 ## 1. Install
 
@@ -187,7 +187,9 @@ plc        opcua   running  opc.tcp://localhost:50000  bad=0 in=1520 lost=0 miss
 ```
 
 `in` counts the samples that the node stored: one for the first value and for each
-change of an OPC UA node, or with `polled = true` one for each OPC UA node at each read.
+change of an OPC UA node, or with `polled = true` one for each OPC UA node at each read,
+other than the values that `bad`, `uncertain`, and `mistyped` count and the samples that
+`lost` counts.
 `missed` counts each change after values that the server dropped from a full queue
 because the node did not take them in time, or with `polled = true` each tick that the
 connector skipped. No count shows a change that a later change replaced before the next
