@@ -57,7 +57,7 @@ struct Home {
 }
 
 impl Home {
-    /// Sends the places of a write of `value`: `time` at place 0 and `value` at place 1.
+    /// Sends the places of a write of `value`: `time` at place 0, `value` at place 1.
     async fn start(&mut self) {
         let mut out = [0; Places::LEN];
         Places { count: 2 }.encode(&mut out);

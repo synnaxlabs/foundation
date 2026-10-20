@@ -26,10 +26,11 @@ use crate::{State, dial};
 /// program while so many are due.
 const IN_FLIGHT: u64 = 64;
 
-/// Serves the write of the subject of `admission` that `write` starts with `open`, whose home is
-/// `home`, another node: forwards it to `home`, sends the program the places of `home`, then sends
-/// `home` each message of the program unchanged, and each renewal of the hello of
-/// `admission` between frames, and sends the program each reply of `home` unchanged.
+/// Serves the write of the subject of `admission` that `write` starts with `open`,
+/// whose home is `home`, another node: forwards it to `home`, sends the program the
+/// places of `home`, then sends `home` each message of the program unchanged, and each
+/// renewal of the hello of `admission` between frames, and sends the program each
+/// reply of `home` unchanged.
 /// When `home` ends the write after its places, ends group 0 with [`Reply::Ended`],
 /// and each frame that has no outcome then, or that comes later, with
 /// [`Outcome::Ended`]. Finishes the program's stream once the program and `home`
@@ -119,9 +120,9 @@ async fn trailing(receiver: &mut Receiver) -> Result<(), Error> {
 }
 
 /// Opens the forward at `home` of the write that `write` starts with `body`, an open of
-/// `channels` channels, with the hello of `admission`, and gives its halves, the places of `home`, and the count of hellos admitted through the hello it
-/// sent. A session that closes with `Code(0)` before the places gets another try, as
-/// [`dial::retry`] states.
+/// `channels` channels, with the hello of `admission`. Gives its halves, the places of
+/// `home`, and the count of hellos admitted through the hello it sent. A session that
+/// closes with `Code(0)` before the places gets another try, as [`dial::retry`] states.
 async fn start(
     state: &Rc<RefCell<State>>,
     admission: &Admission,
