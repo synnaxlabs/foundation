@@ -133,7 +133,8 @@ pub(crate) const BODY: Body = Body {
             value: "a string",
             presence: Presence::When(&["password"]),
             summary: "The user name of the session. Without it, the session is \
-                      anonymous. A connector with `password` needs it.",
+                      anonymous. A connector with `password` needs it. Only a \
+                      connector with `certificate` takes it.",
         },
         schema::Attribute {
             name: "password",

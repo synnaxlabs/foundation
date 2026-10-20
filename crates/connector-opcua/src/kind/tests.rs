@@ -3291,9 +3291,29 @@ fn reads_with_a_user_over_a_secure_channel_of_each_policy_in_each_mode() {
     }
 }
 
-const REFUSED_USER: &str = "the server refused the user \"operator\" with the password \
-                            secret(\"plant.opcua_password\"). Check `user` and the \
-                            password secret(\"plant.opcua_password\")";
+const REFUSED: &str = "refused the user \"operator\" with the password \
+                       secret(\"plant.opcua_password\"). Check `user` and the password \
+                       secret(\"plant.opcua_password\")";
+
+/// The cause of `BadIdentityTokenRejected` over a channel in `mode` with the user of
+/// [`LOGINS`].
+fn rejected(mode: client::Mode) -> String {
+    match mode {
+        client::Mode::SignAndEncrypt => format!(
+            "{UNOFFERED} SignAndEncrypt {POLICIES} that lets in a user name and \
+             password, or it {REFUSED}. For a server with only Sign endpoints, set \
+             `unencrypted = true`; else turn on one of these policies with user names \
+             and passwords on the server"
+        ),
+        client::Mode::Sign => format!(
+            "{UNOFFERED} Sign {POLICIES} that lets in a user name and password, it \
+             offers only a user name token whose policy is None, which would send the \
+             password in clear, or it {REFUSED}. Turn on one of these policies in the \
+             mode Sign with a user name token whose policy encrypts the password on \
+             the server"
+        ),
+    }
+}
 
 #[test]
 fn a_wrong_password_names_the_user_and_the_password() {
@@ -3301,7 +3321,8 @@ fn a_wrong_password_names_the_user_and_the_password() {
         user: Some(("operator", Some(b"pass"))),
         ..Secure::with_user(Policy::Basic256Sha256)
     };
-    connect_fails(secure, "BadUserAccessDenied", REFUSED_USER);
+    let cause = format!("the server {REFUSED}");
+    connect_fails(secure, "BadUserAccessDenied", &cause);
 }
 
 #[test]
@@ -3320,7 +3341,28 @@ fn a_refused_identity_token_names_the_user_and_the_password() {
         Status::BAD_IDENTITY_TOKEN_INVALID,
     ] {
         let cause = cause(status, Some(&secured));
-        assert_eq!(cause.as_deref(), Some(REFUSED_USER), "{}", status.name());
+        let refused = format!("the server {REFUSED}");
+        assert_eq!(cause, Some(refused), "{}", status.name());
+    }
+}
+
+/// A server can send `BadIdentityTokenRejected` for a token that it refuses, so with a
+/// user the cause names that and the endpoints, in each mode.
+#[test]
+fn a_rejected_token_of_a_user_names_both_causes_in_each_mode() {
+    for mode in [client::Mode::SignAndEncrypt, client::Mode::Sign] {
+        let security = Security {
+            mode,
+            user: Some(config::User {
+                name: "operator".into(),
+                password: secret::Source::Secret(name(PASSWORD)),
+            }),
+            ..cause_security()
+        };
+        let password = secret::Value::new(b"pass".to_vec());
+        let secured = secured_on(&security, CLIENT.certificate, Some(password));
+        let cause = cause(Status::BAD_IDENTITY_TOKEN_REJECTED, Some(&secured));
+        assert_eq!(cause, Some(rejected(mode)), "{mode:?}");
     }
 }
 
@@ -3342,11 +3384,7 @@ fn a_server_with_no_users_asks_to_turn_them_on() {
         users: None,
         ..Secure::with_user(Policy::Basic256Sha256)
     };
-    let cause = format!(
-        "{UNOFFERED} SignAndEncrypt {POLICIES} that lets in a user name and password. \
-         For a server with only Sign endpoints, set `unencrypted = true`; else turn on \
-         one of these policies with user names and passwords on the server"
-    );
+    let cause = rejected(client::Mode::SignAndEncrypt);
     connect_fails(secure, "BadIdentityTokenRejected", &cause);
 }
 
@@ -3374,11 +3412,7 @@ fn never_sends_a_password_in_clear() {
         cleartext: true,
         ..Secure::with_user(Policy::Basic256Sha256)
     };
-    let cause = format!(
-        "{UNOFFERED} Sign {POLICIES} that lets in a user name and password. Turn on \
-         one of these policies in the mode Sign with user names and passwords on the \
-         server"
-    );
+    let cause = rejected(client::Mode::Sign);
     connect_fails(secure, "BadIdentityTokenRejected", &cause);
 }
 

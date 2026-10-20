@@ -480,7 +480,9 @@ async fn session<T>(
 /// The likely cause, which ends with its fix, of a connect over `secured`, or in the
 /// mode None when it is `None`, that failed with `status`. `None` when the status names
 /// no cause. A server can send the trust, time, URI, and use statuses about the
-/// certificate of the node too, so their causes name both certificates.
+/// certificate of the node too, so their causes name both certificates. A server can
+/// send `BadIdentityTokenRejected` for a token that it refuses, so with a user its
+/// cause names that too.
 fn cause(status: Status, secured: Option<&Secured<'_>>) -> Option<String> {
     if status == Status::BAD_IDENTITY_TOKEN_REJECTED {
         return Some(unoffered(secured));
@@ -490,12 +492,7 @@ fn cause(status: Status, secured: Option<&Secured<'_>>) -> Option<String> {
     let cause = match status {
         Status::BAD_SECURITY_CHECKS_FAILED => secured.distrusted(),
         Status::BAD_USER_ACCESS_DENIED | Status::BAD_IDENTITY_TOKEN_INVALID => {
-            let user = secured.security.user.as_ref()?;
-            let (name, password) = (&user.name, &user.password);
-            format!(
-                "the server refused the user {name:?} with the password {password}. \
-                 Check `user` and the password {password}"
-            )
+            format!("the server {}", refused(secured.security.user.as_ref()?))
         }
         Status::BAD_CERTIFICATE_UNTRUSTED => format!(
             "the trust holds neither the certificate of the server nor the CA that \
@@ -535,37 +532,54 @@ fn cause(status: Status, secured: Option<&Secured<'_>>) -> Option<String> {
 
 /// The cause of a server that offers no endpoint in the mode of `secured`, or in the
 /// mode None when it is `None`, with its user, else an anonymous user, and a policy of
-/// the client.
+/// the client. With a user, it also names a refusal of the user, and in the mode Sign a
+/// user token that would send the password in clear.
 fn unoffered(secured: Option<&Secured<'_>>) -> String {
-    let (user, with) = match secured.and_then(|secured| secured.user.as_ref()) {
-        Some(_) => ("a user name and password", " with user names and passwords"),
-        None => ("an anonymous user", ""),
+    let Some(security) = secured.map(|secured| secured.security) else {
+        return "the server offers no endpoint in the mode None that lets in an \
+                anonymous user. For a server with only secure endpoints, give \
+                `certificate`, `key`, and `trust`"
+            .into();
     };
-    let (mode, fix) = match secured.map(|secured| secured.security.mode) {
-        None => {
-            return "the server offers no endpoint in the mode None that lets in an \
-                    anonymous user. For a server with only secure endpoints, give \
-                    `certificate`, `key`, and `trust`"
-                .into();
-        }
-        Some(client::Mode::SignAndEncrypt) => (
+    let (mode, fix) = match security.mode {
+        client::Mode::SignAndEncrypt => (
             "SignAndEncrypt",
-            format!(
-                "For a server with only Sign endpoints, set `unencrypted = true`; else \
-                 turn on one of these policies{with} on the server"
-            ),
+            "For a server with only Sign endpoints, set `unencrypted = true`; else \
+             turn on one of these policies",
         ),
-        Some(client::Mode::Sign) => (
-            "Sign",
-            format!(
-                "Turn on one of these policies in the mode Sign{with} on the server"
-            ),
-        ),
+        client::Mode::Sign => {
+            ("Sign", "Turn on one of these policies in the mode Sign")
+        }
     };
     let [first, second, third] = client::POLICIES;
-    format!(
+    let offers = format!(
         "the server offers no endpoint in the mode {mode} with the policy {first}, \
-         {second}, or {third} that lets in {user}. {fix}"
+         {second}, or {third} that lets in"
+    );
+    let Some(user) = &security.user else {
+        return format!("{offers} an anonymous user. {fix} on the server");
+    };
+    let (clear, token) = match security.mode {
+        client::Mode::SignAndEncrypt => (",", "user names and passwords"),
+        client::Mode::Sign => (
+            ", it offers only a user name token whose policy is None, which would send \
+             the password in clear,",
+            "a user name token whose policy encrypts the password",
+        ),
+    };
+    format!(
+        "{offers} a user name and password{clear} or it {}. {fix} with {token} on the \
+         server",
+        refused(user)
+    )
+}
+
+/// The refusal of `user`, with its fix.
+fn refused(user: &config::User) -> String {
+    let (name, password) = (&user.name, &user.password);
+    format!(
+        "refused the user {name:?} with the password {password}. Check `user` and the \
+         password {password}"
     )
 }
 

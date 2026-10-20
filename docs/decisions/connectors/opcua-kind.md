@@ -306,8 +306,17 @@
   `BadIdentityTokenRejected`. `run` and `browse` read `password` with the other sources.
   `BadUserAccessDenied` and `BadIdentityTokenInvalid` with a `user` give "the server
   refused the user {user} with the password {source}. Check `user` and the password
-  {source}". Lost: a block `user "operator" { password = ... }`, a block for one pair,
-  as a later X.509 user token would need a second form (plan:
+  {source}". A server can also send `BadIdentityTokenRejected` for a token that it
+  refuses, so with a `user` its text names both causes: no endpoint in the mode that
+  lets in a user name and password, in the mode Sign only a user token whose policy is
+  None, or the refusal of the user. The fix names `user`, the password, and a user name
+  token whose policy encrypts the password (`laptop.architect-2`,
+  2026-10-20T12:58:13Z:
+  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6291388946). Lost:
+  a block `user "operator" { password = ... }`, a block for one pair, as a later X.509
+  user token would need a second form (plan:
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6230820716, and
   its details:
-  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6291339308).
+  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6291339308). Not
+  yet done: open62541 frees its copies of the key and the password with no clear
+  (#3593).
