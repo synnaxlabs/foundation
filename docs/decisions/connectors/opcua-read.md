@@ -1,6 +1,7 @@
-- **OPCUA READ (#2524)** The `opcua` kind reads the Value of all its nodes on each
-  tick, in Read requests built once for a session (`client::Nodes`). The limit of one
-  message is known only after the connect: the server gives its buffer sizes,
+- **OPCUA READ (#2524)** With `polled = true`, or after the fallback of OPCUA SUBSCRIBE,
+  the `opcua` kind reads the Value of all its nodes on each tick, in Read requests
+  built once for a session (`client::Nodes`). The limit of one message is known only
+  after the connect: the server gives its buffer sizes,
   MaxMessageSize, and MaxChunkCount in the ACK, and the server picks the token whose
   encoded size each request carries. open62541 sends the first chunks of a message
   before it finds that the message passes a limit, and the channel then closes. So the
@@ -205,11 +206,12 @@
   do not shrink. Each buffer holds the changes of at most `PUBLISHES` answers, each at
   most the receive limit over the 5 bytes of the smallest notification, so with the
   doubling of a `Vec` the 2 buffers of a client hold at most about 54 MB.
-  `subscribe(nodes, sampling)` asks for a publishing interval of the longer of
-  `sampling` and 100 ms, at most 1 min, a keep-alive count of max(1, floor(1 min /
-  interval)), and a queue of each item that holds the samples of two revised publishing
-  intervals. When the revised interval is not positive, or times the larger of 1 and the
-  revised keep-alive count is over 5 min, half of the 10 min timeout of a Publish
+  `subscribe(nodes, sampling, round_trip)` asks for a publishing interval of the longer
+  of `sampling` and 100 ms, at most 1 min, a keep-alive count of max(1, floor(1 min /
+  interval)), and a queue of each item that holds the samples of the larger of two
+  revised publishing intervals and two of `round_trip` (OPCUA SUBSCRIBE). When the
+  revised interval is not positive, or times the larger of 1 and the revised
+  keep-alive count is over 5 min, half of the 10 min timeout of a Publish
   request in open62541, `subscribe` fails with `BadOutOfRange` and sends no Publish
   request: the client sends Publish requests only after this check. At
   `BadNoSubscription` in a Publish answer, the patched open62541 deletes each local
