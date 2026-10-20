@@ -13,12 +13,15 @@ use env::files::{Files, Mode};
 
 use crate::change;
 use crate::error::Error;
-use crate::file::{self, Blocks};
+use crate::file::{self, Blocks, Found, Kind};
 use crate::region::Request;
 
-/// The name of the join file in a mesh directory.
-const FILE: &str = "join";
-const VERSION: u16 = 1;
+/// The join file of a mesh directory.
+pub(crate) const KIND: Kind = Kind {
+    name: "join",
+    format: 1,
+    most: change::BYTES_MAX,
+};
 
 /// The request in the join file of `dir`, or `None` when `dir` or the file is not
 /// there. A `mode` of `Mode::Write` first waits for each call on the file that a
@@ -35,15 +38,15 @@ pub(crate) async fn read(
     blocks: &Blocks,
     mode: Mode,
 ) -> Result<Option<Request>, Error> {
-    let path = dir.join(FILE);
-    let read = file::read(files, &path, blocks, mode, VERSION, change::BYTES_MAX);
-    let Some(framed) = read.await? else {
-        return Ok(None);
+    let request = match file::read(files, dir, &KIND, blocks, mode).await? {
+        Found::Absent => return Ok(None),
+        Found::Broken => None,
+        Found::Whole(framed) => {
+            let mut body = framed.body();
+            Request::decode(&mut body).filter(|_| body.is_empty())
+        }
     };
-    let request = framed.and_then(|framed| {
-        let mut body = framed.body();
-        Request::decode(&mut body).filter(|_| body.is_empty())
-    });
+    let path = dir.join(KIND.name);
     request.map(Some).ok_or(Error::JoinFile { path })
 }
 
@@ -62,7 +65,7 @@ pub(crate) async fn write(
 ) -> Result<(), Error> {
     let mut body = Vec::new();
     request.encode(&mut body);
-    Ok(file::replace(files, dir, FILE, blocks, VERSION, &body).await?)
+    Ok(file::replace(files, dir, &KIND, blocks, &body).await?)
 }
 
 /// Makes `dir` and the name of each file in it durable, so that a join file that a

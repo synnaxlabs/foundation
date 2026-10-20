@@ -15,16 +15,20 @@ use std::rc::{Rc, Weak};
 use std::task::{Poll, Waker};
 
 use block::Pool;
-use env::files::{Files, Mode};
+use env::files::{self, Files, Mode};
 
 use crate::error::Error;
-use crate::file::{self, Blocks, Framed};
+use crate::file::{self, Blocks, Found, Framed, Kind};
 use crate::message::FOUNDING_BYTES_MAX;
 use crate::region::Founding;
 
 /// The name of the founding file in a mesh directory.
-pub(crate) const FILE: &str = "founding";
-const VERSION: u16 = 1;
+pub(super) const FILE: &str = "founding";
+const KIND: Kind = Kind {
+    name: FILE,
+    format: 1,
+    most: FOUNDING_BYTES_MAX,
+};
 
 /// The founding that the mesh directory `dir` of `files` holds, or `None` when `dir`
 /// is not there or holds no founding file. [`Mesh::open`](crate::Mesh::open) with this
@@ -71,7 +75,8 @@ pub(super) async fn keep(
     logged: bool,
 ) -> Result<(), Error> {
     let encoded = given.encode();
-    // A later open does not check it, so a node with a stored founding always opens.
+    // A later open does not check it. No build makes the bound smaller, so a stored
+    // founding is never over the bound of its read, and a node with one always opens.
     if !logged && encoded.len() > FOUNDING_BYTES_MAX {
         return Err(Error::Unjoinable {
             bytes: encoded.len(),
@@ -86,7 +91,7 @@ pub(super) async fn keep(
     let body = body.as_ref().map(Framed::body);
     if !logged {
         if body != Some(&encoded[..]) {
-            let replaced = file::replace(files, dir, FILE, blocks, VERSION, &encoded);
+            let replaced = file::replace(files, dir, &KIND, blocks, &encoded);
             return Ok(replaced.await?);
         }
         // Also for the same founding: a crash after the rename of an earlier open can
@@ -115,11 +120,28 @@ async fn read(
     blocks: &Blocks,
     mode: Mode,
 ) -> Result<Option<Framed>, Error> {
+    match file::read(files, dir, &KIND, blocks, mode).await? {
+        Found::Absent => Ok(None),
+        Found::Broken => Err(unfounded(dir)),
+        Found::Whole(framed) => Ok(Some(framed)),
+    }
+}
+
+/// The path of the founding file of `dir`, or `None` when `dir` or the file is not
+/// there.
+///
+/// # Errors
+///
+/// [`Error::Files`] when a file call fails.
+pub(crate) async fn held(files: &Files, dir: &Path) -> Result<Option<PathBuf>, Error> {
     let path = dir.join(FILE);
-    let read = file::read(files, &path, blocks, mode, VERSION, FOUNDING_BYTES_MAX);
-    match read.await? {
-        Some(framed) => framed.map(Some).ok_or_else(|| unfounded(dir)),
-        None => Ok(None),
+    match files.open(&path, Mode::Read).await {
+        Ok(opened) => {
+            opened.close().await;
+            Ok(Some(path))
+        }
+        Err(files::Error::NotFound { .. }) => Ok(None),
+        Err(error) => Err(Error::Files(error)),
     }
 }
 

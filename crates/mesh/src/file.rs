@@ -10,6 +10,8 @@ use types::digest::Digest;
 
 /// The bytes of a check.
 pub(crate) const CHECK: usize = 8;
+/// The bytes of a frame before its body: the check, then the format.
+pub(crate) const HEAD: usize = CHECK + 2;
 /// The most bytes in one block of a read or a write.
 pub(crate) const CHUNK: usize = 64 << 10;
 
@@ -46,6 +48,27 @@ pub(crate) fn unframe(bytes: &[u8]) -> Option<(u16, &[u8])> {
     (*claimed == check(rest)).then(|| (u16::from_le_bytes(*format), body))
 }
 
+/// A file of a mesh directory: its name, the format of its frame, and the most bytes of
+/// its body.
+#[derive(Debug)]
+pub(crate) struct Kind {
+    pub(crate) name: &'static str,
+    pub(crate) format: u16,
+    pub(crate) most: usize,
+}
+
+/// What [`read`] finds of a file.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Found {
+    /// The file or its directory is not there.
+    Absent,
+    /// The file holds a body of more than the most bytes of its kind, which [`read`]
+    /// does not read, or its check fails, or its format is not that of its kind.
+    Broken,
+    /// The file, whole.
+    Whole(Framed),
+}
+
 /// The bytes of a file that [`read`] found whole: the check and the format, then the
 /// body.
 #[derive(Debug, PartialEq, Eq)]
@@ -63,37 +86,35 @@ impl Framed {
     }
 }
 
-/// The file `path`, or `None` when it or its directory is not there. It is
-/// `Some(None)` when the file holds a body of more than `most` bytes, which it does not
-/// read, or when its check fails or its format is not `format`. A `mode` of
-/// `Mode::Write` first waits for each call on the file that a dropped [`replace`] left
-/// to run; a read open does not.
+/// The file of `kind` in `dir`. A `mode` of `Mode::Write` first waits for each call on
+/// the file that a dropped [`replace`] left to run; a read open does not.
 pub(crate) async fn read(
     files: &Files,
-    path: &Path,
+    dir: &Path,
+    kind: &Kind,
     blocks: &Blocks,
     mode: Mode,
-    format: u16,
-    most: usize,
-) -> Result<Option<Option<Framed>>, Failed> {
-    let opened = match files.open(path, mode).await {
+) -> Result<Found, Failed> {
+    let opened = match files.open(&dir.join(kind.name), mode).await {
         Ok(opened) => opened,
-        Err(files::Error::NotFound { .. }) => return Ok(None),
+        Err(files::Error::NotFound { .. }) => return Ok(Found::Absent),
         Err(error) => return Err(Failed::Files(error)),
     };
-    if opened.len() > wide(CHECK.saturating_add(2).saturating_add(most)) {
+    if opened.len() > wide(HEAD.saturating_add(kind.most)) {
         opened.close().await;
-        return Ok(Some(None));
+        return Ok(Found::Broken);
     }
     let bytes = blocks.read(&opened).await;
     opened.close().await;
     let bytes = bytes?;
     let start = match unframe(&bytes) {
-        Some((found, body)) if found == format => (bytes.len().checked_sub(body.len()))
-            .expect("invariant: the body is a tail of the file"),
-        _ => return Ok(Some(None)),
+        Some((format, body)) if format == kind.format => {
+            (bytes.len().checked_sub(body.len()))
+                .expect("invariant: the body is a tail of the file")
+        }
+        _ => return Ok(Found::Broken),
     };
-    Ok(Some(Some(Framed { bytes, start })))
+    Ok(Found::Whole(Framed { bytes, start }))
 }
 
 /// Makes `dir`, durable in its parent.
@@ -170,19 +191,19 @@ impl Blocks {
     }
 }
 
-/// Writes `body` in its frame of `format` as the file `name` of `dir`, in place of the
-/// file there, and syncs `dir`. It removes `name` and `name.new`, writes `name.new`,
-/// and renames it to `name`, which makes its bytes durable. So a crash leaves the old
-/// file, the new one, or none.
+/// Writes `body` in its frame as the file of `kind` in `dir`, in place of the file
+/// there, and syncs `dir`. It removes the file and the file of its name with `.new`
+/// after it, writes the second, and renames it to the first, which makes its bytes
+/// durable. So a crash leaves the old file, the new one, or none.
 pub(crate) async fn replace(
     files: &Files,
     dir: &Path,
-    name: &str,
+    kind: &Kind,
     blocks: &Blocks,
-    format: u16,
     body: &[u8],
 ) -> Result<(), Failed> {
-    let bytes = frame(format, body);
+    let bytes = frame(kind.format, body);
+    let name = kind.name;
     let (path, new) = (dir.join(name), dir.join(format!("{name}.new")));
     // `File::rename` refuses an existing target, so the old file goes first.
     files.remove(&path).await.map_err(Failed::Files)?;
@@ -234,7 +255,7 @@ mod tests {
             at in any::<prop::sample::Index>(),
         ) {
             let mut bytes = frame(format, &body);
-            for len in 0..CHECK + 2 {
+            for len in 0..HEAD {
                 prop_assert_eq!(unframe(&bytes[..len]), None);
             }
             let at = at.index(bytes.len());

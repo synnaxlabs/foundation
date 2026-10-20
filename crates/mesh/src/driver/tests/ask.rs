@@ -796,8 +796,11 @@ fn ask_gives_the_error_of_a_join_file_that_does_not_read_back_whole() {
 async fn write_framed(node: &sim::node::Node, format: u16, body: &[u8]) {
     let blocks = crate::file::Blocks::new(create_pool()).unwrap();
     let files = node.files();
-    let written =
-        crate::file::replace(&files, Path::new(""), "join", &blocks, format, body);
+    let kind = crate::file::Kind {
+        format,
+        ..join::file::KIND
+    };
+    let written = crate::file::replace(&files, Path::new(""), &kind, &blocks, body);
     written.await.unwrap();
 }
 

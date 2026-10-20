@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use block::{Block, Pool};
 use env::clock::Clock;
-use env::files::{self, Files, Mode};
+use env::files::{Files, Mode};
 use transport::stream::Receiver;
 use transport::{Class, Code, Transport};
 use types::time::{Monotonic, Span};
@@ -119,14 +119,8 @@ pub async fn ask(config: Config) -> Result<region::Founding, Error> {
         card.card().public_key,
         "invariant: the transport proves the public key of the card"
     );
-    let founded = dir.join(crate::driver::FOUNDING);
-    match files.open(&founded, Mode::Read).await {
-        Ok(opened) => {
-            opened.close().await;
-            return Err(Error::Founded { path: founded });
-        }
-        Err(files::Error::NotFound { .. }) => {}
-        Err(error) => return Err(Error::Files(error)),
+    if let Some(path) = crate::driver::founded(&files, &dir).await? {
+        return Err(Error::Founded { path });
     }
     let blocks = Blocks::new(Rc::clone(&pool)).map_err(Error::Pool)?;
     file::durable(&files, &dir).await?;
