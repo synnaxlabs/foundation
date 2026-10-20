@@ -479,6 +479,10 @@ impl Samples {
 /// Each sample of `bytes`, `N` bytes each, as `sample` of its bytes.
 fn decoded<T, const N: usize>(bytes: &[u8], sample: impl Fn([u8; N]) -> T) -> Vec<T> {
     let (samples, rest) = bytes.as_chunks::<N>();
-    assert!(rest.is_empty(), "invariant: a series holds whole samples");
+    assert!(
+        rest.is_empty(),
+        "invariant: a series holds whole samples of {N} bytes, not {} bytes",
+        bytes.len()
+    );
     samples.iter().map(|raw| sample(*raw)).collect()
 }
