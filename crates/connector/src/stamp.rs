@@ -1,6 +1,5 @@
 //! The stamps of the frames that a connector writes.
 
-use hub::writer::Writer;
 use types::time::{Interval, Span, Stamp};
 
 mod fit;
@@ -28,7 +27,7 @@ impl Stamps {
     /// When the last stamp is `i64::MAX` ns.
     pub async fn request<T>(
         &mut self,
-        writer: &Writer,
+        writer: &hub::writer::Writer,
         request: impl Future<Output = T>,
     ) -> (T, Stamp) {
         let sent = writer.now();
@@ -94,6 +93,78 @@ impl Stamps {
             .map_or(stamp, |last| stamp.max(last + Span::NANOSECOND));
         self.last = Some(stamp);
         stamp
+    }
+}
+
+/// The hub's writer of a connector and the stamps of its frames. It writes a frame that
+/// the home refuses as `Backwards` again, once, 1 ns after the stamp that the refusal
+/// gives.
+#[derive(Debug)]
+pub(crate) struct Writer {
+    hub: hub::writer::Writer,
+    stamps: Stamps,
+}
+
+impl Writer {
+    /// The writer of the frames of `hub`, with no stamp given yet.
+    pub(crate) fn new(hub: hub::writer::Writer) -> Self {
+        Self {
+            hub,
+            stamps: Stamps::default(),
+        }
+    }
+
+    /// The hub's writer, to read its key set, its entries, and its mesh time.
+    pub(crate) fn hub(&self) -> &hub::writer::Writer {
+        &self.hub
+    }
+
+    /// As [`Stamps::request`] on the hub's writer.
+    pub(crate) async fn request<T>(
+        &mut self,
+        request: impl Future<Output = T>,
+    ) -> (T, Stamp) {
+        self.stamps.request(&self.hub, request).await
+    }
+
+    /// As [`Stamps::next`].
+    pub(crate) fn next(&mut self, stamp: Stamp) -> Stamp {
+        self.stamps.next(stamp)
+    }
+
+    /// Writes a frame at `stamp` with `send`, which writes one frame on the hub's
+    /// writer at the stamp that it gets, and gives the latest stamp that the home gives
+    /// for a part of the frame that it refused as `Backwards`, or `None`. `send` gets
+    /// `None` first. When it gives a stamp `before`, `write` calls it once more with
+    /// `Some(before)`, at the stamp 1 ns after `before`.
+    ///
+    /// # Errors
+    ///
+    /// The error of `send`, with no call after it.
+    ///
+    /// # Panics
+    ///
+    /// When `send` gives a stamp again, or as [`Stamps::after`].
+    pub(crate) fn write<E>(
+        &mut self,
+        stamp: Stamp,
+        mut send: impl FnMut(
+            &mut hub::writer::Writer,
+            Stamp,
+            Option<Stamp>,
+        ) -> Result<Option<Stamp>, E>,
+    ) -> Result<(), E> {
+        let Some(before) = send(&mut self.hub, stamp, None)? else {
+            return Ok(());
+        };
+        let stamp = self.stamps.after(before);
+        if let Some(again) = send(&mut self.hub, stamp, Some(before))? {
+            panic!(
+                "invariant: a frame stamped after {before}, the last stamp of its \
+                 index, is not backwards, but the home gives {again} as last"
+            );
+        }
+        Ok(())
     }
 }
 

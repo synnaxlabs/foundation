@@ -43,13 +43,17 @@
   https://github.com/synnaxlabs/foundation/pull/2817#issuecomment-6208721580, and
   2026-10-16T06:44:07Z, condition 1:
   https://github.com/synnaxlabs/foundation/issues/2830#issuecomment-6209753061).
-  `status::Writer` keeps its own write again: it writes string series, stages its values
-  again when the pool has no block, and closes on `Removed`, where `poll::Writer` writes
-  fixed-width samples, loses the frame, and gives the error to the run. One writer for
-  both is deferred to #2527. Lost: a copy of the writer in each kind, which the rule of
-  `Backwards` and of pool loss would drift between; a `write` that takes a closure per
-  channel, which reads each value up to three times and makes the kind count `bad` and
-  `uncertain` in another pass (`laptop.architect-2`, 2026-10-16T04:07:48Z:
+  `status::Writer` writes string series, stages its values again when the pool has no
+  block, and closes on `Removed`, where `poll::Writer` writes fixed-width samples, loses
+  the frame, and gives the error to the run. So the two keep their own sends, and both
+  write through `stamp::Writer` (STAMP), which holds the write again (the plan,
+  2026-10-20T08:04:42Z:
+  https://github.com/synnaxlabs/foundation/issues/2527#issuecomment-6286386198). Lost:
+  `status::Writer` writes through `poll::Writer`, which then takes text values and a
+  second rule for a pool with no block in its hot path; a copy of the writer in each
+  kind, which the rule of `Backwards` and of pool loss would drift between; a `write`
+  that takes a closure per channel, which reads each value up to three times and makes
+  the kind count `bad` and `uncertain` in another pass (`laptop.architect-2`, 2026-10-16T04:07:48Z:
   https://github.com/synnaxlabs/foundation/pull/2817#issuecomment-6207854657); a bit set
   of the kept channels beside the values, which each caller keeps in step; an error at
   the open for a channel named again, which the parse refuses first; slots that the kind

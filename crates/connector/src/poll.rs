@@ -12,7 +12,7 @@ use types::sample::{Scalar, Type, Value};
 use types::time::Stamp;
 
 use crate::kind::{Context, Error};
-use crate::stamp::Stamps;
+use crate::stamp;
 use crate::status;
 
 #[cfg(test)]
@@ -31,8 +31,7 @@ const INDEX: Code = Code::new("connector.index");
 /// frame lost as `lost`. No write allocates after the first.
 #[derive(Debug)]
 pub struct Writer {
-    hub: hub::writer::Writer,
-    stamps: Stamps,
+    stamped: stamp::Writer,
     /// The frame that keeps each value.
     all: Shape,
     /// The sample of each entry of the key set.
@@ -183,30 +182,30 @@ impl Writer {
             kept: Kept::new(&all, writer.entries().len()),
             all,
             fills,
-            stamps: Stamps::default(),
             applied: ctx.count(applied),
             lost: ctx.count(lost),
-            hub: writer,
+            stamped: stamp::Writer::new(writer),
         })
     }
 
     /// The sample type of each channel, in the order of `channels`.
     #[must_use]
     pub fn types(&self) -> impl ExactSizeIterator<Item = Type> + '_ {
-        let entries = self.hub.set().entries();
-        (self.hub.entries().iter()).map(|&entry| entries[entry].data_type)
+        let hub = self.stamped.hub();
+        let entries = hub.set().entries();
+        (hub.entries().iter()).map(|&entry| entries[entry].data_type)
     }
 
     /// The mesh time of the writer's hub, as [`hub::writer::Writer::time`] gives it.
     #[must_use]
     pub fn time(&self) -> Time {
-        self.hub.time()
+        self.stamped.hub().time()
     }
 
     /// Runs `request`, and gives its output with the stamp of its frame: the midpoint
     /// of the mesh times before and after it, or 1 ns after the last stamp.
     pub async fn request<T>(&mut self, request: impl Future<Output = T>) -> (T, Stamp) {
-        self.stamps.request(&self.hub, request).await
+        self.stamped.request(request).await
     }
 
     /// Writes one frame at `stamp` with the value of each channel that `values` gives,
@@ -246,8 +245,7 @@ impl Writer {
     /// `write`, so that only the fill is built for each iterator.
     fn send(&mut self, stamp: Stamp) -> Result<(), Error> {
         let Self {
-            hub: writer,
-            stamps,
+            stamped,
             all,
             fills,
             slots,
@@ -268,33 +266,27 @@ impl Writer {
             }
             kept.shape.borrow()
         };
-        let mut out = Out {
-            writer,
-            applied,
-            lost,
-        };
-        let first = out.send(fills, shape, values, stamp, backwards)?;
-        let Some(before) = first else {
-            return Ok(());
-        };
-        let stamp = stamps.after(before);
-        let refused =
-            |&&(entry, _): &&(usize, usize)| backwards.contains(&fills[entry].group);
-        again.clear();
-        again.extend(shape.series.iter().filter(refused));
-        let shape = Borrowed {
-            series: again,
-            groups: backwards,
-            ..shape
-        };
-        let last = out.send(fills, shape, values, stamp, &mut Vec::new())?;
-        if let Some(again) = last {
-            panic!(
-                "invariant: a frame stamped after {before}, the last stamp of its \
-                 index, is not backwards, but the home gives {again} as last"
-            );
-        }
-        Ok(())
+        stamped.write(stamp, |hub, stamp, before| {
+            let mut out = Out {
+                writer: hub,
+                applied,
+                lost,
+            };
+            if before.is_none() {
+                return out.send(fills, shape, values, stamp, backwards);
+            }
+            let refused = |&&(entry, _): &&(usize, usize)| {
+                backwards.contains(&fills[entry].group)
+            };
+            again.clear();
+            again.extend(shape.series.iter().filter(refused));
+            let shape = Borrowed {
+                series: again,
+                groups: backwards,
+                ..shape
+            };
+            out.send(fills, shape, values, stamp, &mut Vec::new())
+        })
     }
 }
 
