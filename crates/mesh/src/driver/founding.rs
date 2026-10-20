@@ -87,7 +87,8 @@ pub(super) async fn keep(
     let body = body.as_ref().map(Stored::body);
     if !logged {
         if body != Some(&encoded[..]) {
-            write(files, dir, blocks, &encoded).await?;
+            let names = [FILE, NEW];
+            file::replace(files, dir, names, blocks, VERSION, &encoded).await?;
         }
         // Also for the same founding: a crash after the rename of an earlier open can
         // leave its name not durable.
@@ -155,29 +156,6 @@ fn unfounded(dir: &Path) -> Error {
     Error::Unfounded {
         path: dir.join(FILE),
     }
-}
-
-// `File::rename` refuses an existing target, so the old `founding` goes first. The
-// caller syncs `dir`.
-async fn write(
-    files: &Files,
-    dir: &Path,
-    blocks: &Blocks,
-    given: &[u8],
-) -> Result<(), Error> {
-    let bytes = file::frame(VERSION, given);
-    let (path, new) = (dir.join(FILE), dir.join(NEW));
-    files.remove(&path).await.map_err(Error::Files)?;
-    files.remove(&new).await.map_err(Error::Files)?;
-    let len = file::wide(bytes.len());
-    let mut opened = files
-        .open(&new, Mode::Create { len })
-        .await
-        .map_err(Error::Files)?;
-    blocks.write(&opened, 0, &mut &bytes[..]).await?;
-    opened.rename(&path).await.map_err(Error::Files)?;
-    opened.close().await;
-    Ok(())
 }
 
 /// The founding file that join answers send. An idle voter holds no copy: each answer

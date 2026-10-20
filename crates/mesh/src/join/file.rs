@@ -67,21 +67,9 @@ pub(crate) async fn write(
 ) -> Result<(), Error> {
     let mut body = Vec::new();
     request.encode(&mut body);
-    let bytes = file::frame(VERSION, &body);
     files.create_dir(dir).await.map_err(Error::Files)?;
     let parent = dir.parent().unwrap_or(Path::new(""));
     files.sync_dir(parent).await.map_err(Error::Files)?;
-    // `File::rename` refuses an existing target, so the old `join` goes first.
-    let (path, new) = (dir.join(FILE), dir.join(NEW));
-    files.remove(&path).await.map_err(Error::Files)?;
-    files.remove(&new).await.map_err(Error::Files)?;
-    let len = file::wide(bytes.len());
-    let mut opened = files
-        .open(&new, Mode::Create { len })
-        .await
-        .map_err(Error::Files)?;
-    blocks.write(&opened, 0, &mut &bytes[..]).await?;
-    opened.rename(&path).await.map_err(Error::Files)?;
-    opened.close().await;
+    file::replace(files, dir, [FILE, NEW], blocks, VERSION, &body).await?;
     files.sync_dir(dir).await.map_err(Error::Files)
 }

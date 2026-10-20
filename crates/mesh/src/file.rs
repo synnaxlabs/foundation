@@ -1,10 +1,11 @@
 //! What the files of a mesh directory share: the check and the frame of their bytes,
 //! and the read and write of a file in blocks of a pool.
 
+use std::path::Path;
 use std::rc::Rc;
 
 use block::Pool;
-use env::files::{self, File};
+use env::files::{self, File, Files, Mode};
 use types::digest::Digest;
 
 /// The bytes of a check.
@@ -111,6 +112,34 @@ impl Blocks {
         }
         Ok(())
     }
+}
+
+/// Writes `body` in its frame of `format` as the file `name` of `dir`, in place of the
+/// file there. It removes `name` and `new`, writes `new`, and renames it to `name`,
+/// which makes its bytes durable. So a crash leaves the old file, the new one, or
+/// none. The caller syncs `dir`.
+pub(crate) async fn replace(
+    files: &Files,
+    dir: &Path,
+    [name, new]: [&str; 2],
+    blocks: &Blocks,
+    format: u16,
+    body: &[u8],
+) -> Result<(), Failed> {
+    let bytes = frame(format, body);
+    let (path, new) = (dir.join(name), dir.join(new));
+    // `File::rename` refuses an existing target, so the old file goes first.
+    files.remove(&path).await.map_err(Failed::Files)?;
+    files.remove(&new).await.map_err(Failed::Files)?;
+    let len = wide(bytes.len());
+    let mut opened = files
+        .open(&new, Mode::Create { len })
+        .await
+        .map_err(Failed::Files)?;
+    blocks.write(&opened, 0, &mut &bytes[..]).await?;
+    opened.rename(&path).await.map_err(Failed::Files)?;
+    opened.close().await;
+    Ok(())
 }
 
 /// `len` as a file offset.
