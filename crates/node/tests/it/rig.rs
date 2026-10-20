@@ -151,25 +151,14 @@ impl Rig {
         node.exit(&self.clock, PATIENCE, "the node exits at SIGTERM")
     }
 
-    /// Stops the node of [`Rig::start`] with SIGSTOP, as a loaded host stalls it, until
-    /// [`Rig::resume`]. Panics when no node runs.
+    /// Stops the node of [`Rig::start`] with SIGSTOP, as a loaded host stalls it, while
+    /// `during` runs, then lets it go on with SIGCONT. Panics when no node runs.
     #[cfg(unix)]
-    pub(crate) fn pause(&self) {
-        self.node
-            .as_ref()
-            .expect("a node runs")
-            .process
-            .signal("STOP");
-    }
-
-    /// Lets the node of [`Rig::pause`] go on with SIGCONT. Panics when no node runs.
-    #[cfg(unix)]
-    pub(crate) fn resume(&self) {
-        self.node
-            .as_ref()
-            .expect("a node runs")
-            .process
-            .signal("CONT");
+    pub(crate) fn stalled(&self, during: impl FnOnce()) {
+        let process = &self.node.as_ref().expect("a node runs").process;
+        process.signal("STOP");
+        during();
+        process.signal("CONT");
     }
 
     /// Kills the node of [`Rig::start`] with SIGKILL, as a crash ends it, and waits
