@@ -311,12 +311,13 @@
   leader that cannot dial a member, such as one whose card has no address, reaches it
   on a session that the member dialed. So a member that is not a voter, and to which no
   leader sent a message for two election timeouts, dials the next voter in key order
-  after the last voter that led when it reached the member, else after the last voter
-  that the member dialed, and wrapping. The group holds the session. The leader sends a
-  learner a heartbeat at each quorum check, one each election timeout, so a member
-  that the leader reaches dials no voter. A failed dial does nothing, and the member
-  dials at most one voter for each two election timeouts. The transport keeps at most
-  one session for each pair of nodes (the plan of PR 2b of #3140,
+  after the voter that it met last, as the leader that reached it or as the voter that
+  it dialed, and after the last voter it dials the first. The group holds the session.
+  The leader sends a learner a heartbeat at each quorum check, one each election
+  timeout, so a member that the leader reaches dials no voter. A failed dial does
+  nothing, and the member dials at most one voter for each two election timeouts. The
+  transport keeps at most one session for each pair of nodes (the plan of PR 2b of
+  #3140,
   https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6283363405). A stop
   of the group drops each handle. When `Transport::dial` gives the one open session to a
   peer (#1363), a call can take its session from `dial`, and #1598 decides whether the
