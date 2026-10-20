@@ -149,12 +149,24 @@ pub enum Error {
     /// The home of the index of a program's write is `home`, another node, and the
     /// forward of the write to it ended before its places. Code: `refusal`, the code
     /// that `home` stopped the forward with, or `FAILED` when the session to `home`
-    /// failed, `home` broke HUB WIRE, or `home` takes smaller messages than this node.
+    /// failed or `home` broke HUB WIRE.
     Forward {
         /// The home.
         home: node::Key,
         /// The refusal that the program gets.
         refusal: Refusal,
+    },
+    /// The stream to `home`, the home of the index of a program's write, takes
+    /// messages of at most `home_max` bytes, under the `max` bytes of this node's
+    /// transport, so the node cannot forward the program's messages as they came.
+    /// Code: `FAILED`.
+    Limit {
+        /// The home.
+        home: node::Key,
+        /// The largest message that the stream to `home` takes.
+        home_max: usize,
+        /// The largest message that this node's transport takes.
+        max: usize,
     },
 }
 
@@ -186,6 +198,7 @@ impl Error {
             Self::Ended(ended) => Some(Code(client::read::ended(ended).code())),
             Self::Writer(error) => Some(Code(client::write::refused(error).code())),
             Self::Forward { refusal, .. } => Some(Code(refusal.code())),
+            Self::Limit { .. } => Some(Code(Refusal::Failed.code())),
         }
     }
 }
@@ -279,6 +292,15 @@ impl fmt::Display for Error {
                 f,
                 "the forward of the write to node {home}, the home of its index, \
                  ended: {refusal}"
+            ),
+            Self::Limit {
+                home,
+                home_max,
+                max,
+            } => write!(
+                f,
+                "the home {home} takes messages of at most {home_max} bytes, under the \
+                 {max} of this node: give each node of the mesh the same message limit"
             ),
         }
     }

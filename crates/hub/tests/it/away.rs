@@ -602,11 +602,20 @@ fn stops_the_write_as_failed_when_the_home_takes_smaller_messages() {
             super::read::finish(&mut agent).await;
         },
     );
-    let forward = serve::Error::Forward {
+    let limit = serve::Error::Limit {
         home: OTHER,
-        refusal: Refusal::Failed,
+        home_max: MESSAGE / 2,
+        max: MESSAGE,
     };
-    assert_eq!(served, [Err(forward), Ok(Got::Ended)]);
+    assert_eq!(
+        limit.to_string(),
+        format!(
+            "the home {OTHER} takes messages of at most {} bytes, under the {MESSAGE} of \
+             this node: give each node of the mesh the same message limit",
+            MESSAGE / 2
+        )
+    );
+    assert_eq!(served, [Err(limit), Ok(Got::Ended)]);
 }
 
 /// With 64 frames that have no outcome, the member reads no more frames of the program

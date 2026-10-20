@@ -180,10 +180,15 @@ async fn attempt(
         )
     };
     // Each message of the program goes to the home as it came.
-    if to.bytes_max() < taken {
+    let home_max = to.bytes_max();
+    if home_max < taken {
         to.reset(Code(Refusal::Failed.code()));
         from.stop(Code(Refusal::Failed.code()));
-        return Err(failed);
+        return Err(Error::Limit {
+            home,
+            home_max,
+            max: taken,
+        });
     }
     let header = wire::header::encode(Protocol::Hub);
     message(state, &mut to, header.len(), |out| {

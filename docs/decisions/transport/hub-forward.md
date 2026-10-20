@@ -69,28 +69,35 @@
   session from the node to the home for each program connection, which needs no
   dispatch, but the home would check a nonce that the program never saw.
 
-  At the member (#3104 PR 4a), a program's write whose index has a home on another node
-  of the region goes to `serve::client::write::away`. It reserves the ends and counts of
-  the open and the encoded open, `Write::length`, in the subject's share, and encodes
-  the open again from its decoded fields. Each field of the wire `Open` has one
-  encoding, so these are the bytes that the program signed, and the member holds the
-  names once while it waits for the home. Lost: keeping the program's body, which holds
-  the names twice during that wait. `hub::dial` dials the home and retries a session
-  that closes with `Code(0)` before the places, as the remote reader does. A home whose
-  stream takes messages under the member transport's `message_bytes_max` gets
-  `FAILED`, as does a reply before the places that `Opening` refuses (`MALFORMED` to
-  the home). A code of the home before the places stops the program's stream with that
-  code, `NOT_HOME` included, as `serve::Error::Forward { home, refusal }`, and an end
-  of the stream with no code gives `FAILED`. The member finds no new home (#3541). After
-  the places, the member splices: each message of the program goes to the home as it
-  came, each renewal of the hello goes between frames, and each reply goes to the
-  program as it came. It reads no more of the program while 64 frames have an outcome
-  due. When the home stops the stream, the member ends group 0 with `Reply::Ended`:
-  `REFUSED`, `VIA`, and `CHANGED` give `End::Refused`, `UNKNOWN` gives `End::Removed`,
-  and each other code gives `End::Failed`. A reply that `Replies` refuses, or a finish
-  of the home before the program's, gives `End::Failed` and `MALFORMED` to the home.
-  A close of the program's session resets the stream to the home with code 0. A home
-  with smaller messages than the member: #3542. Plan:
-  https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6284841084, with
-  the changes of
-  https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6284933117.
+  At the member (#3104 PR 4a), a program's write whose one index has a home on another
+  node of the region goes to `serve::client::write::away`. A write on more than one
+  index with a home on another node still stops with `NOT_HOME` until PR 4b
+  (`laptop.monitor`, key choice 8). It reserves the ends and counts of the open and the
+  encoded open, `Write::length`, in the subject's share, and encodes the open again from
+  its decoded fields. Each field of the wire `Open` has one encoding, so these are the
+  bytes that the program signed, and the member holds the names once while it waits for
+  the home. Lost: keeping the program's body, which holds the names twice during that
+  wait. `hub::dial` dials the home and retries a session that closes with `Code(0)`
+  before the places, as the remote reader does. A home whose stream takes messages under
+  the member transport's `message_bytes_max` gets `FAILED`, and the member gives
+  `serve::Error::Limit`, whose text names both limits and tells the user to give each
+  node of the mesh the same limit (condition of `laptop.monitor` on key choice 8). A
+  reply before the places that `Opening` refuses gives `FAILED` to the program and
+  `MALFORMED` to the home. A code of the home before the places stops the program's
+  stream with that code, `NOT_HOME` included, as `serve::Error::Forward { home, refusal
+  }`, and an end of the stream with no code gives `FAILED`. The member finds no new home
+  (#3541). After the places, the member splices: each message of the program goes to the
+  home as it came, each renewal of the hello goes between frames, and each reply goes to
+  the program as it came. It reads no more of the program while 64 frames have an
+  outcome due. When the home stops the stream, the member ends group 0 with
+  `Reply::Ended`: `REFUSED`, `VIA`, and `CHANGED` give `End::Refused`, `UNKNOWN` gives
+  `End::Removed`, and each other code gives `End::Failed`. A reply that `Replies`
+  refuses, or a finish of the home before the program's, gives `End::Failed` and
+  `MALFORMED` to the home. A close of the program's session resets the stream to the
+  home with code 0. A home with smaller messages than the member: #3542. Plan:
+  https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6284841084, with the
+  changes of
+  https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6284933117. The doc
+  of `Frames::skip` and `serve::Error::Forward`: `laptop.architect`,
+  2026-10-20T06:53:02Z
+  (https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6285208337).
