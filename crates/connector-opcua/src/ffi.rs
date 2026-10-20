@@ -169,10 +169,13 @@ impl std::fmt::Debug for Status {
 }
 
 /// `UA_String` and `UA_ByteString`.
+#[derive(Debug)]
 #[repr(C)]
-pub(crate) struct Bytes {
-    pub(crate) length: usize,
-    pub(crate) data: *mut u8,
+pub struct Bytes {
+    /// The count of bytes at `data`.
+    pub length: usize,
+    /// The bytes. With a `length` of 0, NULL or a pointer that holds no byte.
+    pub data: *mut u8,
 }
 
 impl Bytes {
@@ -994,7 +997,9 @@ unsafe extern "C" {
     ) -> *mut ConnectionManager;
     pub(crate) fn shim_cm_free(cm: *mut ConnectionManager);
     pub(crate) fn shim_buffer_free(buffer: *mut Bytes);
-    pub(crate) fn shim_network_free(buffer: *mut Bytes);
+    /// Frees a buffer that a send gives Rust, and empties `buffer`. It clears the whole
+    /// block of a chunk that is not final, and only the `length` bytes of a final one.
+    pub fn shim_send_free(buffer: *mut Bytes);
     pub(crate) fn shim_establish(
         cm: *mut ConnectionManager,
         id: usize,

@@ -118,7 +118,7 @@ unsafe fn asked(ptr: *mut c_void) -> usize {
 
 /// `malloc`. `malloc(0)` gives a unique pointer, not NULL.
 #[unsafe(no_mangle)]
-extern "C" fn connector_opcua_malloc(size: usize) -> *mut c_void {
+pub extern "C" fn connector_opcua_malloc(size: usize) -> *mut c_void {
     let Some(layout) = layout(size) else {
         return ptr::null_mut();
     };
@@ -151,7 +151,7 @@ extern "C" fn connector_opcua_calloc(count: usize, size: usize) -> *mut c_void {
 ///
 /// `ptr` is NULL or a live pointer of these functions.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn connector_opcua_realloc(
+pub unsafe extern "C" fn connector_opcua_realloc(
     ptr: *mut c_void,
     size: usize,
 ) -> *mut c_void {
@@ -174,9 +174,14 @@ unsafe extern "C" fn connector_opcua_realloc(
 ///
 /// `ptr` is NULL or a live pointer of these functions.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn connector_opcua_free(ptr: *mut c_void) {
-    // SAFETY: as the caller.
-    unsafe { connector_opcua_free_written(ptr, usize::MAX) };
+pub unsafe extern "C" fn connector_opcua_free(ptr: *mut c_void) {
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: the caller gives a live pointer of these functions.
+    let size = unsafe { asked(ptr) };
+    // SAFETY: as above, of `size` bytes.
+    unsafe { clear_free(ptr, size) };
 }
 
 /// `free` for a block of which C wrote only the first `written` bytes: it clears only
@@ -184,20 +189,43 @@ unsafe extern "C" fn connector_opcua_free(ptr: *mut c_void) {
 ///
 /// # Safety
 ///
-/// As `connector_opcua_free`.
+/// As [`connector_opcua_free`].
+///
+/// # Panics
+///
+/// When `written` is past the size of the block. The panic cannot unwind into C, so the
+/// process aborts.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn connector_opcua_free_written(ptr: *mut c_void, written: usize) {
+pub unsafe extern "C" fn connector_opcua_free_written(
+    ptr: *mut c_void,
+    written: usize,
+) {
     if ptr.is_null() {
         return;
     }
     // SAFETY: the caller gives a live pointer of these functions.
+    let size = unsafe { asked(ptr) };
+    assert!(
+        written <= size,
+        "C wrote {written} bytes in a block of {size}"
+    );
+    // SAFETY: as above.
+    unsafe { clear_free(ptr, written) };
+}
+
+/// Writes zeros over the first `count` bytes of the block of `ptr`, then frees it.
+///
+/// # Safety
+///
+/// `ptr` is a live pointer of these functions, of at least `count` bytes.
+unsafe fn clear_free(ptr: *mut c_void, count: usize) {
+    // SAFETY: as the caller.
     let (block, layout) = unsafe { block(ptr) };
-    let size = written.min(layout.size() - ALIGN);
-    // SAFETY: `ptr` is at least `size` bytes of the block after its header.
-    unsafe { ptr.cast::<u8>().write_bytes(0, size) };
+    // SAFETY: `ptr` is at least `count` bytes of the block after its header.
+    unsafe { ptr.cast::<u8>().write_bytes(0, count) };
     // SAFETY: the bytes are live and now hold zeros.
-    let bytes = unsafe { slice::from_raw_parts(ptr.cast::<u8>(), size) };
-    // The `dealloc` frees the bytes, so the compiler may drop writes that nothing reads.
+    let bytes = unsafe { slice::from_raw_parts(ptr.cast::<u8>(), count) };
+    // `dealloc` frees the bytes, so the compiler may drop writes that nothing reads.
     zeroize::optimization_barrier(bytes);
     // SAFETY: `block` is a live block of `layout`, from the global allocator.
     unsafe { alloc::dealloc(block, layout) };
@@ -208,7 +236,7 @@ unsafe extern "C" fn connector_opcua_free_written(ptr: *mut c_void, written: usi
 /// too, other than the blocks that aws-lc takes from `malloc` itself: the array of its
 /// thread locals, one block for each thread, and its error queue (the state of each
 /// thread that puts an error, and the data of each error). aws-lc then does not clear a
-/// block before it frees it.
+/// block itself: [`connector_opcua_free`] clears it.
 ///
 /// # Safety
 ///

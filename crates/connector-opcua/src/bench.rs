@@ -3,7 +3,8 @@
 //! server with clients that each have their own manager. [`kind`] writes the frames of
 //! the `opcua` kind with no server. [`value`] decodes the values of a read.
 //! [`route_crypto`] makes aws-lc allocate through the global allocator, other than its
-//! thread locals and its error queue. Not part of the contract of the crate.
+//! thread locals and its error queue. The C allocator and [`shim_send_free`] are here
+//! for the tests of their clears. Not part of the contract of the crate.
 
 #![expect(unsafe_code, reason = "open62541 is a C library")]
 
@@ -11,7 +12,11 @@ pub mod client;
 pub mod kind;
 pub mod value;
 
-pub use crate::alloc::route_crypto;
+pub use crate::alloc::{
+    connector_opcua_free, connector_opcua_free_written, connector_opcua_malloc,
+    connector_opcua_realloc, route_crypto,
+};
+pub use crate::ffi::{Bytes, shim_send_free};
 
 use std::cell::Cell;
 use std::ffi::{CStr, CString, c_void};

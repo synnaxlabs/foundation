@@ -9,8 +9,9 @@
 //! over a secure channel makes a fixed count of allocations. aws-lc allocates through
 //! the global allocator here, so the count holds its blocks too, other than its thread
 //! locals and its error queue, which stay in `malloc`. A free and a realloc of C leave
-//! no secret in a freed block, so a login frees no copy of the key or the password. The
-//! count covers each thread, so this binary has no test harness.
+//! no secret in a freed block, nor does the free of a sent buffer, so a login frees no
+//! copy of the key or the password. The count covers each thread, so this binary has no
+//! test harness.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 #![expect(unsafe_code, reason = "the routing of aws-lc and its positive control")]
@@ -21,7 +22,10 @@ use std::hint::black_box;
 use std::pin::pin;
 use std::ptr;
 
-use connector_opcua::bench::{Client, Manager, client};
+use connector_opcua::bench::{
+    Bytes, Client, Manager, client, connector_opcua_free, connector_opcua_free_written,
+    connector_opcua_malloc, connector_opcua_realloc, shim_send_free,
+};
 #[path = "common/kind.rs"]
 #[expect(dead_code, reason = "this binary measures only the ticks")]
 mod kind;
@@ -43,6 +47,7 @@ fn main() {
     the_drop_clears_the_client();
     a_free_clears_its_block();
     a_free_of_written_bytes_clears_them();
+    a_send_free_clears_what_its_chunk_can_hold();
     a_realloc_clears_the_old_block();
     a_login_frees_no_copy_of_the_key_or_the_password();
     the_fuzz_round_trip_allocates_for_each_step();
@@ -124,28 +129,22 @@ fn the_drop_clears_the_client() {
     assert_eq!(freed, 0, "the drop freed the URI of the client with zeros");
 }
 
-unsafe extern "C" {
-    fn connector_opcua_malloc(size: usize) -> *mut c_void;
-    fn connector_opcua_realloc(ptr: *mut c_void, size: usize) -> *mut c_void;
-    fn connector_opcua_free(ptr: *mut c_void);
-    fn connector_opcua_free_written(ptr: *mut c_void, written: usize);
-}
-
 /// The bytes of a secret that no other block holds.
 const SECRET: &[u8] = b"the secret of one C block";
 
 /// Gives a C block of `size` bytes that holds [`SECRET`] first.
 fn holding(size: usize) -> *mut c_void {
-    // SAFETY: the call takes no pointer.
-    let block = unsafe { connector_opcua_malloc(size) };
+    assert!(size >= SECRET.len(), "a block of {size} holds the secret");
+    let block = connector_opcua_malloc(size);
     assert!(!block.is_null(), "the malloc");
-    // SAFETY: the block holds `size` bytes, at least `SECRET.len()`, and `SECRET` is
-    // not in it.
+    // SAFETY: the block holds `size` bytes, at least `SECRET.len()`.
     unsafe { ptr::copy_nonoverlapping(SECRET.as_ptr(), block.cast(), SECRET.len()) };
     block
 }
 
-/// The positive control: the drop of a `Vec` frees its bytes with no clear.
+/// The positive control: the drop of a `Vec` frees its bytes with no clear. This
+/// allocator reads each block that it frees, so the compiler keeps the clear here also
+/// with no `optimization_barrier`: no test sees the barrier.
 fn a_free_clears_its_block() {
     let found = ALLOCATOR.freed_holding(SECRET, || drop(black_box(SECRET.to_vec())));
     assert_eq!(found, ((), 1), "a Vec");
@@ -168,6 +167,41 @@ fn a_free_of_written_bytes_clears_them() {
         ((), 0),
         "the free of the written bytes"
     );
+}
+
+/// The free of a sent buffer of a chunk of type `kind` (byte 3 of the header) whose
+/// `length` is `length`, with [`SECRET`] after the header. Gives the count of freed
+/// blocks that hold the secret.
+fn sent(kind: u8, length: usize) -> u64 {
+    let size = 4 + SECRET.len();
+    let data = connector_opcua_malloc(size).cast::<u8>();
+    assert!(!data.is_null(), "the malloc");
+    let chunk = [b"MSG", &[kind][..], SECRET].concat();
+    // SAFETY: the block holds `size` bytes, the length of `chunk`.
+    unsafe { ptr::copy_nonoverlapping(chunk.as_ptr(), data, size) };
+    let mut buffer = Bytes { length, data };
+    // SAFETY: `buffer` is a block of `connector_opcua_malloc` of at least `length`.
+    let ((), found) =
+        ALLOCATOR.freed_holding(SECRET, || unsafe { shim_send_free(&raw mut buffer) });
+    found
+}
+
+/// A final chunk clears its `length` bytes, and a chunk that is not final its whole
+/// block, past its `length` too.
+fn a_send_free_clears_what_its_chunk_can_hold() {
+    let whole = 4 + SECRET.len();
+    assert_eq!(
+        sent(b'F', whole),
+        0,
+        "a final chunk with the secret in its length"
+    );
+    assert_eq!(
+        sent(b'F', 4),
+        1,
+        "a final chunk with the secret past its length"
+    );
+    assert_eq!(sent(b'C', 4), 0, "a chunk that is not final");
+    assert_eq!(sent(b'F', 3), 0, "a buffer shorter than a header");
 }
 
 /// A realloc to each size moves the block on the allocator of the system, which frees

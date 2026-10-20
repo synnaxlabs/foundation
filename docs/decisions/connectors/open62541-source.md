@@ -373,13 +373,21 @@
   block and frees the old one with the same zeros. So a freed block of the copy keeps no
   copy of the key of the node or of a password, and a copy that a later release adds
   needs no patch. Its cost is one `memset` of each freed block. A network buffer of
-  `shim.c` holds a short message in a block of the send buffer size, so its free
-  (`connector_opcua_free_written`) clears only its `length` bytes, which open62541 sets
-  to cover each byte that it writes before it sends or frees the buffer. Lost: a patch
-  at each copy in the copy (the user token of the config, the plaintext of the encrypted
-  token, the key of the policies), which each new release needs again, with a hand
-  mutant of each line, and which misses the copies that a later release adds (#3593,
-  plan https://github.com/synnaxlabs/foundation/issues/3593#issuecomment-6294792367). No
+  `shim.c` holds a short message in a block of the send buffer size. A chunk that is not
+  final can hold, past its `length`, the part of a value that `encodeWithExchangeBuffer`
+  moved to the next chunk, so the free of a sent buffer (`shim_send_free`) clears the
+  whole block of such a chunk, which the encode filled to near its end. A final chunk
+  holds no byte past `length`, so its free (`connector_opcua_free_written`) clears only
+  those. Each release update checks that only the exchange of a buffer moves a part
+  encode to the next chunk, and that the exchange sends the chunk as one that is not
+  final. Lost: a patch at each copy in the copy (the user token of the config, the
+  plaintext of the encrypted token, the key of the policies), which each new release
+  needs again, with a hand mutant of each line, and which misses the copies that a later
+  release adds. Lost: a patch that clears the part encode before the exchange, which
+  each release needs again (#3593; `laptop.architect-2`, 2026-10-20 15:42 UTC,
+  https://github.com/synnaxlabs/foundation/issues/3593#issuecomment-6294839523; the
+  cost, 2026-10-20 16:22 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3622#issuecomment-6295683844). No
   pointer crosses between the libc allocator and these: the objects of the copy,
   `shim.c`, and `server.c` call no libc function that gives or takes a heap pointer. Our
   change makes `UA_CertificateUtils_getThumbprint` of

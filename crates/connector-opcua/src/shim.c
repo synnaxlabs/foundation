@@ -687,13 +687,18 @@ static UA_StatusCode cm_alloc(UA_ConnectionManager *cm, uintptr_t id,
     return UA_STATUSCODE_GOOD;
 }
 
-/* Frees a buffer that open62541 gives Rust, other than a buffer of a send. */
+/* Frees a ByteString that open62541 gives Rust. */
 void shim_buffer_free(UA_ByteString *buffer) { UA_ByteString_clear(buffer); }
 
-/* Frees a buffer of `allocNetworkBuffer`. Rust frees each buffer that a send gives it
- * with this. open62541 sets `length` to cover each byte it writes before it sends or
- * frees the buffer, so the free clears only those `length` bytes. */
-void shim_network_free(UA_ByteString *buffer) {
+/* Frees a buffer of `allocNetworkBuffer` that a send gives Rust. A chunk that is not
+ * final can hold, past `length`, the part of a value that the encode moved to the next
+ * chunk, so its free clears the whole block. A final chunk holds no byte past `length`,
+ * so its free clears only those. */
+void shim_send_free(UA_ByteString *buffer) {
+    if(buffer->length < 4 || buffer->data[3] != 'F') {
+        UA_ByteString_clear(buffer);
+        return;
+    }
     connector_opcua_free_written(buffer->data, buffer->length);
     UA_ByteString_init(buffer);
 }
@@ -702,7 +707,7 @@ static void cm_free_buffer(UA_ConnectionManager *cm, uintptr_t id,
                            UA_ByteString *buffer) {
     (void)cm;
     (void)id;
-    shim_network_free(buffer);
+    UA_ByteString_clear(buffer);
 }
 
 /* Gives a started TCP connection manager on `el`, first in its event sources, whose

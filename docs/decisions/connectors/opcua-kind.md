@@ -332,4 +332,5 @@
   details:
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6291339308). The
   copies of the key and the password that open62541 makes are cleared when freed, as
-  OPEN62541 SOURCE says for the allocator (#3593).
+  OPEN62541 SOURCE says for the allocator (#3593; `laptop.architect-2`, 2026-10-20 15:42
+  UTC, https://github.com/synnaxlabs/foundation/issues/3593#issuecomment-6294839523).
