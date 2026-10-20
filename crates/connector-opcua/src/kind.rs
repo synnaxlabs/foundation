@@ -91,8 +91,9 @@ impl kind::Kind for Kind {
     /// It leaves out each other value: an Uncertain one adds 1 to the count
     /// `uncertain`, another one that is not Good adds 1 to `bad`, and one of another
     /// type adds 1 to `mistyped`. The note names the first node of another type of
-    /// the latest frame that has one, and a frame with none clears it. A frame that
-    /// leaves out each value is not written.
+    /// the latest frame that has one. A later value of that node that is of its sample
+    /// type, or that is not Good, clears it. A frame that leaves out each value is not
+    /// written.
     ///
     /// The subscription samples each node once per period of the rate. The server sends
     /// the changes once per publishing interval: the period, but at least 100 ms and at
