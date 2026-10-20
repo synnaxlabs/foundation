@@ -320,7 +320,6 @@ unsafe extern "C" {
     pub(crate) fn shim_server_keep_alives(server: *mut Server, least: u32);
     pub(crate) fn shim_server_held(server: *mut Server) -> u32;
     pub(crate) fn shim_server_publishing(server: *mut Server, ms: f64);
-    pub(crate) fn shim_server_publish_requests(server: *mut Server, most: u32);
     pub(crate) fn shim_server_queues(server: *mut Server, most: u32);
     pub(crate) fn shim_server_count(server: *mut Server) -> *const Counts;
     pub(crate) fn UA_Client_getConnectionAttribute(

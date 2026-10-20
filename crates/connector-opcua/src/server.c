@@ -157,11 +157,6 @@ void shim_server_publishes(UA_Server *server, UA_UInt32 most) {
     UA_Server_getConfig(server)->maxNotificationsPerPublish = most;
 }
 
-/* Sets the most Publish requests that `server` holds for one session. */
-void shim_server_publish_requests(UA_Server *server, UA_UInt32 most) {
-    UA_Server_getConfig(server)->maxPublishReqPerSession = most;
-}
-
 /* Sets the shortest publishing interval that `server` grants, in ms. */
 void shim_server_publishing(UA_Server *server, UA_Double ms) {
     UA_Server_getConfig(server)->publishingIntervalLimits.min = ms;

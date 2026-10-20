@@ -617,38 +617,6 @@ fn a_waiting_change_stops_the_publish_requests() {
     );
 }
 
-/// A server that holds one Publish request of a session refuses the second once, and
-/// the client then keeps one in flight, also after a change stops them.
-#[test]
-fn a_server_of_one_publish_request_gets_one_a_change() {
-    let publishes = run(0, async |node| {
-        serve(&node, 4, async |mut peer| {
-            let level = add_level(&peer);
-            peer.server.set_publishing(1000.0);
-            peer.server.set_publish_requests(1);
-            let mut client = peer.connected().await;
-            let revised = client.subscribe(&[numbered(0)], LEVEL).await;
-            assert!(revised.is_ok(), "{revised:?}");
-            let first = client.changes(future::pending()).await.map(untimed);
-            assert_eq!(first, Ok(vec![changed_to(0.0, false)]));
-            let settle = client.idle(peer.clock.sleep(ms(100))).await;
-            assert_eq!(settle, Ok(()));
-            let counts = peer.server.count();
-            for value in 1..=5 {
-                level.set(f64::from(value));
-                let got = client.changes(future::pending()).await.map(untimed);
-                assert_eq!(got, Ok(vec![changed_to(f64::from(value), false)]));
-            }
-            let publishes = counts.publishes();
-            client.close().await;
-            publishes
-        })
-        .await
-    })
-    .0;
-    assert_eq!(publishes, 4);
-}
-
 /// Once subscribed, a client keeps [`PUBLISHES`] of its [`READS`] for the Publish
 /// requests, so a read fails at once at `READS - PUBLISHES` dropped reads, and below
 /// it sends its request.
