@@ -397,6 +397,26 @@ fn a_failed_store_read_keeps_the_listed_round() {
     assert_eq!(board.blobs, [(1, calls)].into());
 }
 
+// A get with nothing to get sets the peer that it asks and makes no call.
+#[test]
+fn a_get_that_ends_asks_no_peer() {
+    solo(|node, tasks| async move {
+        let config = config(&node, &tasks, 3, &IDS, &IDS).await;
+        let progress = Cell::new(peer::Progress::default());
+        let peers = [(key(1), (public(1), Vec::new()))];
+        let got = peer::get(
+            &config.store,
+            &config.transport,
+            &config.clock,
+            &[],
+            &peers,
+            &progress,
+        );
+        assert_eq!(got.await, Ok(()));
+        assert_eq!(progress.get(), peer::Progress::default());
+    });
+}
+
 // Cuts the power of voter 3, and starts it again after `down` runs on its node.
 fn restart<F: Future<Output = ()> + 'static>(
     cluster: &mut Cluster,
