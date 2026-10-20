@@ -22,9 +22,9 @@
 //! response, a read, or a write, takes each later message; and a `client::Reader` of
 //! each mode and a `write::Opening` take each message until they give the last place,
 //! and then the end of the stream. An `Opening` of the bound in the first byte of the
-//! input takes the messages of the rest. A `write::Replies` of 256 groups counts a frame sent
-//! for each message whose first byte is 0, with a group for each other byte of it, or
-//! group 0 when it has none, and decodes each other message as a reply.
+//! input takes the messages of the rest. A `write::Replies` of 256 groups counts a
+//! frame sent for each message whose first byte is 0, with a group for each other
+//! byte of it, or group 0 when it has none, and decodes each other message as a reply.
 
 #![no_main]
 #![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
@@ -207,10 +207,10 @@ fn open(bytes: &[u8]) {
 }
 
 /// Drives an `Opening` of the bound in the first byte of `bytes` and a default one on
-/// the messages of the rest. A count over the bound gives `Error::Places` with the
-/// bound as its cap; else each message gives what the default gives, and both hold the
-/// same bytes. `held` is 0 before the run, never falls, and a refused message leaves it
-/// as it was.
+/// the messages of the rest. A count over the bound and at most `PLACES_MAX` gives
+/// `Error::Places` with the bound as its cap; else each message gives what the default
+/// gives, and both hold the same bytes. `held` is 0 before the run, never falls, and a
+/// refused message leaves it as it was.
 fn bounded(bytes: &[u8]) {
     let Some((&most, rest)) = bytes.split_first() else {
         return;
