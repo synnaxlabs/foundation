@@ -240,17 +240,20 @@ impl Network {
         self.tcp.yet()
     }
 
-    /// The true time of the first arrival, or of the first departure that frees a
-    /// send buffer.
+    /// The true time of the first arrival, of the first departure that frees a send
+    /// buffer, or of the first lost TCP segment that goes again.
     pub(crate) fn first(&self) -> Option<Monotonic> {
-        self.wire.first().into_iter().chain(self.udp.first()).min()
+        let first = self.wire.first().into_iter().chain(self.udp.first());
+        first.chain(self.tcp.first()).min()
     }
 
-    /// Delivers the packets that arrive by true time `at`, and frees the send buffers
-    /// of the datagrams that leave by then. Returns the wakers of the ends that receive
-    /// and of the sends that find room.
+    /// Sends again the lost TCP segments due by true time `at`, delivers the packets
+    /// that arrive by then, and frees the send buffers of the datagrams that leave by
+    /// then. Returns the wakers of the ends that receive or time out and of the sends
+    /// that find room.
     pub(crate) fn deliver(&mut self, at: Monotonic) -> Vec<Waker> {
         let mut wakers = self.udp().free(at);
+        wakers.extend(self.tcp().retry(at));
         while let Some(packet) = self.wire.pop(at) {
             match packet {
                 Packet::Datagram(datagram) => {

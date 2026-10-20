@@ -19,8 +19,9 @@ pub struct Config {
     /// The most extra delay, uniform per packet. It reorders datagrams, but not the
     /// segments of one direction of a TCP stream. Not negative.
     pub jitter: Span,
-    /// The chance, from 0 to 1, that a datagram is lost. 1 cuts the link. A TCP send
-    /// on a link with loss panics: sim does not simulate it yet.
+    /// The chance, from 0 to 1, that a datagram or a TCP segment is lost. 1 cuts the
+    /// link. A lost TCP segment goes again after a timeout, and the later segments of
+    /// its direction wait for it.
     pub loss: f64,
     /// The chance, from 0 to 1, that a datagram arrives twice.
     pub duplication: f64,

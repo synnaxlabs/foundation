@@ -15,7 +15,11 @@ fn secs(n: i64) -> Span {
 }
 
 /// What `future` gives within `span` on the clock of `node`, or `None`.
-async fn within<F: Future>(node: &node::Node, span: Span, future: F) -> Option<F::Output> {
+async fn within<F: Future>(
+    node: &node::Node,
+    span: Span,
+    future: F,
+) -> Option<F::Output> {
     let mut future = pin!(future);
     let mut sleep = pin!(node.clock().sleep(span));
     poll_fn(|cx| match future.as_mut().poll(cx) {
@@ -85,9 +89,11 @@ fn a_connect_on_a_cut_link_times_out_after_127_s() {
 fn a_lost_syn_goes_again_on_the_link_that_heals() {
     let (mut sim, a, b) = pair(0, cut());
     let mut listener = listen(&b, 4433);
-    let _server = start(&b, "server", move |_| async move {
-        accept(&mut listener).await
-    });
+    let _server = start(
+        &b,
+        "server",
+        move |_| async move { accept(&mut listener).await },
+    );
     let remote = at(&b, 4433);
     let client = start(&a, "client", move |node| async move {
         connect(&node, remote, options()).await.unwrap();
@@ -101,9 +107,14 @@ fn a_lost_syn_goes_again_on_the_link_that_heals() {
     assert_eq!(take(&client), legs(2) + secs(3));
 }
 
-#[test]
-fn a_writer_whose_bytes_are_lost_times_out_and_its_quiet_peer_waits() {
-    let (mut sim, a, b) = pair(0, link::Config::default());
+/// The time from the write of bytes that are each time lost on a link of `delay` to
+/// the timeout of the writer. Its peer, which waits to read, is stuck.
+fn write_timeout(delay: Span) -> Span {
+    let link = link::Config {
+        delay,
+        ..link::Config::default()
+    };
+    let (mut sim, a, b) = pair(0, link);
     let mut listener = listen(&b, 4433);
     let _server = start(&b, "server", move |_| async move {
         let mut tcp = accept(&mut listener).await;
@@ -112,23 +123,69 @@ fn a_writer_whose_bytes_are_lost_times_out_and_its_quiet_peer_waits() {
     let remote = at(&b, 4433);
     let client = start(&a, "client", move |node| async move {
         let mut tcp = connect(&node, remote, options()).await.unwrap();
-        node.clock().sleep(Span::SECOND).await;
+        node.clock().sleep(secs(2)).await;
+        let wrote = node.clock().now();
         write_all(&mut tcp, &[7]).await.unwrap();
         let error = read(&mut tcp, 1).await.unwrap_err();
-        (node.clock().now(), error)
+        (node.clock().now() - wrote, error)
     });
-    sim.run_for(millis(500)).unwrap();
-    sim.link(&a, &b, cut());
+    sim.run_for(Span::from_nanos(3 * delay.nanos() + Span::SECOND.nanos()))
+        .unwrap();
+    sim.link(&a, &b, link::Config { loss: 1.0, ..link });
     let stuck = Error::Stuck {
         threads: vec!["server".into()],
         seed: 0,
     };
     assert_eq!(sim.run().unwrap_err(), stuck);
-    // Linux sends the bytes 16 times, from an RTO of the round trip plus 200 ms,
-    // twice as long after each, to at most 120 s: 205.1115 s, then 6 times 120 s.
-    let wrote = legs(2) + Span::SECOND;
-    let timed_out = wrote + Span::from_nanos(925_111_500_000);
-    assert_eq!(take(&client), (timed_out, Net::TimedOut { remote }));
+    let (span, error) = take(&client);
+    assert_eq!(error, Net::TimedOut { remote });
+    span
+}
+
+#[test]
+fn a_writer_whose_bytes_are_lost_times_out_at_the_first_try_after_924_6_s() {
+    // Linux tries from an RTO of the round trip plus 200 ms, twice as long after
+    // each loss, to at most 120 s, and stops at the first try 924.6 s after the
+    // first send.
+    assert_eq!(write_timeout(delay()), Span::from_nanos(925_111_500_000));
+    assert_eq!(write_timeout(millis(5)), Span::from_nanos(934_830_000_000));
+    assert_eq!(
+        write_timeout(millis(500)),
+        Span::from_nanos(992_400_000_000)
+    );
+}
+
+#[test]
+fn a_lost_ack_goes_with_the_next_segment_of_its_direction() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    let _server = start(&b, "server", move |node| async move {
+        let mut tcp = accept(&mut listener).await;
+        read(&mut tcp, 1).await.unwrap();
+        node.clock().sleep(millis(10)).await;
+        write_all(&mut tcp, &[9]).await.unwrap();
+        read_all(&mut tcp).await
+    });
+    let remote = at(&b, 4433);
+    let client = start(&a, "client", move |node| async move {
+        let options = tcp::Options {
+            send_buffer_bytes: 1,
+            ..options()
+        };
+        let mut tcp = connect(&node, remote, options).await.unwrap();
+        write_all(&mut tcp, &[1]).await.unwrap();
+        write_all(&mut tcp, &[2]).await.unwrap();
+        node.clock().now()
+    });
+    sim.run_for(Span::from_nanos(5 * delay().nanos() / 2))
+        .unwrap();
+    sim.link(&b, &a, cut());
+    sim.run_for(millis(5)).unwrap();
+    sim.link(&b, &a, link::Config::default());
+    sim.run().unwrap();
+    // The ACK of the first byte is lost at leg 3, and the bytes of the server carry
+    // it 10 ms later, before its RTO of 200.5 ms.
+    assert_eq!(take(&client), legs(4) + millis(10));
 }
 
 #[test]
