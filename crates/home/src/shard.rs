@@ -506,12 +506,12 @@ impl Shard {
     /// Body bytes of a frame of `set`, with each entry present, that [`Shard::write`]
     /// never refuses with [`Error::Large`] and that an idle shard applies, as a lower
     /// bound of the most such bytes: the series and their padding, as [`Frame::body`]
-    /// holds them, raw or encoded. Its draft fits [`Shard::pool`], and the entries of its groups fit
-    /// [`buffer::Buffer::block_max`] each and one record in all when encoded. The pool
-    /// holds at once the draft of an encoded frame of more than one group, the index
-    /// frame and header of each group, and the newest frame of each index of `set`. A
-    /// frame with fewer entries of `set` is never refused for this many either. 0 when
-    /// no frame of `set` fits.
+    /// holds them, raw or encoded. Its draft fits [`Shard::pool`], and the entries of
+    /// its groups fit [`buffer::Buffer::block_max`] each and one record in all when
+    /// encoded. The pool holds at once the draft of an encoded frame of more than one
+    /// group, the index frame and header of each group, and the newest frame of each
+    /// index of `set`. A frame with fewer entries of `set` is never refused for this
+    /// many either. 0 when no frame of `set` fits.
     #[must_use]
     pub fn write_body_max(&self, set: &KeySet) -> usize {
         let pool = self.buffer.pool();
@@ -631,12 +631,11 @@ impl Shard {
     ///
     /// [`Error::Resend`] for a frame labeled resend. [`Error::Full`] for a backfill
     /// frame when the ring or the pool has no room, and [`Error::Large`] for a frame
-    /// whose bodies no record holds, whose entry passes
-    /// [`buffer::Buffer::block_max`], or whose index frame no block of the pool holds;
-    /// no seq moves for either. The size decides before the room of a handoff or a
-    /// block: a live frame that fits but finds no room has its groups with samples lost.
-    /// [`Error::Disk`] after a failed commit, before any other error but
-    /// [`Error::Resend`].
+    /// whose bodies no record holds, whose entry passes [`buffer::Buffer::block_max`],
+    /// or whose index frame no block of the pool holds; no seq moves for either. The
+    /// size decides before the room of a handoff or a block: a live frame that fits but
+    /// finds no room has its groups with samples lost. [`Error::Disk`] after a failed
+    /// commit, before any other error but [`Error::Resend`].
     ///
     /// # Panics
     ///
@@ -3517,8 +3516,8 @@ mod tests {
         });
     }
 
-    /// A pool of 90000 bytes gives a [`Buffer::block_max`] of 26625 bytes, which binds a
-    /// frame of one index before the budget does: 26595 bytes of encoded stamps after
+    /// A pool of 90000 bytes gives a [`Buffer::block_max`] of 26625 bytes, which binds
+    /// a frame of one index before the budget does: 26595 bytes of encoded stamps after
     /// the stored header of 30.
     #[test]
     fn bounds_a_frame_of_one_index_by_block_max() {
