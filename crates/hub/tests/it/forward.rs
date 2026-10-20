@@ -17,7 +17,7 @@ use types::time::Span;
 use wire::Protocol;
 use wire::header::MALFORMED;
 use wire::hub::client::write::Open;
-use wire::hub::client::{BODY_BYTES_MAX, CHANGED, EXPIRED, REFUSED, VIA};
+use wire::hub::client::{BODY_BYTES_MAX, CHANGED, EXPIRED, REFUSED, UNSYNCED, VIA};
 use wire::hub::forward::{Forward, places};
 use wire::hub::write::{Head, Time};
 use wire::hub::{BUSY, NOT_HOME};
@@ -146,6 +146,28 @@ fn forwarded_with<P>(
 where
     P: Future<Output = ()> + 'static,
 {
+    forwarded_on(seed, sessions, Mesh::Synced, during, after, member)
+}
+
+/// Whether the home has mesh time when it serves a forward.
+enum Mesh {
+    Synced,
+    Unsynced,
+}
+
+/// As [`forwarded_with`], at a home whose mesh clock runs only with `mesh`. The serve
+/// task of each stream runs under [`Test::pause`].
+fn forwarded_on<P>(
+    seed: u64,
+    sessions: usize,
+    mesh: Mesh,
+    during: impl AsyncFnOnce(&Test) + Send + 'static,
+    after: impl AsyncFnOnce(&Test) + Send + 'static,
+    member: impl FnOnce(Member) -> P + Send + 'static,
+) -> Vec<Result<Got, serve::Error>>
+where
+    P: Future<Output = ()> + 'static,
+{
     let served = Arc::new(Mutex::new(Vec::new()));
     let kept = Arc::clone(&served);
     let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
@@ -163,8 +185,15 @@ where
             Some(region),
         )
         .await;
-        test.sync().await;
+        if matches!(mesh, Mesh::Synced) {
+            test.sync().await;
+        }
         test.hub.set_rules(rules());
+        let paused = env::tasks::Tasks::new(super::Counted {
+            tasks: tasks.clone(),
+            ended: Rc::new(Cell::new(0)),
+            pause: Rc::clone(&test.pause),
+        });
         let accepted = Rc::new(Cell::new(0));
         let mut ends = Vec::new();
         for _ in 0..sessions {
@@ -173,7 +202,7 @@ where
             tasks.spawn(serve_each(
                 &session,
                 &link,
-                &tasks,
+                &paused,
                 &node.clock(),
                 &kept,
                 &accepted,
@@ -585,4 +614,48 @@ fn stops_a_forward_whose_first_hello_has_ended_as_expired() {
         ),
         "{served:?}"
     );
+}
+
+/// A renewal that comes in the poll of the forward's task in which the first hello
+/// ends moves the end: the write polls before the expiry.
+#[test]
+fn renews_a_forward_whose_renewal_and_end_come_in_one_poll() {
+    let during = async |test: &Test| {
+        homed(test).await;
+        test.clock.sleep(START).await;
+        test.pause.pause();
+        test.clock.sleep(SHORT).await;
+        test.pause.resume();
+    };
+    let served = forwarded(4117, during, |member| async move {
+        let mut stream = member.opened(member.hello(SHORT), &["value"], &[0]).await;
+        stream.started().await;
+        send(&mut stream, &[1], &[10]).await;
+        assert_eq!(stream.reply().await, taken(1, 0, 1));
+        assert_eq!(stream.reply().await, stored(1));
+        member.sleep(Span::from_nanos(2 * START.nanos())).await;
+        stream.send(&signed(member.hello(LIFE), &AGENT)).await;
+        member.sleep(SHORT).await;
+        send(&mut stream, &[2], &[20]).await;
+        assert_eq!(stream.reply().await, taken(2, 1, 1));
+        assert_eq!(end(&mut stream).await, [stored(2)]);
+    });
+    assert_eq!(served, [Ok(Got::Ended)]);
+}
+
+/// A home with no mesh time stops a forward at its first hello with `UNSYNCED`.
+#[test]
+fn stops_a_forward_at_a_home_with_no_mesh_time_as_unsynced() {
+    let served = forwarded_on(
+        4118,
+        1,
+        Mesh::Unsynced,
+        async |_| {},
+        async |_| {},
+        |member| async move {
+            let mut stream = member.forward(1, member.hello(LIFE)).await;
+            assert_eq!(stream.recv().await, reset_with(UNSYNCED));
+        },
+    );
+    assert_eq!(served, [Err(serve::Error::Access(Refusal::Unsynced))]);
 }
