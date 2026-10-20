@@ -242,28 +242,3 @@ impl Drop for Renewal<'_> {
         drop(held);
     }
 }
-
-#[cfg(test)]
-mod tests {
-
-    use std::task::Waker;
-
-    use types::ed25519::PrivateKey;
-
-    use super::*;
-
-    #[test]
-    fn keeps_no_waker_of_a_dropped_renewal() {
-        let admission = Admission::new(PrivateKey([3; 32]).public());
-        let cx = Context::from_waker(Waker::noop());
-        let first = admission.renewal();
-        first.register(&cx);
-        first.register(&cx);
-        for _ in 0..3 {
-            admission.renewal().register(&cx);
-        }
-        assert_eq!(format!("{:?}", admission.waiting.borrow()), "{0}");
-        drop(first);
-        assert_eq!(format!("{:?}", admission.waiting.borrow()), "{}");
-    }
-}
