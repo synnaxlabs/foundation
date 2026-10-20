@@ -303,11 +303,21 @@
   messages, ends only then (#1401) (approved by the architect, 2026-10-07T13:40:50Z:
   https://github.com/synnaxlabs/foundation/pull/1410#issuecomment-6039206881). The group
   holds the handle of the session to each member, and not the task, so that `set_home`
-  (PR 4c-2 of #471) can open its stream on it: the task is the only one that dials (the
-  plan of PR 4d,
+  (PR 4c-2 of #471) can open its stream on it: the task, and the dial of a member that
+  is not a voter below, are the only ones that dial (the plan of PR 4d,
   https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037266854, approved
   by the architect, 2026-10-07T11:52:00Z:
-  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501). A stop
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501). A
+  leader that cannot dial a member, such as one whose card has no address, reaches it
+  on a session that the member dialed. So a member that is not a voter, and to which no
+  leader sent a message for two election timeouts, dials the next voter in key order
+  after the last voter that led when it reached the member, else after the last voter
+  that the member dialed, and wrapping. The group holds the session. The leader sends a
+  learner a heartbeat at each quorum check, one each election timeout, so a member
+  that the leader reaches dials no voter. A failed dial does nothing, and the member
+  dials at most one voter for each two election timeouts. The transport keeps at most
+  one session for each pair of nodes (the plan of PR 2b of #3140,
+  https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6283363405). A stop
   of the group drops each handle. When `Transport::dial` gives the one open session to a
   peer (#1363), a call can take its session from `dial`, and #1598 decides whether the
   handle goes back to the task. `set_home` makes a member the home of an index, and

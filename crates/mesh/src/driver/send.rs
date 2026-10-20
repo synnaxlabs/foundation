@@ -68,7 +68,8 @@ impl From<transport::Error> for Failure {
 }
 
 impl Senders {
-    /// Spawns the task of each member at the first message for it.
+    /// Spawns the task of each member at the first message for it, and a dial of
+    /// each voter that the group asks to reach.
     pub(super) async fn run(self) {
         loop {
             let fresh = poll_fn(|cx| {
@@ -76,16 +77,37 @@ impl Senders {
                     return Poll::Ready(None);
                 };
                 let mut group = group.borrow_mut();
-                if group.fresh.is_empty() {
+                if group.fresh.is_empty() && group.reach.is_none() {
                     group.starter = Some(cx.waker().clone());
                     return Poll::Pending;
                 }
-                Poll::Ready(Some(mem::take(&mut group.fresh)))
+                Poll::Ready(Some((mem::take(&mut group.fresh), group.reach.take())))
             });
-            let Some(fresh) = fresh.await else { return };
+            let Some((fresh, reach)) = fresh.await else {
+                return;
+            };
             for to in fresh {
                 self.tasks.tasks().spawn(self.clone().send(to));
             }
+            if let Some(to) = reach {
+                self.tasks.tasks().spawn(self.clone().reach(to));
+            }
+        }
+    }
+
+    // Dials `to` and keeps the session in the group while it runs, so that `to`
+    // can send on it. A failed dial does nothing: the group names the next voter
+    // after a timeout.
+    async fn reach(self, to: node::Key) {
+        let contact = self.running().and_then(|group| group.borrow().contact(to));
+        let Some((public_key, addresses)) = contact else {
+            return;
+        };
+        let Ok(session) = self.transport.dial(public_key, &addresses).await else {
+            return;
+        };
+        if let Some(group) = self.running() {
+            group.borrow_mut().sessions.insert(to, session);
         }
     }
 

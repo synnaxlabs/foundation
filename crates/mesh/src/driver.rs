@@ -60,6 +60,10 @@ mod version;
 /// The time of one `raft` tick.
 const TICK: Span = Span::from_nanos(100 * Span::MILLISECOND.nanos());
 const ELECTION_TICKS: u32 = 10;
+/// The ticks after which a member that is not a voter, with no message from the
+/// leader, dials a voter. A leader sends it a heartbeat at each quorum check, which
+/// comes each `ELECTION_TICKS`.
+const QUIET_TICKS: u32 = 2 * ELECTION_TICKS;
 
 /// The header that goes first on each stream that this node opens.
 fn header(pool: &Pool) -> Result<Block, block::Error> {
@@ -405,6 +409,7 @@ impl Mesh {
         }
         claim::check(&group.raft, &mut message, |key| group.public_key(key))?;
         group.input(|raft| raft.step(message))?;
+        group.heard(from);
         group.sync();
         group.wake();
         Ok(())
@@ -784,8 +789,15 @@ struct Group {
     waits: Option<block::Error>,
     // Each member that got its queue since `Senders::run` last took this.
     fresh: Vec<node::Key>,
-    // The task of `Senders::run`, while it waits for a new queue.
+    // The voter that `Senders::run` dials next, for a member that is not a voter.
+    reach: Option<node::Key>,
+    // The task of `Senders::run`, while it waits for a new queue or a `reach`.
     starter: Option<Waker>,
+    // The ticks since the leader last reached this node.
+    quiet: u32,
+    // The voter that led when it last reached this node, else the last that
+    // `reach` named.
+    turn: Option<node::Key>,
     applied: Applied,
     // The task of each call that waits for the outcome of a try of its proposal, or
     // for a read of the spec.
@@ -817,7 +829,10 @@ impl Group {
             synced: Position::default(),
             waits: None,
             fresh: Vec::new(),
+            reach: None,
             starter: None,
+            quiet: 0,
+            turn: None,
             applied: Applied::default(),
             calls: BTreeMap::new(),
             used,
@@ -977,6 +992,37 @@ impl Group {
         let slot = self.slots;
         self.slots = slot.wrapping_add(1);
         slot
+    }
+
+    // Notes that the leader reached this node when `from`, the sender of a message
+    // that `raft` just took, leads.
+    fn heard(&mut self, from: node::Key) {
+        if self.raft.leader() == Some(from) {
+            self.quiet = 0;
+            self.turn = Some(from);
+        }
+    }
+
+    // Counts a tick. A member that is not a voter and that no leader reached for
+    // `QUIET_TICKS` dials the next voter after `turn`, in key order: a leader that
+    // has no address of this node then sends on that session.
+    fn tick(&mut self) {
+        let voters = self.raft.voters();
+        if voters.contains(self.raft.key()) {
+            return;
+        }
+        self.quiet = self.quiet.saturating_add(1);
+        if self.quiet < QUIET_TICKS {
+            return;
+        }
+        self.quiet = 0;
+        let after = |key: &node::Key| self.turn.is_some_and(|turn| *key > turn);
+        let next = voters.nodes().find(after).or_else(|| voters.nodes().next());
+        if let Some(next) = next {
+            self.turn = Some(next);
+            self.reach = Some(next);
+            self.starter.take().into_iter().for_each(Waker::wake);
+        }
     }
 
     // Tells `run` that the group has an input.
@@ -1323,6 +1369,7 @@ async fn run(
             // slows.
             while Pin::new(&mut tick).poll(cx).is_ready() {
                 group.input(|raft| raft.tick(rng.next_u64()));
+                group.tick();
                 tick = clock.sleep(TICK);
             }
             let ready = group.raft.ready();
@@ -1506,6 +1553,9 @@ mod tests {
         settled: Vec<(u8, Settled)>,
         /// Each `Error::Contested` that a serve gave, in order, with its node.
         contested: Vec<(u8, Error)>,
+        /// Each session that a peer opened to a node, in order: the node, and the
+        /// public key of the peer.
+        opened: Vec<(u8, PublicKey)>,
         /// The members that are not founding voters.
         learners: BTreeSet<u8>,
         /// The home that each node sets next.
@@ -1792,6 +1842,7 @@ mod tests {
             let Peer::Node(peer) = session.peer() else {
                 panic!("a peer with no node key opened a session");
             };
+            board.lock().unwrap().opened.push((id, peer));
             let (mesh, streams, board) =
                 (mesh.clone(), tasks.clone(), Arc::clone(&board));
             tasks.spawn(async move {
@@ -2013,19 +2064,27 @@ mod tests {
         }
     }
 
-    /// Three voters, each on its own node with its own transport.
+    /// Members, each on its own node with its own transport.
     struct Cluster {
         sim: Sim,
+        /// The id of each node, in the order of `nodes`.
+        ids: Vec<u8>,
         nodes: Vec<sim::node::Node>,
         board: Arc<Mutex<Board>>,
     }
 
     impl Cluster {
         fn new(seed: u64) -> Self {
+            Self::of(seed, &IDS)
+        }
+
+        /// A cluster of the members `ids`.
+        fn of(seed: u64, ids: &[u8]) -> Self {
             let mut sim = Sim::new(crate::common::simulation(seed));
             let node = |_| sim.node(sim::node::Config::default());
             Self {
-                nodes: IDS.map(node).into(),
+                nodes: ids.iter().map(node).collect(),
+                ids: ids.to_vec(),
                 sim,
                 board: Arc::default(),
             }
@@ -2033,7 +2092,7 @@ mod tests {
 
         /// Starts each voter.
         fn start(&self) {
-            for id in IDS {
+            for &id in &self.ids {
                 self.start_voter(id);
             }
         }
@@ -2041,29 +2100,32 @@ mod tests {
         /// Starts voter `id`. It runs until its node crashes.
         fn start_voter(&self, id: u8) {
             let (own, board) = (self.node(id).clone(), Arc::clone(&self.board));
+            let ids = self.ids.clone();
             let config = env::shards::Config {
                 name: format!("voter-{id}"),
                 core: None,
             };
             let main = move |tasks| async move {
-                voter(own, tasks, id, board).await;
+                voter(own, tasks, id, &ids, board).await;
             };
             drop(self.node(id).shards().start(config, main).unwrap());
         }
 
         fn node(&self, id: u8) -> &sim::node::Node {
-            &self.nodes[IDS.iter().position(|&own| own == id).unwrap()]
+            &self.nodes[self.ids.iter().position(|&own| own == id).unwrap()]
         }
 
         /// Sets what each node proposes.
         fn script(&self, change: impl Fn(u8) -> Change) {
-            let script = IDS.map(|id| (id, [encoded(&change(id))].into())).into();
+            let each = |&id: &u8| (id, [encoded(&change(id))].into());
+            let script = self.ids.iter().map(each).collect();
             self.board.lock().unwrap().script = script;
         }
 
         /// Each node proposes the byte forms `changes`, in order.
         fn script_each(&self, changes: &[Vec<u8>]) {
-            let script = IDS.map(|id| (id, changes.iter().cloned().collect())).into();
+            let each = |&id: &u8| (id, changes.iter().cloned().collect());
+            let script = self.ids.iter().map(each).collect();
             self.board.lock().unwrap().script = script;
         }
 
@@ -2160,6 +2222,7 @@ mod tests {
         node: sim::node::Node,
         tasks: Tasks,
         id: u8,
+        ids: &[u8],
         board: Arc<Mutex<Board>>,
     ) -> ! {
         let (hidden, learners, founding, bytes) = {
@@ -2172,11 +2235,12 @@ mod tests {
                 bytes,
             )
         };
-        let voters: Vec<u8> = IDS
-            .into_iter()
+        let voters: Vec<u8> = ids
+            .iter()
+            .copied()
             .filter(|of| !learners.contains(of))
             .collect();
-        let base = config_at(&node, &tasks, id, PORT, bytes, &IDS, &voters).await;
+        let base = config_at(&node, &tasks, id, PORT, bytes, ids, &voters).await;
         let transport = Rc::clone(&base.transport);
         let member = |of| {
             if hidden == Some(of) {
@@ -2186,7 +2250,7 @@ mod tests {
             }
         };
         let mut config = base;
-        config.founding.members = IDS.map(member).into();
+        config.founding.members = ids.iter().copied().map(member).collect();
         config.founding.definitions = founding;
         let mesh = Mesh::open(config).await.unwrap();
         let (serving, streams, serves) =
@@ -3070,6 +3134,7 @@ mod tests {
     mod home;
     mod in_use;
     mod join;
+    mod learner;
     mod send;
     mod serve;
     mod version;
