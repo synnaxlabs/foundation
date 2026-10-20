@@ -18,37 +18,119 @@ use transport::stream::{Receiver, Sender};
 use types::frame::key_set::{Entry, KeySet};
 use types::frame::{Draft, Layout};
 use types::name::Name;
-use wire::hub::client::Place;
+use types::node;
 use wire::hub::client::write::{Open, Write};
+use wire::hub::client::{Place, Signed};
+use wire::hub::forward::{Forward, places};
 use wire::hub::write::{Due, Frames, Outcome, Reply, Step, Time};
 
 use self::group::{Frame, Group, Parts, Written};
 use super::{Reserved, body};
 use crate::State;
-use crate::link::Session;
+use crate::serve::admission::Admission;
 use crate::serve::{Error, alloc, unless};
 use crate::writer::{self, Homed, Split, Writer};
 
-/// Serves the write of `subject` that `write` starts: verifies its open, opens its
-/// writer, and sends its places, then writes each frame of the program and sends its
-/// outcome, and `Stored` after each commit, until the program finishes the stream.
+/// The stream that carried the open of a write to this node.
+#[derive(Clone, Copy)]
+enum Origin {
+    /// The program's own write stream, which takes no renewal.
+    Program,
+    /// A forward from the program's node `via` of the group at the places of `forward`,
+    /// which takes each renewal of the hello at the wait for the home and between
+    /// frames.
+    Forward {
+        /// The node that carried the forward.
+        via: node::Key,
+        /// The forward that started the stream.
+        forward: Forward,
+    },
+}
+
+/// Serves the write of `subject` that `write` starts on the program's own stream:
+/// verifies its open with `admission`, opens its writer, and sends its places, then
+/// writes each frame of the program and sends its outcome, and `Stored` after each
+/// commit, until the stream finishes.
 pub(super) async fn serve(
-    session: &Session,
+    state: &Rc<RefCell<State>>,
+    admission: &Admission,
     subject: Name,
     write: Write,
     receiver: &mut Receiver,
     sender: &mut Sender,
 ) -> Result<(), Error> {
-    let state = &session.state;
-    let open = open(session, subject.clone(), write, receiver).await?;
-    let decoded = Reserved::new(state, subject.clone(), held(&open.channels))?;
-    let Some(homed) = here(state, subject.clone(), open, receiver).await? else {
-        sender.finish()?;
+    let origin = Origin::Program;
+    let Some((set, writes, _ends)) =
+        opened(state, admission, origin, subject, write, receiver, sender).await?
+    else {
         return Ok(());
     };
-    let ends = Frames::bytes(homed.places());
-    let ends = u64::try_from(ends).expect("invariant: a u64 holds a usize");
-    let _reserved = Reserved::new(state, subject, ends)?;
+    let writes = relay(state, set, writes, None, receiver, sender).await?;
+    writes.finish(state, sender).await
+}
+
+/// Serves the write that `write` starts on a forward from the program's node `via` of
+/// the group at the places of `forward`, as [`serve`] does, after it takes that group,
+/// for the subject of `admission`, which has admitted a hello. Each message at the
+/// wait for the home, and a hello between frames, renews the hello that `admission`
+/// admitted.
+pub(super) async fn forward(
+    state: &Rc<RefCell<State>>,
+    admission: &Admission,
+    via: node::Key,
+    forward: Forward,
+    write: Write,
+    receiver: &mut Receiver,
+    sender: &mut Sender,
+) -> Result<(), Error> {
+    let subject = admission
+        .subject()
+        .expect("invariant: an admitted hello has a subject");
+    let origin = Origin::Forward { via, forward };
+    let Some((set, writes, _ends)) =
+        opened(state, admission, origin, subject, write, receiver, sender).await?
+    else {
+        return Ok(());
+    };
+    let renewal = |message: &[u8]| renewal(admission, state, message);
+    let writes = relay(state, set, writes, Some(&renewal), receiver, sender).await?;
+    writes.finish(state, sender).await
+}
+
+/// Verifies the open of `write` with `admission`, takes the group of a forward, opens
+/// one writer for each group, and sends its places, then gives the writes of the
+/// stream, their set, and the hold of their ends and counts in the budget. Gives
+/// `None` after it finishes `sender` when the program finishes first.
+async fn opened(
+    state: &Rc<RefCell<State>>,
+    admission: &Admission,
+    origin: Origin,
+    subject: Name,
+    write: Write,
+    receiver: &mut Receiver,
+    sender: &mut Sender,
+) -> Result<Option<(Arc<KeySet>, Writes, Reserved)>, Error> {
+    let open = open(state, admission, subject.clone(), write, receiver).await?;
+    let held = held(&open.channels);
+    let (open, decoded) = match origin {
+        Origin::Program => (open, Reserved::new(state, subject.clone(), held)?),
+        Origin::Forward { forward, .. } => {
+            let places = bytes(places::LEN * open.channels.len());
+            let decoded = Reserved::new(state, subject.clone(), held + places)?;
+            let Some(open) = take(forward, open, receiver).await? else {
+                sender.finish()?;
+                return Ok(None);
+            };
+            (open, decoded)
+        }
+    };
+    let Some(homed) =
+        here(state, admission, origin, subject.clone(), open, receiver).await?
+    else {
+        sender.finish()?;
+        return Ok(None);
+    };
+    let ends = Reserved::new(state, subject, bytes(Frames::bytes(homed.places())))?;
     let split = homed
         .split()
         .map_err(|error| Error::Writer(Box::new(error)))?;
@@ -61,41 +143,76 @@ pub(super) async fn serve(
     start(state, sender, &set, &entries, channels).await?;
     drop(decoded);
     let writes = Writes::new(&set, writers);
-    let writes = relay(state, set, writes, receiver, sender).await?;
-    writes.finish(state, sender).await
+    Ok(Some((set, writes, ends)))
 }
 
-/// Reads, verifies, and decodes the open, and holds its body in the budget until then.
+/// The open of the group at the places of the run of `forward`, or `None` when the
+/// stream ends before the last place.
+async fn take(
+    forward: Forward,
+    mut open: Open,
+    receiver: &mut Receiver,
+) -> Result<Option<Open>, Error> {
+    let channels = u32::try_from(open.channels.len())
+        .expect("invariant: an open names fewer than u32::MAX channels");
+    let mut run = places::Run::new(forward, channels);
+    // The run gives at most one place for each channel.
+    let mut taken = Vec::with_capacity(open.channels.len());
+    while !run.ended() {
+        let Some(message) = receiver.recv().await? else {
+            return Ok(None);
+        };
+        taken.extend(run.decode(&message)?);
+    }
+    let mut taken = taken.into_iter().peekable();
+    open.channels = open
+        .channels
+        .into_iter()
+        .zip(0..)
+        .filter_map(|(name, at)| taken.next_if_eq(&at).map(|_| name))
+        .collect();
+    Ok(Some(open))
+}
+
+/// Reads, verifies with `admission`, and decodes the open, and holds its body in the
+/// budget until then.
 async fn open(
-    session: &Session,
+    state: &Rc<RefCell<State>>,
+    admission: &Admission,
     subject: Name,
     write: Write,
     receiver: &mut Receiver,
 ) -> Result<Open, Error> {
-    let _reserved = Reserved::new(&session.state, subject, write.length)?;
+    let _reserved = Reserved::new(state, subject, write.length)?;
     let bytes = body(receiver, write.body()).await?;
-    session.client.admission.verify(
-        &session.state,
-        proof::Kind::Write,
-        &bytes,
-        &write.signature,
-    )?;
+    admission.verify(state, proof::Kind::Write, &bytes, &write.signature)?;
     Ok(Open::decode(&bytes)?)
 }
 
 /// The bytes that `names` hold once decoded: 16 for each name, and its length.
 fn held(names: &[Name]) -> u64 {
-    let bytes: usize = names
-        .iter()
-        .map(|name| size_of::<Name>() + name.as_str().len())
-        .sum();
-    u64::try_from(bytes).expect("invariant: a u64 holds a usize")
+    bytes(
+        names
+            .iter()
+            .map(|name| size_of::<Name>() + name.as_str().len())
+            .sum(),
+    )
+}
+
+/// `len` bytes as a count of the budget.
+fn bytes(len: usize) -> u64 {
+    u64::try_from(len).expect("invariant: a u64 holds a usize")
 }
 
 /// Resolves the channels of `open` and waits for this node to be the home of each
-/// index, or gives `None` when the program finishes first.
+/// index, or gives `None` when the program finishes first. The channels of a forward
+/// on more than one index give [`Error::ManyIndexes`] before it waits for a home, so
+/// it takes no control. Each message of a forward during the wait is a renewal that
+/// `admission` admits.
 async fn here(
     state: &Rc<RefCell<State>>,
+    admission: &Admission,
+    origin: Origin,
     subject: Name,
     open: Open,
     receiver: &mut Receiver,
@@ -107,17 +224,27 @@ async fn here(
         channels: open.channels,
     };
     let program = pin!(async {
-        match receiver.recv().await? {
-            None => Ok(()),
-            Some(_) => Err(Error::Client(wire::hub::client::Error::Trailing)),
+        while let Some(message) = receiver.recv().await? {
+            let Origin::Forward { .. } = origin else {
+                return Err(Error::Client(wire::hub::client::Error::Trailing));
+            };
+            admission.admit(state, Signed::decode(&message)?)?;
         }
+        Ok(())
     });
-    let Some(homed) = unless(program, Homed::new(state, config)).await? else {
+    let homed = async {
+        match origin {
+            Origin::Program => Homed::new(state, config).await.map(Some),
+            Origin::Forward { via, .. } => Homed::one(state, config, via).await,
+        }
+    };
+    let Some(homed) = unless(program, homed).await? else {
         return Ok(None);
     };
-    homed
-        .map(Some)
-        .map_err(|error| Error::Writer(Box::new(error)))
+    let Some(homed) = homed.map_err(|error| Error::Writer(Box::new(error)))? else {
+        return Err(Error::ManyIndexes);
+    };
+    Ok(Some(homed))
 }
 
 /// Sends the places of the write and their run: place `n` is entry `n` of `set`, with
@@ -154,14 +281,21 @@ async fn start(
     super::places(state, sender, &places).await
 }
 
+/// Takes a message between frames as a renewal of a hello, and gives whether it was
+/// one.
+type Renewal<'a> = &'a dyn Fn(&[u8]) -> Result<bool, Error>;
+
 /// Writes each frame of the program with `writes`, a write of `set`, and sends its
 /// outcomes, until the program finishes the stream, and gives `writes`. The blocks of
 /// the outcomes of a frame come before its draft, so a pool with no block for them
-/// stops the stream before a home takes the frame.
+/// stops the stream before a home takes the frame. Between frames, a message for which
+/// `renewal` gives `true` is no part of a frame. One relay serves each origin, so that
+/// a forward's renewal adds no second copy of the frame path.
 async fn relay(
     state: &RefCell<State>,
     set: Arc<KeySet>,
     mut writes: Writes,
+    renewal: Option<Renewal<'_>>,
     receiver: &mut Receiver,
     sender: &mut Sender,
 ) -> Result<Writes, Error> {
@@ -174,6 +308,12 @@ async fn relay(
                     frames.finish()?;
                     return Ok(writes);
                 };
+                if let Some(renewal) = renewal
+                    && frames.between()
+                    && renewal(&message)?
+                {
+                    continue;
+                }
                 frames.decode(&message)?
             }
             Due::Body(rest) => {
@@ -214,6 +354,23 @@ async fn relay(
                 send(sender, block, reply).await?;
             }
         }
+    }
+}
+
+/// Renews the hello of `admission` with `message`, a message between frames, when it
+/// is a hello, and gives whether it was. Gives `false` for a message of another kind,
+/// which a frame decodes.
+fn renewal(
+    admission: &Admission,
+    state: &RefCell<State>,
+    message: &[u8],
+) -> Result<bool, Error> {
+    match Signed::decode(message) {
+        Ok(signed) => admission.admit(state, signed).map(|()| true),
+        Err(
+            wire::hub::client::Error::Empty | wire::hub::client::Error::Kind { .. },
+        ) => Ok(false),
+        Err(error) => Err(error.into()),
     }
 }
 

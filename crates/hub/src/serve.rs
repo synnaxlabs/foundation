@@ -17,11 +17,14 @@ use block::{Block, Unique};
 use transport::stream::{Incoming, Part, Receiver, Sender};
 use transport::{Class, Code};
 use types::channel::{self, Slot};
+use types::ed25519::PublicKey;
 use types::frame::key_set::KeySet;
 use types::frame::{self, Frame, Placed};
 use types::name::Name;
+use types::node;
 use wire::header::MALFORMED;
 use wire::hub::client::{BODY_BYTES_MAX, Refusal};
+use wire::hub::forward::Forward;
 use wire::hub::{
     BUSY, FAILED, FromReader, Head, Home, Mode, NOT_HOME, UNKNOWN, ends, keys,
 };
@@ -37,12 +40,12 @@ pub use client::{Reply, Request};
 /// the body of a request from its decode until the caller sends or drops its [`Reply`],
 /// the open of a read until it decodes after the wait for the home of its index, the
 /// open of a write until it decodes, the decoded names of each write stream, 16 bytes
-/// and the length of each, from that decode until it sends its places, and its ends
-/// and counts, 20 bytes for each place of its writers, from the home of each index
-/// until the stream ends. A body that does not fit stops with `BUSY` before the hub
-/// reads a byte of it, and ends or names that do not fit stop with `BUSY` before the
-/// writer opens. The bodies of one subject hold at most
-/// [`BODY_BYTES_MAX`] of it ([`Error::Share`]).
+/// and the length of each, and the places of a forward, 4 bytes for each channel of
+/// its open, from that decode until it sends its places, and its ends and counts, 20
+/// bytes for each place of its writers, from the home of each index until the stream
+/// ends. A body that does not fit stops with `BUSY` before the hub reads a byte of it,
+/// and ends or names that do not fit stop with `BUSY` before the writer opens. The
+/// bodies of one subject hold at most [`BODY_BYTES_MAX`] of it ([`Error::Share`]).
 pub const BODIES_BYTES_MAX: u64 = 2 * BODY_BYTES_MAX;
 
 /// Why [`Link::serve`](crate::Link::serve) ended a stream.
@@ -58,7 +61,8 @@ pub enum Error {
     OneWay,
     /// The stream's class is not the class of the open's mode. Code `MALFORMED`.
     Class(Class),
-    /// The keys of the open of a read are on more than one index. Code `MALFORMED`.
+    /// The keys of the open of a read, or the channels of the group of a forward, are
+    /// on more than one index. Code `MALFORMED`.
     ManyIndexes,
     /// The selector of a read matches more than [`wire::hub::client::PLACES_MAX`]
     /// places with their index. Code `MALFORMED`.
@@ -293,15 +297,63 @@ impl From<transport::Error> for Error {
     }
 }
 
-/// Serves the session on `incoming`, and stops the stream with the code of the error
-/// that ends it.
+/// Gives the serve that `serve` makes in a box, behind a trait object, so that its
+/// frame path has a poll of its own. Out of line, so that its future, which is built on
+/// the stack before it moves into the box, adds nothing to the stack frame of each poll
+/// of the caller.
+#[inline(never)]
+fn boxed<'a, F>(
+    serve: impl FnOnce() -> F,
+) -> Pin<Box<dyn Future<Output = Result<(), Error>> + 'a>>
+where
+    F: Future<Output = Result<(), Error>> + 'a,
+{
+    Box::pin(serve())
+}
+
+/// Serves the stream `incoming` from a node, a forward or a reader session by its
+/// first message. `peer` is the public key that the node's transport session proved,
+/// and `holder` is the node when the hub's region holds `peer` as a member.
+/// Stops the stream with the code of the error that ends it.
+///
+/// # Panics
+///
+/// When `holder` is `None` and the first message is a forward.
 pub(crate) async fn run(
     state: &Rc<RefCell<State>>,
+    peer: PublicKey,
+    holder: Option<node::Key>,
     incoming: Incoming,
 ) -> Result<(), Error> {
     let class = incoming.class;
     let (mut receiver, mut sender) = halves(incoming)?;
-    let served = serve(state, class, &mut receiver, &mut sender).await;
+    // No async level between this and the reader's serve, which polls once a frame,
+    // and a forward in a box of its own, so that the reader's poll holds none of it.
+    let served = match receiver.recv().await {
+        Ok(Some(message)) => match Forward::decode(&message) {
+            Ok(forward) => {
+                drop(message);
+                let via = holder.expect("invariant: a forward comes from a member");
+                boxed(|| {
+                    client::forward::serve(
+                        state,
+                        via,
+                        peer,
+                        forward,
+                        &mut receiver,
+                        &mut sender,
+                    )
+                })
+                .await
+            }
+            Err(wire::hub::Error::Kind { .. }) => {
+                serve(state, class, message, &mut receiver, &mut sender).await
+            }
+            Err(error) => Err(error.into()),
+        },
+        Ok(None) => sender.finish().map_err(Error::from),
+        Err(error) => Err(error.into()),
+    };
     if let Err(error) = &served {
         stop(receiver, sender, error);
     }
@@ -328,9 +380,11 @@ fn stop(receiver: Receiver, sender: Sender, error: &Error) {
     }
 }
 
+/// Serves the reader session that `message` opens.
 async fn serve(
     state: &Rc<RefCell<State>>,
     class: Class,
+    message: Block,
     receiver: &mut Receiver,
     sender: &mut Sender,
 ) -> Result<(), Error> {
@@ -340,7 +394,7 @@ async fn serve(
         complete,
         mut layout,
         live,
-    }) = open(state, class, &mut home, receiver).await?
+    }) = open(state, class, &mut home, message, receiver).await?
     else {
         sender.finish()?;
         return Ok(());
@@ -419,22 +473,21 @@ struct Opened {
     live: u64,
 }
 
-/// Reads the open and its keys, checks each key as it arrives, waits until the mesh
-/// names this node the home of the index, and carries the index and opens the session
-/// in the order of the keys. A removal of a channel that it checked ends it. Gives
-/// `None` when the peer finishes first.
+/// Decodes the open in `message`, reads its keys, checks each key as it arrives, waits
+/// until the mesh names this node the home of the index, and carries the index and
+/// opens the session in the order of the keys. A removal of a channel that it checked
+/// ends it. Gives `None` when the peer finishes first.
 async fn open(
     state: &Rc<RefCell<State>>,
     class: Class,
     home: &mut Home,
+    message: Block,
     receiver: &mut Receiver,
 ) -> Result<Option<Opened>, Error> {
-    let Some(message) = receiver.recv().await? else {
-        return Ok(None);
-    };
     let FromReader::Open(open) = home.decode(&message)? else {
         unreachable!("invariant: the first message that Home gives is an open");
     };
+    drop(message);
     let wanted = match open.mode {
         Mode::Latest => Class::Latest,
         Mode::Complete { .. } => Class::Complete,

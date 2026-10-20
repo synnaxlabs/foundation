@@ -12,6 +12,7 @@ use types::frame::key_set::{Group, KeySet};
 use types::frame::{self, Draft, Form, Label};
 use types::hash;
 use types::name::Name;
+use types::node;
 use types::sample::Type;
 use types::time::{Span, Stamp};
 
@@ -184,6 +185,31 @@ impl Homed {
         state: &Rc<RefCell<State>>,
         config: Config,
     ) -> Result<Self, Error> {
+        let via = state.borrow().node;
+        let homed = Self::within(state, config, usize::MAX, via).await?;
+        Ok(homed.expect("invariant: no writer has more than usize::MAX indexes"))
+    }
+
+    /// As [`Homed::new`] for a writer on one index, which `via` opened: the node of its
+    /// program. Gives `None` when its channels resolve to more than one index: before
+    /// the wait for the home, or when a change of a channel during that wait gives them
+    /// a second.
+    pub(crate) async fn one(
+        state: &Rc<RefCell<State>>,
+        config: Config,
+        via: node::Key,
+    ) -> Result<Option<Self>, Error> {
+        Self::within(state, config, 1, via).await
+    }
+
+    /// As [`Homed::new`] for a writer that `via` opened, or `None` when the channels
+    /// resolve to more than `indexes` indexes after the wait for mesh time.
+    async fn within(
+        state: &Rc<RefCell<State>>,
+        config: Config,
+        indexes: usize,
+        via: node::Key,
+    ) -> Result<Option<Self>, Error> {
         let Config {
             subject,
             authority,
@@ -198,6 +224,9 @@ impl Homed {
         crate::time::known(state).await;
         let (keys, groups) = loop {
             let (keys, groups) = resolve(&mut state.borrow_mut(), &channels)?;
+            if groups.len() > indexes {
+                return Ok(None);
+            }
             let checked: Vec<channel::Key> =
                 groups.iter().map(|&(index, _)| index).collect();
             let pending = Pending::new(state, keys.clone());
@@ -210,16 +239,16 @@ impl Homed {
         let holder = control::Writer {
             subject,
             authority,
-            via: state.borrow().node,
+            via,
         };
-        Ok(Self {
+        Ok(Some(Self {
             state: Rc::clone(state),
             holder,
             lease,
             keys,
             groups,
             channels,
-        })
+        }))
     }
 
     /// Opens the writer at the home. Call it with no wait after [`Homed::new`], so

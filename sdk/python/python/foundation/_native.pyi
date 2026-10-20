@@ -68,9 +68,10 @@ class Stopped(Exception):
     channels of more than one index or a lease that the home refuses, `failed` when the
     home cannot open the write, `refused` when the access check of the node refuses the
     write, and `busy` when the node has no room for the open. Later: `unknown` when a
-    channel was removed, `failed` when the home failed, `busy` when the home has no room
-    for the outcome of a frame, and `malformed` for a frame that breaks a rule of the
-    wire.
+    channel was removed, `failed` when the home failed, `refused` when the home refuses
+    the program's proof, such as a renewal of its hello, `busy` when the home has no
+    room for the outcome of a frame, and `malformed` for a frame that breaks a rule of
+    the wire.
     """
 
     code: str

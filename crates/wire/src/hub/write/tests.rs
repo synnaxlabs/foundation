@@ -60,7 +60,7 @@ const REFUSALS: [(Refusal, u8); 7] = [
     (Refusal::Large, 7),
 ];
 
-const ENDS: [(End, u8); 2] = [(End::Removed, 1), (End::Failed, 2)];
+const ENDS: [(End, u8); 3] = [(End::Removed, 1), (End::Failed, 2), (End::Refused, 3)];
 
 mod pins {
     use super::*;
@@ -527,14 +527,14 @@ mod reply {
 
     #[test]
     fn refuses_a_code_that_no_end_has() {
-        for code in (0..=u8::MAX).filter(|code| !(1..=2).contains(code)) {
+        for code in (0..=u8::MAX).filter(|code| !(1..=3).contains(code)) {
             let want = Error::End { code };
             assert_eq!(Reply::decode(&ended(code)), Err(want));
             assert_eq!(Reply::decode(&end(code)), Err(want));
         }
         assert_eq!(
-            Error::End { code: 3 }.to_string(),
-            "the ended group has code 3, which no end has"
+            Error::End { code: 4 }.to_string(),
+            "the ended group has code 4, which no end has"
         );
     }
 
@@ -1315,8 +1315,8 @@ mod corpus {
 
     /// The inputs `write_replies_stored` and `write_replies_order_stored`, where each
     /// `Stored` names its group, reach each arm that the inputs with groups reached
-    /// before, and a kind that no reply has, an end code that no end has, and a group
-    /// that the write does not have.
+    /// before, and a kind that no reply has, a group that the write refused, and a
+    /// group that the write does not have.
     #[test]
     fn decodes_each_reply_input_of_the_fuzz_target_with_stored_groups() {
         let unasked = |frame| Err(Error::Unasked { frame, sent: 0 });
@@ -1341,7 +1341,10 @@ mod corpus {
                 Err(Error::Length { len: 16 }),
                 Err(Error::Length { len: 2 }),
                 Err(Error::Kind { kind: 7 }),
-                Err(Error::End { code: 3 }),
+                Ok(Reply::Ended {
+                    group: 0,
+                    end: End::Refused
+                }),
                 Err(Error::Groups {
                     group: 256,
                     count: 256
@@ -1427,7 +1430,7 @@ mod corpus {
                     group: 0,
                     next: 2
                 }),
-                Err(Error::End { code: 3 }),
+                Err(Error::Unended { frame: 1, group: 2 }),
                 Err(Error::Unended { frame: 1, group: 2 }),
                 Err(Error::Order { frame: 2, next: 1 }),
                 short(9),
@@ -1435,9 +1438,36 @@ mod corpus {
         );
     }
 
+    /// The input `write_outcome_end_unknown`, which is `write_outcome_group` with end
+    /// code 4 in place of 3, gives the error of an end code that no end has.
+    #[test]
+    fn refuses_an_end_code_that_no_end_has_in_the_fuzz_inputs() {
+        assert_eq!(
+            decoded(corpus!("write_outcome_end_unknown")),
+            [
+                Err(Error::Group {
+                    frame: 1,
+                    group: 2,
+                    next: 0
+                }),
+                Ok(outcome(1, Outcome::Lost { range: range(0, 1) })),
+                Err(Error::Length { len: 9 }),
+                Err(Error::Group {
+                    frame: 1,
+                    group: 0,
+                    next: 2
+                }),
+                Err(Error::End { code: 4 }),
+                Err(Error::Unended { frame: 1, group: 2 }),
+                Err(Error::Order { frame: 2, next: 1 }),
+                Err(Error::Length { len: 9 }),
+            ]
+        );
+    }
+
     /// The input `write_outcome_group_stored` gives each error of an outcome of another
-    /// group than the next, of an end code that no end has, and of a reply against the
-    /// end of its group, and ends with a group that ended unstored.
+    /// group than the next and of a reply against the end of its group, and ends with a
+    /// group that ended unstored.
     #[test]
     fn refuses_each_reply_against_the_groups_in_the_fuzz_inputs() {
         let (got, replies) = run(corpus!("write_outcome_group_stored"));
@@ -1461,7 +1491,7 @@ mod corpus {
                     group: 0,
                     next: 2
                 }),
-                Err(Error::End { code: 3 }),
+                Err(Error::Unended { frame: 1, group: 2 }),
                 Err(Error::Unended { frame: 1, group: 2 }),
                 Ok(of(2, 1, Outcome::Taken { range: range(1, 1) })),
                 Ok(Reply::Ended {
