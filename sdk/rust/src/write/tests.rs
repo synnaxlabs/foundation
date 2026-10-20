@@ -552,10 +552,13 @@ fn a_call_of_two_series_of_one_channel_gives_unordered_in_its_places_and_sends_n
 }
 
 #[test]
-fn a_call_of_more_items_than_places_keeps_a_frame_bounded_by_the_places() {
+fn a_call_of_more_items_than_places_gives_the_error_of_each_item_past_them() {
     let (mut writer, served) = writer(WAITING);
-    let bound = 2 * (writer.places().len() + 1);
     let unordered = |entry, last| layout(frame::Error::Unordered { entry, last });
+    let past = layout(frame::Error::OutOfRange {
+        entry: 9,
+        entries: 3,
+    });
     let one_more = [
         (0, Value::I64(1)),
         (1, Value::F64(1.0)),
@@ -563,18 +566,21 @@ fn a_call_of_more_items_than_places_keeps_a_frame_bounded_by_the_places() {
         (0, Value::I64(2)),
     ];
     assert_eq!(writer.write(&one_more), unordered(0, 0));
-    assert_eq!(
-        writer.write(&vec![(0, Value::I64(1)); 100_000]),
-        unordered(0, 0)
-    );
-    assert!(writer.frame.parts.capacity() <= bound);
-    assert!(writer.frame.bytes.capacity() <= 8 * bound);
-    assert_eq!(
-        writer.write_series(&vec![of(1, 0, &[]); 100_000]),
-        unordered(1, 1)
-    );
-    assert!(writer.frame.parts.capacity() <= bound);
-    assert!(writer.frame.series.capacity() <= bound);
+    let mut values = vec![(0, Value::I64(1)); 100_000];
+    assert_eq!(writer.write(&values), unordered(0, 0));
+    values.push((9, Value::I64(1)));
+    assert_eq!(writer.write(&values), past);
+    values[99_999] = (1, Value::I64(1));
+    let value = Err(Error::Value {
+        place: 1,
+        scalar: Scalar::I64,
+        data_type: Type::Scalar(Scalar::F64),
+    });
+    assert_eq!(writer.write(&values), value);
+    let mut series = vec![of(1, 0, &[]); 100_000];
+    assert_eq!(writer.write_series(&series), unordered(1, 1));
+    series.push(of(9, 0, &[]));
+    assert_eq!(writer.write_series(&series), past);
     assert_eq!(writer.close(), Ok(()));
     assert_eq!(served.join().unwrap().len(), 0);
 }

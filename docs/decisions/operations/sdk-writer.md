@@ -123,14 +123,13 @@
   series of one group with two counts give `Stream(program::Error::Count)`, `place` the
   lowest place of the group and `other` its lowest place of another count. Each error
   names the places of the caller, with nothing sent, and the writer goes on. A call
-  reads at most one item more than the places, so a call of more items gives
-  `Unordered` or an error of one of those items, and the kept frame stays bounded by
-  the places. Lost: an error of its own for a call of too many items, which a caller
-  would get for the cause of `Unordered`. When a group of the frame got
-  `Outcome::Ended`, the call gives `Error::Partial`: `written` holds the channels of
-  each group that got `Taken`, `unwritten` the rest, and `outcomes` each outcome of
-  the frame. The writer goes on. The end of a group alone
-  gives no error at `close`. `close` gives `Stream(Unstored)` for each group that
+  checks the place of each item and the type of each value, and keeps at most one item
+  more than the places: a call of more items at places holds a place twice and gives
+  `Unordered`, so the kept frame stays bounded by the places. When a group of the
+  frame got `Outcome::Ended`, the call gives `Error::Partial`: `written` holds the
+  channels of each group that got `Taken`, `unwritten` the rest, and `outcomes` each
+  outcome of the frame. The writer goes on. The end of a group alone gives no error at
+  `close`. `close` gives `Stream(Unstored)` for each group that
   ended with a frame that the node took and that may not be on disk, with the place of
   the index of each such group (`laptop.architect-2`, 2026-10-19T13:14:55Z,
   https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268099496, item 2,

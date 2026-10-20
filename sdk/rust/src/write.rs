@@ -173,9 +173,7 @@ impl Writer {
     /// channel (`Unordered`, `entry` the higher of their places and `last` the lower),
     /// or for values that give the stamps of only some groups (`IndexAbsent`, `entry`
     /// the lowest place of a group with no stamp and `index` the place of its index),
-    /// each with nothing sent, and `Unsent` for no values. A call of more values than
-    /// the places gives `Unordered` or an error of one of its first `places + 1`
-    /// values: it reads no value after those.
+    /// each with nothing sent, and `Unsent` for no values.
     pub fn write(
         &mut self,
         values: &[(usize, Value)],
@@ -183,7 +181,7 @@ impl Writer {
         self.frame.parts.clear();
         self.frame.bytes.clear();
         let mut stamped = false;
-        for &(place, value) in self.bounded(values) {
+        for (n, &(place, value)) in values.iter().enumerate() {
             let (at, data_type) = self.place(place)?;
             let scalar = value.scalar();
             if data_type != Type::Scalar(scalar) {
@@ -193,9 +191,11 @@ impl Writer {
                     data_type,
                 });
             }
-            stamped |= at.node == at.group;
-            let fill = |sample: &mut [u8]| value.write(sample);
-            self.frame.push(at, scalar.width(), fill);
+            if self.kept(n) {
+                stamped |= at.node == at.group;
+                let fill = |sample: &mut [u8]| value.write(sample);
+                self.frame.push(at, scalar.width(), fill);
+            }
         }
         if stamped {
             return self.call(Time::Frame(Path::Live));
@@ -222,9 +222,7 @@ impl Writer {
     /// whose count is not that count; each with nothing sent. `Unsent` for a frame
     /// with no series or a series of no samples; and `Pool(TooLarge)` for a frame over
     /// the largest block, or, before any copy, for series whose bytes go over
-    /// [`Writer::bytes_max`], `requested` their bytes. A call of more series than the
-    /// places gives `Pool(TooLarge)`, `Unordered`, or an error of one of its first
-    /// `places + 1` series: it reads no series after those.
+    /// [`Writer::bytes_max`], `requested` their bytes.
     pub fn write_series(
         &mut self,
         series: &[Series<'_>],
@@ -237,14 +235,19 @@ impl Writer {
         }
         self.frame.parts.clear();
         self.frame.bytes.clear();
-        for &Series {
-            place,
-            count,
-            bytes,
-        } in self.bounded(series)
+        for (
+            n,
+            &Series {
+                place,
+                count,
+                bytes,
+            },
+        ) in series.iter().enumerate()
         {
             let (at, _) = self.place(place)?;
-            self.frame.copy(at, count, bytes);
+            if self.kept(n) {
+                self.frame.copy(at, count, bytes);
+            }
         }
         self.call(Time::Frame(Path::Live))
     }
@@ -278,11 +281,12 @@ impl Writer {
         })
     }
 
-    /// The first items of a call, at most one more than the places. A frame holds no
-    /// place twice, so each item past the places repeats one of these, and the sort
-    /// gives `Unordered` with the kept frame bounded by the places.
-    fn bounded<'a, T>(&self, items: &'a [T]) -> &'a [T] {
-        &items[..items.len().min(self.places.len() + 1)]
+    /// Whether the frame keeps item `n` of a call: one of the first, at most one more
+    /// than the places. A call of more items that are each at a place holds a place
+    /// twice, so the sort gives `Unordered`, and the kept frame stays bounded by the
+    /// places.
+    fn kept(&self, n: usize) -> bool {
+        n <= self.places.len()
     }
 
     /// Where a series of `place` goes, and its type.

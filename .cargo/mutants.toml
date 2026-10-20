@@ -295,4 +295,8 @@ exclude_re = [
   # With `!=`, each frame takes the check of each group, which gives the counts that
   # one count for all series gives. Only the time differs.
   'sdk/rust/src/write\.rs:.*replace == with != in Writer::counted$',
+  # With `true`, a call of far more values than places grows the kept frame, and the
+  # allocation check of `a_warm_call_makes_no_allocation_on_the_thread_of_its_caller`
+  # in `crates/node/tests/it/sdk.rs` fails.
+  'sdk/rust/src/write\.rs:.*replace Writer::kept -> bool with true$',
 ]
