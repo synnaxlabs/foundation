@@ -8,19 +8,15 @@
 
 use std::ffi::c_void;
 
-use connector_opcua::bench::{Client, client};
+use connector_opcua::bench::{
+    Bytes, Client, client, connector_opcua_free, connector_opcua_malloc,
+    connector_opcua_realloc,
+};
 use sim::Sim;
 use types::sample::Scalar;
 
 #[global_allocator]
 static ALLOCATOR: counting::Bytes = counting::Bytes::new();
-
-/// A `UA_ByteString`.
-#[repr(C)]
-struct Bytes {
-    length: usize,
-    data: *mut u8,
-}
 
 /// A `UA_NodeId` with a numeric identifier.
 #[repr(C, align(8))]
@@ -35,9 +31,6 @@ unsafe extern "C" {
     fn UA_findDataType(key: *const Key) -> *const c_void;
     fn UA_ByteString_allocBuffer(bytes: *mut Bytes, length: usize) -> u32;
     fn UA_clear(value: *mut c_void, kind: *const c_void);
-    fn connector_opcua_malloc(size: usize) -> *mut c_void;
-    fn connector_opcua_realloc(ptr: *mut c_void, size: usize) -> *mut c_void;
-    fn connector_opcua_free(ptr: *mut c_void);
 }
 
 /// The size of the header before each block of the allocator.
@@ -104,8 +97,7 @@ fn the_drop_frees_the_client_its_loop_and_its_timers() {
 fn each_function_writes_the_size_into_the_header() {
     let before = ALLOCATOR.held();
     let held = || ALLOCATOR.held().strict_sub(before);
-    // SAFETY: any size is valid.
-    let block = unsafe { connector_opcua_malloc(10) };
+    let block = connector_opcua_malloc(10);
     assert!(!block.is_null(), "malloc gave a block");
     assert_eq!(held(), 10 + HEADER, "malloc");
     // SAFETY: `block` is live and from the allocator.

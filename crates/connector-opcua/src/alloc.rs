@@ -2,7 +2,9 @@
 //! defines `UA_malloc`, `UA_calloc`, `UA_realloc`, and `UA_free` as these functions,
 //! so each C allocation goes through the global allocator of the binary. Each keeps
 //! the C contract: a failure gives NULL and never panics, and each pointer is aligned
-//! to 16. [`exhausted`] stops the process when a constructor of `shim.c` gives NULL.
+//! to 16. A free writes zeros over its block, as aws-lc does in its default mode, so a
+//! freed block keeps no copy of a key or a password. [`exhausted`] stops the process
+//! when a constructor of `shim.c` gives NULL.
 //! Behind `sim`, [`route_crypto`] gives these functions to aws-lc too.
 
 #![expect(unsafe_code, reason = "C allocates through these functions")]
@@ -11,7 +13,7 @@ use std::alloc::{self, Layout};
 use std::ffi::c_void;
 #[cfg(feature = "sim")]
 use std::ffi::{c_char, c_int};
-use std::ptr;
+use std::{ptr, slice};
 
 /// The alignment of each block, the `max_align_t` of each target, and the size of the
 /// header before it, which holds the size that C asked for.
@@ -102,9 +104,21 @@ unsafe fn block(ptr: *mut c_void) -> (*mut u8, Layout) {
     (block, layout)
 }
 
+/// Gives the size that C asked for in the block of `ptr`.
+///
+/// # Safety
+///
+/// As [`block`].
+unsafe fn asked(ptr: *mut c_void) -> usize {
+    // SAFETY: as the caller.
+    let (block, layout) = unsafe { block(ptr) };
+    poison(block);
+    layout.size() - ALIGN
+}
+
 /// `malloc`. `malloc(0)` gives a unique pointer, not NULL.
 #[unsafe(no_mangle)]
-extern "C" fn connector_opcua_malloc(size: usize) -> *mut c_void {
+pub extern "C" fn connector_opcua_malloc(size: usize) -> *mut c_void {
     let Some(layout) = layout(size) else {
         return ptr::null_mut();
     };
@@ -130,34 +144,28 @@ extern "C" fn connector_opcua_calloc(count: usize, size: usize) -> *mut c_void {
 }
 
 /// `realloc`. `realloc(NULL, size)` is `malloc(size)`, and `realloc(ptr, 0)` frees
-/// `ptr` and gives a pointer as `malloc(0)` does. On a failure it gives NULL and
-/// `ptr` stays live.
+/// `ptr` and gives a pointer as `malloc(0)` does. It always moves the block, and frees
+/// the old one as `free` does. On a failure it gives NULL and `ptr` stays live.
 ///
 /// # Safety
 ///
 /// `ptr` is NULL or a live pointer of these functions.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn connector_opcua_realloc(
+pub unsafe extern "C" fn connector_opcua_realloc(
     ptr: *mut c_void,
     size: usize,
 ) -> *mut c_void {
-    if ptr.is_null() {
-        return connector_opcua_malloc(size);
+    let new = connector_opcua_malloc(size);
+    if ptr.is_null() || new.is_null() {
+        return new;
     }
-    let Some(new) = layout(size) else {
-        return ptr::null_mut();
-    };
     // SAFETY: the caller gives a live pointer of these functions.
-    let (old_block, old) = unsafe { block(ptr) };
-    // SAFETY: `old_block` is a live block of `old`, from the global allocator, and
-    // `new` has the same alignment and a valid size.
-    let block = unsafe { alloc::realloc(old_block, old, new.size()) };
-    if block.is_null() {
-        // `ptr` stays live.
-        poison(old_block);
-    }
-    // SAFETY: `block` is NULL or a block of `new`.
-    unsafe { stamp(block, size) }
+    let count = unsafe { asked(ptr) }.min(size);
+    // SAFETY: `ptr` and `new` are two live blocks of at least `count` bytes.
+    unsafe { ptr::copy_nonoverlapping(ptr.cast::<u8>(), new.cast::<u8>(), count) };
+    // SAFETY: as above.
+    unsafe { connector_opcua_free(ptr) };
+    new
 }
 
 /// `free`. `free(NULL)` does nothing.
@@ -166,12 +174,59 @@ unsafe extern "C" fn connector_opcua_realloc(
 ///
 /// `ptr` is NULL or a live pointer of these functions.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn connector_opcua_free(ptr: *mut c_void) {
+pub unsafe extern "C" fn connector_opcua_free(ptr: *mut c_void) {
     if ptr.is_null() {
         return;
     }
     // SAFETY: the caller gives a live pointer of these functions.
+    let size = unsafe { asked(ptr) };
+    // SAFETY: as above, of `size` bytes.
+    unsafe { clear_free(ptr, size) };
+}
+
+/// `free` for a block of which C wrote only the first `written` bytes: it clears only
+/// those, so a large buffer that holds a short message costs only the message.
+///
+/// # Safety
+///
+/// As [`connector_opcua_free`].
+///
+/// # Panics
+///
+/// When `written` is past the size of the block. The panic cannot unwind into C, so the
+/// process aborts.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn connector_opcua_free_written(
+    ptr: *mut c_void,
+    written: usize,
+) {
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: the caller gives a live pointer of these functions.
+    let size = unsafe { asked(ptr) };
+    assert!(
+        written <= size,
+        "C wrote {written} bytes in a block of {size}"
+    );
+    // SAFETY: as above.
+    unsafe { clear_free(ptr, written) };
+}
+
+/// Writes zeros over the first `count` bytes of the block of `ptr`, then frees it.
+///
+/// # Safety
+///
+/// `ptr` is a live pointer of these functions, of at least `count` bytes.
+unsafe fn clear_free(ptr: *mut c_void, count: usize) {
+    // SAFETY: as the caller.
     let (block, layout) = unsafe { block(ptr) };
+    // SAFETY: `ptr` is at least `count` bytes of the block after its header.
+    unsafe { ptr.cast::<u8>().write_bytes(0, count) };
+    // SAFETY: the bytes are live and now hold zeros.
+    let bytes = unsafe { slice::from_raw_parts(ptr.cast::<u8>(), count) };
+    // `dealloc` frees the bytes, so the compiler may drop writes that nothing reads.
+    zeroize::optimization_barrier(bytes);
     // SAFETY: `block` is a live block of `layout`, from the global allocator.
     unsafe { alloc::dealloc(block, layout) };
 }
@@ -181,7 +236,7 @@ unsafe extern "C" fn connector_opcua_free(ptr: *mut c_void) {
 /// too, other than the blocks that aws-lc takes from `malloc` itself: the array of its
 /// thread locals, one block for each thread, and its error queue (the state of each
 /// thread that puts an error, and the data of each error). aws-lc then does not clear a
-/// block before it frees it.
+/// block itself: [`connector_opcua_free`] clears it.
 ///
 /// # Safety
 ///

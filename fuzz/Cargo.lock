@@ -371,6 +371,7 @@ dependencies = [
  "hub",
  "tracing",
  "types",
+ "zeroize",
 ]
 
 [[package]]

@@ -8,16 +8,24 @@
 //! and the first drives of a subscription allocate no memory for its changes. A read
 //! over a secure channel makes a fixed count of allocations. aws-lc allocates through
 //! the global allocator here, so the count holds its blocks too, other than its thread
-//! locals and its error queue, which stay in `malloc`. The count covers each thread, so
-//! this binary has no test harness.
+//! locals and its error queue, which stay in `malloc`. A free and a realloc of C leave
+//! no secret in a freed block, nor does the free of a sent buffer, so a login frees no
+//! copy of the key or the password. The count covers each thread, so this binary has no
+//! test harness.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 #![expect(unsafe_code, reason = "the routing of aws-lc and its positive control")]
 
+use std::ffi::c_void;
 use std::future::poll_fn;
+use std::hint::black_box;
 use std::pin::pin;
+use std::ptr;
 
-use connector_opcua::bench::{Client, Manager, client};
+use connector_opcua::bench::{
+    Bytes, Client, Manager, client, connector_opcua_free, connector_opcua_free_written,
+    connector_opcua_malloc, connector_opcua_realloc, shim_send_free,
+};
 #[path = "common/kind.rs"]
 #[expect(dead_code, reason = "this binary measures only the ticks")]
 mod kind;
@@ -36,7 +44,12 @@ fn main() {
     the_count_holds_the_allocations_of_aws_lc();
     the_count_holds_the_allocations_of_c();
     a_run_allocates_nothing();
-    the_drop_frees_the_client();
+    the_drop_clears_the_client();
+    a_free_clears_its_block();
+    a_free_of_written_bytes_clears_them();
+    a_send_free_clears_what_its_chunk_can_hold();
+    a_realloc_clears_the_old_block();
+    a_login_frees_no_copy_of_the_key_or_the_password();
     the_fuzz_round_trip_allocates_for_each_step();
     a_failed_decode_stops_the_round_trip();
     a_read_through_the_manager_allocates_a_fixed_count();
@@ -108,11 +121,177 @@ fn a_run_allocates_nothing() {
 /// The client of the copy holds this URI when it has no other.
 const URI: &[u8] = b"urn:open62541.unconfigured.application";
 
-fn the_drop_frees_the_client() {
+/// That the drop frees each block is in `tests/memory.rs`.
+fn the_drop_clears_the_client() {
     let (_sim, clock, mut rng) = sim();
     let client = Client::new(clock, &mut rng, 0);
     let ((), freed) = ALLOCATOR.freed_holding(URI, || drop(client));
-    assert_eq!(freed, 1, "the drop freed the URI of the client");
+    assert_eq!(freed, 0, "the drop freed the URI of the client with zeros");
+}
+
+/// The bytes of a secret that no other block holds.
+const SECRET: &[u8] = b"the secret of one C block";
+
+/// Gives a C block of `size` bytes that holds [`SECRET`] first.
+fn holding(size: usize) -> *mut c_void {
+    assert!(size >= SECRET.len(), "a block of {size} holds the secret");
+    let block = connector_opcua_malloc(size);
+    assert!(!block.is_null(), "the malloc");
+    // SAFETY: the block holds `size` bytes, at least `SECRET.len()`.
+    unsafe { ptr::copy_nonoverlapping(SECRET.as_ptr(), block.cast(), SECRET.len()) };
+    block
+}
+
+/// The positive control: the drop of a `Vec` frees its bytes with no clear. This
+/// allocator reads each block that it frees, so the compiler keeps the clear here also
+/// with no `optimization_barrier`: no test sees the barrier.
+fn a_free_clears_its_block() {
+    let found = ALLOCATOR.freed_holding(SECRET, || drop(black_box(SECRET.to_vec())));
+    assert_eq!(found, ((), 1), "a Vec");
+    let block = holding(SECRET.len());
+    // SAFETY: `block` is a live block of `connector_opcua_malloc`.
+    let found =
+        ALLOCATOR.freed_holding(SECRET, || unsafe { connector_opcua_free(block) });
+    assert_eq!(found, ((), 0), "a free");
+}
+
+/// A free of the bytes written first in a larger block, as of a network buffer.
+fn a_free_of_written_bytes_clears_them() {
+    let block = holding(SECRET.len() * 4);
+    let free = || {
+        // SAFETY: `block` is a live block of `connector_opcua_malloc`.
+        unsafe { connector_opcua_free_written(block, SECRET.len()) };
+    };
+    assert_eq!(
+        ALLOCATOR.freed_holding(SECRET, free),
+        ((), 0),
+        "the free of the written bytes"
+    );
+}
+
+/// The free of a sent buffer of a chunk of type `kind` (byte 3 of the header) whose
+/// `length` is `length`, with [`SECRET`] after the header. Gives the count of freed
+/// blocks that hold the secret.
+fn sent(kind: u8, length: usize) -> u64 {
+    let size = 4 + SECRET.len();
+    let data = connector_opcua_malloc(size).cast::<u8>();
+    assert!(!data.is_null(), "the malloc");
+    let chunk = [b"MSG", &[kind][..], SECRET].concat();
+    // SAFETY: the block holds `size` bytes, the length of `chunk`.
+    unsafe { ptr::copy_nonoverlapping(chunk.as_ptr(), data, size) };
+    let mut buffer = Bytes { length, data };
+    // SAFETY: `buffer` is a block of `connector_opcua_malloc` of at least `length`.
+    let ((), found) =
+        ALLOCATOR.freed_holding(SECRET, || unsafe { shim_send_free(&raw mut buffer) });
+    assert_eq!(
+        (buffer.length, buffer.data.is_null()),
+        (0, true),
+        "the free empties the buffer"
+    );
+    found
+}
+
+/// A final chunk clears its `length` bytes, and each other buffer its whole block, past
+/// its `length` too.
+fn a_send_free_clears_what_its_chunk_can_hold() {
+    let whole = 4 + SECRET.len();
+    assert_eq!(
+        sent(b'F', whole),
+        0,
+        "a final chunk with the secret in its length"
+    );
+    assert_eq!(
+        sent(b'F', 4),
+        1,
+        "a final chunk with the secret past its length"
+    );
+    assert_eq!(sent(b'C', 4), 0, "a chunk that is not final");
+    assert_eq!(sent(b'A', 4), 0, "an abort chunk");
+    assert_eq!(sent(b'F', 3), 0, "a buffer shorter than a header");
+}
+
+/// A realloc to each size moves the block on the allocator of the system, which frees
+/// the old block with no clear.
+fn a_realloc_clears_the_old_block() {
+    for size in [SECRET.len() / 2, SECRET.len() * 64] {
+        let block = holding(SECRET.len());
+        // SAFETY: `block` is a live block of `connector_opcua_malloc`.
+        let (grown, found) = ALLOCATOR
+            .freed_holding(SECRET, || unsafe { connector_opcua_realloc(block, size) });
+        assert!(!grown.is_null(), "the realloc to {size}");
+        assert_eq!(found, 0, "a realloc to {size}");
+        // SAFETY: `grown` is a live block of `connector_opcua_realloc`.
+        unsafe { connector_opcua_free(grown) };
+    }
+}
+
+/// The private numbers of the key of the test client, each in the little-endian bytes
+/// that a `BIGNUM` of aws-lc holds on a 64-bit target. No block holds the DER of the
+/// key.
+fn keys() -> [(&'static str, Vec<u8>); 6] {
+    type Get =
+        unsafe extern "C" fn(*const aws_lc_sys::RSA) -> *const aws_lc_sys::BIGNUM;
+    let der = include_bytes!("../src/secure/client-key.der");
+    // SAFETY: `der` lives for the call, which copies what it reads.
+    let rsa =
+        unsafe { aws_lc_sys::RSA_private_key_from_bytes(der.as_ptr(), der.len()) };
+    assert!(!rsa.is_null(), "the key parses");
+    let bytes = |number: *const aws_lc_sys::BIGNUM| {
+        // SAFETY: `number` is a live number of `rsa`.
+        let length = unsafe { aws_lc_sys::BN_num_bytes(number) };
+        let mut out = vec![0; usize::try_from(length).expect("a length fits")];
+        // SAFETY: `out` holds `out.len()` bytes, and `number` lives.
+        let done =
+            unsafe { aws_lc_sys::BN_bn2le_padded(out.as_mut_ptr(), out.len(), number) };
+        assert_eq!(done, 1, "the number fits");
+        out
+    };
+    let gets: [(&str, Get); 6] = [
+        ("d", aws_lc_sys::RSA_get0_d),
+        ("p", aws_lc_sys::RSA_get0_p),
+        ("q", aws_lc_sys::RSA_get0_q),
+        ("dmp1", aws_lc_sys::RSA_get0_dmp1),
+        ("dmq1", aws_lc_sys::RSA_get0_dmq1),
+        ("iqmp", aws_lc_sys::RSA_get0_iqmp),
+    ];
+    // SAFETY: `rsa` is a live private key, so each number lives with it.
+    let numbers = gets.map(|(name, get)| (name, bytes(unsafe { get(rsa) })));
+    // SAFETY: nothing else holds `rsa`.
+    unsafe { aws_lc_sys::RSA_free(rsa) };
+    numbers
+}
+
+/// Connects with the user of the bench, reads, closes the client, and ends the server
+/// in `mode`.
+fn log_in(mode: client::Mode) {
+    let mut sim = Sim::new(sim::Config::default());
+    let node = sim.node(sim::node::Config::default());
+    let run = move |node: sim::node::Node, _| async move {
+        let body = async |server: &client::Server| {
+            let mut client = server.connect(1).await;
+            client.read(client::Variable::Number).await;
+            client.close().await;
+        };
+        let (clock, net, rng) = (node.clock(), node.net(), node.entropy().rng());
+        client::Server::login(clock, net, node.addresses()[0], rng, mode, body).await;
+    };
+    sim.run_on(&node, run).expect("the run ends");
+}
+
+/// aws-lc copies the numbers of the key of the client into its own blocks, and the
+/// client and the server of open62541 copy the password.
+fn a_login_frees_no_copy_of_the_key_or_the_password() {
+    let keys = keys();
+    let needles = keys.iter().map(|(name, bytes)| (*name, bytes.as_slice()));
+    let needles: Vec<_> = needles
+        .chain([("the password", client::PASSWORD)])
+        .collect();
+    for mode in [client::Mode::Sign, client::Mode::SignAndEncrypt] {
+        for &(name, needle) in &needles {
+            let ((), found) = ALLOCATOR.freed_holding(needle, || log_in(mode));
+            assert_eq!(found, 0, "{name} over {mode:?}");
+        }
+    }
 }
 
 /// A `Variant` (23, as `ffi` is private) of 7 `ExtensionObject` values, then the

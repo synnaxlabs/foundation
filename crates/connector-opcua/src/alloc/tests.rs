@@ -4,7 +4,8 @@ use std::ffi::c_void;
 
 use super::{
     connector_opcua_calloc as calloc, connector_opcua_free as free,
-    connector_opcua_malloc as malloc, connector_opcua_realloc as realloc, exhausted,
+    connector_opcua_free_written as free_written, connector_opcua_malloc as malloc,
+    connector_opcua_realloc as realloc, exhausted,
 };
 use crate::child;
 
@@ -236,5 +237,26 @@ fn exhausted_aborts_with_the_size_of_a_header() {
             .unwrap(),
         "memory allocation of 16 bytes failed\nnote: run with `RUST_BACKTRACE=1` \
          environment variable to display a backtrace\n"
+    );
+}
+
+/// Frees a block of 4 bytes with 5 written, in a child process, and does nothing
+/// outside one.
+#[test]
+fn frees_more_than_its_block() {
+    if child::running() {
+        // SAFETY: the block is live. The call aborts before it frees.
+        unsafe { free_written(malloc(4), 5) };
+    }
+}
+
+#[test]
+fn a_free_of_more_than_its_block_aborts() {
+    assert_eq!(
+        child::panicked("alloc::tests::frees_more_than_its_block", &[]),
+        [
+            "C wrote 5 bytes in a block of 4",
+            "panic in a function that cannot unwind"
+        ]
     );
 }

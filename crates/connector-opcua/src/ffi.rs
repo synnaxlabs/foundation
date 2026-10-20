@@ -170,9 +170,19 @@ impl std::fmt::Debug for Status {
 
 /// `UA_String` and `UA_ByteString`.
 #[repr(C)]
-pub(crate) struct Bytes {
-    pub(crate) length: usize,
-    pub(crate) data: *mut u8,
+pub struct Bytes {
+    /// The count of bytes at `data`.
+    pub length: usize,
+    /// The bytes. With a `length` of 0, NULL or a pointer that holds no byte.
+    pub data: *mut u8,
+}
+
+impl std::fmt::Debug for Bytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Bytes")
+            .field("length", &self.length)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Bytes {
@@ -994,6 +1004,15 @@ unsafe extern "C" {
     ) -> *mut ConnectionManager;
     pub(crate) fn shim_cm_free(cm: *mut ConnectionManager);
     pub(crate) fn shim_buffer_free(buffer: *mut Bytes);
+    /// Frees a buffer that a send gives Rust, and empties `buffer`. It clears only the
+    /// `length` bytes of a final chunk (byte 3 is `F`), and the whole block of each
+    /// other buffer.
+    ///
+    /// # Safety
+    ///
+    /// `buffer` is a live `UA_ByteString` whose `data` is NULL with `length` 0, or a
+    /// live block of `connector_opcua_malloc` of at least `length` bytes.
+    pub fn shim_send_free(buffer: *mut Bytes);
     pub(crate) fn shim_establish(
         cm: *mut ConnectionManager,
         id: usize,
@@ -1010,3 +1029,6 @@ unsafe extern "C" {
 #[cfg(any(test, feature = "sim"))]
 #[cfg_attr(not(test), expect(dead_code, reason = "`bench` uses only some"))]
 pub(crate) mod test;
+
+#[cfg(test)]
+mod tests;
