@@ -1,14 +1,19 @@
 - **SDK PYTHON WRITER** `Client.open_writer(channels, *, authority=0, lease=None,
   on_loss="warn")` of `sdk-python` opens a `foundation.Writer` over `sdk::write::Writer`
-  (SDK WRITER), with the place order of `sdk`. `Writer.write` takes a `dict` from a
-  channel name or a place to one value, or one value when the writer has one place
-  other than the index. `Writer.write_series` takes a `dict` to one-dimensional
-  `numpy.ndarray`s of the exact dtype of each place, in native byte order, and casts
-  nothing. A stamp is an `int` of nanoseconds since the UNIX epoch, and
-  `write_series` also takes `datetime64[ns]` for `timestamp` and `timedelta64[ns]` for
-  `duration`. The binding checks each value and array against its place, then calls
-  `sdk` with the GIL released. A writer of one process raises `RuntimeError` in a child
-  that the process forks, and its close there gives `None` and ends nothing. The plan
+  (SDK WRITER), of channels of any index, with the place order of `sdk`.
+  `Writer.places` gives `(name, type, index)` for each place, `index` the place of its
+  index, as `sdk::Place` holds it, and `Writer.index` is gone (`laptop.architect-2`,
+  2026-10-20T13:37:38Z,
+  https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6292172439).
+  `Writer.write` takes a `dict` from a channel name or a place to one value, or one
+  value when the writer has one place that is not an index. `Writer.write_series` takes
+  a `dict` to one-dimensional `numpy.ndarray`s of the exact dtype of each place, in
+  native byte order, and casts nothing. A stamp is an `int` of nanoseconds since the
+  UNIX epoch, and `write_series` also takes `datetime64[ns]` for `timestamp` and
+  `timedelta64[ns]` for `duration`. The binding checks each value and array against its
+  place, then calls `sdk` with the GIL released. A writer of one process raises
+  `RuntimeError` in a child that the process forks, and its close there gives `None` and
+  ends nothing. The plan
   (https://github.com/synnaxlabs/foundation/issues/3320#issuecomment-6257542875) was
   approved by `laptop.architect-2` at 2026-10-19T01:19:25Z
   (https://github.com/synnaxlabs/foundation/issues/3320#issuecomment-6257620825), with
@@ -31,18 +36,18 @@
      `except ConnectionError` then still catches a typo. `Stream` with `Layout`,
      `Unsent`, `Body`, `Open`, `Unnamed`, or `Pool` raises `ValueError`: nothing was
      sent, and the writer goes on, or, at the open, no writer or reader opened.
-     `Stream` with `Unstored` raises `Stopped` with the code of the end of the first
-     group (`Removed` gives `unknown`, `Failed` gives `failed`, `Refused` gives
-     `refused`): an `sdk-python` writer has one index until #3283 PR 4, so one group,
-     and only `close` gives it. Approved in PR 3372 by `laptop.architect-2` at
-     2026-10-19T20:32:43Z
-     (https://github.com/synnaxlabs/foundation/pull/3372#issuecomment-6276693435). Lost:
-     a class or a code of its own for `Unstored`, since after both the caller does the
-     same: a frame that the node took may not be on disk. So the code alone does not
-     tell a refusal at `close` from the end of the group; the text does. When an
-     `sdk-python` writer can hold more than one group (#3283 PR 4), this map comes back
-     to `laptop.architect-2` (2026-10-20T11:52:04Z,
-     https://github.com/synnaxlabs/foundation/pull/3581#issuecomment-6290213494). A
+     `Stream` with `Unstored`, which only `close` gives, raises `Stopped` with the code
+     of the end of the first group in the order of the index places (`Removed` gives
+     `unknown`, `Failed` gives `failed`, `Refused` gives `refused`), and a text that
+     names the index and the end of each group: "the writes of plant.time (unknown),
+     cell.time (failed) ended: a frame that the node took may not be on disk". Approved
+     in PR 3372 by `laptop.architect-2` at 2026-10-19T20:32:43Z
+     (https://github.com/synnaxlabs/foundation/pull/3372#issuecomment-6276693435), and
+     for many groups at 2026-10-20T13:37:38Z
+     (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6292172439).
+     Lost: a class or a code of its own for `Unstored`, since after both the caller does
+     the same: a frame that the node took may not be on disk. So the code alone does not
+     tell a refusal at `close` from the end of a group; the text does. A
      `Pool` error of the stream of a reader, after its open, raises `ConnectionError` in
      place of `ValueError` (item 2 of SDK PYTHON READER). Each other `Stream` or
      `Session` error raises `ConnectionError`.
@@ -82,14 +87,33 @@
      Lost: a second lock for the buffers, since a call then takes two
      locks; and a re-entrant lock, since an inner call then changes the buffers that
      the outer call fills.
-  5. `DataLost.seqs` is a `dict` from each channel name of the lost frame, the index
-     included, to the `range` of its lost seqs, the shape that the reader of PR 7b
-     gives. The text names each channel and its count.
-  6. `Stopped` and `Rejected` are two classes, as their code sets differ. A writer has
-     ended after `Stopped`, and each later call raises it again. It goes on after
-     `Rejected`, the refusal of one frame (`waiting`, `reserved`, `expired`, `order`,
-     `codec`, `full`, or `large`). Changed with item 1 (same links): `Stopped` was
-     `Refused`.
+  5. `DataLost.seqs` is a `dict` from each channel name of the lost groups of the
+     frame, the index included, to the `range` of its lost seqs, the shape that the
+     reader of PR 7b gives. The text names each channel and its count.
+  6. `Stopped` and `Rejected` are two classes, as their code sets differ. `Stopped`
+     from a call has two scopes, which its text names. When the node stopped the
+     stream, the writer has ended, and each later call raises it again. When the write
+     of a group ended (`sdk::Error::Partial`), only that group ended: each later frame
+     that holds it raises again, and the frames of the other groups go on, so a writer
+     of one index has ended. `PartialWrite`, a subclass of `Stopped`, is the end of a
+     group when the node took another group of the frame. The writer goes on after
+     `Rejected`, the refusal of the frame of one or more groups (`waiting`, `reserved`,
+     `expired`, `order`, `codec`, `full`, or `large`). When the node did not take each
+     group of a frame, a call raises for the first rule that holds: an end, then a
+     refusal, then a loss, which does what `on_loss` says. `PartialWrite` and
+     `Rejected` have `written` and `unwritten`, the channels of the frame, the index of
+     each group included, in the groups that the node took and did not take, in place
+     order. The text of each names each group that the node did not take, by its
+     index, with its cause: the end, the refusal, or the count of lost samples. So a
+     loss in a frame that raises for an end or a refusal is not silent. Changed with
+     item 1 (same links): `Stopped` was `Refused`. Changed for many indexes by
+     `laptop.architect-2` at 2026-10-20T13:37:38Z
+     (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6292172439).
+     Lost: a return of the outcome of each group with no raise, because an unchecked
+     return drops a refusal with no sign; an `ExceptionGroup` of the error of each
+     group, because `except Rejected` then misses it; `PartialWrite` as an `Exception`
+     of its own, because `except Stopped` then misses the end of a group; and
+     `PartialWrite` when no group was taken, because its name is then false.
   7. `write_series` copies each array into the kept buffer with the GIL held, because
      another Python thread can change an array while the GIL is free. Before the copy
      of each array, it raises `ValueError` when the bytes copied so far and the bytes
@@ -103,7 +127,10 @@
      Changed by `laptop.architect-2` at 2026-10-19T13:03:37Z
      (https://github.com/synnaxlabs/foundation/pull/3325#issuecomment-6267870899):
      before, `numpy.array` copied such an array first, and `numpy` lets other threads
-     run in that copy. Its cost is measured below, with the P1 judgment.
+     run in that copy. Its cost is measured below, with the P1 judgment. The checks of
+     one count for each group and of the stamps of each group or of none are those of
+     `sdk` (`program::Error::Count` and `Layout(IndexAbsent)`), which raise
+     `ValueError` with the places of the caller.
   The key choices of the plan went ahead with `laptop.monitor` at 2026-10-19T01:13:34Z
   (https://github.com/synnaxlabs/foundation/issues/3320#issuecomment-6257555546), with
   one condition: the `TypeError` of an array of another dtype names the place, the

@@ -144,12 +144,8 @@
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267752091) and
   on 2026-10-20T10:51:53Z
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6289228997): no
-  `sdk::Error::Count`. Until #3283 PR 4, `sdk-python` opens one index: an open of
-  channels of more than one index drops the `sdk` writer and raises `Stopped`, code
-  `malformed`, "channels of more than one index (plant.time, demo.time): open one
-  writer for each index", which names each index once, in place order
-  (`laptop.architect-2`, 2026-10-20T10:53:39Z,
-  https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6289256688). Lost:
+  `sdk::Error::Count`. `sdk-python` opens channels of any index (SDK PYTHON WRITER,
+  https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6292172439). Lost:
   one frame for each group, sent in turn, because one call is then no longer one frame
   and each group costs a round trip; `program::Place` re-exported as `sdk::Place`,
   because its `index` would be a place of the node (6267752091, item 1); and
