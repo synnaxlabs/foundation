@@ -1,7 +1,7 @@
 //! The cost of a stamp, on a sim node. Run with `cargo bench -p connector --bench
 //! stamp`.
 //!
-//! - `now`: one read of mesh time by `Writer::now`.
+//! - `now`: one read of mesh time by `hub::writer::Writer::now`.
 //! - `request`: `poll::Writer::request` of a request that is ready at once, so the
 //!   line is its two reads of mesh time and the rule of the stamp.
 //! - `before`: `Fit::before` of a fit that bounds the clock, one value later in device
@@ -58,7 +58,7 @@ fn main() {
             entropy: node.entropy(),
             tasks,
         };
-        let stamped = Arc::new(Mutex::new(Vec::new()));
+        let stamped = Arc::new(Mutex::new(None));
         let kind = Stamped(Arc::clone(&stamped));
         let rig = Rig::open(env, node.net(), Table::new().with("stamped", kind)).await;
         rig.define(definitions());
@@ -73,13 +73,8 @@ fn main() {
             .open_connector("stamped", connector, &config, &token)
             .await;
         opened.run().await.expect("the connector ends ok");
-        let [request, sample] = stamped
-            .lock()
-            .expect("no panic")
-            .drain(..)
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap_or_else(|_| panic!("the run times two lines"));
+        let lines = stamped.lock().expect("no panic").take();
+        let [request, sample] = lines.expect("the run times its lines");
         [now, request, before(), between(), old(), mesh(), sample]
     });
     print(&lines.expect("the run ends"));
@@ -112,8 +107,8 @@ fn definitions() -> Vec<(Name, Definition)> {
 }
 
 /// A kind that opens a [`Writer`] of [`value`], and puts its lines `request` and
-/// `sample` in the list that it holds.
-struct Stamped(Arc<Mutex<Vec<Line>>>);
+/// `sample` in the place that it holds.
+struct Stamped(Arc<Mutex<Option<[Line; 2]>>>);
 
 impl Kind for Stamped {
     type Config = ();
@@ -127,7 +122,7 @@ impl Kind for Stamped {
         Ok(Channels {
             writes: vec![value()],
             counts: connector::poll::COUNTS
-                .map(|count| count.parse().expect("a name"))
+                .map(|count| count.parse().expect("a valid name"))
                 .to_vec(),
             ..Channels::default()
         })
@@ -135,10 +130,9 @@ impl Kind for Stamped {
 
     async fn run(&self, ctx: kind::Context<()>) -> Result<(), Error> {
         let writer = Writer::open(&ctx, vec![value()]).await?;
-        let mut writer = writer.expect("no cancel");
-        let request = request(&mut writer);
-        let sample = sample(&mut writer);
-        self.0.lock().expect("no panic").extend([request, sample]);
+        let mut writer = writer.expect("a live token");
+        let lines = [request(&mut writer), sample(&mut writer)];
+        *self.0.lock().expect("no panic") = Some(lines);
         Ok(())
     }
 }

@@ -162,11 +162,7 @@ impl Writer {
         (output, self.stamps.next(midpoint(sent, answered)))
     }
 
-    /// Gives `stamp`, or the nanosecond after the last stamp when that is later.
-    ///
-    /// # Panics
-    ///
-    /// When the last stamp is `i64::MAX` ns.
+    /// As [`Stamps::next`].
     pub(crate) fn next(&mut self, stamp: Stamp) -> Stamp {
         self.stamps.next(stamp)
     }
