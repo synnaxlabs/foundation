@@ -17,6 +17,7 @@ import time
 import typing
 import unittest
 import warnings
+from unittest import mock
 
 import foundation
 from test_stubs import assert_stated, called
@@ -29,14 +30,21 @@ ADMIN = "@admin"
 # The encoding of the base point of Ed25519: a public key that is not of small order.
 BASE = bytes([0x58]) + bytes([0x66] * 31)
 WRONG = bytes(31) + b"\x01"
-# The watcher of a node, `sh -c WATCH <pid> <directory>`. Its stdin ends when the test
-# process and its forked children end.
+# The watcher of a node, `sh -c WATCH <pid> <directory> <loops>`. Its stdin ends when
+# the test process and its forked children end. It sends SIGKILL after <loops> waits of
+# 0.1 s.
 WATCH = """
 cat >/dev/null
 kill -CONT "$0"; kill -TERM "$0"
-while kill -0 "$0" 2>/dev/null; do sleep 0.1; done
+i=0
+while kill -0 "$0" 2>/dev/null; do
+  i=$((i + 1))
+  if [ "$i" -ge "$2" ]; then kill -KILL "$0"; fi
+  sleep 0.1
+done
 rm -rf "$1"
 """
+LOOPS = str(int(PATIENCE * 10))
 FORKED = (
     "a connect in a forked child traps on macOS (#3370): connect in the test process"
 )
@@ -127,7 +135,11 @@ class Node:
 
     def __init__(self) -> None:
         self.start()
-        self.address = self.first().address
+        try:
+            self.address = self.first().address
+        except BaseException:
+            self.stop()
+            raise
 
     def start(self) -> None:
         """Makes the directory, starts the node and its watcher, and waits for the
@@ -145,7 +157,7 @@ class Node:
             stderr=subprocess.PIPE,
         )
         self.watcher = subprocess.Popen(
-            ["sh", "-c", WATCH, str(self.process.pid), self.dir.name],
+            ["sh", "-c", WATCH, str(self.process.pid), self.dir.name, LOOPS],
             stdin=subprocess.PIPE,
             start_new_session=True,
         )
@@ -154,6 +166,7 @@ class Node:
             self.process.wait(PATIENCE)
             self.watcher.kill()
             self.watcher.communicate()
+            self.dir.cleanup()
             raise AssertionError(
                 f"the node exited with {self.process.returncode}:\n"
                 + self.process.stderr.read().decode()
@@ -192,15 +205,15 @@ class Node:
         self.process.send_signal(signal.SIGCONT)
 
     def stop(self) -> None:
-        """Stops the watcher, then the node with SIGTERM, waits until the node exits,
-        and removes the directory."""
-        self.watcher.kill()
-        self.watcher.communicate()
+        """Stops the node with SIGTERM, waits until it exits, removes the directory,
+        and then stops the watcher."""
         if self.process.poll() is None:
             self.process.send_signal(signal.SIGCONT)
             self.process.send_signal(signal.SIGTERM)
         self.process.communicate(timeout=PATIENCE)
         self.dir.cleanup()
+        self.watcher.kill()
+        self.watcher.communicate()
 
 
 class ClientTest(unittest.TestCase):
@@ -485,6 +498,7 @@ class NodeTest(unittest.TestCase):
         def started() -> None:
             node = Node.__new__(Node)
             node.start()
+            node.pause()
             os.write(write, f"{node.process.pid} {node.dir.name}\n".encode())
             time.sleep(PATIENCE)
 
@@ -504,6 +518,54 @@ class NodeTest(unittest.TestCase):
                 shutil.rmtree(directory, ignore_errors=True)
                 self.fail(f"the node {pid} or its directory {directory} is left")
             time.sleep(0.01)
+
+    def test_a_node_stops_and_its_directory_goes_when_its_first_connect_raises(
+        self,
+    ) -> None:
+        node = Node.__new__(Node)
+        broken = mock.patch.object(
+            foundation, "connect", side_effect=ConnectionError("broken")
+        )
+        with broken, self.assertRaises(ConnectionError) as raised:
+            node.__init__()
+        self.assertEqual(str(raised.exception), "broken")
+        self.assertIsNotNone(node.process.returncode)
+        self.assertFalse(os.path.exists(node.dir.name))
+        self.assertEqual(node.watcher.returncode, -signal.SIGKILL)
+
+    def test_a_node_that_exits_at_its_start_leaves_no_watcher_and_no_directory(
+        self,
+    ) -> None:
+        node = Node.__new__(Node)
+        with mock.patch.dict(os.environ, {"FOUNDATION_NODE": shutil.which("false")}):
+            with self.assertRaises(AssertionError) as raised:
+                node.start()
+        self.assertEqual(str(raised.exception), "the node exited with 1:\n")
+        self.assertEqual(node.watcher.returncode, -signal.SIGKILL)
+        self.assertFalse(os.path.exists(node.dir.name))
+
+    def test_a_watcher_kills_a_node_that_ignores_sigterm(self) -> None:
+        directory = tempfile.mkdtemp(prefix="foundation-python-")
+        deaf = subprocess.Popen(
+            ["sh", "-c", 'trap "" TERM; echo; while :; do sleep 0.1; done'],
+            stdout=subprocess.PIPE,
+        )
+        watcher = subprocess.Popen(
+            ["sh", "-c", WATCH, str(deaf.pid), directory, "10"],
+            stdin=subprocess.PIPE,
+        )
+        try:
+            deaf.stdout.readline()
+            watcher.stdin.close()
+            self.assertEqual(deaf.wait(PATIENCE), -signal.SIGKILL)
+            self.assertEqual(watcher.wait(PATIENCE), 0)
+        finally:
+            deaf.kill()
+            deaf.wait()
+            deaf.stdout.close()
+            watcher.kill()
+            watcher.wait()
+        self.assertFalse(os.path.exists(directory))
 
 
 class ArgumentTest(unittest.TestCase):
