@@ -250,9 +250,9 @@ state on `main`.
   votes with different last positions. Neither holds data. A sender stops its group
   only when a majority of the other voters of the incoming half of its own configuration
   give that answer inside two election timeouts. That configuration can be smaller than
-  the one in force, so a minority of the voters in force that lags or lies can still
-  stop a node that missed its removal and a later add of itself (#1105, #1822, #3355).
-  `node` serves mesh streams when it has a region (NODE MESH). A voter that lies can
+  the one in force, so a minority of the voters in force that lies can still stop a
+  node that missed its removal and a later add of itself (#1105, #1822, #3355). `node`
+  serves mesh streams when it has a region (NODE MESH). A voter that lies can
   still break safety, because a false `AppendReply` counts as held, so `raft` trusts its
   voters (RAFT SURFACE, #352 item 2). A join that a voter that lies writes gives its
   node the key it names (MESH DRIVER). A signed `AppendReply` is #882.

@@ -115,11 +115,14 @@
   the incoming half of the newest configuration in its log, itself not counted. An
   answer counts for `2 × election_ticks` ticks, so an answer given before a committed
   add drops. Answers given just before a committed add count for one window after it.
-  The rule is not conclusive. A node that missed its removal and a later add of itself
-  stops when a majority of the other voters of the incoming half of the newest
-  configuration in its log answer `removed` while they also lack the add. That half can
-  be smaller than the configuration that adds the node back: when it holds one other
-  voter, that voter alone stops the node. The node then needs a join again. The leave
+  The rule is not conclusive for a node that is not a member. Such a node that missed
+  its removal and a later add of itself stops when a majority of the other voters of the
+  incoming half of the newest configuration in its log answer `removed` while they also
+  lack the add. That half can be smaller than the configuration that adds the node back:
+  when it holds one other voter, that voter alone stops the node. The node then needs a
+  join again. A member that missed its removal is a learner and gets `NotVoter`
+  (`laptop.architect`, 2026-10-20T02:17:41Z:
+  https://github.com/synnaxlabs/foundation/pull/3411#issuecomment-6281787838). The leave
   design (#3355) decides a conclusive rule. A removed node with entries past the commit
   of a voter, at a term at or above the term at that commit, gets `NotVoter` from it
   until the voter commits past its last index. The voter cannot tell such a tail from a
