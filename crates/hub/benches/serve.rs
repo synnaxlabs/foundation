@@ -30,6 +30,10 @@
 //!
 //! As for the `reader` bench, judge a change by `net`, and compare two builds on one
 //! pinned core whose SMT sibling is idle.
+//!
+//! `-- --line <prefix> --rounds <n>` runs only the lines whose name starts with
+//! `prefix`, in which `_` stands for a space, and the timer, with `n` rounds in place
+//! of 50. A profile collects the timed poll of each line by name: `serve::timed`.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -46,6 +50,7 @@ mod net;
 mod node;
 #[path = "../tests/common/peer.rs"]
 mod peer;
+mod run;
 #[path = "../tests/common/serving.rs"]
 mod serving;
 #[expect(dead_code, reason = "the bench uses only some of the helpers")]
@@ -54,16 +59,17 @@ mod sessions;
 mod table;
 
 use std::ops::RangeInclusive;
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use agent::Agent;
+use agent::{AGENT, Agent};
 use common::name;
 use env::tasks::Tasks;
 use fixture::{channel_name, create_hub};
 use hub::writer::{self, Writer};
-use hub::{Hub, Link, Served};
+use hub::{Hub, Link, Served, serve};
+use run::Run;
 use table::Line;
 use transport::stream::Receiver;
 use transport::{Address, Transport};
@@ -79,9 +85,11 @@ static ALLOCATOR: counting::Allocator = counting::Allocator::new();
 /// Frames per round.
 const FRAMES: usize = 64;
 const WARMUP: usize = 10;
+/// Rounds per line, unless `--rounds` gives another count.
 const ROUNDS: usize = 50;
-/// The frames of each session.
-const RUN: usize = (WARMUP + ROUNDS) * FRAMES;
+/// Rounds between two renewals of the program's session, well inside the life of a
+/// hello in mesh time.
+const RENEW: usize = 1000;
 /// Samples per series of a `wide` frame.
 const SAMPLES: usize = 256;
 /// How long the bench waits between two checks of what the peer read.
@@ -282,6 +290,8 @@ struct Progress {
 }
 
 fn main() {
+    let run = Arc::new(Run::new(ROUNDS));
+    let rounds = run.rounds;
     let mut sim = sim::Sim::new(sim::Config::default());
     let home = sim.node(sim::node::Config::default());
     let progress = Arc::new(Progress::default());
@@ -289,6 +299,7 @@ fn main() {
     for (turn, (end, _)) in PEERS.into_iter().enumerate() {
         let node = sim.node(sim::node::Config::default());
         let progress = Arc::clone(&progress);
+        let run = Arc::clone(&run);
         let config = env::shards::Config {
             name: "peer".into(),
             core: None,
@@ -299,37 +310,48 @@ fn main() {
                 own.clock().sleep(STEP).await;
             }
             match end {
+                _ if !dials(&run, turn) => {}
                 End::Wire(message) => {
-                    peer(&own, &tasks, message, at, turn, &progress).await;
+                    peer(&own, &tasks, message, at, turn, &progress, &run).await;
                 }
-                End::Client => program(&own, tasks, at, turn, &progress).await,
+                End::Client => {
+                    program(&own, tasks, at, turn, &progress, &run).await;
+                }
             }
             progress.turn.fetch_add(1, Ordering::Relaxed);
         };
         drop(node.shards().start(config, main).expect("starts"));
     }
     let (timer, lines) = sim
-        .run_on(&home, move |node, tasks| bench(node, tasks, progress))
+        .run_on(&home, move |node, tasks| bench(node, tasks, progress, run))
         .expect("the run ends");
-    let title = format!("ns per frame over {ROUNDS} rounds of {FRAMES} frames");
+    let title = format!("ns per frame over {rounds} rounds of {FRAMES} frames");
     table::print(&title, &timer, &lines);
 }
 
-/// The home: serves each session of each peer in turn, and gives the `timer` line and
-/// a line for each session.
+/// Whether the peer of `turn` has a line of `run`, so that it dials.
+fn dials(run: &Run, turn: usize) -> bool {
+    PEERS[turn].1.iter().any(|case| run.runs(case.name))
+}
+
+/// The home: serves each session of `run` of each peer in turn, and gives the `timer`
+/// line and a line for each session.
 async fn bench(
     node: sim::node::Node,
     tasks: Tasks,
     progress: Arc<Progress>,
+    run: Arc<Run>,
 ) -> (Line, Vec<Line>) {
     let transport = net::transport(&node, &tasks, &net::own_pool(), net::HOME, 1 << 16);
     let (hub, mut stamp) = create_hub(&node, tasks.clone(), indexes()).await;
     hub.set_rules(sessions::rules());
     let mut timer = Line::new("timer", FRAMES);
     let mut lines = Vec::new();
-    for (turn, (end, cases)) in PEERS.into_iter().enumerate() {
+    let peers = PEERS.into_iter().enumerate();
+    for (turn, (end, cases)) in peers.filter(|&(turn, _)| dials(&run, turn)) {
         let (session, remote) = accept(&transport, &hub, &tasks, end).await;
-        for (at, case) in cases.iter().enumerate() {
+        let cases = cases.iter().enumerate();
+        for (at, case) in cases.filter(|(_, case)| run.runs(case.name)) {
             let mut serving = pin!(remote.serve(net::stream(&session).await));
             let mut line = Line::new(case.name, FRAMES);
             let configs = configs(base(turn, at), case.shape);
@@ -339,7 +361,7 @@ async fn bench(
                 serving::poll(serving.as_mut());
                 node.clock().sleep(STEP).await;
             }
-            for round in 0..WARMUP + ROUNDS {
+            for round in 0..WARMUP + run.rounds {
                 let frames = progress.frames.load(Ordering::Relaxed) + FRAMES;
                 match case.mode {
                     Mode::Latest => {
@@ -354,10 +376,7 @@ async fn bench(
                             common::write(&mut writer, frame);
                             timer.add(table::timed(&ALLOCATOR, || ()).1);
                             line.add(
-                                table::timed(&ALLOCATOR, || {
-                                    serving::poll(serving.as_mut());
-                                })
-                                .1,
+                                table::timed(&ALLOCATOR, || timed(serving.as_mut())).1,
                             );
                         }
                     }
@@ -370,10 +389,7 @@ async fn bench(
                         }
                         node.clock().sleep(common::SETTLE).await;
                         line.add(
-                            table::timed(&ALLOCATOR, || {
-                                serving::poll(serving.as_mut());
-                            })
-                            .1,
+                            table::timed(&ALLOCATOR, || timed(serving.as_mut())).1,
                         );
                     }
                 }
@@ -388,6 +404,12 @@ async fn bench(
         drop(session.closed().await);
     }
     (timer, lines)
+}
+
+/// One poll of `serving`, the timed work of a line.
+#[inline(never)]
+fn timed(serving: Pin<&mut impl Future<Output = Result<Served, serve::Error>>>) {
+    serving::poll(serving);
 }
 
 /// Accepts the session of the peer of `end`, and gives it and its link.
@@ -424,7 +446,7 @@ async fn read(node: &sim::node::Node, progress: &Progress, frames: usize) {
 }
 
 /// The HUB WIRE peer of `turn`: dials the home at `at`, and reads each of its
-/// sessions in turn as [`take`] does.
+/// sessions of `run` in turn as [`take`] does.
 async fn peer(
     node: &sim::node::Node,
     tasks: &Tasks,
@@ -432,6 +454,7 @@ async fn peer(
     at: Address,
     turn: usize,
     progress: &Progress,
+    run: &Run,
 ) {
     let pool = net::own_pool();
     let transport: Transport = net::transport(node, tasks, &pool, net::PEER, message);
@@ -439,12 +462,14 @@ async fn peer(
         .dial(net::public_key(&net::HOME), &[at])
         .await
         .expect("dials");
-    for (line, case) in PEERS[turn].1.iter().enumerate() {
+    let cases = PEERS[turn].1.iter().enumerate();
+    for (line, case) in cases.filter(|(_, case)| run.runs(case.name)) {
         let keys = case.shape.read(base(turn, line));
-        let (mut sender, mut receiver, reader) =
+        let (mut sender, mut receiver, mut reader) =
             peer::open(&pool, &session, case.mode, &keys).await;
         progress.opened.fetch_add(1, Ordering::Relaxed);
-        take(&mut receiver, reader, case, progress).await;
+        let rounds = WARMUP + run.rounds;
+        take(&mut receiver, &mut reader, case, rounds, progress).await;
         sender.finish().expect("finishes");
         let finished = receiver.recv().await;
         assert!(
@@ -457,17 +482,20 @@ async fn peer(
 }
 
 /// The program of `turn`: dials the home at `at`, admits a hello, and reads each of
-/// its reads in turn as [`take`] does.
+/// its reads of `run` in turn as [`take`] does.
 async fn program(
     node: &sim::node::Node,
     tasks: Tasks,
     at: Address,
     turn: usize,
     progress: &Progress,
+    run: &Run,
 ) {
     let mut agent = Agent::dial(node, tasks, at, name(agent::SUBJECT)).await;
-    agent.admit().await;
-    for (line, case) in PEERS[turn].1.iter().enumerate() {
+    let mut challenge = agent.admit().await;
+    let mut round = 0;
+    let cases = PEERS[turn].1.iter().enumerate();
+    for (line, case) in cases.filter(|(_, case)| run.runs(case.name)) {
         let mode = match case.mode {
             Mode::Latest => client::Mode::Latest,
             Mode::Complete { .. } => client::Mode::Complete,
@@ -480,9 +508,16 @@ async fn program(
             .collect();
         let select: Vec<_> = names.iter().map(String::as_str).collect();
         let mut stream = agent.read(mode, &select).await;
-        let (_, _, reader) = stream.opened().await;
+        let (_, _, mut reader) = stream.opened().await;
         progress.opened.fetch_add(1, Ordering::Relaxed);
-        take(&mut stream.receiver, reader, case, progress).await;
+        for _ in 0..WARMUP + run.rounds {
+            take(&mut stream.receiver, &mut reader, case, 1, progress).await;
+            round += 1;
+            if round % RENEW == 0 {
+                agent.send_hello(Agent::hello(challenge), &AGENT).await;
+                challenge = agent.hello.challenge().await;
+            }
+        }
         stream.sender.finish().expect("finishes");
         let finished = stream.recv().await;
         assert!(
@@ -494,20 +529,21 @@ async fn program(
     node.clock().sleep(STEP).await;
 }
 
-/// Reads `RUN` frames of `case` from `receiver` with `reader`, and counts each in
-/// `progress`.
+/// Reads the frames of `rounds` rounds of `case` from `receiver` with `reader`, and
+/// counts each in `progress`.
 ///
 /// # Panics
 ///
 /// When a frame does not take the messages of `case`.
 async fn take(
     receiver: &mut Receiver,
-    mut reader: wire::hub::Reader,
+    reader: &mut wire::hub::Reader,
     case: &Case,
+    rounds: usize,
     progress: &Progress,
 ) {
-    for _ in 0..RUN {
-        let messages = peer::frame(receiver, &mut reader).await;
+    for _ in 0..rounds * FRAMES {
+        let messages = peer::frame(receiver, reader).await;
         assert_eq!(
             messages, case.messages,
             "the messages of a frame of {}",

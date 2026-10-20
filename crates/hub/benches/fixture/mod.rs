@@ -18,9 +18,10 @@ use types::time::{Span, Stamp};
 
 use crate::common::name;
 
-/// A ring that holds each frame of the run, as nothing frees a ring until #160: 64
-/// times the ring of `home::testing::shard`.
-const AREA: u64 = 1 << 28;
+/// A ring that holds each frame of a run of 2000 rounds of one line, as nothing frees
+/// a ring until #160: 256 times the ring of `home::testing::shard`. The sim disk keeps
+/// only the bytes written.
+const AREA: u64 = 1 << 30;
 /// A pool of 4 times the budget of `home::testing::shard`. A size class keeps its
 /// range while one of its blocks is in use, so the lines of a bench before its widest
 /// can hold most of 8 MiB, which then has no room for a frame of the widest in some
