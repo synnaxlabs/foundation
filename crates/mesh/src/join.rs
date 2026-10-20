@@ -309,7 +309,9 @@ impl fmt::Display for Miss {
         match self {
             Self::Stream(error) => write!(f, "the stream failed: {error}"),
             Self::Deadline => f.write_str("no answer came within 10 s"),
-            Self::Slow => f.write_str("the founding came under 100 KiB/s or with a gap over 10 s"),
+            Self::Slow => f.write_str(
+                "the founding came under 100 KiB/s or with a gap over 10 s",
+            ),
             Self::Malformed => f.write_str("the answer is not one of a join stream"),
             Self::Uncommitted => f.write_str("no leader committed the join"),
             Self::Unsynced => f.write_str("the voter has no mesh time to stamp a join"),
