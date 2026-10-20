@@ -238,15 +238,15 @@ impl Homed {
         if channels.is_empty() {
             return Err(Error::Empty);
         }
-        // A lease of no length and an unknown name fail before the wait for mesh time,
+        // An unknown name and a lease of no length fail before the wait for mesh time,
         // so a write that its home would refuse does not go to the home.
+        resolve(&mut state.borrow_mut(), &channels)?;
         if let Some(span) = lease
             && let Err(error) = control::lease::Lease::new(span)
         {
             let span = error.span;
             return Err(Error::Home(home::writer::Error::Lease { span }));
         }
-        resolve(&mut state.borrow_mut(), &channels)?;
         crate::time::known(state).await;
         let (keys, groups) = loop {
             let (keys, groups) = resolve(&mut state.borrow_mut(), &channels)?;
