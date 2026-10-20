@@ -196,8 +196,8 @@
   syncs the directory, as for the file `founding`. So a crash leaves the old request,
   the new one, or none, and `Error::JoinFile` names only a file that changed on disk.
   A crash before the rename can lose an old request, but `ask` writes over a request
-  only when its ticket or key is not that of the call, or a round ends with a refusal
-  of it and with no voter that admits it.
+  only when its ticket or key is not that of the call, or a round ends with a refusal of
+  it and no voter has answered in the call that the join applied.
   `config.founding.members` can lack this node when `config.dir` holds the join file of
   this node: the node opens with no member record of its own, and only its log can make
   it a voter. Its member record comes when it applies its join (`laptop.architect`,
@@ -206,10 +206,10 @@
   surface and its condition 1: 2026-10-20T09:51:13Z,
   https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6288239430).
   Amended (2026-10-20, round 1 of PR 5e of #336): when a round ends with a voter that
-  refuses the stored request, and no voter admitted it in the call, `ask` writes the
-  request of its card and status over it, at most once in a call and durable before the
-  first send, and asks the next round with it, at once. That round is one of the 8, so
-  `bound` holds. This supersedes item 3 of
+  refuses the stored request, and no voter has answered in the call that the join
+  applied, `ask` writes the request of its card and status over it, at most once in a
+  call and durable before the first send, and asks the next round with it, at once. That
+  round is one of the 8, so `bound` holds. This supersedes item 3 of
   https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6286140973 for that
   case, because a node that can never join by its ticket is the worse failure. A voter
   that applied the join admits only the stored request, so the case left is a call in
@@ -218,7 +218,11 @@
   https://github.com/synnaxlabs/foundation/pull/3571#issuecomment-6290352039; each
   refusal counts, in place of "for its card, its ticket, or its status" of its item 3,
   until #3588: 2026-10-20T12:37:53Z,
-  https://github.com/synnaxlabs/foundation/pull/3571#issuecomment-6291013253). An `ask`
+  https://github.com/synnaxlabs/foundation/pull/3571#issuecomment-6291013253; the call
+  in place of the round: 2026-10-20T13:07:15Z,
+  https://github.com/synnaxlabs/foundation/pull/3571#issuecomment-6291563764, in the
+  words of 2026-10-20T13:13:16Z,
+  https://github.com/synnaxlabs/foundation/pull/3571#issuecomment-6291683276). An `ask`
   in a mesh directory that holds a founding file gives `Error::Founded`, before it makes
   the directory or reads `join`: the file stays for the life of the directory, and each
   open of a founding that lacks this node reads it. Lost: `ask` gives the stored

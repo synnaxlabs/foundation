@@ -77,6 +77,7 @@ pub fn bound(ticket: &Ticket) -> Span {
 /// at most 10 s + its bytes / (100 KiB/s), which is 665.36 s for the largest. A voter
 /// admits a join once this node's `Join` has applied there, so a repeat of the same
 /// request is admitted again.
+///
 /// Before its first ask, `ask` makes `config.dir` and keeps the request in the file
 /// `join` in it, durable. The file holds the card and the ticket's admission, a
 /// signature over this card only, and never the private key of the ticket. When the
@@ -85,10 +86,10 @@ pub fn bound(ticket: &Ticket) -> Span {
 /// or `config.status`. Else it writes the new request over it. So a node that stops
 /// after a voter applied its join, and before the answer came, is admitted at the next
 /// call. When a round ends with a voter that refuses the stored request, and no voter
-/// admitted it in this call, `ask` writes the request of `config.card` and
-/// `config.status` over it and asks the next round with that, at once. The file stays
-/// for the life of `config.dir`: each [`Mesh::open`](crate::Mesh::open) of a founding
-/// that lacks this node reads it.
+/// has answered in this call that this node's join applied, `ask` writes the request
+/// of `config.card` and `config.status` over it and asks the next round with that, at
+/// once. The file stays for the life of `config.dir`: each
+/// [`Mesh::open`](crate::Mesh::open) of a founding that lacks this node reads it.
 ///
 /// # Errors
 ///
