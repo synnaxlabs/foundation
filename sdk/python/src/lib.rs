@@ -84,15 +84,15 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
 /// Dials the node at `address` (`ip:port`, UDP), and blocks until it admits the first
 /// hello of `subject`. The client then renews the hello until it closes.
 ///
-/// `node` is the `uuid.UUID` key of the node, `public_key` the 32 bytes of the key
-/// that the node proves, and `private_key` the 32 bytes of a key that the spec lists
-/// for `subject`. Each of `address`, the pair (`node`, `public_key`), and the pair
-/// (`subject`, `private_key`) comes from the arguments, else from the node that runs on
-/// the data directory `data`: that node gives its address and keys, and its first admin
-/// gives the subject. `data` is a `str` or an `os.PathLike`, the `--data` of
-/// `foundation start`, by default `foundation-data`. With an `address`, the data
-/// directory counts only when its node is at that address: `127.0.0.1:p` matches a node
-/// bound on `0.0.0.0:p`. Other Python threads run while it waits.
+/// `public_key` is the 32 bytes of the key that the node proves, and `private_key` the
+/// 32 bytes of a key that the spec lists for `subject`. Each of `address`,
+/// `public_key`, and the pair (`subject`, `private_key`) comes from the arguments, else
+/// from the node that runs on the data directory `data`: that node gives its address
+/// and public key, and its first admin gives the subject. `data` is a `str` or an
+/// `os.PathLike`, the `--data` of `foundation start`, by default `foundation-data`.
+/// With an `address`, the data directory counts only when its node is at that
+/// address: `127.0.0.1:p` matches a node bound on `0.0.0.0:p`. Other Python threads
+/// run while it waits.
 ///
 /// Raises `TypeError` for an argument of a wrong type, `ValueError` for an argument
 /// that does not parse or a pair given in half, `RuntimeError` when a thread of the
@@ -104,44 +104,39 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
 /// panicked.
 #[pyfunction]
 #[pyo3(signature = (
-    address=None, *, node=None, public_key=None, subject=None, private_key=None,
-    data=None,
+    address=None, *, public_key=None, subject=None, private_key=None, data=None,
 ))]
 fn connect(
     py: Python<'_>,
     address: Option<&str>,
-    node: Option<&Bound<'_, PyAny>>,
     public_key: Option<&[u8]>,
     subject: Option<&str>,
     private_key: Option<&[u8]>,
     data: Option<PathBuf>,
 ) -> PyResult<Client> {
-    let keys = pair(["node", "public_key"], node, public_key)?;
     let subject = pair(["subject", "private_key"], subject, private_key)?;
     let address = address.map(parse_address).transpose()?;
     let data = data.map(parse_data).transpose()?;
-    let keys = keys.map(|(node, public_key)| node_keys(node, public_key));
+    let public_key = public_key.map(parse_public_key).transpose()?;
     let subject = subject.map(|(name, key)| parse_subject(name, key));
     let given = Given {
         address,
-        keys: keys.transpose()?,
+        public_key,
         subject: subject.transpose()?,
     };
-    let (address, node, subject) = match given {
+    let (address, public_key, subject) = match given {
         Given {
             address: Some(address),
-            keys: Some((key, public_key)),
+            public_key: Some(public_key),
             subject: Some(subject),
-        } => (address, (key, public_key), subject),
+        } => (address, public_key, subject),
         given => {
             let data = data.unwrap_or_else(|| PathBuf::from("foundation-data"));
             given.sourced(&data, local(py, &data)?)?
         }
     };
-    let (key, public_key) = node;
     let node = sdk::Node {
         addresses: vec![address],
-        key,
         public_key,
     };
     let client = py
@@ -154,24 +149,21 @@ fn connect(
     })
 }
 
-/// The key and the public key of a node.
-type Keys = (types::node::Key, PublicKey);
-
 /// What the arguments of [`connect`] give.
 struct Given {
     address: Option<SocketAddr>,
-    keys: Option<Keys>,
+    public_key: Option<PublicKey>,
     subject: Option<sdk::Subject>,
 }
 
 impl Given {
-    /// The address, the node's keys, and the subject, each from the arguments, else
-    /// from `local`, the node that runs on the data directory `data`, if any.
+    /// The address, the node's public key, and the subject, each from the arguments,
+    /// else from `local`, the node that runs on the data directory `data`, if any.
     fn sourced(
         self,
         data: &Path,
         local: Option<(sdk::Node, Option<sdk::Subject>)>,
-    ) -> PyResult<(SocketAddr, Keys, sdk::Subject)> {
+    ) -> PyResult<(SocketAddr, PublicKey, sdk::Subject)> {
         let (local, other) = match local {
             Some((node, _))
                 if self
@@ -207,12 +199,10 @@ impl Given {
             })
         };
         let (node, admin) = local.unzip();
-        let keys = self
-            .keys
-            .or_else(|| node.map(|node| (node.key, node.public_key)))
-            .ok_or_else(|| {
-                unsourced("the keys of the node", "node= and public_key=")
-            })?;
+        let public_key = self
+            .public_key
+            .or_else(|| node.map(|node| node.public_key))
+            .ok_or_else(|| unsourced("the public key of the node", "public_key="))?;
         let subject = match (self.subject, admin) {
             (Some(subject), _) | (None, Some(Some(subject))) => subject,
             (None, Some(None)) => {
@@ -228,7 +218,7 @@ impl Given {
                 ));
             }
         };
-        Ok((address, keys, subject))
+        Ok((address, public_key, subject))
     }
 }
 
@@ -294,11 +284,10 @@ fn parse_data(data: PathBuf) -> PyResult<PathBuf> {
     Ok(data)
 }
 
-/// The node's keys of the arguments `node` and `public_key`.
-fn node_keys(node: &Bound<'_, PyAny>, public_key: &[u8]) -> PyResult<Keys> {
-    let public_key = PublicKey::new(bytes("public_key", public_key)?)
-        .map_err(|e| PyValueError::new_err(format!("public_key: {e}")))?;
-    Ok((key(node)?, public_key))
+/// The node's public key of the argument `public_key`.
+fn parse_public_key(public_key: &[u8]) -> PyResult<PublicKey> {
+    PublicKey::new(bytes("public_key", public_key)?)
+        .map_err(|e| PyValueError::new_err(format!("public_key: {e}")))
 }
 
 /// The subject of the arguments `subject` and `private_key`.
@@ -560,18 +549,6 @@ impl Drop for Client {
     }
 }
 
-/// The node key of the `uuid.UUID` `node`.
-fn key(node: &Bound<'_, PyAny>) -> PyResult<types::node::Key> {
-    let uuid = node.py().import("uuid")?.getattr("UUID")?;
-    if !node.is_instance(&uuid)? {
-        let kind = node.get_type().name()?;
-        return Err(PyTypeError::new_err(format!(
-            "node is {kind}, not uuid.UUID"
-        )));
-    }
-    Ok(types::node::Key::from_u128(node.getattr("int")?.extract()?))
-}
-
 /// The 32 bytes of the argument `name`.
 fn bytes(name: &str, value: &[u8]) -> PyResult<[u8; 32]> {
     value.try_into().map_err(|_short| {
@@ -592,6 +569,10 @@ fn exception(py: Python<'_>, error: &sdk::Error, text: String) -> PyErr {
         }
         sdk::Error::Stream(program::Error::Refused(refusal)) => {
             coded(py, Stopped::new_err(text), *refusal)
+        }
+        sdk::Error::Stream(program::Error::Unstored(groups)) => {
+            let (_, end) = groups.first().expect("invariant: Unstored names a group");
+            coded(py, Stopped::new_err(text), stop(*end))
         }
         sdk::Error::Stream(
             program::Error::Layout(_)
@@ -625,6 +606,14 @@ fn coded(py: Python<'_>, error: PyErr, refusal: program::Refusal) -> PyErr {
     match error.value(py).setattr("code", code(refusal)) {
         Ok(()) => error,
         Err(e) => e,
+    }
+}
+
+/// The refusal with which the node stops a stream for the cause of `end`.
+fn stop(end: program::write::End) -> program::Refusal {
+    match end {
+        program::write::End::Removed => program::Refusal::Unknown,
+        program::write::End::Failed => program::Refusal::Failed,
     }
 }
 

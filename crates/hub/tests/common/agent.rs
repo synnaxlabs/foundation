@@ -15,7 +15,7 @@ use wire::hub::client::{
 };
 use wire::hub::write::{Head, Reply, Time};
 
-use crate::net::{HOME, NODE, own_pool, public_key};
+use crate::net::{HOME, own_pool, public_key};
 
 pub(crate) const SUBJECT: &str = "ops.agent";
 /// Two more subjects that the spec lists with `AGENT`.
@@ -261,13 +261,13 @@ impl Agent {
         }
     }
 
-    /// A hello of [`SUBJECT`] through [`NODE`] that echoes `challenge` and lives
+    /// A hello of [`SUBJECT`] through [`HOME`] that echoes `challenge` and lives
     /// [`LIFE`] from the challenge's mesh time.
     pub(crate) fn hello(challenge: Challenge) -> Hello {
         Hello {
             subject: name(SUBJECT),
             key: public_key(&AGENT),
-            via: NODE,
+            via: public_key(&HOME),
             connection: CONNECTION,
             nonce: challenge.nonce,
             expires: challenge.now.latest + LIFE,

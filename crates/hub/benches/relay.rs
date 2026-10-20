@@ -330,7 +330,9 @@ async fn program(
                     Reply::Stored { .. } => {
                         progress.stored.fetch_add(1, Ordering::Relaxed);
                     }
-                    other @ Reply::Outcome { .. } => panic!("not taken: {other:?}"),
+                    other @ (Reply::Outcome { .. } | Reply::Ended { .. }) => {
+                        panic!("not taken: {other:?}")
+                    }
                 }
             }
             progress.frames.fetch_add(FRAMES, Ordering::Relaxed);
@@ -341,7 +343,9 @@ async fn program(
                 Reply::Stored { .. } => {
                     progress.stored.fetch_add(1, Ordering::Relaxed);
                 }
-                other @ Reply::Outcome { .. } => panic!("not stored: {other:?}"),
+                other @ (Reply::Outcome { .. } | Reply::Ended { .. }) => {
+                    panic!("not stored: {other:?}")
+                }
             }
         }
     }

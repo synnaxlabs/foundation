@@ -120,7 +120,14 @@ fn write_replies() {
             group: 1,
             outcome: Outcome::Ended(End::Failed),
         },
-        write::Reply::Stored { frames: 9 },
+        write::Reply::Stored {
+            group: 1,
+            frames: 9,
+        },
+        write::Reply::Ended {
+            group: 1,
+            end: End::Removed,
+        },
     ] {
         let mut out = vec![0; reply.encoded_len()];
         let ((), allocations) = ALLOCATOR.count(|| reply.encode(&mut out));

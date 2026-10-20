@@ -1052,23 +1052,36 @@
   when `d2i_X509` reads its first certificate, or else PEM certificates. The copy loads
   each certificate of each trust entry, and refuses an entry whose load stops before its
   end, and the constructor of the group gives that status (ruling A). PEM is read by the
-  loop of `PEM_bytes_read_bio` of aws-lc on a BIO of the full length, which takes
-  `CERTIFICATE`, `X509 CERTIFICATE`, and `TRUSTED CERTIFICATE` blocks and skips the text
-  outside them, then `d2i_X509` on the bytes of each block, not by the leaf loader of
-  the copy, which drops a block that does not start with the exact line `-----BEGIN
-  CERTIFICATE-----` (round 2 of review of #3271). `d2i_X509` is the one step of the DER
-  path (#3288 item 4, OK of `laptop.architect-2`,
+  loop of `PEM_read_bio` of aws-lc on a BIO of the full length, which reads each block
+  and skips the text outside them. The load takes the `CERTIFICATE`, `X509
+  CERTIFICATE`, and `TRUSTED CERTIFICATE` blocks with no header: the labels that aws-lc
+  reads as `TRUSTED CERTIFICATE`, which the copy states, as aws-lc does not export that
+  rule (`laptop.architect-2`, 2026-10-20 02:38 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3469#issuecomment-6282051598). Lost:
+  `PEM_bytes_read_bio`, which takes the labels in aws-lc, but gives 0 with no error
+  queued for a header such as `Proc-Type: 3`, so that block was `Damaged`. The load
+  reads the header through `PEM_get_EVP_CIPHER_INFO` and `PEM_do_header` of aws-lc with
+  a callback that refuses a password, so a block with a header gives `Invalid` (round 1
+  of review of #3469; `laptop.architect-2`, 2026-10-20 02:03 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3469#issuecomment-6281615454, and 02:38
+  UTC, above). aws-lc reads a header that starts with a NUL byte as none, so that block
+  loads, as in the loads of the policies (round 2 of review of #3469;
+  `laptop.architect-2`, 02:38 UTC, above). Then `d2i_X509` reads the bytes
+  of each block, not the leaf loader of the copy, which drops a block that does not
+  start with the exact line `-----BEGIN CERTIFICATE-----` (round 2 of review of
+  #3271). `d2i_X509` is the one step of the DER path (#3288 item 4, OK of
+  `laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6266776077). This
   supersedes item 1 of
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255744593. A DER
   entry with a byte after its last certificate, and DER then PEM in one entry, make the
   constructor of the group give `BadInternalError`; the client gives the refusals of the
-  PR 2b paragraph below. What aws-lc skips is dropped: text, as the comment of
+  PR 2b paragraph below. What the load skips is dropped: text, as the comment of
   `openSSLLoadEachCertificate` states, DER bytes after PEM, a damaged first DER
   certificate before a PEM block, and a block of another label. A block of any label
-  that aws-lc cannot read fails the load, such as an empty one or one whose `END` line
-  names another label. So the connect fails closed with an untrusted certificate
-  (`laptop.architect-2`, 2026-10-18 22:30 UTC,
+  that `PEM_read_bio` cannot read fails the load, such as an empty one or one whose
+  `END` line names another label. So the connect fails closed with an untrusted
+  certificate (`laptop.architect-2`, 2026-10-18 22:30 UTC,
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255959458; for the
   second, 2026-10-18 22:50 UTC,
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6256155598; and for
@@ -1118,7 +1131,7 @@
   supersedes the first item of
   https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6272707868 for such
   a line). Such an `END` line fails in aws-lc on each target as
-  `client::Refusal::Invalid`, unless it names the label of a block that such a `BEGIN`
+  `client::Refusal::Damaged`, unless it names the label of a block that such a `BEGIN`
   line starts; that block drops
   (https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6278296455;
   `laptop.architect-2`,
@@ -1190,8 +1203,9 @@
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6267044406). PR 2b
   of #2934 refuses the credentials before the dial with the cause as data:
   `client::Error::Refused` with a `client::Refusal`, which names the part that fails and
-  the number from 1 of a trust certificate that does not load. The copy gives the cause
-  through `UA_CertificateUtils_checkTrust` and `UA_CertificateUtils_checkTime`, and
+  the number from 1 of a trust certificate that does not load, or the count of the
+  certificates before a damaged PEM block. The copy gives the cause through
+  `UA_CertificateUtils_checkTrust` and `UA_CertificateUtils_checkTime`, and
   `shim_client_secure` is the one place that turns a cause into a kind. It checks the
   policies, the key pair, the window, the trust, then the URI: the config takes the URI
   that its check allocates, so no refusal comes after that allocation. A check refuses
@@ -1201,10 +1215,13 @@
   for out of memory and the cause (`BadCertificateInvalid` of the policies when
   `UA_OpenSSL_LoadCertificate` gives NULL, `BadInvalidArgument` of the policies when
   `i2d_X509` fails, the key pair check, the URI check when `X509_get_ext_d2i` gives
-  NULL, and the trust load when `d2i_X509` or `PEM_bytes_read_bio` fails, which gives
-  `Invalid`, or `Empty` at the first DER certificate, as the load does not read the
-  `ERR_R_MALLOC_FAILURE` of aws-lc, #3391), the refusal names the cause, and the time
-  check gives `Failed(BadCertificateInvalid)` when its load of the certificate fails
+  NULL, and the trust load when `d2i_X509` fails, which gives `Invalid`, or `Empty` at
+  the first DER certificate, or `PEM_read_bio` fails, which gives `Damaged` (the
+  split: `laptop.architect-2`, 2026-10-19 18:26 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3371#issuecomment-6274275532, item 1),
+  as the load does not read the `ERR_R_MALLOC_FAILURE` of aws-lc, #3483), the refusal
+  names the cause, and the time check gives `Failed(BadCertificateInvalid)` when its
+  load of the certificate fails
   (`laptop.monitor`, 2026-10-19 14:46 UTC,
   https://github.com/synnaxlabs/foundation/pull/3371#issuecomment-6270025607, item 2;
   `laptop.architect-2`, 2026-10-19 14:49 UTC,

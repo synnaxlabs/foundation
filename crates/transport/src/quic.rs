@@ -148,8 +148,8 @@ impl Endpoint {
         }
     }
 
-    /// Dials `remote` and expects it to prove `peer`. The dial ends in
-    /// [`Event::Connected`] or [`Event::Closed`] for the key.
+    /// Dials `remote` and expects it to prove `peer`, or any node key for `None`. The
+    /// dial ends in [`Event::Connected`] or [`Event::Closed`] for the key.
     ///
     /// # Panics
     ///
@@ -157,7 +157,7 @@ impl Endpoint {
     pub(crate) fn connect(
         &mut self,
         now: Monotonic,
-        peer: PublicKey,
+        peer: Option<PublicKey>,
         remote: SocketAddr,
     ) -> connection::Key {
         let now = self.instant(now);
@@ -941,7 +941,7 @@ mod tests {
     use types::time::Span;
 
     use super::*;
-    use crate::quic::pair::{self, Pair, Side};
+    use crate::quic::pair::{self, Foreign, Pair, Side};
     use crate::testing;
 
     /// The link delay each way in [`dial`].
@@ -1028,6 +1028,27 @@ mod tests {
         }
 
         #[test]
+        fn to_any_key_with_a_certificate_that_the_verifier_refuses_is_broken() {
+            testing::run(1, |shard| {
+                let (thief, victim) = (PrivateKey([2; 32]), PrivateKey([3; 32]));
+                let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                let tls = crate::tls::borrowing(&victim, &thief);
+                pair.foreign = Some(Foreign::proving(shard, tls));
+                let key = pair
+                    .client
+                    .endpoint
+                    .connect(pair.now(), None, pair::FOREIGN);
+                pair.client.key = Some(key);
+                pair.run(Duration::from_secs(1));
+                let reason = "the cryptographic handshake failed: error 51: invalid \
+                              peer certificate: BadSignature";
+                let reason = reason.to_owned();
+                let error = Error::Broken { reason };
+                assert_eq!(events(&pair.client), [&closed(&pair.client, error)]);
+            });
+        }
+
+        #[test]
         #[should_panic(
             expected = "a dial fails only on its address: invalid remote address: \
                         127.0.0.1:0"
@@ -1041,7 +1062,7 @@ mod tests {
                     NonZeroUsize::MIN,
                 );
                 let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-                endpoint.connect(Monotonic(0), server(), remote);
+                endpoint.connect(Monotonic(0), Some(server()), remote);
             });
         }
     }
@@ -1168,11 +1189,11 @@ mod tests {
                     NonZeroUsize::MIN,
                 );
                 let mut buffer = Vec::new();
-                endpoint.connect(Monotonic(0), server(), pair::SERVER);
+                endpoint.connect(Monotonic(0), Some(server()), pair::SERVER);
                 while endpoint.transmit(Monotonic(0), &mut buffer).is_some() {}
                 let earliest = endpoint.deadline().expect("a deadline");
                 let later = pair::at(Duration::from_millis(500));
-                endpoint.connect(later, server(), pair::SERVER);
+                endpoint.connect(later, Some(server()), pair::SERVER);
                 while endpoint.transmit(later, &mut buffer).is_some() {}
                 assert_eq!(endpoint.deadline(), Some(earliest));
             });

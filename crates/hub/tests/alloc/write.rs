@@ -122,6 +122,7 @@ async fn outcome(stream: &mut Stream, n: i64) {
     loop {
         match stream.reply().await {
             Reply::Stored { .. } => {}
+            reply @ Reply::Ended { .. } => panic!("the write ended: {reply:?}"),
             Reply::Outcome { frame, outcome, .. } => {
                 let seq = u64::try_from(n).expect("a seq");
                 let taken = wire::hub::write::Outcome::Taken {
