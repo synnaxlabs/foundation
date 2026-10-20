@@ -1,4 +1,5 @@
-//! Streams to the hub of another node of the region.
+//! Sessions to the hubs of other nodes of the region, with a retry of a session that
+//! closes with `Code(0)`.
 
 use std::cell::RefCell;
 use std::rc::Rc;
