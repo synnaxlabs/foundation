@@ -41,6 +41,7 @@ pub(crate) async fn create_hub(
         interner,
         tasks,
         node: crate::net::NODE,
+        public_key: crate::net::public_key(&crate::net::HOME),
         time,
         entropy: node.entropy(),
         region: None,

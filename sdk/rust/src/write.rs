@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
-pub use program::write::{Outcome, Refusal};
+pub use program::write::{End, Outcome, Refusal};
 use tokio::sync::mpsc;
 use types::authority::Authority;
 use types::frame::{self, Form, Path};
@@ -46,7 +46,7 @@ impl Config {
 /// index, which the client's thread holds. It can move between threads. Each call
 /// blocks until the node answers, and the node applies the frames in the order of the
 /// calls. Dropping it stops the stream, and the node ends the writer;
-/// [`Writer::close`] first waits until each frame is on disk.
+/// [`Writer::close`] first waits until each frame is on disk, or its group ended.
 ///
 /// Place `n` of each call is `Config::channels[n]`, and the index is place
 /// `channels.len()` when `channels` does not name it.
@@ -135,12 +135,13 @@ impl Writer {
         self.bytes_max
     }
 
-    /// Writes a frame of one sample of each place of `values`, in any order, and
-    /// blocks until the node took, lost, or refused it. A value of the index place is
-    /// the stamp of the frame. With none, the node stamps it: mesh time now, or 1 ns
-    /// after the last stamp that the node gave this writer when now is not after it.
-    /// So after a stamp of the caller ahead of now, a frame that the node stamps can
-    /// get [`Refusal::Order`].
+    /// Writes a frame of one sample of each place of `values`, in any order, and blocks
+    /// until the node took, lost, or refused it, or the write of its group ended
+    /// ([`Outcome::Ended`], and each later frame gets the same). A value of the index
+    /// place is the stamp of the frame. With none, the node stamps it: mesh time now,
+    /// or 1 ns after the last stamp that the node gave this writer when now is not
+    /// after it. So after a stamp of the caller ahead of now, a frame that the node
+    /// stamps can get [`Refusal::Order`].
     ///
     /// # Errors
     ///
@@ -185,9 +186,11 @@ impl Writer {
 
     /// Writes a frame of `count` samples of each place of `series`, in any order, each
     /// in the raw form of its place's type, and blocks until the node took, lost, or
-    /// refused it. The series of [`Writer::index`] holds the stamps of the frame. A
-    /// frame of one channel of 8-byte samples and its index holds at most about 3,500
-    /// samples (the largest block of the frames of the session, 57,344 bytes).
+    /// refused it, or the write of its group ended ([`Outcome::Ended`], and each later
+    /// frame gets the same). The series of [`Writer::index`] holds the stamps of the
+    /// frame. A frame of one channel of 8-byte samples and its index holds at most
+    /// about 3,500 samples (the largest block of the frames of the session, 57,344
+    /// bytes).
     ///
     /// # Errors
     ///
@@ -218,13 +221,15 @@ impl Writer {
         self.call(Time::Frame(Path::Live))
     }
 
-    /// Finishes the stream, and blocks until each frame that the node took is on disk
-    /// and the node finished the stream. Control ends then.
+    /// Finishes the stream, and blocks until each frame that the node took is on disk,
+    /// or its group ended, and the node finished the stream. Control ends then.
     ///
     /// # Errors
     ///
     /// [`Error::Closed`], [`Error::Panicked`], [`Error::Session`], and
-    /// [`Error::Stream`] as [`Writer::write`] gives them.
+    /// [`Error::Stream`] as [`Writer::write`] gives them. [`Error::Stream`] with
+    /// [`program::Error::Unstored`] when the write of the group ended with a frame that
+    /// the node took and that may not be on disk.
     pub fn close(self) -> Result<(), Error> {
         if let Some(error) = self.lost {
             return Err(error);

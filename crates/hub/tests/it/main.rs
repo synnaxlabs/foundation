@@ -161,6 +161,7 @@ impl Test {
                 pause: Rc::clone(&pause),
             }),
             node: key,
+            public_key: net::public_key(&net::HOME),
             time: mesh.clone(),
             entropy: node.entropy(),
             region: region.as_ref().map(|region| hub::Region {

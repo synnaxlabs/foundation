@@ -16,7 +16,6 @@ import threading
 import time
 import typing
 import unittest
-import uuid
 import warnings
 
 import foundation
@@ -338,16 +337,15 @@ class ClientTest(unittest.TestCase):
             foundation.connect(at, data=self.node.data)
         self.assertEqual(
             str(raised.exception),
-            f"no source gives the keys of the node at {at}: {self.node.data} holds "
-            f"the node at {self.node.address}; pass node= and public_key=, or connect "
-            f"to {self.node.address}",
+            f"no source gives the public key of the node at {at}: {self.node.data} "
+            f"holds the node at {self.node.address}; pass public_key=, or connect to "
+            f"{self.node.address}",
         )
         with self.assertRaises(ConnectionError) as raised:
             called(
                 self,
                 foundation.connect,
                 at,
-                node=uuid.UUID(int=1),
                 public_key=WRONG,
                 data=self.node.data,
             )
@@ -401,7 +399,7 @@ class ClientTest(unittest.TestCase):
 
     def test_a_wrong_public_key_is_not_authenticated(self) -> None:
         with self.assertRaises(ConnectionError) as raised:
-            self.node.connect(node=uuid.UUID(int=1), public_key=WRONG)
+            self.node.connect(public_key=WRONG)
         address = self.node.address
         self.assertEqual(
             str(raised.exception),
@@ -450,7 +448,6 @@ class ArgumentTest(unittest.TestCase):
         return foundation.connect(
             **{
                 "address": "127.0.0.1:1",
-                "node": uuid.UUID(int=1),
                 "public_key": BASE,
                 "subject": ADMIN,
                 "private_key": bytes(32),
@@ -481,8 +478,6 @@ class ArgumentTest(unittest.TestCase):
 
     def test_a_pair_given_in_half_is_refused(self) -> None:
         for half, text in [
-            ({"node": uuid.UUID(int=1)}, "node and public_key"),
-            ({"public_key": BASE}, "node and public_key"),
             ({"subject": ADMIN}, "subject and private_key"),
             ({"private_key": bytes(32)}, "subject and private_key"),
         ]:
@@ -520,7 +515,7 @@ class ArgumentTest(unittest.TestCase):
             foundation.connect("127.0.0.1:1", data=self.directory())
         self.assertEqual(
             str(raised.exception),
-            "no source gives the keys of the node at 127.0.0.1:1: pass node= and "
+            "no source gives the public key of the node at 127.0.0.1:1: pass "
             "public_key=, or data= with the --data of foundation start on the node's "
             "host",
         )
@@ -529,7 +524,6 @@ class ArgumentTest(unittest.TestCase):
         with self.assertRaises(ConnectionError) as raised:
             foundation.connect(
                 "127.0.0.1:1",
-                node=uuid.UUID(int=1),
                 public_key=BASE,
                 data=self.directory(),
             )
@@ -551,7 +545,7 @@ class ArgumentTest(unittest.TestCase):
                 "syntax",
             ),
             (
-                {"node": uuid.UUID(int=1), "public_key": bytes(31)},
+                {"public_key": bytes(31)},
                 "public_key is 31 bytes, not 32",
             ),
             (
@@ -628,10 +622,12 @@ class ArgumentTest(unittest.TestCase):
             self.connect(private_key=bytes(33))
         self.assertEqual(str(raised.exception), "private_key is 33 bytes, not 32")
 
-    def test_a_node_that_is_not_a_uuid_is_refused(self) -> None:
+    def test_a_node_key_is_no_argument(self) -> None:
         with self.assertRaises(TypeError) as raised:
             self.connect(node=1)
-        self.assertEqual(str(raised.exception), "node is int, not uuid.UUID")
+        self.assertEqual(
+            str(raised.exception), "connect() got an unexpected keyword argument 'node'"
+        )
 
     def test_a_subject_that_is_not_a_name_is_refused(self) -> None:
         with self.assertRaises(ValueError) as raised:

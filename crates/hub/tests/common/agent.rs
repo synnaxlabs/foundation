@@ -13,9 +13,9 @@ use wire::hub::FromHome;
 use wire::hub::client::{
     self, Challenge, Mode, Open, Place, Places, Read, Request, Response, Signed, write,
 };
-use wire::hub::write::{Head, Reply};
+use wire::hub::write::{Head, Reply, Time};
 
-use crate::net::{HOME, NODE, own_pool, public_key};
+use crate::net::{HOME, own_pool, public_key};
 
 pub(crate) const SUBJECT: &str = "ops.agent";
 /// Two more subjects that the spec lists with `AGENT`.
@@ -121,14 +121,24 @@ impl Stream {
         }
     }
 
-    /// Sends one frame of a write: `head`, the run of `ends` in one message, and
-    /// `body` in messages of 4 KiB.
-    pub(crate) async fn frame(&mut self, head: Head, ends: &[(u32, u32)], body: &[u8]) {
+    /// Sends one frame of a write whose groups hold `counts` samples: `head`, the run
+    /// of `ends` in one message, with the run of `counts` after its last end when the
+    /// head is not of [`Time::Node`], and `body` in messages of 4 KiB.
+    pub(crate) async fn frame(
+        &mut self,
+        head: Head,
+        counts: &[u32],
+        ends: &[(u32, u32)],
+        body: &[u8],
+    ) {
         let mut out = [0; Head::LEN];
         head.encode(&mut out);
         self.send(&out).await;
         let mut out = vec![0; ends.len() * wire::hub::ends::LEN];
         wire::hub::ends::encode(ends.iter().copied(), &mut out);
+        if head.time != Time::Node {
+            out.extend(counts.iter().flat_map(|n| n.to_le_bytes()));
+        }
         self.send(&out).await;
         for part in body.chunks(1 << 12) {
             self.send(part).await;
@@ -251,13 +261,13 @@ impl Agent {
         }
     }
 
-    /// A hello of [`SUBJECT`] through [`NODE`] that echoes `challenge` and lives
+    /// A hello of [`SUBJECT`] through [`HOME`] that echoes `challenge` and lives
     /// [`LIFE`] from the challenge's mesh time.
     pub(crate) fn hello(challenge: Challenge) -> Hello {
         Hello {
             subject: name(SUBJECT),
             key: public_key(&AGENT),
-            via: NODE,
+            via: public_key(&HOME),
             connection: CONNECTION,
             nonce: challenge.nonce,
             expires: challenge.now.latest + LIFE,
