@@ -218,8 +218,9 @@ impl Status {
         }
     }
 
-    /// Shows `value` of `source` as [`secret::Value::MARK`] in each text of the run after the call,
-    /// in place of the last value of `source`. With no run, it does nothing.
+    /// Shows `value` of `source` as [`secret::Value::MARK`] in each text of the run
+    /// after the call, in place of the last value of `source`. With no run, it does
+    /// nothing.
     pub(crate) fn hold(&self, source: &secret::Source, value: &secret::Value) {
         if let Some(run) = self.values.run.borrow_mut().as_mut() {
             run.secrets.hold(source, value);
@@ -468,9 +469,9 @@ impl Secrets {
         }
     }
 
-    /// `text` with each run of chars that a value covers replaced by one [`secret::Value::MARK`].
-    /// It finds the values in `text`, not in what it gives, so a value inside
-    /// [`secret::Value::MARK`] does not change a mark.
+    /// `text` with each run of chars that a value covers replaced by one
+    /// [`secret::Value::MARK`]. It finds the values in `text`, not in what it gives, so
+    /// a value inside [`secret::Value::MARK`] does not change a mark.
     fn hide<'a>(&self, text: &'a str) -> Cow<'a, str> {
         let mut hidden = String::new();
         // `text[shown..]` is not in `hidden` yet, and the run of covered chars ends
@@ -1230,6 +1231,8 @@ mod tests {
         assert_eq!(got, ["a token \n"; 3]);
     }
 
+    /// It sets and reads the run of the status by hand, to hold a value with no run
+    /// and to see the texts with no write.
     #[test]
     fn hides_only_the_last_value_of_each_source() {
         let status = Status::new(Vec::new(), tracing::Span::none());
