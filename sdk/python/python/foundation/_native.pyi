@@ -89,35 +89,69 @@ class Refused(ConnectionError):
 
 class Stopped(Exception):
     """The node stopped a write, with a code. At the open, no writer opened, and the
-    session goes on. A writer that raises it has ended, and each later call raises it
-    again. `code` is its name in lower case. At the open: `unknown` for a name of no
-    channel, `not_home` when the node is not the home of the index, `malformed` for
-    channels of more than one index or a lease that the home refuses, `failed` when the
-    home cannot open the write, `refused` when the access check of the node refuses the
-    write, and `busy` when the node has no room for the open. Later: `unknown` when a
-    channel was removed, `failed` when the home failed, `refused` when the home refuses
-    the program's proof, such as a renewal of its hello, `busy` when the home has no
-    room for the outcome of a frame, and `malformed` for a frame that breaks a rule of
-    the wire.
+    session goes on. From `write` or `write_series`, the node stopped the stream: the
+    writer has ended, and each later call raises it again. From `close`, also the write
+    of a group ended with a frame that may not be on disk. Its subclass `GroupEnded` is
+    the end of the write of one or more groups only. `code` is its name in lower case.
+    At the open: `unknown` for a name of no channel, `not_home` when the node is not the
+    home of an index, `malformed` for a reader of channels of more than one index,
+    `failed` when the home cannot open the write, `refused` when the access check of the
+    node refuses the write, and `busy` when the node has no room for the open. Later:
+    `unknown` when a channel was removed, `failed` when the home failed, `refused` when
+    the home refuses the program's proof, such as a renewal of its hello, `busy` when
+    the home has no room for the outcome of a frame, and `malformed` for a frame that
+    breaks a rule of the wire.
     """
 
     code: str
 
 class Rejected(Exception):
-    """The node refused one frame of a writer, and took none of it. `code` is why:
-    `waiting`, `reserved`, `expired`, `order`, `codec`, `full`, or `large`. The writer
-    goes on.
+    """The node refused the frame of the group of one or more indexes, and took none of
+    their samples. `code` is why, for the first refused group in place order: `waiting`,
+    `reserved`, `expired`, `order`, `codec`, `full`, or `large`. `written` is the names
+    of the channels of the frame in the groups that the node took, and `unwritten` those
+    in the groups that it refused, each in place order. A lost group is in neither: the
+    node spent its stamps, so it cannot be written again. `lost` is a `dict` from the
+    name of each channel of the lost groups of the frame, the index of each included, to
+    the `range` of the seqs of its lost samples, as `DataLost.seqs` gives it, and is
+    empty when no group was lost. With `on_loss="warn"`, the call also logs the warning
+    of the loss. Its text names the cause of each group that the node did not take. The
+    writer goes on. To write the frame again, write only the channels of `unwritten`.
     """
 
     code: str
+    written: tuple[str, ...]
+    unwritten: tuple[str, ...]
+    lost: dict[str, range]
+
+class GroupEnded(Stopped):
+    """The write of the group of one or more indexes ended. `code` is the end of the
+    first group that ended, as `Stopped` gives it. `ended` is the names of the channels
+    of the writer in each group that ended, the index included, and `written` and
+    `unwritten` those of the channels of the frame in the groups that the node took and
+    refused, each in place order. A lost group is in no list: the node spent its stamps.
+    `lost` is a `dict` from the name of each channel of the lost groups of the frame,
+    the index of each included, to the `range` of the seqs of its lost samples, as
+    `DataLost.seqs` gives it, and is empty when no group was lost. With
+    `on_loss="warn"`, the call also logs the warning of the loss. Its text names the
+    cause of each group that the node did not take. The writer goes on: each later frame
+    that holds a channel of `ended` raises it again, so a writer of one index writes
+    nothing more. To write the frame again, write only the channels of `unwritten`.
+    """
+
+    ended: tuple[str, ...]
+    written: tuple[str, ...]
+    unwritten: tuple[str, ...]
+    lost: dict[str, range]
 
 class DataLost(Exception):
     """Samples were lost. A writer with `on_loss="raise"` raises it when the node found
     no room for a live frame, so its samples are a gap in the log, and goes on, as a
     later frame can find room: `seqs` is a `dict` from the name of each channel of the
-    frame to the `range` of the seqs of its lost samples, and `frame` is `None`. A
-    reader with `on_loss="raise"` raises it for a frame after a loss, and closes: `seqs`
-    is `Frame.lost` of that frame, and `frame` is the frame.
+    lost groups of the frame, the index of each included, to the `range` of the seqs of
+    its lost samples, and `frame` is `None`. A reader with `on_loss="raise"` raises it
+    for a frame after a loss, and closes: `seqs` is `Frame.lost` of that frame, and
+    `frame` is the frame.
     """
 
     seqs: dict[str, range]
@@ -154,16 +188,19 @@ class Client:
         lease: _Float | None = None,
         on_loss: Literal["warn", "raise", "ignore"] = "warn",
     ) -> Writer:
-        """Opens a writer of `channels` at the home of their index, and blocks until the
-        node opened it. `channels` is one channel name or an iterable of names, all of
-        one index. Place `n` is `channels[n]`, and the index is place `len(channels)`
-        when `channels` does not name it. `authority` (0 to 255) is the writer's
-        authority over its channels: a writer of a higher authority takes control from
-        it. `lease` is the seconds that the writer may go with no write and keep
-        control, or `None` for no limit. `on_loss` is what a write does when the node
-        took no room for a live frame: `"warn"` logs a warning on the `foundation`
-        logger, `"raise"` raises `DataLost`, and `"ignore"` does nothing. Other Python
-        threads run while it waits.
+        """Opens a writer of `channels` at the homes of their indexes, and blocks until
+        the node opened it. `channels` is one channel name or an iterable of names, of
+        any index. The channels of one index, and that index, are a group. Place `n` is
+        `channels[n]`; then comes the index of each group that `channels` does not name,
+        in the order of the first channel of each group. `authority` (0 to 255) is the
+        writer's authority over its channels: a writer of a higher authority takes
+        control from it. `lease` is the seconds that the writer may go with no write and
+        keep control, or `None` for no limit. `on_loss` is what a write does when the
+        node took no room for a live frame: `"warn"` logs a warning on the `foundation`
+        logger, `"raise"` raises `DataLost`, and `"ignore"` does nothing. A call that
+        raises `Rejected` or `GroupEnded` for a frame that also lost a group gives the
+        lost seqs in its `lost`, for each `on_loss`, and with `"warn"` also logs the
+        warning. Other Python threads run while it waits.
 
         Raises `TypeError` for an argument of a wrong type; `ValueError` for no channel,
         a name that does not parse, an `authority` outside 0 to 255, a `lease` that,
@@ -217,86 +254,90 @@ class Client:
 
 @final
 class Writer:
-    """A writer of channels of one index at its home, which `Client.open_writer` opens.
-    A `with` block closes it at its end. Its calls take turns to send: a call waits,
-    with other Python threads running, while another call of the writer sends. A value
-    or a logging handler that a call runs can call the writer. A process that forks from
-    the program does not own the writer: in it, each call but a close raises
+    """A writer of channels of any index at their homes, which `Client.open_writer`
+    opens. A `with` block closes it at its end. Its calls take turns to send: a call
+    waits, with other Python threads running, while another call of the writer sends. A
+    value or a logging handler that a call runs can call the writer. A process that
+    forks from the program does not own the writer: in it, each call but a close raises
     `RuntimeError`, and a close gives `None` and ends nothing.
     """
 
     @property
-    def places(self) -> tuple[tuple[str, str], ...]:
-        """The name and the type of each place, in place order, the type as the spec
-        writes it (`f64`, `timestamp`).
+    def places(self) -> tuple[tuple[str, str, int], ...]:
+        """The name, the type, and the place of the index of each place, in place order,
+        the type as the spec writes it (`f64`, `timestamp`). The place of an index is
+        its first place, also at a repeat of it. Place `n` is channel `n` of the open;
+        then comes the index of each group that the open did not name, in the order of
+        the first channel of each group.
         """
-
-    @property
-    def index(self) -> int:
-        """The place of the index, whose samples are the stamps of each frame."""
 
     def write(self, values: dict[Any, Any] | _Value) -> None:
         """Writes one frame of one sample of each value, and blocks until the node took
         it. `values` is a `dict` from a channel name or a place to a value, or one value
-        when the writer has one place other than the index. A value at the index is the
-        stamp of the frame, in nanoseconds since the UNIX epoch; with none, the node
-        stamps the frame. A value is a `bool` or a `numpy.bool_` for `bool`, an `int`
-        (or an object with `__index__`) for an integer type and for `timestamp` and
-        `duration` (nanoseconds), a `float` (or an object with `__float__` or
-        `__index__`, such as an `int`) for `f32` and `f64`, and a `uuid.UUID` for
-        `uuid`. The call reads `values` after it waits for a call of another thread that
-        sends. A change of `values` after that read is not in the frame. Other Python
-        threads run while it waits.
+        when the writer has one place that is not an index. A value at an index is the
+        stamp of its group, in nanoseconds since the UNIX epoch. The values give the
+        stamp of each group of the frame or of none; with none, the node stamps each
+        group. A value is a `bool` or a `numpy.bool_` for `bool`, an `int` (or an object
+        with `__index__`) for an integer type and for `timestamp` and `duration`
+        (nanoseconds), a `float` (or an object with `__float__` or `__index__`, such as
+        an `int`) for `f32` and `f64`, and a `uuid.UUID` for `uuid`. The call reads
+        `values` after it waits for a call of another thread that sends. A change of
+        `values` after that read is not in the frame. Other Python threads run while it
+        waits.
 
         Raises `TypeError` for a value that is not of its place's type, a place of a
         type that is not a scalar, a key that is not a name or a place, or one value
         with no key for a writer of more places; `OverflowError` for a number outside
         its type; `KeyError` for a name of no place; `ValueError` for no value, a place
-        past the places, or two values of one channel; and each error other than
-        `TypeError` and `OverflowError` that the `__float__` or `__index__` of a value
-        raised. Each `TypeError` of the conversion of a value is the `__cause__` of the
-        `TypeError` that names its place. With each of these, nothing was sent and the
-        writer goes on. Raises `Rejected` when the node refused the frame, and
-        `DataLost` for a lost frame with `on_loss="raise"`; the writer goes on after
-        both. Raises `Stopped` when the node stopped the stream, and `ConnectionError`
-        when the session failed, after which each call raises it again; `RuntimeError`
-        after a close or in a forked process; and `PanicException` when the client's
-        thread panicked.
+        past the places, two values of one channel, or the stamps of only some groups of
+        the frame; and each error other than `TypeError` and `OverflowError` that the
+        `__float__` or `__index__` of a value raised. Each `TypeError` of the conversion
+        of a value is the `__cause__` of the `TypeError` that names its place. With each
+        of these, nothing was sent and the writer goes on. When the node did not take
+        each group of the frame, raises for the first that holds: a group whose write
+        ended raises `GroupEnded`, also in a writer of one index; a refused group raises
+        `Rejected`; and a lost group raises `DataLost` with `on_loss="raise"`, with the
+        channels of the lost groups only. The text of each names the cause of each group
+        that the node did not take. Raises `Stopped` when the node stopped the stream,
+        so the writer has ended, and `ConnectionError` when the session failed, after
+        each of which each call raises it again; `RuntimeError` after a close or in a
+        forked process; and `PanicException` when the client's thread panicked.
         """
 
     def write_series(self, series: dict[Any, NDArray[Any]]) -> None:
         """Writes one frame of each series of `series`, a `dict` from a channel name or
         a place to a one-dimensional `numpy.ndarray`, and blocks until the node took it.
-        Each array has the same length, and the series of the index holds the stamps.
-        Each array has the dtype of its place in native byte order: `bool`, `int8` to
-        `uint64`, `float32`, `float64`, and `int64` or `datetime64[ns]` for `timestamp`,
-        `int64` or `timedelta64[ns]` for `duration`. The writer casts nothing, and
-        copies each array before the send, in which other Python threads run. The call
-        reads `series` after it waits for a call of another thread that sends. A change
-        of `series` after that read is not in the frame.
+        The arrays of one group have one length, and the series of each index holds the
+        stamps of its group. Each array has the dtype of its place in native byte order:
+        `bool`, `int8` to `uint64`, `float32`, `float64`, and `int64` or
+        `datetime64[ns]` for `timestamp`, `int64` or `timedelta64[ns]` for `duration`.
+        The writer casts nothing, and copies each array before the send, in which other
+        Python threads run. The call reads `series` after it waits for a call of another
+        thread that sends. A change of `series` after that read is not in the frame.
 
         Raises `TypeError` for a value that is not an array of one dimension of its
         place's dtype (its text names the place, the dtypes that it takes, the dtype
         given, and the fix, such as `pass a.astype("float64")`), or a place of `uuid` or
-        of a type that is not a scalar, and `ValueError` for arrays of different
-        lengths, an array of more than 4294967295 samples, series over the bytes of one
-        frame (before their copy), no series, no series of the index, a frame over the
-        largest block, or an array that another call writes to.
-        With each of these, nothing was sent and the writer goes on. Raises each other
-        error as `write` raises it.
+        of a type that is not a scalar, and `ValueError` for arrays of one group with
+        different lengths, an array of more than 4294967295 samples, series over the
+        bytes of one frame (before their copy), no series, a group with series and no
+        series of its index, a frame over the largest block, or an array that another
+        call writes to. With each of these, nothing was sent and the writer goes on.
+        Raises each other error as `write` raises it.
         """
 
     def close(self) -> None:
         """Finishes the stream, and blocks until each frame that the node took is on
-        disk, or its group ended, and the node finished the stream. Control ends then.
-        A close waits for a call that sends, with other Python threads running. A call
+        disk, or its group ended, and the node finished the stream. Control ends then. A
+        close waits for a call that sends, with other Python threads running. A call
         that a close ends before its send raises `RuntimeError`. A close after a close
         gives `None`, and in a forked process it gives `None` and ends nothing.
 
-        Raises `Stopped` when the node stopped the stream or the write of its group
-        ended, and then a frame that the node took may not be on disk. Raises
-        `ConnectionError` when the session failed, `RuntimeError` when the client
-        closed, and `PanicException` when the client's thread panicked.
+        Raises `Stopped` when the node stopped the stream, or when the write of a group
+        ended with a frame that the node took and that may not be on disk, with `code`
+        the end of the first such group and a text that names the index and the end of
+        each. Raises `ConnectionError` when the session failed, `RuntimeError` when the
+        client closed, and `PanicException` when the client's thread panicked.
         """
 
     def __enter__(self) -> Self: ...
@@ -335,9 +376,9 @@ class Reader:
     """
 
     @property
-    def places(self) -> tuple[tuple[str, str], ...]:
-        """The name and the type of each place, in place order, the type as the spec
-        writes it (`f64`, `timestamp`).
+    def places(self) -> tuple[tuple[str, str, int], ...]:
+        """The name, the type, and the place of the index of each place, in place order,
+        the type as the spec writes it (`f64`, `timestamp`).
         """
 
     def __iter__(self) -> Self: ...

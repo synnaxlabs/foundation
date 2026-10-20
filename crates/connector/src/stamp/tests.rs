@@ -39,14 +39,14 @@ fn with_writer<T: Send + 'static>(
 fn a_request_is_stamped_at_its_midpoint() {
     let config = sim::node::Config::default();
     let (sent, answered, output, stamp) = with_writer(config, async |writer, clock| {
-        let mut stamps = Stamps::default();
-        let sent = writer.now();
+        let mut stamped = stamp::Writer::new(writer);
+        let sent = stamped.hub().now();
         let request = async {
             clock.sleep(Span::from_nanos(3_000)).await;
             7
         };
-        let (output, stamp) = stamps.request(&writer, request).await;
-        (sent, writer.now(), output, stamp)
+        let (output, stamp) = stamped.request(request).await;
+        (sent, stamped.hub().now(), output, stamp)
     });
     assert_eq!(answered - sent, Span::from_nanos(3_000));
     assert_eq!(output, 7);
@@ -56,12 +56,12 @@ fn a_request_is_stamped_at_its_midpoint() {
 #[test]
 fn a_request_with_no_wait_is_stamped_after_the_one_before() {
     let (now, stamps) = with_writer(sim::node::Config::default(), async |writer, _| {
-        let mut stamps = Stamps::default();
+        let mut stamped = stamp::Writer::new(writer);
         let mut given = Vec::new();
         for _ in 0..3 {
-            given.push(stamps.request(&writer, future::ready(())).await.1);
+            given.push(stamped.request(future::ready(())).await.1);
         }
-        (writer.now(), given)
+        (stamped.hub().now(), given)
     });
     let after = |n| now + Span::from_nanos(n);
     assert_eq!(stamps, [now, after(1), after(2)]);
@@ -69,16 +69,15 @@ fn a_request_with_no_wait_is_stamped_after_the_one_before() {
 
 #[test]
 fn a_request_after_a_refusal_is_stamped_after_its_stamp() {
-    let (now, refused, stamp) =
-        with_writer(sim::node::Config::default(), async |writer, _| {
-            let mut stamps = Stamps::default();
-            let now = writer.now();
-            let refused = stamps.after(now + Span::from_nanos(20));
-            let ((), stamp) = stamps.request(&writer, future::ready(())).await;
-            (now, refused, stamp)
-        });
-    assert_eq!(refused, now + Span::from_nanos(21));
-    assert_eq!(stamp, now + Span::from_nanos(22));
+    let (ahead, (wrote, ..), groups, stamp) = with_hub(async |hub| {
+        let ahead = write_ahead(&hub, "a.restarts", Span::MILLISECOND).await;
+        let mut writer = stamp::Writer::new(open(&hub, 1, &["a.state"]).await);
+        let wrote = write(&mut writer);
+        let ((), stamp) = writer.request(future::ready(())).await;
+        (ahead, wrote, groups(&writer), stamp)
+    });
+    assert_eq!(wrote, Ok(vec![(groups[0], true)]));
+    assert_eq!(stamp, ahead + Span::from_nanos(2));
 }
 
 #[test]
@@ -89,10 +88,10 @@ fn a_request_near_the_end_of_time_is_stamped_at_its_midpoint() {
         ..Default::default()
     };
     let (sent, stamp) = with_writer(config, async |writer, clock| {
-        let mut stamps = Stamps::default();
-        let sent = writer.now();
+        let mut stamped = stamp::Writer::new(writer);
+        let sent = stamped.hub().now();
         let request = clock.sleep(Span::from_nanos(2 * Span::SECOND.nanos() + 1));
-        (sent, stamps.request(&writer, request).await.1)
+        (sent, stamped.request(request).await.1)
     });
     assert_eq!(stamp, sent + Span::SECOND);
 }
@@ -104,14 +103,18 @@ fn a_request_before_the_epoch_is_stamped_at_its_midpoint_rounded_down() {
         ..Default::default()
     };
     let (sent, stamp) = with_writer(config, async |writer, clock| {
-        let mut stamps = Stamps::default();
-        let sent = writer.now();
+        let mut stamped = stamp::Writer::new(writer);
+        let sent = stamped.hub().now();
         let request = clock.sleep(Span::from_nanos(2 * Span::SECOND.nanos() + 1));
-        (sent, stamps.request(&writer, request).await.1)
+        (sent, stamped.request(request).await.1)
     });
     assert!(sent.nanos() < 0, "{sent:?}");
     assert_eq!(stamp, sent + Span::SECOND);
 }
+
+// The tests from here to the property tests call `Stamps` directly: the rule is a
+// value with no hub, so its edges and each case of a property test need no node.
+// The tests of `stamp::Writer` and `poll::Writer` reach it through the writer.
 
 #[test]
 #[should_panic(expected = "stamp overflow: 9223372036854775807 ns + 1 ns")]

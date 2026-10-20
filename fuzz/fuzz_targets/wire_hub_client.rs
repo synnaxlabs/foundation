@@ -8,8 +8,10 @@
 //! decoder of a session of their count and the mode, a read of more than one index
 //! gives `Error::ManyIndexes` after `Error::Repeated` and ends its decoder, each other
 //! refused message of a read stream leaves its decoder as it was, an `Opening` gives
-//! what a `Reader` gives other than `Error::ManyIndexes`, and each valid message made
-//! from the input reads back. A `Reader` holds an `Opening`,
+//! what a `Reader` gives other than `Error::ManyIndexes`, an `Opening` of a bound
+//! refuses a count over it and else gives what the default gives, with the same hold
+//! that never falls and that a refused message leaves as it was, and each valid
+//! message made from the input reads back. A `Reader` holds an `Opening`,
 //! so the checks of the read stream are the checks of the run of both.
 //! `write::Replies` takes or refuses each reply as the order of the replies gives, a
 //! refused reply changes no count, and `unstored` gives each group that ended with a
@@ -19,9 +21,10 @@
 //! message, an open among them; the body of the first message, when it is a request, a
 //! response, a read, or a write, takes each later message; and a `client::Reader` of
 //! each mode and a `write::Opening` take each message until they give the last place,
-//! and then the end of the stream. A `write::Replies` of 256 groups counts a frame sent
-//! for each message whose first byte is 0, with a group for each other byte of it, or
-//! group 0 when it has none, and decodes each other message as a reply.
+//! and then the end of the stream. An `Opening` of the bound in the first byte of the
+//! input takes the messages of the rest. A `write::Replies` of 256 groups counts a
+//! frame sent for each message whose first byte is 0, with a group for each other
+//! byte of it, or group 0 when it has none, and decodes each other message as a reply.
 
 #![no_main]
 #![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
@@ -201,6 +204,50 @@ fn open(bytes: &[u8]) {
         }
     }
     assert_eq!(opening.decode(None).err(), Some(Error::Finished));
+}
+
+/// Drives an `Opening` of the bound in the first byte of `bytes` and a default one on
+/// the messages of the rest. A count over the bound and at most `PLACES_MAX` gives
+/// `Error::Places` with the bound as its cap; else each message gives what the default
+/// gives, and both hold the same bytes. `held` is 0 before the run, never falls, and a
+/// refused message leaves it as it was.
+fn bounded(bytes: &[u8]) {
+    let Some((&most, rest)) = bytes.split_first() else {
+        return;
+    };
+    let most = u32::from(most);
+    let mut opening = Opening::new(most);
+    let mut default = Opening::default();
+    assert_eq!(opening.held(), 0, "a hold before the places");
+    for message in fuzz::messages(rest) {
+        let before = opening.held();
+        match (opening.decode(Some(message)), default.decode(Some(message))) {
+            (Err(Error::Places { count, cap }), Ok(None)) => {
+                assert!(count > most && cap == most, "{count} places over {cap}");
+                assert_eq!(opening.held(), 0, "a hold of refused places");
+                return;
+            }
+            (Err(bounded), Err(given)) => {
+                assert_eq!(bounded, given, "{message:?}");
+                assert_eq!(
+                    opening.held(),
+                    before,
+                    "a refused message changed the hold"
+                );
+            }
+            (Ok(bounded), Ok(given)) => {
+                assert_eq!(bounded.is_some(), given.is_some(), "{message:?}");
+                assert!(opening.held() >= before, "the hold fell");
+                assert_eq!(opening.held(), default.held(), "the holds differ");
+                if bounded.is_some() {
+                    return;
+                }
+            }
+            (bounded, given) => {
+                panic!("{bounded:?} is not what the default gave: {given:?}")
+            }
+        }
+    }
 }
 
 /// Drives a reader of `mode` on `bytes` until it gives the last place, then ends the
@@ -435,6 +482,7 @@ fn read(bytes: &[u8]) {
     drive(bytes, Mode::Latest);
     drive(bytes, Mode::Complete);
     open(bytes);
+    bounded(bytes);
     let mut messages = fuzz::messages(bytes);
     let Some((mut body, length)) = messages.next().and_then(fixed) else {
         for message in messages {

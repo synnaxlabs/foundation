@@ -13,6 +13,9 @@
 //!   outcome of each back. 64 frames each round.
 //! - `member 1x64`: as `member 1x2`, with an index and 63 data channels.
 //! - `member 1x2 one`: as `member 1x2`, one frame each round.
+//! - `member 1x2 full`: as `member 1x2`, 128 frames each round to a home that answers
+//!   [`WINDOW`] at a time, so the member reads no more of the program while the
+//!   window is full.
 //! - `member 1x2 one+62`: as `member 1x2 one`, while 62 more forwards of the program's
 //!   session wait for a renewal of its hello, so the timed forward keeps its waker in
 //!   a set of 63.
@@ -97,6 +100,9 @@ const MESSAGE: usize = 1 << 16;
 const STREAMS: u32 = 64;
 /// The index of each write.
 const TIME: channel::Key = channel::Key::from_u128(1);
+/// The most frames whose outcome the home by hand holds back, the window of a
+/// forward.
+const WINDOW: u64 = 64;
 
 /// A write stream that one end serves.
 struct Case {
@@ -109,7 +115,7 @@ struct Case {
     idle: usize,
 }
 
-const MEMBER: [Case; 4] = [
+const MEMBER: [Case; 5] = [
     Case {
         name: "member 1x2",
         series: 2,
@@ -120,6 +126,12 @@ const MEMBER: [Case; 4] = [
         name: "member 1x64",
         series: 64,
         frames: 64,
+        idle: 0,
+    },
+    Case {
+        name: "member 1x2 full",
+        series: 2,
+        frames: 128,
         idle: 0,
     },
     Case {
@@ -667,8 +679,8 @@ fn frame(places: &[Place], stamp: i64) -> (Vec<(u32, u32)>, Vec<u8>) {
 }
 
 /// The home by hand at [`region::OTHER`]: takes each forward of the member, sends the
-/// places of its write, answers each round of its timed forward, and finishes each
-/// forward once the member does.
+/// places of its write, answers each round of its timed forward, [`WINDOW`] frames at
+/// a time, and finishes each forward once the member does.
 async fn answer_member(node: sim::node::Node, tasks: Tasks) {
     let (pool, sizes) = (net::own_pool(), (MESSAGE, 1 << 20));
     let transport =
@@ -682,7 +694,12 @@ async fn answer_member(node: sim::node::Node, tasks: Tasks) {
         let mut stream = opened(&session).await;
         let frames = u64::try_from(case.frames).expect("few");
         for round in 0..u64::try_from(WARMUP + ROUNDS).expect("few") {
-            answer(&mut stream, round * frames..(round + 1) * frames).await;
+            let (mut first, end) = (round * frames, (round + 1) * frames);
+            while first < end {
+                let last = end.min(first + WINDOW);
+                answer(&mut stream, first..last).await;
+                first = last;
+            }
         }
         for stream in std::iter::once(stream).chain(idle) {
             ended(stream).await;

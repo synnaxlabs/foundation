@@ -206,9 +206,17 @@ fn wide(series: usize) -> Vec<Place> {
         .chain(
             (2..)
                 .take(series - 1)
-                .map(|at| place(at, I64, &format!("c{at:05}"), 0)),
+                .map(|at| place(at, I64, &format!("c{at}"), 0)),
         )
         .collect()
+}
+
+/// The config of a writer of the channels of [`wide`] of `series`, so the node gives
+/// no more places than its open lets it.
+fn wide_config(series: usize) -> Config {
+    let names: Vec<String> = (2..=series).map(|at| format!("c{at}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    config(&names, 1)
 }
 
 /// Accepts the next write of `session` and opens it with `places`.
@@ -626,11 +634,12 @@ fn sends_an_open_at_the_cap() {
 }
 
 /// A frame whose ends are over the most bytes of one message sends them in more than
-/// one, each but the last of the most whole ends that a body message holds, and the
-/// node takes them in order.
+/// one, each but the last of the most whole ends that a body message holds, the last
+/// with the count, and the node takes them in order.
 #[test]
 fn sends_ends_over_one_message_as_whole_ends() {
-    const SERIES: usize = 1 << 15;
+    // Ends of 72 000 bytes, over a message of 64 KiB, from an open under 64 KiB.
+    const SERIES: usize = 9000;
     let places = wide(SERIES);
     by_hand(
         719,
@@ -643,12 +652,13 @@ fn sends_ends_over_one_message_as_whole_ends() {
             next().await;
             let mut ends = Vec::new();
             let mut runs = Vec::new();
-            while ends.len() < SERIES * 8 {
+            while ends.len() < SERIES * 8 + 4 {
                 let message = next().await;
                 ends.extend_from_slice(&message);
                 runs.push(message.len());
             }
             assert!(runs.len() > 1, "the ends go in {} messages", runs.len());
+            assert_eq!(ends.split_off(SERIES * 8), 1_u32.to_le_bytes());
             let want: Vec<u8> = (1..=SERIES)
                 .flat_map(|at| {
                     let at = u32::try_from(at).expect("fits");
@@ -656,7 +666,6 @@ fn sends_ends_over_one_message_as_whole_ends() {
                 })
                 .collect();
             assert_eq!(ends, want);
-            assert_eq!(next().await, 1_u32.to_le_bytes());
             let most = next().await.len();
             let mut body = most;
             while body < SERIES * 8 {
@@ -667,14 +676,14 @@ fn sends_ends_over_one_message_as_whole_ends() {
                 full.iter().all(|&run| run == most / 8 * 8),
                 "{runs:?} of {most}"
             );
-            assert_eq!(last % 8, 0, "whole ends");
+            assert_eq!((last - 4) % 8, 0, "whole ends, then the count");
             answer(&mut write, 1, taken(0, 1)).await;
             node.clock().sleep(QUIET).await;
         },
         |session, node| {
             Box::pin(async move {
                 let mut writer =
-                    session.writer(config(&["c00002"], 1)).await.expect("opens");
+                    session.writer(wide_config(SERIES)).await.expect("opens");
                 let series: Vec<(usize, u32, usize)> =
                     (0..SERIES).map(|at| (at, 1, 8)).collect();
                 writer.draft(Form::Raw, &series).await.expect("a frame");
@@ -1290,8 +1299,7 @@ fn sends_whole_ends_to_a_node_whose_message_is_not_a_multiple_of_8() {
         },
         |node, tasks, at| async move {
             let session = connect(&node, tasks, at, AGENT).await.expect("connects");
-            let mut writer =
-                session.writer(config(&["c00002"], 1)).await.expect("opens");
+            let mut writer = session.writer(wide_config(SERIES)).await.expect("opens");
             let series: Vec<(usize, u32, usize)> =
                 (0..SERIES).map(|at| (at, 1, 8)).collect();
             writer.draft(Form::Raw, &series).await.expect("a frame");
@@ -1309,7 +1317,8 @@ fn sends_whole_ends_to_a_node_whose_message_is_not_a_multiple_of_8() {
 /// node gets the head and whole messages of ends before the reset.
 #[test]
 fn ends_the_writer_after_a_call_dropped_in_its_run_of_ends() {
-    const SERIES: usize = 2000;
+    // Its open, with names of under 2 000 bytes, fits the window.
+    const SERIES: usize = 400;
     let places = wide(SERIES);
     raw_sized(
         723,
@@ -1335,8 +1344,7 @@ fn ends_the_writer_after_a_call_dropped_in_its_run_of_ends() {
         },
         |node, tasks, at| async move {
             let session = connect(&node, tasks, at, AGENT).await.expect("connects");
-            let mut writer =
-                session.writer(config(&["c00002"], 1)).await.expect("opens");
+            let mut writer = session.writer(wide_config(SERIES)).await.expect("opens");
             let series: Vec<(usize, u32, usize)> =
                 (0..SERIES).map(|at| (at, 1, 8)).collect();
             writer.draft(Form::Raw, &series).await.expect("a frame");
@@ -1361,7 +1369,8 @@ fn ends_the_writer_after_a_call_dropped_in_its_run_of_ends() {
 /// `finish` resets it with `Code(0)`: the node never gets a finish inside the frame.
 #[test]
 fn resets_at_the_finish_after_a_call_dropped_between_messages_of_its_frame() {
-    const SERIES: usize = 2000;
+    // Its open, with names of under 2 000 bytes, fits the window.
+    const SERIES: usize = 400;
     let places = wide(SERIES);
     // The window holds the head and two whole messages of ends, and no byte more.
     raw_sized(
@@ -1384,8 +1393,7 @@ fn resets_at_the_finish_after_a_call_dropped_between_messages_of_its_frame() {
         },
         |node, tasks, at| async move {
             let session = connect(&node, tasks, at, AGENT).await.expect("connects");
-            let mut writer =
-                session.writer(config(&["c00002"], 1)).await.expect("opens");
+            let mut writer = session.writer(wide_config(SERIES)).await.expect("opens");
             let series: Vec<(usize, u32, usize)> =
                 (0..SERIES).map(|at| (at, 1, 8)).collect();
             writer.draft(Form::Raw, &series).await.expect("a frame");
@@ -1506,29 +1514,47 @@ fn gives_the_error_of_the_renewal_to_an_open_writer() {
 }
 
 /// Places that name one channel twice, a stream that the node finishes before the
-/// last place, or places with no place of a channel of the open give the error of the
-/// places, and the program stops the write as `MALFORMED`.
+/// last place, places with no place of a channel of the open, or more than two places
+/// for each channel of the open give the error of the places, and the program stops
+/// the write as `MALFORMED`.
 #[test]
 fn stops_a_write_whose_places_are_not_valid() {
+    use wire::hub::client::Error::{Finished, Places, Repeated};
     let twice = vec![place(1, STAMP, "time", 0), place(1, STAMP, "again", 0)];
-    let whole = vec![place(1, STAMP, "time", 0), place(2, I64, "value", 0)];
-    let other = vec![place(1, STAMP, "time", 0), place(2, I64, "other", 0)];
+    let on_time = |names: &[&str]| {
+        let values = names
+            .iter()
+            .zip(2..)
+            .map(|(name, at)| place(at, I64, name, 0));
+        std::iter::once(place(1, STAMP, "time", 0))
+            .chain(values)
+            .collect::<Vec<_>>()
+    };
+    let whole = on_time(&["value"]);
+    let other = on_time(&["other"]);
+    let over = on_time(&["value", "other"]);
+    let wide = on_time(&["value", "other", "third", "fourth"]);
     let message = Error::Message;
+    let one: &[&str] = &["value"];
+    let two: &[&str] = &["value", "other"];
     let cases = [
+        (727, twice, 2, one, message(Repeated { key: key(1) })),
+        (728, whole, 1, one, message(Finished)),
         (
-            727,
-            twice,
+            729,
+            other,
             2,
-            message(wire::hub::client::Error::Repeated { key: key(1) }),
+            one,
+            Error::Unplaced("value".parse().unwrap()),
         ),
-        (728, whole, 1, message(wire::hub::client::Error::Finished)),
-        (729, other, 2, Error::Unplaced("value".parse().unwrap())),
+        (730, over, 3, one, message(Places { count: 3, cap: 2 })),
+        (731, wide, 5, two, message(Places { count: 5, cap: 4 })),
     ];
     assert_eq!(
-        cases[2].3.to_string(),
+        cases[2].4.to_string(),
         "the node gave no place for the channel value of the open"
     );
-    for (seed, places, sent, error) in cases {
+    for (seed, places, sent, names, error) in cases {
         by_hand(
             seed,
             move |session, node| async move {
@@ -1546,7 +1572,7 @@ fn stops_a_write_whose_places_are_not_valid() {
             },
             move |session, node| {
                 Box::pin(async move {
-                    let got = session.writer(config(&["value"], 1)).await.map(drop);
+                    let got = session.writer(config(names, 1)).await.map(drop);
                     assert_eq!(got, Err(error));
                     node.clock().sleep(QUIET).await;
                 })

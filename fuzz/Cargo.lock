@@ -371,6 +371,7 @@ dependencies = [
  "hub",
  "tracing",
  "types",
+ "zeroize",
 ]
 
 [[package]]
@@ -887,6 +888,7 @@ dependencies = [
  "env",
  "raft",
  "spec",
+ "tracing",
  "transport",
  "types",
  "wire",

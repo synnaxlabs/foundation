@@ -25,7 +25,9 @@ Never read all of `docs/decisions/`: read only the records that an issue names.
 - **Admit.** A builder sends new issues. Add the milestone and `ready` when the issue
   states its goal, crates, tests that must pass, and decisions section; the scenario
   needs it; and nothing blocks it. Else reply on the issue with the reason. Issues off
-  the path wait without a milestone.
+  the path wait without a milestone. An issue labeled `blocked` with no `owner:` label
+  is on the backlog. When its wait ends, a builder removes `blocked` and sends you its
+  link (`/build`, Rules). Admit it then as a new issue.
 - **Refill.** On every wake, count the `ready` issues with no `owner:` label. While
   there are fewer than builders, take the next open issues on the path from the
   backlog, not only new ones, and admit each that passes. An idle builder is a failure
@@ -36,8 +38,9 @@ Never read all of `docs/decisions/`: read only the records that an issue names.
   into such an issue as an item, and close it with the item's link.
 - **Route.** An issue that changes crates on two machines: split it into one issue per
   machine, linked, each with its `crate:` labels. A builder blocked on another machine's
-  issue: admit that issue first, and `send` its link to the blocked builder only when it
-  merges or changes.
+  issue: admit that issue first, and `send` its link to the owner of the blocked issue
+  only when it changes. At its close, the waits script of `/build` finds the blocked
+  issue.
 - **Order.** Mark issues ready in the order of the milestone's plan issue, which
   `laptop.director` keeps. The director also owns each issue's text: send it an issue
   that is unclear instead of admitting it.

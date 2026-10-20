@@ -11,7 +11,7 @@ use types::digest::Digest;
 use types::name::Name;
 use types::node;
 
-use super::{Mesh, put};
+use super::{Mesh, fetched, put};
 use crate::change::{self, CHUNKS_MAX, Change, HOMES_MAX};
 use crate::error::Error;
 use crate::region::{self, Refused};
@@ -189,16 +189,12 @@ impl Mesh {
         base: Digest,
         update: &Update,
     ) -> Result<Vec<Digest>, Error> {
-        loop {
-            let missing = match tree::diff(chunks, base, update.root) {
-                Ok(diff) => return Ok(diff.chunks),
-                Err(tree::Error::Missing(digest)) => digest,
-                Err(tree::Error::Corrupt(_)) => return Ok(update.chunks.clone()),
-            };
-            match self.store.get(missing).await.map_err(Error::Blob)? {
-                Some(chunk) => chunks.insert(chunk.to_vec()),
-                None => return Ok(update.chunks.clone()),
-            };
+        let read = |chunks: &Chunks| {
+            tree::diff(chunks, base, update.root).map(|diff| diff.chunks)
+        };
+        match fetched(&self.store, chunks, read).await? {
+            Ok(listed) => Ok(listed),
+            Err(_) => Ok(update.chunks.clone()),
         }
     }
 }

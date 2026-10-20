@@ -363,14 +363,56 @@
   `laptop.architect-2`, 2026-10-20T00:39Z,
   https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6280562003).
   The copy, `shim.c`, and `server.c` allocate through the global allocator of the
-  binary. `src/alloc.h` is the `UA_ARCH_HEADER` of both builds: it declares the 4
+  binary. `src/alloc.h` is the `UA_ARCH_HEADER` of both builds: it declares the 5
   functions of `src/alloc.rs` and defines `UA_malloc`, `UA_calloc`, `UA_realloc`, and
   `UA_free` as them, before `config.h` sets the libc calls as the defaults. They keep
-  the C contract on `std::alloc`: a failure gives NULL and never panics, `malloc(0)`
-  and `realloc(p, 0)` give a unique pointer that is not NULL, and each pointer is
-  aligned to 16. No pointer crosses between the libc allocator and these: the objects of
-  the copy, `shim.c`, and `server.c` call no libc function that gives or takes a heap
-  pointer. Our change makes `UA_CertificateUtils_getThumbprint` of
+  the C contract on `std::alloc`: a failure gives NULL and never panics, `malloc(0)` and
+  `realloc(p, 0)` give a unique pointer that is not NULL, and each pointer is aligned to
+  16. `free` writes zeros over each block before it gives the block back, as
+  `OPENSSL_free` of aws-lc does in its default mode, and `realloc` always moves the
+  block and frees the old one with the same zeros. So a freed block of the copy keeps no
+  copy of the key of the node or of a password, and a copy that a later release adds
+  needs no patch. Its cost is one `memset` of each freed block. A network buffer of
+  `shim.c` holds a short message in a block of the send buffer size. The invariant: a
+  sent buffer holds bytes past its `length` only when it is a chunk that is not final.
+  `encodeWithExchangeBuffer` (`ua_types_encoding_binary.c:112-118`) moves `pos` back
+  only to call the exchange, and `Array_encodeBinaryOverlayable` (lines 447-455) calls
+  the exchange only after it fills the block to its end. The exchange,
+  `sendSymmetricEncodingCallback` (`ua_securechannel.c:506`), sends the chunk with
+  `final` false, and only `UA_MessageContext_finish` (line 581) sets `final`. A send
+  with no exchange (OPN, HEL, and the ACK and RHE of a server) fails the encode of a
+  part and frees the buffer through `freeNetworkBuffer` (`ua_securechannel.c` lines 329
+  and 376, `client/ua_client_connect.c` lines 547 and 560, `server/ua_server_binary.c`
+  lines 288, 1021, and 1034). ERR (`ua_securechannel.c:139-155`) sends a block of its
+  exact size, so it holds no byte past `length`. So the free of a sent buffer
+  (`shim_send_free`) clears only its `length` (`connector_opcua_free_written`) when byte
+  3 is `F`, and the whole block for each other byte. Each other free of a network buffer
+  (`cm_free_buffer`) clears the whole block. A chunk that is not final filled its block
+  to near its end, so its whole clear costs about the bytes that it sends. Each release
+  update reads each call of the exchange and each move of `pos` back in the encode, and
+  checks that only `UA_MessageContext_finish` sets `final`, and that each call of
+  `sendWithConnection` sets `length` to the end of the last byte that its send wrote
+  (`ua_securechannel.c` lines 154, 372, and 479, `client/ua_client_connect.c` line 565,
+  `server/ua_server_binary.c` lines 292 and 1039). Lost: a patch at each copy in the
+  copy (the user token of the config, the plaintext of the encrypted token, the key of
+  the policies), which each new release needs again, with a hand mutant of each line,
+  and which misses the copies that a later release adds. Lost: a local patch that writes
+  zeros over `[oldpos, pos)` before the move back. Each release needs it again with a
+  hand mutant (LOCAL PATCHES), and it misses a later site that moves `pos` back before
+  an exchange, which the read of byte 3 covers (#3593; `laptop.architect-2`, 2026-10-20
+  15:42 UTC,
+  https://github.com/synnaxlabs/foundation/issues/3593#issuecomment-6294839523; the
+  cost, 2026-10-20 16:22 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3622#issuecomment-6295683844; the
+  invariant and the clear by byte 3, 2026-10-20 16:45 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3622#issuecomment-6296154748; the check
+  of the sent `length`, 2026-10-20 17:11 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3622#issuecomment-6296658333; the sends
+  with no exchange, 2026-10-20 17:26 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3622#issuecomment-6296960457). No
+  pointer crosses between the libc allocator and these: the objects of the copy,
+  `shim.c`, and `server.c` call no libc function that gives or takes a heap pointer. Our
+  change makes `UA_CertificateUtils_getThumbprint` of
   `plugins/crypto/openssl/certificategroup.c` write the hex of the digest into the
   thumbprint, in place of a block from `malloc` and `free`, and makes
   `UA_CertificateUtils_getSubjectName` free the name of aws-lc with `OPENSSL_free`.

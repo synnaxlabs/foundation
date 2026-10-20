@@ -930,6 +930,60 @@ fn keeps_the_source_of_the_token_after_a_long_401_body() {
 }
 
 #[test]
+fn shows_a_mark_in_place_of_the_token_in_the_answer_of_influx() {
+    let got = [
+        (
+            StatusCode::BAD_REQUEST,
+            "bad header: Authorization: Token s3cret",
+        ),
+        (StatusCode::UNAUTHORIZED, "the token s3cret is unknown"),
+    ]
+    .map(|answer| {
+        run(move |node, tasks| async move {
+            let plant = Plant::new(node, tasks).await;
+            plant.answers.borrow_mut().push_back(answer);
+            let config = with_token(&plant, "secret", "plant.influx_token");
+            let (_, errors, end) = send_one(&plant, config).await;
+            (errors, end.is_none())
+        })
+    });
+    let at = "InfluxDB at 10.0.0.1:8086 answered";
+    let want = [
+        format!("{at} 400 Bad Request: bad header: Authorization: Token <secret>. {REFUSED}"),
+        format!(
+            "{at} 401 Unauthorized. Check the token secret(\"plant.influx_token\"): the \
+             token <secret> is unknown"
+        ),
+    ]
+    .map(|error| (vec![String::new(), error, String::new()], true));
+    assert_eq!(got, want);
+}
+
+/// HTTP drops the white space at the end of a header value, so the server echoes the
+/// token of a file with no space.
+#[test]
+fn shows_a_mark_in_place_of_a_token_that_the_answer_holds_with_no_space_at_its_end() {
+    let got = run(move |node, tasks| async move {
+        node.paths()
+            .write(std::path::Path::new(TOKEN_FILE), b"s3cret \n")
+            .expect("writes");
+        let plant = Plant::new(node, tasks).await;
+        let answer = (
+            StatusCode::BAD_REQUEST,
+            "bad header: Authorization: Token s3cret",
+        );
+        plant.answers.borrow_mut().push_back(answer);
+        let config = with_token(&plant, "file", TOKEN_FILE);
+        send_one(&plant, config).await.1
+    });
+    let want = format!(
+        "InfluxDB at 10.0.0.1:8086 answered 400 Bad Request: bad header: \
+         Authorization: Token <secret>. {REFUSED}"
+    );
+    assert_eq!(got, [String::new(), want, String::new()]);
+}
+
+#[test]
 fn keeps_the_answer_of_influx_after_a_401_with_a_long_source_and_body() {
     let path: &'static str = format!("/run/secrets/{}", "\u{1}".repeat(200)).leak();
     let body: &'static str = "y".repeat(600).leak();

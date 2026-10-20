@@ -405,6 +405,51 @@ fn sends_the_home_each_renewal_between_frames() {
     assert_eq!(served, [Ok(Got::Ended), Ok(Got::Ended)]);
 }
 
+/// A renewal and a frame that reach the member at one instant reach the home whole, in
+/// either order, and the next renewal is not lost. Over 32 seeds, so that `sim` runs
+/// the admit and the poll of the forward in each order.
+#[test]
+fn sends_the_home_a_renewal_that_comes_with_a_frame() {
+    let orders = Arc::new(Mutex::new([0; 2]));
+    for seed in 0..32 {
+        let renewed = Arc::new(Mutex::new(Vec::new()));
+        let (kept, counted) = (Arc::clone(&renewed), Arc::clone(&orders));
+        let served = away(
+            seed,
+            move |mut home| async move {
+                home.start().await;
+                let mut got = home.messages(4).await;
+                let first = usize::from(Signed::decode(&got[0]).is_err());
+                let at = if first == 0 { 0 } else { 3 };
+                let mut nonces = vec![renewal(&got.remove(at))];
+                assert_eq!(got, frame(10, 10));
+                counted.lock().expect("not poisoned")[first] += 1;
+                home.reply(taken(1, 0, 1)).await;
+                nonces.push(renewal(&home.messages(1).await[0]));
+                home.reply(stored(1)).await;
+                assert_eq!(home.stream.recv().await, Ok(None));
+                home.stream.sender.finish().expect("finishes");
+                assert_eq!(*kept.lock().expect("not poisoned"), nonces);
+            },
+            |mut agent, challenge| async move {
+                let mut stream = write(&agent).await;
+                renewed.lock().expect("not poisoned").push(challenge.nonce);
+                agent.send_hello(Agent::hello(challenge), &AGENT).await;
+                send(&mut stream, &frame(10, 10)).await;
+                let challenge = agent.hello.challenge().await;
+                assert_eq!(stream.reply().await, taken(1, 0, 1));
+                renew(&mut agent, challenge, &renewed).await;
+                assert_eq!(stream.reply().await, stored(1));
+                assert_eq!(end(&mut stream).await, []);
+                super::read::finish(&mut agent).await;
+            },
+        );
+        assert_eq!(served, [Ok(Got::Ended), Ok(Got::Ended)], "seed {seed}");
+    }
+    let orders = *orders.lock().expect("not poisoned");
+    assert!(orders.iter().all(|&count| count > 0), "orders {orders:?}");
+}
+
 /// A renewal that the member admits while it waits for the places of the home reaches
 /// the home then, so the hello that the home holds does not expire in that wait.
 #[test]
@@ -440,9 +485,9 @@ fn sends_the_home_each_renewal_before_its_places() {
 
 /// The member holds the places of the home in the share of the subject until it sends
 /// them to the program: the size of a [`Place`] for each that the home counts, then
-/// each message of places. Here, with the 40 bytes of the ends and the 8 of the open,
-/// it holds `held` bytes of the share, of which `free` were free, when the hold of
-/// `length` fails.
+/// the bytes of the names of each message of places. Here, with the 40 bytes of the
+/// ends and the 8 of the open, it holds `held` bytes of the share, of which `free` were
+/// free, when the hold of `length` fails.
 fn stops_a_forward_whose_places_pass_the_share(
     seed: u64,
     free: u64,
@@ -483,15 +528,15 @@ fn stops_a_forward_whose_places_pass_the_share_as_busy() {
     stops_a_forward_whose_places_pass_the_share(23, 48 + fixed() - 1, fixed(), 48);
 }
 
-/// The 2 places of `value` come in one message of 65 bytes.
+/// The 2 places of `value` come in one message, with 9 bytes of names.
 #[test]
 fn stops_a_forward_whose_message_of_places_passes_the_share_as_busy() {
-    let free = 48 + fixed() + 65 - 1;
-    stops_a_forward_whose_places_pass_the_share(24, free, 65, 48 + fixed());
+    let free = 48 + fixed() + 9 - 1;
+    stops_a_forward_whose_places_pass_the_share(24, free, 9, 48 + fixed());
 }
 
 /// Once the member sends the places to the program, it gives back their whole hold,
-/// the message of 65 bytes too, and holds only the 40 bytes of the ends.
+/// the 9 bytes of names too, and holds only the 40 bytes of the ends.
 #[test]
 fn frees_the_places_of_a_forward_once_it_sends_them() {
     let served = away(
@@ -519,7 +564,7 @@ fn frees_the_places_of_a_forward_once_it_sends_them() {
 
 /// The member holds the places of a forward in the share of its subject while it sends
 /// them to a program that takes none. The frames of 10 001 channels hold 200 020
-/// bytes, and the places 3 280 006.
+/// bytes, and the places 3 030 000.
 #[test]
 fn holds_the_places_of_a_forward_while_it_sends_them() {
     const COUNT: usize = 10_000;
@@ -558,7 +603,7 @@ fn holds_the_places_of_a_forward_while_it_sends_them() {
     let share = serve::Error::Share {
         subject: name(SUBJECT),
         length: BODY_BYTES_MAX - 39,
-        held: 200_020 + 3_280_006,
+        held: 200_020 + 3_030_000,
     };
     let closed = serve::Error::Stream(transport::Error::Closed { code: Code(0) });
     assert_eq!(served, [Err(share), Ok(Got::Ended), Err(closed)]);

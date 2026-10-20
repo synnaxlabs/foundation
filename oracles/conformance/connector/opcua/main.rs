@@ -19,7 +19,9 @@ use spec::data_type::DataType;
 use spec::definition::Definition;
 use types::channel;
 use types::name::Name;
+use types::quality::Quality;
 use types::sample::{Scalar, Type};
+use types::time::Span;
 
 #[path = "../scenarios.rs"]
 mod scenarios;
@@ -35,6 +37,8 @@ const CHANNELS: [&str; 3] = ["plant.a", "plant.b", "plant.c"];
 const NO_READ: &str = "the connector has no `read` block, so it reads nothing. \
                        `browse` lists the points of the server, and `import` adds a \
                        `read` block for each.";
+/// The time from one change of the variables to the next.
+const PERIOD: Span = Span::from_nanos(100_000_000);
 
 const SUITE: Suite = Suite {
     kinds,
@@ -43,6 +47,8 @@ const SUITE: Suite = Suite {
     progress: "in",
     backoff: Backoff::Restart,
     refused,
+    secrets: None,
+    echo: None,
 };
 
 scenarios::suite!(SUITE);
@@ -86,7 +92,8 @@ fn setup(plant: &Plant<'_>) -> Document {
     config(&address, "10Hz", reads.collect())
 }
 
-/// Serves the variables of [`NODES`] until `until`.
+/// Serves the variables of [`NODES`] until `until`, and changes each one every
+/// [`PERIOD`], so a subscription gets new values as from a real plant.
 async fn simulate(inputs: Serve) {
     let listen = tcp::Listen {
         local: inputs.address,
@@ -108,6 +115,13 @@ async fn simulate(inputs: Serve) {
     let now = move || wall.now().time;
     let mut rng = inputs.node.entropy().rng();
     let (clock, variables) = (inputs.node.clock(), Variables::new(&NODES));
+    let (ticks, changed) = (clock.clone(), variables.clone());
+    inputs.tasks.spawn(async move {
+        loop {
+            ticks.sleep(PERIOD).await;
+            changed.change(Quality::GOOD);
+        }
+    });
     let served = serve(
         clock,
         now,

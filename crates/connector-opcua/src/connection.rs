@@ -974,7 +974,7 @@ impl Buffer {
 impl Drop for Buffer {
     fn drop(&mut self) {
         // SAFETY: open62541 allocated it, and only this buffer holds it.
-        unsafe { ffi::shim_buffer_free(&raw mut self.0) };
+        unsafe { ffi::shim_send_free(&raw mut self.0) };
     }
 }
 

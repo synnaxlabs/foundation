@@ -22,6 +22,7 @@ const BAD_ADDRESS: Code = Code::new("opcua.bad-address");
 const BAD_NODE_ID: Code = Code::new("opcua.bad-node-id");
 const BAD_POLLED: Code = Code::new("opcua.bad-polled");
 const BAD_UNENCRYPTED: Code = Code::new("opcua.bad-unencrypted");
+const BAD_USER: Code = Code::new("opcua.bad-user");
 const REPEATED_CHANNEL: Code = Code::new("opcua.repeated-channel");
 
 /// The scheme of each address.
@@ -52,6 +53,16 @@ pub(crate) struct Security {
     pub(crate) trust: secret::Source,
     /// `Sign` with `unencrypted = true`, else `SignAndEncrypt`.
     pub(crate) mode: client::Mode,
+    /// With no `user`, `None`, and the session is anonymous.
+    pub(crate) user: Option<User>,
+}
+
+/// The user name of a session and the source of its password.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct User {
+    /// Not empty.
+    pub(crate) name: String,
+    pub(crate) password: secret::Source,
 }
 
 /// The body of the config.
@@ -82,7 +93,13 @@ pub(crate) const BODY: Body = Body {
         schema::Attribute {
             name: "certificate",
             value: "a secret",
-            presence: Presence::When(&["key", "trust", "unencrypted"]),
+            presence: Presence::When(&[
+                "key",
+                "trust",
+                "unencrypted",
+                "user",
+                "password",
+            ]),
             summary: "The DER or PEM certificate of the node, with an RSA key and its \
                       application URI in the subject alternative name. With it, the \
                       channel signs and encrypts. Without it, the channel neither \
@@ -111,13 +128,28 @@ pub(crate) const BODY: Body = Body {
                       server with no encrypted endpoint. Only a connector with \
                       `certificate` takes it.",
         },
+        schema::Attribute {
+            name: "user",
+            value: "a string",
+            presence: Presence::When(&["password"]),
+            summary: "The user name of the session. Without it, the session is \
+                      anonymous. A connector with `password` needs it. Only a \
+                      connector with `certificate` takes it.",
+        },
+        schema::Attribute {
+            name: "password",
+            value: "a secret",
+            presence: Presence::When(&["user"]),
+            summary: "The password of `user`. Only a connector with `certificate` \
+                      takes it, so the password never goes in clear.",
+        },
     ],
     blocks: &[schema::Block {
         keyword: "read",
         label: Some("the channel"),
         forms: &[READ],
     }],
-    examples: &[EXAMPLE, POLLED, SECURE, SIGNED],
+    examples: &[EXAMPLE, POLLED, SECURE, SIGNED, USER],
 };
 
 /// A connector to one server.
@@ -158,6 +190,17 @@ certificate = file(\"/etc/foundation/opcua/node.der\")
 key         = secret(\"plant.opcua_key\")
 trust       = file(\"/etc/foundation/opcua/plc.der\")
 unencrypted = true
+";
+
+/// A connector that logs in with a user name and password.
+const USER: &str = "\
+address     = \"opc.tcp://plc:4840\"
+rate        = \"10Hz\"
+certificate = file(\"/etc/foundation/opcua/node.der\")
+key         = secret(\"plant.opcua_key\")
+trust       = file(\"/etc/foundation/opcua/plc.der\")
+user        = \"operator\"
+password    = secret(\"plant.opcua_password\")
 ";
 
 /// The body of a `read` block.
@@ -218,16 +261,18 @@ pub(crate) fn parse(config: &Document) -> Result<Config, Vec<Diagnostic>> {
     }
 }
 
-/// Reads `certificate`, `key`, and `trust`, each a source that
-/// [`secret::Source::read`] takes, and the bool `unencrypted`. Gives `None` with none
-/// of them.
+/// Reads `certificate`, `key`, `trust`, and `password`, each a source that
+/// [`secret::Source::read`] takes, the bool `unencrypted`, and the string `user`.
+/// Gives `None` with none of them.
 ///
 /// # Errors
 ///
 /// Each diagnostic of a source, `opcua.bad-unencrypted` for an `unencrypted` that is
-/// not a bool, a `document.missing-attribute` for `certificate` at each of `key`,
-/// `trust`, and `unencrypted` with no `certificate`, and one at `certificate` for each
-/// of `key` and `trust` that it lacks.
+/// not a bool, and `opcua.bad-user` for a `user` that is not a string or is empty.
+/// Then a `document.missing-attribute` for `certificate` at each of `key`, `trust`,
+/// `unencrypted`, `user`, and `password` with no `certificate`, one at `certificate`
+/// for each of `key` and `trust` that it lacks, one for `password` at a `user` with
+/// none, and one for `user` at a `password` with none.
 pub(crate) fn security(config: &Document) -> Result<Option<Security>, Vec<Diagnostic>> {
     let mut diagnostics = Vec::new();
     let attributes = &config.attributes;
@@ -239,36 +284,40 @@ pub(crate) fn security(config: &Document) -> Result<Option<Security>, Vec<Diagno
     let certificate = source("certificate");
     let key = source("key");
     let trust = source("trust");
+    let password = source("password");
     let unencrypted = attributes.get("unencrypted").map(|attribute| {
         unencrypted(&attribute.value).map_err(|error| diagnostics.push(error))
     });
+    let name = (attributes.get("user")).map(|attribute| {
+        user(&attribute.value).map_err(|error| diagnostics.push(error))
+    });
+    diagnostics.extend(missing(attributes));
+    let user = match (name, password) {
+        (Some(Ok(name)), Some(Ok(password))) => Ok(Some(User { name, password })),
+        (None, None) => Ok(None),
+        _ => Err(()),
+    };
     let Some(certificate) = certificate else {
-        diagnostics.extend(no_certificate(attributes));
         return if diagnostics.is_empty() {
             Ok(None)
         } else {
             Err(diagnostics)
         };
     };
-    let at = attributes
-        .get("certificate")
-        .and_then(|attribute| attribute.key_span);
-    let needs = [
-        (key.is_none(), "key", "the private key of the certificate"),
+    match (
+        certificate,
+        key,
+        trust,
+        unencrypted.unwrap_or(Ok(false)),
+        user,
+    ) {
         (
-            trust.is_none(),
-            "trust",
-            "the certificate of the server or of its CA",
-        ),
-    ];
-    for (missing, name, what) in needs {
-        if missing {
-            let fix = format!("Add a `{name}` with {what}, or remove `certificate`");
-            diagnostics.push(read::missing(kind::NOUN, at, &[name], fix));
-        }
-    }
-    match (certificate, key, trust, unencrypted.unwrap_or(Ok(false))) {
-        (Ok(certificate), Some(Ok(key)), Some(Ok(trust)), Ok(unencrypted)) => {
+            Ok(certificate),
+            Some(Ok(key)),
+            Some(Ok(trust)),
+            Ok(unencrypted),
+            Ok(user),
+        ) => {
             let mode = if unencrypted {
                 client::Mode::Sign
             } else {
@@ -279,26 +328,73 @@ pub(crate) fn security(config: &Document) -> Result<Option<Security>, Vec<Diagno
                 key,
                 trust,
                 mode,
+                user,
             }))
         }
         _ => Err(diagnostics),
     }
 }
 
-/// The `document.missing-attribute` for `certificate` at each of `key`, `trust`, and
-/// `unencrypted` in `attributes`.
-fn no_certificate(attributes: &Map) -> Vec<Diagnostic> {
-    let present = ["key", "trust", "unencrypted"]
+/// What the `certificate` of a connector with a user holds, and why it needs one.
+const CLEAR: &str = "the certificate of the node, and a `key` and `trust` for it, \
+                     since a password never goes in clear";
+
+/// The `document.missing-attribute` of each attribute that another of `attributes`
+/// needs: `certificate` at each of `key`, `trust`, `unencrypted`, `user`, and
+/// `password` with no `certificate`, else `key` and `trust` at `certificate`, and
+/// `password` at `user` and `user` at `password`.
+fn missing(attributes: &Map) -> Vec<Diagnostic> {
+    let has = |key| attributes.get(key).is_some();
+    let mut needs = Vec::new();
+    if has("certificate") {
+        needs.extend([
+            ("certificate", "key", "the private key of the certificate"),
+            (
+                "certificate",
+                "trust",
+                "the certificate of the server or of its CA",
+            ),
+        ]);
+    } else {
+        for by in ["key", "trust", "unencrypted"] {
+            needs.push((by, "certificate", "the certificate of the node"));
+        }
+        for by in ["user", "password"] {
+            needs.push((by, "certificate", CLEAR));
+        }
+    }
+    needs.extend([
+        ("user", "password", "the password of the user"),
+        ("password", "user", "the user name of the session"),
+    ]);
+    needs
         .into_iter()
-        .filter_map(|name| Some((name, attributes.get(name)?)));
-    present
-        .map(|(name, attribute)| {
-            let fix = format!(
-                "Add a `certificate` with the certificate of the node, or remove `{name}`"
-            );
-            read::missing(kind::NOUN, attribute.key_span, &["certificate"], fix)
+        .filter_map(|(by, wanted, what)| {
+            let at = attributes.get(by)?.key_span;
+            let fix = format!("Add a `{wanted}` with {what}, or remove `{by}`");
+            (!has(wanted)).then(|| read::missing(kind::NOUN, at, &[wanted], fix))
         })
         .collect()
+}
+
+/// Reads the text of `user`, a string or a reference.
+fn user(value: &Value) -> Result<String, Diagnostic> {
+    let refused = |message| {
+        Diagnostic::new(
+            BAD_USER,
+            value.span,
+            message,
+            "Write the user name of the session, such as `user = \"operator\"`".into(),
+        )
+    };
+    match value.kind.text() {
+        Some("") => Err(refused("`user` is empty".into())),
+        Some(text) => Ok(text.into()),
+        None => Err(refused(format!(
+            "`user` is a string, not {}",
+            value.kind.noun()
+        ))),
+    }
 }
 
 /// Reads the bool of `unencrypted`.

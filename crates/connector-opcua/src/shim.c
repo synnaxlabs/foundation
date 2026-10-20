@@ -687,15 +687,27 @@ static UA_StatusCode cm_alloc(UA_ConnectionManager *cm, uintptr_t id,
     return UA_STATUSCODE_GOOD;
 }
 
-/* Frees a buffer of `allocNetworkBuffer`. Rust frees each buffer that a send gives it
- * with this. */
+/* Frees a ByteString that open62541 gives Rust. */
 void shim_buffer_free(UA_ByteString *buffer) { UA_ByteString_clear(buffer); }
+
+/* Frees a buffer of `allocNetworkBuffer` that a send gives Rust. A chunk that is not
+ * final can hold, past `length`, the part of a value that the encode moved to the next
+ * chunk. Only a final chunk (byte 3 is `F`) holds no byte past `length`, so only its
+ * free clears only those, and each other free clears the whole block. */
+void shim_send_free(UA_ByteString *buffer) {
+    if(buffer->length < 4 || buffer->data[3] != 'F') {
+        UA_ByteString_clear(buffer);
+        return;
+    }
+    connector_opcua_free_written(buffer->data, buffer->length);
+    UA_ByteString_init(buffer);
+}
 
 static void cm_free_buffer(UA_ConnectionManager *cm, uintptr_t id,
                            UA_ByteString *buffer) {
     (void)cm;
     (void)id;
-    shim_buffer_free(buffer);
+    UA_ByteString_clear(buffer);
 }
 
 /* Gives a started TCP connection manager on `el`, first in its event sources, whose
@@ -1000,6 +1012,26 @@ UA_StatusCode shim_client_secure(UA_Client *client, UA_MessageSecurityMode mode,
     config->certificateVerification.clear(&config->certificateVerification);
     return shim_trust(&config->certificateVerification, &security->trust,
                       config->logging, config->eventLoop);
+}
+
+/* Makes `client`, which has not connected, activate its session with a copy of the
+ * user name `name` and the password `password`, each with its length, so a NUL byte
+ * does not cut it. Gives `BadOutOfMemory` when memory runs out. */
+UA_StatusCode shim_client_user(UA_Client *client, const UA_String *name,
+                               const UA_ByteString *password) {
+    UA_UserNameIdentityToken *token = UA_UserNameIdentityToken_new();
+    if(!token)
+        return UA_STATUSCODE_BADOUTOFMEMORY;
+    if(UA_String_copy(name, &token->userName) != UA_STATUSCODE_GOOD ||
+       UA_ByteString_copy(password, &token->password) != UA_STATUSCODE_GOOD) {
+        UA_UserNameIdentityToken_delete(token);
+        return UA_STATUSCODE_BADOUTOFMEMORY;
+    }
+    UA_ClientConfig *config = UA_Client_getConfig(client);
+    UA_ExtensionObject_clear(&config->userIdentityToken);
+    UA_ExtensionObject_setValue(&config->userIdentityToken, token,
+                                &UA_TYPES[UA_TYPES_USERNAMEIDENTITYTOKEN]);
+    return UA_STATUSCODE_GOOD;
 }
 
 /* Writes the SHA-1 thumbprint of `certificate`, DER or PEM, to `thumbprint` as 40

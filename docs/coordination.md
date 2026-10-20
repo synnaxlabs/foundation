@@ -103,17 +103,22 @@ Labels:
 - `owner:<name>` -> the session that took the task.
 - `crate:<name>` -> which crates it changes.
 - `ready` -> on the milestone path, complete, and not blocked, so a builder may take it.
-  Only the coordinator adds it.
+  Only the coordinator adds it, and a builder to an issue on the path that it gives
+  back (`/build`).
 - `night` -> ready for the night lane. Only the architect adds it.
 - `model:fable` -> runs on Fable. Only the person or the architect adds it.
 - `interface` -> a request to change a public surface or a crate dependency.
 - `oracle` -> it changes `oracles/`.
-- `blocked` -> waiting on another issue, linked in the body, or on a question for the
-  person.
+- `blocked` -> waiting on other issues or PRs, or on a question for the person, named
+  in one line of the body that is never wrapped: `Waits on #<n>, #<m>.`, with
+  `the person` for a question.
 - `security` -> a security finding.
 
 Builders file the next issues on the milestone path from `docs/decisions/`, and the
-coordinator admits them. Any builder takes any crate. One task is in progress per crate.
+coordinator admits them. Any builder takes any crate. One task is in progress per crate:
+an issue with an `owner:` label holds its crates while an open PR closes it or has its
+number in its branch, or while it is not `blocked`. A builder holds at most one owned
+issue with no open PR (`/build`, "Take an issue").
 
 ## Pull requests
 

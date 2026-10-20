@@ -538,3 +538,10 @@
   https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6286854444. Lost: a
   draft that takes one count for each group, which makes the caller find the group of
   each place.
+  The places of a write number at most two for each channel of its open (itself and
+  its index), and at most `PLACES_MAX`. `write::Opening::new` takes the bound of its
+  caller: the program gives two for each channel, and refuses more with
+  `Error::Places { count, cap }`, which stops the stream with `MALFORMED`. The member of
+  a forward gives the channels of its open and one index (`laptop.architect`, item 3,
+  2026-10-20T16:17:34Z:
+  https://github.com/synnaxlabs/foundation/issues/3559#issuecomment-6295589076).

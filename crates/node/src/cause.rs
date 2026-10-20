@@ -60,6 +60,7 @@ pub(crate) fn mesh(error: &mesh::Error) -> Option<&files::Error> {
         | mesh::Error::Stale { .. }
         | mesh::Error::Large { .. }
         | mesh::Error::Problems(_)
+        | mesh::Error::Tree(_)
         | mesh::Error::Stray { .. }
         | mesh::Error::NotIndex(_)
         | mesh::Error::UnknownNode(_)
