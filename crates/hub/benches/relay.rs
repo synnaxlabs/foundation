@@ -19,6 +19,11 @@
 //!   channels, so the home refuses each frame as `Waiting`.
 //!
 //! Compare two builds on one pinned core whose SMT sibling is idle.
+//!
+//! `-- --line <prefix> --rounds <n>` runs only the lines whose name starts with
+//! `prefix`, in which `_` stands for a space, and the timer, with `n` rounds in place
+//! of 50. A profile collects the timed work by name: `relay::timed` for a served line,
+//! and `relay::write` for `write 1x2`.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -34,6 +39,7 @@ mod fixture;
 mod net;
 #[path = "../tests/common/node.rs"]
 mod node;
+mod run;
 #[path = "../tests/common/serving.rs"]
 mod serving;
 #[expect(dead_code, reason = "the bench uses only some of the helpers")]
@@ -41,20 +47,21 @@ mod serving;
 mod sessions;
 mod table;
 
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
-use agent::Agent;
+use agent::{AGENT, Agent};
 use common::name;
 use env::tasks::Tasks;
 use fixture::{channel_name, create_hub};
-use hub::writer;
-use hub::{Hub, Served};
+use hub::writer::{self, Writer};
+use hub::{Hub, Served, serve};
+use run::Run;
 use table::Line;
 use transport::Address;
 use types::authority::Authority;
-use types::frame::{Form, Path};
+use types::frame::{Draft, Form, Path};
 use types::sample::{Scalar, Type};
 use types::time::Span;
 use wire::hub::client::Place;
@@ -66,7 +73,11 @@ static ALLOCATOR: counting::Allocator = counting::Allocator::new();
 /// Frames per round.
 const FRAMES: usize = 64;
 const WARMUP: usize = 10;
+/// Rounds per line, unless `--rounds` gives another count.
 const ROUNDS: usize = 50;
+/// Rounds between two renewals of the program's session, well inside the life of a
+/// hello in mesh time.
+const RENEW: usize = 1000;
 /// How long the bench waits between two checks of what the program did.
 const STEP: Span = Span::MILLISECOND;
 /// The keys of each case's channels start at a multiple of `LINE`.
@@ -146,12 +157,15 @@ struct Progress {
 }
 
 fn main() {
+    let run = Arc::new(Run::new(ROUNDS));
+    let rounds = run.rounds;
     let mut sim = sim::Sim::new(sim::Config::default());
     let home = sim.node(sim::node::Config::default());
     let progress = Arc::new(Progress::default());
     let at = Address::Udp(std::net::SocketAddr::new(home.addresses()[0], net::PORT));
     let node = sim.node(sim::node::Config::default());
     let shared = Arc::clone(&progress);
+    let selected = Arc::clone(&run);
     let own = node.clone();
     let config = env::shards::Config {
         name: "program".into(),
@@ -161,34 +175,42 @@ fn main() {
         while shared.stamp.load(Ordering::Relaxed) == 0 {
             own.clock().sleep(STEP).await;
         }
-        program(&own, tasks, at, &shared).await;
+        program(&own, tasks, at, &shared, &selected).await;
     };
     drop(node.shards().start(config, main).expect("starts"));
     let (timer, lines, partial, stored) = sim
-        .run_on(&home, move |node, tasks| bench(node, tasks, progress))
+        .run_on(&home, move |node, tasks| bench(node, tasks, progress, run))
         .expect("the run ends");
     let title = format!(
-        "ns per frame over {ROUNDS} rounds of {FRAMES} frames \
+        "ns per frame over {rounds} rounds of {FRAMES} frames \
          (rounds not whole in one poll: {partial}; Stored replies: {stored})"
     );
     table::print(&title, &timer, &lines);
 }
 
-/// The home: runs the control line, then serves the program's write of each case.
+/// The home: runs the control line of `run`, then serves the program's write of each
+/// case of `run`.
 async fn bench(
     node: sim::node::Node,
     tasks: Tasks,
     progress: Arc<Progress>,
+    run: Arc<Run>,
 ) -> (Line, Vec<Line>, usize, usize) {
     let transport = net::transport(&node, &tasks, &net::own_pool(), net::HOME, 1 << 16);
     let indexes = (0..=CASES.len()).map(|at| (base(at), base(at) + 1..=base(at) + 63));
     let (hub, now) = create_hub(&node, tasks.clone(), indexes).await;
     hub.set_rules(sessions::rules());
     let mut timer = Line::new("timer", FRAMES);
-    let mut lines = vec![control(&node, &hub, now, &mut timer, &progress).await];
+    let mut lines = Vec::new();
+    if run.runs(CONTROL) {
+        lines.push(control(&node, &hub, now, run.rounds, &mut timer, &progress).await);
+    } else {
+        progress.stamp.store(now, Ordering::Relaxed);
+    }
     let (session, remote) = serving::program(&transport, &hub, &tasks).await;
     let mut partial = 0;
-    for (at, case) in CASES.iter().enumerate() {
+    let cases = CASES.iter().enumerate();
+    for (at, case) in cases.filter(|(_, case)| run.runs(case.name)) {
         let holder = if case.waiting {
             let config = writer::Config {
                 subject: name("holder"),
@@ -210,7 +232,7 @@ async fn bench(
         }
         node.clock().sleep(common::SETTLE).await;
         serving::poll(serving.as_mut());
-        for round in 0..WARMUP + ROUNDS {
+        for round in 0..WARMUP + run.rounds {
             let sent = progress.sent.load(Ordering::Relaxed) + FRAMES;
             let frames = progress.frames.load(Ordering::Relaxed) + FRAMES;
             progress.go.fetch_add(1, Ordering::Relaxed);
@@ -219,7 +241,7 @@ async fn bench(
             }
             node.clock().sleep(common::SETTLE).await;
             timer.add(table::timed(&ALLOCATOR, || ()).1);
-            line.add(table::timed(&ALLOCATOR, || serving::poll(serving.as_mut())).1);
+            line.add(table::timed(&ALLOCATOR, || timed(serving.as_mut())).1);
             let mut waits = 0;
             while progress.frames.load(Ordering::Relaxed) < frames {
                 node.clock().sleep(STEP).await;
@@ -243,15 +265,26 @@ async fn bench(
     (timer, lines, partial, stored)
 }
 
-/// The `write 1x2` line. Stores in `progress` the stamp after its last frame.
+/// One poll of `serving`, the timed work of a served line.
+#[inline(never)]
+fn timed(serving: Pin<&mut impl Future<Output = Result<Served, serve::Error>>>) {
+    serving::poll(serving);
+}
+
+/// The name of the control line.
+const CONTROL: &str = "write 1x2";
+
+/// The control line, of `rounds` rounds. Stores in `progress` the stamp after its last
+/// frame.
 async fn control(
     node: &sim::node::Node,
     hub: &Hub,
     now: i64,
+    rounds: usize,
     timer: &mut Line,
     progress: &Progress,
 ) -> Line {
-    let mut line = Line::new("write 1x2", FRAMES);
+    let mut line = Line::new(CONTROL, FRAMES);
     let config = writer::Config {
         subject: name("control"),
         authority: Authority(1),
@@ -260,7 +293,7 @@ async fn control(
     };
     let mut writer = hub.writer(config).await.expect("opens");
     let mut stamp = now - 10_000_000;
-    for round in 0..WARMUP + ROUNDS {
+    for round in 0..WARMUP + rounds {
         for _ in 0..FRAMES {
             let mut draft =
                 writer.draft(Form::Raw, &[(0, 8), (1, 8)]).expect("a frame");
@@ -271,7 +304,7 @@ async fn control(
             }
             draft.set_count(0, 1);
             timer.add(table::timed(&ALLOCATOR, || ()).1);
-            line.add(table::timed(&ALLOCATOR, || common::write(&mut writer, draft)).1);
+            line.add(table::timed(&ALLOCATOR, || write(&mut writer, draft)).1);
         }
         node.clock().sleep(common::SETTLE).await;
         timer.close(round >= WARMUP);
@@ -283,19 +316,27 @@ async fn control(
     line
 }
 
-/// The program: opens a write for each case, and sends each round when the home lets
-/// it.
+/// One write of `draft`, the timed work of the control line.
+#[inline(never)]
+fn write(writer: &mut Writer, draft: Draft) {
+    common::write(writer, draft);
+}
+
+/// The program: opens a write for each case of `run`, and sends each round when the
+/// home lets it.
 async fn program(
     node: &sim::node::Node,
     tasks: Tasks,
     at: Address,
     progress: &Progress,
+    run: &Run,
 ) {
     let mut agent = Agent::dial(node, tasks, at, name(agent::SUBJECT)).await;
-    agent.admit().await;
+    let mut challenge = agent.admit().await;
     let mut stamp = progress.stamp.load(Ordering::Relaxed);
     let mut round = 0;
-    for (at, case) in CASES.iter().enumerate() {
+    let cases = CASES.iter().enumerate();
+    for (at, case) in cases.filter(|(_, case)| run.runs(case.name)) {
         let names: Vec<String> = (1..case.series)
             .map(|data| channel_name(base(at) + u128::from(data)).to_string())
             .collect();
@@ -305,8 +346,12 @@ async fn program(
         let series = usize::try_from(case.series).expect("few");
         assert_eq!(start.places.len(), series, "the places of {}", case.name);
         progress.opened.fetch_add(1, Ordering::Relaxed);
-        for _ in 0..WARMUP + ROUNDS {
+        for _ in 0..WARMUP + run.rounds {
             round += 1;
+            if round % RENEW == 0 {
+                agent.send_hello(Agent::hello(challenge), &AGENT).await;
+                challenge = agent.hello.challenge().await;
+            }
             while progress.go.load(Ordering::Relaxed) < round {
                 node.clock().sleep(Span::from_nanos(100_000)).await;
             }
