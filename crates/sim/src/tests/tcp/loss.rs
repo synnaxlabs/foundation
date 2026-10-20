@@ -247,3 +247,256 @@ fn a_reset_drops_the_lost_bytes_of_its_stream_and_goes_at_once() {
     };
     assert_eq!(take(&server), (reset, Err(error)));
 }
+
+/// Options with a send buffer of 1 byte, so that a write of a second byte waits for
+/// the ACK of the first.
+fn one_byte() -> tcp::Options {
+    tcp::Options {
+        send_buffer_bytes: 1,
+        ..options()
+    }
+}
+
+#[test]
+fn an_ack_goes_at_once_while_the_bytes_of_its_end_wait_to_go_again() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen_on(&b, at(&b, 4433), one_byte());
+    let server = start(&b, "server", move |node| async move {
+        let mut tcp = accept(&mut listener).await;
+        node.clock().sleep(millis(10)).await;
+        write_all(&mut tcp, &[2]).await.unwrap();
+        write_all(&mut tcp, &[3]).await.unwrap();
+        (node.clock().now(), read(&mut tcp, 1).await.unwrap(), tcp)
+    });
+    let remote = at(&b, 4433);
+    let _client = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        node.clock().sleep(millis(10)).await;
+        write_all(&mut tcp, &[1]).await.unwrap();
+        tcp
+    });
+    sim.run_for(millis(5)).unwrap();
+    sim.link(&a, &b, cut());
+    sim.run_for(Span::from_nanos(5_600_000)).unwrap();
+    sim.link(&a, &b, link::Config::default());
+    sim.run().unwrap();
+    // The byte of the client is lost at leg 2 plus 10 ms. The ACK of the first byte
+    // of the server goes at leg 4 plus 10 ms, not behind it at its RTO.
+    let (wrote, read, _tcp) = take(&server);
+    assert_eq!((wrote, read), (legs(5) + millis(10), vec![1]));
+}
+
+#[test]
+fn a_lost_ack_goes_with_the_first_segment_sent_after_it_not_one_in_flight() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    let _server = start(&b, "server", move |node| async move {
+        let mut tcp = accept(&mut listener).await;
+        node.clock().sleep(millis(10)).await;
+        write_all(&mut tcp, &[9]).await.unwrap();
+        node.clock().sleep(millis(10)).await;
+        write_all(&mut tcp, &[10]).await.unwrap();
+        tcp
+    });
+    let remote = at(&b, 4433);
+    let client = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, one_byte()).await.unwrap();
+        node.clock().sleep(Span::from_nanos(10_100_000)).await;
+        write_all(&mut tcp, &[1]).await.unwrap();
+        write_all(&mut tcp, &[2]).await.unwrap();
+        (node.clock().now(), tcp)
+    });
+    let leg = delay().nanos();
+    sim.run_for(Span::from_nanos(3 * leg + 10_050_000)).unwrap();
+    sim.link(&b, &a, cut());
+    sim.run_for(Span::from_nanos(100_000)).unwrap();
+    sim.link(&b, &a, link::Config::default());
+    sim.run().unwrap();
+    // The ACK of the first byte is lost while the byte 9 is in flight. The byte 10,
+    // sent after it, carries it.
+    let (wrote, _tcp) = take(&client);
+    assert_eq!(wrote, legs(4) + millis(20));
+}
+
+#[test]
+fn a_power_cut_keeps_the_lost_bytes_of_the_other_nodes() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let c = sim.node(node::Config::default());
+    let mut listener = listen(&b, 4433);
+    let server = start(&b, "server", move |node| async move {
+        let mut tcp = accept(&mut listener).await;
+        let read = read(&mut tcp, 1).await.unwrap();
+        (node.clock().now(), read, tcp)
+    });
+    let remote = at(&b, 4433);
+    let _client = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        node.clock().sleep(millis(10)).await;
+        write_all(&mut tcp, &[1]).await.unwrap();
+        tcp
+    });
+    sim.run_for(millis(5)).unwrap();
+    sim.link(&a, &b, cut());
+    sim.run_for(millis(7)).unwrap();
+    sim.crash(&c, Crash::Power);
+    sim.link(&a, &b, link::Config::default());
+    sim.run().unwrap();
+    // The byte is lost at leg 2 plus 10 ms, and goes again after its RTO of 2 legs
+    // plus 200 ms.
+    let (read_at, read, _tcp) = take(&server);
+    assert_eq!((read_at, read), (legs(5) + millis(210), vec![1]));
+}
+
+#[test]
+fn a_power_cut_keeps_the_lost_acks_of_the_other_nodes() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let c = sim.node(node::Config::default());
+    let mut listener = listen(&b, 4433);
+    let _server = start(&b, "server", move |_| async move {
+        let mut tcp = accept(&mut listener).await;
+        read_all(&mut tcp).await
+    });
+    let remote = at(&b, 4433);
+    let client = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, one_byte()).await.unwrap();
+        node.clock().sleep(millis(10)).await;
+        write_all(&mut tcp, &[1]).await.unwrap();
+        write_all(&mut tcp, &[2]).await.unwrap();
+        (node.clock().now(), tcp)
+    });
+    sim.run_for(millis(5)).unwrap();
+    sim.link(&b, &a, cut());
+    sim.run_for(millis(7)).unwrap();
+    sim.crash(&c, Crash::Power);
+    sim.link(&b, &a, link::Config::default());
+    sim.run_for(secs(1)).unwrap();
+    // The ACK of the first byte is lost at leg 3 plus 10 ms, and goes again after
+    // its RTO of 2 legs plus 200 ms.
+    let (wrote, _tcp) = take(&client);
+    assert_eq!(wrote, legs(6) + millis(210));
+}
+
+/// Asserts that `client` gives `Error::TimedOut` when each segment from the server
+/// is lost from 5 ms on. The server's listener has `options`, and the client starts
+/// 10 ms after its connect.
+fn times_out<T, F, G>(
+    options: tcp::Options,
+    server: impl FnOnce(Tcp) -> F + Send + 'static,
+    client: impl FnOnce(Tcp) -> G + Send + 'static,
+) where
+    T: Send + 'static,
+    F: Future<Output = T> + 'static,
+    G: Future<Output = Net> + 'static,
+{
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen_on(&b, at(&b, 4433), options);
+    let _server = start(&b, "server", move |_| async move {
+        server(accept(&mut listener).await).await
+    });
+    let remote = at(&b, 4433);
+    let client = start(&a, "client", move |node| async move {
+        let tcp = connect(&node, remote, self::options()).await.unwrap();
+        node.clock().sleep(millis(10)).await;
+        client(tcp).await
+    });
+    sim.run_for(millis(5)).unwrap();
+    sim.link(&b, &a, cut());
+    sim.run().unwrap();
+    assert_eq!(take(&client), Net::TimedOut { remote });
+}
+
+#[test]
+fn a_lost_ack_times_out_the_writer_of_the_bytes_it_acks() {
+    let server = |mut tcp| async move {
+        read(&mut tcp, 1).await.unwrap();
+        tcp
+    };
+    times_out(options(), server, |mut tcp| async move {
+        write_all(&mut tcp, &[1]).await.unwrap();
+        read(&mut tcp, 1).await.unwrap_err()
+    });
+}
+
+#[test]
+fn a_lost_window_update_times_out_the_writer_that_waits_for_room() {
+    let options = tcp::Options {
+        recv_buffer_bytes: 2,
+        ..options()
+    };
+    let server = |mut tcp| async move {
+        read(&mut tcp, 2).await.unwrap();
+        tcp
+    };
+    times_out(options, server, |mut tcp| async move {
+        write_all(&mut tcp, &[1, 2, 3, 4]).await.unwrap();
+        read(&mut tcp, 1).await.unwrap_err()
+    });
+}
+
+#[test]
+fn a_lost_ack_of_a_fin_times_out_the_end_that_closed() {
+    let server = |mut tcp| async move {
+        assert_eq!(read(&mut tcp, 1).await, Ok(vec![]));
+        tcp
+    };
+    times_out(options(), server, |mut tcp| async move {
+        close(&mut tcp).await.unwrap();
+        read(&mut tcp, 1).await.unwrap_err()
+    });
+}
+
+#[test]
+fn a_lost_ack_that_no_end_waits_for_breaks_nothing() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    let _server = start(&b, "server", move |node| async move {
+        let mut tcp = accept(&mut listener).await;
+        node.clock().sleep(millis(10)).await;
+        assert_eq!(read(&mut tcp, 4_096).await, Ok(pattern(2_000)));
+        node.clock().sleep(secs(1_000)).await;
+        write_all(&mut tcp, &[9]).await.unwrap();
+        tcp
+    });
+    let remote = at(&b, 4433);
+    let client = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        write_all(&mut tcp, &pattern(2_000)).await.unwrap();
+        read(&mut tcp, 1).await
+    });
+    sim.run_for(millis(5)).unwrap();
+    sim.link(&b, &a, cut());
+    sim.run_for(secs(999)).unwrap();
+    sim.link(&b, &a, link::Config::default());
+    sim.run().unwrap();
+    // The window update of the read at 10 ms is lost each time, and the client,
+    // whose bytes are each acked, waits for nothing from it.
+    assert_eq!(take(&client), Ok(vec![9]));
+}
+
+#[test]
+fn a_lost_ack_of_a_handshake_times_out_the_accept_and_leaves_the_backlog() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let listen = tcp::Listen {
+        local: at(&b, 4433),
+        backlog: 0,
+        options: options(),
+    };
+    let mut listener = b.net().listen(&listen).unwrap();
+    let remote = at(&b, 4433);
+    let _first = start(&a, "first", move |node| async move {
+        connect(&node, remote, options()).await.unwrap()
+    });
+    sim.run_for(Span::from_nanos(3 * delay().nanos() / 2))
+        .unwrap();
+    sim.link(&a, &b, cut());
+    sim.run_for(secs(1_000)).unwrap();
+    sim.link(&a, &b, link::Config::default());
+    let server = start(&b, "server", move |_| async move {
+        accept(&mut listener).await.peer()
+    });
+    let _second = start(&a, "second", move |node| async move {
+        connect(&node, remote, options()).await.unwrap()
+    });
+    sim.run().unwrap();
+    assert_eq!(take(&server), at(&a, 49_153));
+}
