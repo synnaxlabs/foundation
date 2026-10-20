@@ -2,8 +2,8 @@
 
 use config::openssh::{self, Unreadable};
 use proptest::prelude::*;
-use ssh_key::private::{Ed25519Keypair, Ed25519PrivateKey, KeypairData};
-use ssh_key::public::Ed25519PublicKey;
+use ssh_key::private::{Ed25519Keypair, Ed25519PrivateKey, KeypairData, OpaqueKeypair};
+use ssh_key::public::{Ed25519PublicKey, OpaquePublicKey};
 use types::ed25519::PrivateKey;
 
 /// `ssh-keygen -t ed25519 -N "" -C alice@laptop`, and the line of its `.pub` file.
@@ -29,7 +29,7 @@ apyEWMirL6NgKgnQ==
 -----END OPENSSH PRIVATE KEY-----
 ";
 
-/// `ssh-keygen -t ecdsa -b 256 -N ""`.
+/// `ssh-keygen -t rsa -b 1024 -N ""`.
 const RSA: &str = "-----BEGIN OPENSSH PRIVATE KEY-----
 b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAlwAAAAdzc2gtcn
 NhAAAAAwEAAQAAAIEAv3Su37OsRS+tk7zwm9dxJasHJhoWYvCGH8OXR7GWlZdkwzeQQx5/
@@ -47,6 +47,7 @@ QQDGgbx3D8ZSGTxlxQHjSSVqy1nXTM/Rey2+xNtZaCMhmdgJnhp7BupUXvqzp4ySJKyBAO
 LuN/r50yflT0JbNPLJAAAAAAEC
 -----END OPENSSH PRIVATE KEY-----
 ";
+/// `ssh-keygen -t ecdsa -b 256 -N ""`.
 const ECDSA: &str = "-----BEGIN OPENSSH PRIVATE KEY-----
 b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAaAAAABNlY2RzYS
 1zaGEyLW5pc3RwMjU2AAAACG5pc3RwMjU2AAAAQQRoMDjdYYenV2PI4+S3E381Kevu6Ay+
@@ -104,6 +105,115 @@ fn refuses_a_key_of_another_algorithm_by_its_name() {
                 .into()
         )
     );
+}
+
+/// An algorithm that is not on the list of known names is not named, since a corrupt
+/// file can hold any text there.
+#[test]
+fn refuses_a_key_of_an_unknown_algorithm_as_no_key_file() {
+    let algorithm = ssh_key::Algorithm::new("a@b.example").unwrap();
+    let public = OpaquePublicKey::new(vec![1; 32], algorithm);
+    let pair = OpaqueKeypair::new(vec![2; 32], public);
+    let file = ssh_key::PrivateKey::new(KeypairData::Other(pair), "").unwrap();
+    let text = file.to_openssh(ssh_key::LineEnding::LF).unwrap();
+    assert_eq!(
+        unreadable(&text),
+        (
+            Unreadable::Format,
+            "the file is not an OpenSSH private key".into()
+        )
+    );
+}
+
+/// A key file with CRLF line ends, as an editor on Windows saves it, with blank lines
+/// or other text after the end mark, or with no line end after the end mark reads as
+/// its key. OpenSSH 9.6p1 reads the second and third, and refuses the first and last.
+#[test]
+fn reads_a_key_file_with_each_line_end_and_text_after_the_end_mark() {
+    let crlf = KEYGEN.replace('\n', "\r\n");
+    let blank = format!("{KEYGEN}\n\r\n");
+    let after = format!("{KEYGEN}any text\n");
+    for text in [crlf.as_str(), &blank, &after, KEYGEN.trim_end()] {
+        let key = openssh::private_key(text).unwrap();
+        assert_eq!(openssh::line(key.public()), KEYGEN_PUB, "{text:?}");
+    }
+}
+
+#[test]
+fn reads_a_key_file_with_mixed_line_ends_and_space_at_the_end() {
+    let mixed: String = KEYGEN
+        .lines()
+        .enumerate()
+        .flat_map(|(i, line)| [line, if i % 2 == 0 { "\r\n" } else { "\n" }])
+        .collect();
+    let crlf_blanks = format!("{}\r\n\r\n  \r\n", KEYGEN.replace('\n', "\r\n"));
+    let trailing_tab = format!("{KEYGEN}\t\n");
+    for text in [mixed, crlf_blanks, trailing_tab] {
+        let key = openssh::private_key(&text).unwrap();
+        assert_eq!(openssh::line(key.public()), KEYGEN_PUB, "{text:?}");
+    }
+}
+
+/// Go's `ssh.MarshalPrivateKey` wraps the body at 64 columns, and OpenSSH reads a body
+/// at any width.
+#[test]
+fn reads_a_key_file_whose_body_has_any_width() {
+    let body: String = KEYGEN
+        .lines()
+        .filter(|line| !line.starts_with("-----"))
+        .collect();
+    for width in [64, 76, body.len()] {
+        let mut text = String::from("-----BEGIN OPENSSH PRIVATE KEY-----\n");
+        for line in body.as_bytes().chunks(width) {
+            text.push_str(std::str::from_utf8(line).unwrap());
+            text.push('\n');
+        }
+        text.push_str("-----END OPENSSH PRIVATE KEY-----\n");
+        let key = openssh::private_key(&text).unwrap();
+        assert_eq!(openssh::line(key.public()), KEYGEN_PUB, "{text:?}");
+    }
+}
+
+/// `ssh-keygen -C` in a Latin-1 locale writes a comment that is not UTF-8, which OpenSSH
+/// reads and `ssh-key` 0.6.7 refuses. The error says so, not that the file is no key.
+#[test]
+fn refuses_a_key_file_whose_comment_is_not_utf8() {
+    use base64ct::{Base64, Encoding};
+    let body: String = KEYGEN
+        .lines()
+        .filter(|line| !line.starts_with("-----"))
+        .collect();
+    let mut binary = Base64::decode_vec(&body).unwrap();
+    let at = binary
+        .windows(12)
+        .position(|bytes| bytes == b"alice@laptop")
+        .unwrap();
+    binary[at + 2] = 0xe9;
+    let text = format!(
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\n",
+        Base64::encode_string(&binary)
+    );
+    let expected = (
+        Unreadable::Comment,
+        "the key file holds a text that is not UTF-8, such as its comment".into(),
+    );
+    assert_eq!(unreadable(&text), expected);
+}
+
+/// OpenSSH skips white space in the body: space and tab around each line, and a
+/// vertical tab or a form feed in a line.
+#[test]
+fn reads_a_key_file_with_white_space_in_its_body() {
+    let mut lines: Vec<String> = KEYGEN.lines().map(str::to_owned).collect();
+    let last = lines.len() - 1;
+    for (i, line) in lines[1..last].iter_mut().enumerate() {
+        let mid = line.len() / 2;
+        let c = if i % 2 == 0 { '\x0b' } else { '\x0c' };
+        *line = format!("  {}{c}{}\t ", &line[..mid], &line[mid..]);
+    }
+    let text = lines.join("\n") + "\n";
+    let key = openssh::private_key(&text).unwrap();
+    assert_eq!(openssh::line(key.public()), KEYGEN_PUB, "{text:?}");
 }
 
 #[test]
@@ -174,6 +284,13 @@ fn gives_the_code_and_the_fix_of_each_error() {
     assert_eq!(
         parts(Unreadable::Mismatch),
         ("config.key-mismatch", new_key)
+    );
+    assert_eq!(
+        parts(Unreadable::Comment),
+        (
+            "config.key-comment",
+            "Give the key a comment in UTF-8 with `ssh-keygen -c -C <comment> -f <file>`"
+        )
     );
 }
 

@@ -235,7 +235,10 @@ fn unreadable(path: &Path, error: Unreadable, fix: &str) -> PyErr {
     let text = format!("{path}: {code}: {error}. {first}");
     PyValueError::new_err(match error {
         Unreadable::Passphrase => format!("{text}. Or {fix}"),
-        Unreadable::Format | Unreadable::Algorithm(_) | Unreadable::Mismatch => text,
+        Unreadable::Format
+        | Unreadable::Algorithm(_)
+        | Unreadable::Mismatch
+        | Unreadable::Comment => text,
     })
 }
 
