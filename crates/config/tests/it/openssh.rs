@@ -2,8 +2,8 @@
 
 use config::openssh::{self, Unreadable};
 use proptest::prelude::*;
-use ssh_key::private::{Ed25519Keypair, Ed25519PrivateKey, KeypairData};
-use ssh_key::public::Ed25519PublicKey;
+use ssh_key::private::{Ed25519Keypair, Ed25519PrivateKey, KeypairData, OpaqueKeypair};
+use ssh_key::public::{Ed25519PublicKey, OpaquePublicKey};
 use types::ed25519::PrivateKey;
 
 /// `ssh-keygen -t ed25519 -N "" -C alice@laptop`, and the line of its `.pub` file.
@@ -29,7 +29,7 @@ apyEWMirL6NgKgnQ==
 -----END OPENSSH PRIVATE KEY-----
 ";
 
-/// `ssh-keygen -t ecdsa -b 256 -N ""`.
+/// `ssh-keygen -t rsa -b 1024 -N ""`.
 const RSA: &str = "-----BEGIN OPENSSH PRIVATE KEY-----
 b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAlwAAAAdzc2gtcn
 NhAAAAAwEAAQAAAIEAv3Su37OsRS+tk7zwm9dxJasHJhoWYvCGH8OXR7GWlZdkwzeQQx5/
@@ -47,6 +47,7 @@ QQDGgbx3D8ZSGTxlxQHjSSVqy1nXTM/Rey2+xNtZaCMhmdgJnhp7BupUXvqzp4ySJKyBAO
 LuN/r50yflT0JbNPLJAAAAAAEC
 -----END OPENSSH PRIVATE KEY-----
 ";
+/// `ssh-keygen -t ecdsa -b 256 -N ""`.
 const ECDSA: &str = "-----BEGIN OPENSSH PRIVATE KEY-----
 b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAaAAAABNlY2RzYS
 1zaGEyLW5pc3RwMjU2AAAACG5pc3RwMjU2AAAAQQRoMDjdYYenV2PI4+S3E381Kevu6Ay+
@@ -104,6 +105,36 @@ fn refuses_a_key_of_another_algorithm_by_its_name() {
                 .into()
         )
     );
+}
+
+/// An algorithm that is not on the list of known names is not named, since a corrupt
+/// file can hold any text there.
+#[test]
+fn refuses_a_key_of_an_unknown_algorithm_as_no_key_file() {
+    let algorithm = ssh_key::Algorithm::new("a@b.example").unwrap();
+    let public = OpaquePublicKey::new(vec![1; 32], algorithm);
+    let pair = OpaqueKeypair::new(vec![2; 32], public);
+    let file = ssh_key::PrivateKey::new(KeypairData::Other(pair), "").unwrap();
+    let text = file.to_openssh(ssh_key::LineEnding::LF).unwrap();
+    assert_eq!(
+        unreadable(&text),
+        (
+            Unreadable::Format,
+            "the file is not an OpenSSH private key".into()
+        )
+    );
+}
+
+/// OpenSSH reads a key file with CRLF line ends, as an editor on Windows saves it,
+/// with blank lines at the end, and with no line end after the last line.
+#[test]
+fn reads_a_key_file_with_each_line_end_that_openssh_reads() {
+    let crlf = KEYGEN.replace('\n', "\r\n");
+    let blank = format!("{KEYGEN}\n\r\n");
+    for text in [crlf.as_str(), &blank, KEYGEN.trim_end()] {
+        let key = openssh::private_key(text).unwrap();
+        assert_eq!(openssh::line(key.public()), KEYGEN_PUB, "{text:?}");
+    }
 }
 
 #[test]
