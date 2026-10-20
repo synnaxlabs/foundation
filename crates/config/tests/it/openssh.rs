@@ -60,19 +60,21 @@ wAAAAhALtETUKZA++mtWola1ac1GiHc2vbUymBIa1LE65UqDb+AAAAAAECAwQFBgc=
 
 /// Why `text` is not read, with its message.
 fn unreadable(text: &str) -> (Unreadable, String) {
-    let error = openssh::private_key(text).map(|key| key.0).unwrap_err();
+    let error = openssh::private_key(text.as_bytes())
+        .map(|key| key.0)
+        .unwrap_err();
     (error, error.to_string())
 }
 
 #[test]
 fn reads_the_key_that_ssh_keygen_writes() {
-    let key = openssh::private_key(KEYGEN).unwrap();
+    let key = openssh::private_key(KEYGEN.as_bytes()).unwrap();
     assert_eq!(openssh::line(key.public()), KEYGEN_PUB);
 }
 
 #[test]
 fn writes_the_form_that_ssh_keygen_writes() {
-    let key = openssh::private_key(KEYGEN).unwrap();
+    let key = openssh::private_key(KEYGEN.as_bytes()).unwrap();
     let text = openssh::key_file(&key, "alice@laptop");
     let ours = ssh_key::PrivateKey::from_openssh(&text).unwrap();
     let theirs = ssh_key::PrivateKey::from_openssh(KEYGEN).unwrap();
@@ -134,9 +136,27 @@ fn reads_a_key_file_with_each_line_end_and_text_after_the_end_mark() {
     let blank = format!("{KEYGEN}\n\r\n");
     let after = format!("{KEYGEN}any text\n");
     for text in [crlf.as_str(), &blank, &after, KEYGEN.trim_end()] {
-        let key = openssh::private_key(text).unwrap();
+        let key = openssh::private_key(text.as_bytes()).unwrap();
         assert_eq!(openssh::line(key.public()), KEYGEN_PUB, "{text:?}");
     }
+}
+
+/// OpenSSH skips the bytes after the end mark, so they need not be UTF-8. A byte
+/// before it that is not UTF-8 makes the file no key file.
+#[test]
+fn reads_any_bytes_after_the_end_mark_and_refuses_others_before_it() {
+    let after = [KEYGEN.as_bytes(), b"caf\xe9 notes\n"].concat();
+    let key = openssh::private_key(&after).unwrap();
+    assert_eq!(openssh::line(key.public()), KEYGEN_PUB);
+    let before = [b"\xe9".as_slice(), KEYGEN.as_bytes()].concat();
+    let error = openssh::private_key(&before).map(|key| key.0).unwrap_err();
+    assert_eq!(
+        (error, error.to_string()),
+        (
+            Unreadable::Format,
+            "the file is not an OpenSSH private key".into()
+        )
+    );
 }
 
 #[test]
@@ -149,7 +169,7 @@ fn reads_a_key_file_with_mixed_line_ends_and_space_at_the_end() {
     let crlf_blanks = format!("{}\r\n\r\n  \r\n", KEYGEN.replace('\n', "\r\n"));
     let trailing_tab = format!("{KEYGEN}\t\n");
     for text in [mixed, crlf_blanks, trailing_tab] {
-        let key = openssh::private_key(&text).unwrap();
+        let key = openssh::private_key(text.as_bytes()).unwrap();
         assert_eq!(openssh::line(key.public()), KEYGEN_PUB, "{text:?}");
     }
 }
@@ -169,7 +189,7 @@ fn reads_a_key_file_whose_body_has_any_width() {
             text.push('\n');
         }
         text.push_str("-----END OPENSSH PRIVATE KEY-----\n");
-        let key = openssh::private_key(&text).unwrap();
+        let key = openssh::private_key(text.as_bytes()).unwrap();
         assert_eq!(openssh::line(key.public()), KEYGEN_PUB, "{text:?}");
     }
 }
@@ -212,7 +232,7 @@ fn reads_a_key_file_with_white_space_in_its_body() {
         *line = format!("  {}{c}{}\t ", &line[..mid], &line[mid..]);
     }
     let text = lines.join("\n") + "\n";
-    let key = openssh::private_key(&text).unwrap();
+    let key = openssh::private_key(text.as_bytes()).unwrap();
     assert_eq!(openssh::line(key.public()), KEYGEN_PUB, "{text:?}");
 }
 
@@ -329,6 +349,6 @@ proptest! {
         comment in "[ -~]{0,40}",
     ) {
         let text = openssh::key_file(&PrivateKey(bytes), &comment);
-        prop_assert_eq!(openssh::private_key(&text).unwrap().0, bytes);
+        prop_assert_eq!(openssh::private_key(text.as_bytes()).unwrap().0, bytes);
     }
 }

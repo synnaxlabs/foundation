@@ -252,15 +252,19 @@ impl fmt::Display for Unreadable {
 /// Reads the OpenSSH private key file of an Ed25519 key with no passphrase, as
 /// `ssh-keygen -t ed25519 -N ""` and [`key_file`] write it. It reads each such file
 /// that `ssh-key` 0.6.7 reads, also one with a body of any width or with white space,
-/// any text after the end mark, CRLF line ends, or no line end after the end mark. It
+/// any bytes after the end mark, CRLF line ends, or no line end after the end mark. It
 /// refuses some files that OpenSSH reads: a comment that is not UTF-8
 /// ([`Unreadable::Comment`]), padding of a block or more, options of the `none` KDF,
 /// and a NUL in the body. The comment is not kept.
 ///
 /// # Errors
 ///
-/// [`Unreadable`] says why the text is not such a file.
-pub fn private_key(text: &str) -> Result<PrivateKey, Unreadable> {
+/// [`Unreadable`] says why `file` is not such a file. A byte up to the end mark that
+/// is not UTF-8 gives [`Unreadable::Format`].
+pub fn private_key(file: &[u8]) -> Result<PrivateKey, Unreadable> {
+    let Ok(text) = std::str::from_utf8(marked(file)) else {
+        return Err(Unreadable::Format);
+    };
     let text = lines(text);
     let file = match ssh_key::PrivateKey::from_openssh(&text) {
         Ok(file) => file,
@@ -297,6 +301,19 @@ pub fn private_key(text: &str) -> Result<PrivateKey, Unreadable> {
         return Err(Unreadable::Mismatch);
     }
     Ok(key)
+}
+
+/// `file` up to the end of the line of its end mark, or all of `file` with no end mark.
+fn marked(file: &[u8]) -> &[u8] {
+    let mut start = 0;
+    for line in file.split(|byte| *byte == b'\n') {
+        start += line.len();
+        if line.starts_with(b"-----END") {
+            return &file[..start];
+        }
+        start += 1;
+    }
+    file
 }
 
 /// `text` up to its end mark as `ssh-key` takes it: the body with no white space, in
