@@ -1254,8 +1254,11 @@
   no cut at 1024 bytes, and give `BadOutOfMemory` when memory runs out, in place of
   `Good` and a NULL subject. Then the text names only the source. Our change makes
   `getThumbprint` write the thumbprint with no block, in place of a write through a
-  `malloc` that it did not check. An empty subject is legal X.509: the copy gives the
-  sentinel, and the text gives the thumbprint with no subject (`laptop.architect-2`,
+  `malloc` that it did not check (`laptop.architect-2`, 2026-10-20 08:02 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3545#issuecomment-6286349076, item 2,
+  which replaces the check of a NULL subject in the shim). An empty subject is legal
+  X.509: the copy gives the sentinel, and the text gives the thumbprint with no subject
+  (`laptop.architect-2`,
   2026-10-20 07:32:19 UTC,
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6285815315, which
   corrects condition 2 of
