@@ -114,7 +114,7 @@ pub(crate) const LONG_KEY: Identity = Identity {
 
 const PAD: usize = (100 << 10) + 1;
 
-const LONG_KEY_DER: [u8; CLIENT.key.len() + PAD + 37] = long_key(CLIENT.key);
+static LONG_KEY_DER: [u8; CLIENT.key.len() + PAD + 37] = long_key(CLIENT.key);
 
 /// The PKCS #8 of the RSA PKCS #1 key `key`, with attributes of one OCTET STRING of
 /// [`PAD`] zero bytes.
@@ -144,15 +144,15 @@ const fn long_key<const LENGTH: usize>(key: &[u8]) -> [u8; LENGTH] {
 /// Writes at `at` the DER header of `tag` with the `length` of 256 to 2^24 - 1 bytes,
 /// and gives the index after it.
 const fn header(out: &mut [u8], at: usize, tag: u8, length: usize) -> usize {
-    let bytes = if length > 0xFFFF { 3 } else { 2 };
+    let (count, form) = if length > 0xFFFF {
+        (3, 0x83)
+    } else {
+        (2, 0x82)
+    };
+    let be = length.to_be_bytes();
     out[at] = tag;
-    out[at + 1] = 0x80 | bytes as u8;
-    let mut index = 0;
-    while index < bytes {
-        out[at + 2 + index] = (length >> (8 * (bytes - 1 - index))) as u8;
-        index += 1;
-    }
-    at + 2 + bytes
+    out[at + 1] = form;
+    copy(out, at + 2, be.split_at(be.len() - count).1)
 }
 
 /// Copies `bytes` to `out` at `at`, and gives the index after them.
