@@ -45,9 +45,10 @@ pub(super) async fn run(
         fit: Fit::default(),
         mesh: frames.writer.time(),
     };
-    clock.read(client).await?;
+    let round_trip = clock.read(client).await?;
     let nodes: Vec<Node> = reads.iter().map(|read| read.node.clone()).collect();
-    let revised = client.subscribe(&nodes, ctx.config().rate.span(1)).await;
+    let sampling = ctx.config().rate.span(1);
+    let revised = client.subscribe(&nodes, sampling, round_trip).await;
     let revised =
         revised.map_err(|status| failed(client.url(), Call::Subscribe, status))?;
     for (read, item) in reads.iter().zip(&revised.items) {
@@ -153,20 +154,20 @@ struct Clock {
 
 impl Clock {
     /// Reads the current time of the server, and adds it to the fit between the mesh
-    /// times before and after the read.
+    /// times before and after the read. Gives the round trip of the read.
     ///
     /// # Errors
     ///
     /// [`Error::Device`] when the read fails, or gives a time before the map of
     /// [`device`].
-    async fn read(&mut self, client: &mut Client) -> Result<(), Error> {
+    async fn read(&mut self, client: &mut Client) -> Result<Span, Error> {
         let sent = self.mesh.now();
         let time = client.time().await;
         let answered = self.mesh.now();
         let time = time.and_then(|time| device(time).ok_or(Status::BAD_OUT_OF_RANGE));
         let time = time.map_err(|status| failed(client.url(), Call::Read, status))?;
         _ = self.fit.between(time, sent, answered);
-        Ok(())
+        Ok(answered - sent)
     }
 }
 

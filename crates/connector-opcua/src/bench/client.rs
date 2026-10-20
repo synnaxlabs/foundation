@@ -308,7 +308,7 @@ impl Client {
     /// If the subscription or an item fails, with its status, or on a second call.
     pub async fn subscribe(&mut self, count: usize) {
         let nodes: Vec<Node> = (0..count).map(counter).collect();
-        match self.session.subscribe(&nodes, SAMPLING).await {
+        match self.session.subscribe(&nodes, SAMPLING, Span::ZERO).await {
             Ok(revised) => {
                 for item in revised.items {
                     item.unwrap_or_else(|status| panic!("an item failed: {status:?}"));

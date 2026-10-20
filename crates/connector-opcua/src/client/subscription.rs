@@ -144,8 +144,9 @@ impl Client {
     /// Creates a subscription, and a monitored item for each node of `nodes` that
     /// samples at `sampling`. It asks for a publishing interval of `sampling`, at
     /// least 100 ms and at most 1 min, and a keep-alive count of the publishing
-    /// intervals in 1 min. Each item queues the values that it samples in two
-    /// publishing intervals that the server gives, the oldest dropped first. Each item
+    /// intervals in 1 min. Each item queues the values that it samples in the larger
+    /// of two publishing intervals that the server gives and two of `round_trip`, the
+    /// oldest dropped first. Each item
     /// asks for both timestamps and a change of the status or the value. It reads the
     /// `MaxMonitoredItemsPerCall` of the server, and sends the items in
     /// `CreateMonitoredItems` calls of at most that many. Each answer of a Publish fits
@@ -182,6 +183,7 @@ impl Client {
         &mut self,
         nodes: &[Node],
         sampling: Span,
+        round_trip: Span,
     ) -> Result<Revised, Status> {
         assert!(
             sampling > Span::ZERO,
@@ -208,7 +210,7 @@ impl Client {
         // SAFETY: the client lives.
         unsafe { ffi::shim_client_publishes(self.raw.as_ptr(), PUBLISHES) };
         let sampling = ms(sampling);
-        let queue = queue(interval, sampling);
+        let queue = queue(interval.max(ms(round_trip)), sampling);
         let build =
             |nodes: &[ffi::Node<'_>]| Request::monitor(id, nodes, 0, sampling, queue);
         let sizes = self.sizes(build, Item::Created.bytes());
@@ -304,15 +306,15 @@ fn span(ms: f64) -> Span {
     Span::from_nanos((ms * 1e6) as i64)
 }
 
-/// Gives the size of a queue that holds the values sampled every `sampling` ms in two
-/// publishing intervals of `interval` ms: 0 for NaN, and `u32::MAX` when it is past.
+/// Gives the size of a queue that holds the values sampled every `sampling` ms in
+/// twice `span` ms: 0 for NaN, and `u32::MAX` when it is past.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     reason = "the cast saturates, as the doc says"
 )]
-fn queue(interval: f64, sampling: f64) -> u32 {
-    (2.0 * (interval / sampling).ceil()) as u32
+fn queue(span: f64, sampling: f64) -> u32 {
+    (2.0 * (span / sampling).ceil()) as u32
 }
 
 /// Gives `count`, or `u32::MAX` when it is past.
