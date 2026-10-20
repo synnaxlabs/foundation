@@ -69,7 +69,9 @@
   (`laptop.architect-2`, 2026-10-13T01:38:13Z, item 2:
   https://github.com/synnaxlabs/foundation/pull/2518#issuecomment-6136191164, approved
   2026-10-13T02:04:57Z, item 3:
-  https://github.com/synnaxlabs/foundation/pull/2518#issuecomment-6136552780). The
+  https://github.com/synnaxlabs/foundation/pull/2518#issuecomment-6136552780, and
+  2026-10-20T13:14:36Z:
+  https://github.com/synnaxlabs/foundation/issues/2527#issuecomment-6291709126). The
   person put the module in `connector` for each kind that reads by request (ONE NODE
   record, section 3, 2026-10-13T00:50:41Z,
   https://github.com/synnaxlabs/foundation/issues/1737#issuecomment-6135595217). Lost:
