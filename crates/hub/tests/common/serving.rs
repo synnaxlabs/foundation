@@ -5,16 +5,23 @@ use std::task::{Context, Poll, Waker};
 
 use env::tasks::Tasks;
 use hub::{Hub, Link, Served, serve};
-use transport::{Session, Transport};
+use transport::{Peer, Session, Transport};
 
 /// Accepts the session of the next program on `transport`, and gives it and its link
-/// on `hub`. A task in `tasks` serves its first stream, its hello.
+/// on `hub`. A task in `tasks` serves its first stream, its hello. It skips each
+/// session of a node, as `accept` also gives the sessions that the node dials.
 pub(crate) async fn program(
     transport: &Transport,
     hub: &Hub,
     tasks: &Tasks,
 ) -> (Session, Link) {
-    let (session, hello) = crate::net::accept(transport).await;
+    let session = loop {
+        let session = transport.accept().await.expect("a session");
+        if session.peer() == Peer::Client {
+            break session;
+        }
+    };
+    let hello = crate::net::stream(&session).await;
     let link = hub.link(session.clone());
     let served = link.clone();
     tasks.spawn(async move { drop(served.serve(hello).await) });
