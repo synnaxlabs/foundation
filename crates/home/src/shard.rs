@@ -3355,7 +3355,10 @@ mod tests {
                 Ok(&[applied(0, 0, 1), applied(2, 0, 1)][..])
             );
             shard.committed().await.expect("the commit ends");
-            assert_eq!(find(&test.ring().await, &handoff_to("subject-b")), []);
+            assert_eq!(
+                find(&test.ring().await, &handoff_to("subject-b")),
+                [0_usize; 0]
+            );
         });
     }
 
@@ -3373,7 +3376,10 @@ mod tests {
             assert_eq!(shard.deadline(), None);
             shard.advance();
             shard.committed().await.expect("the commit ends");
-            assert_eq!(find(&test.ring().await, &handoff_to("subject-b")), []);
+            assert_eq!(
+                find(&test.ring().await, &handoff_to("subject-b")),
+                [0_usize; 0]
+            );
         });
     }
 
@@ -3436,7 +3442,10 @@ mod tests {
             let write = frame(&test.pool, &set, &[(2, &[10])]);
             assert_eq!(shard.write(b, Label::Resend, write), Err(Error::Resend));
             shard.committed().await.expect("the commit ends");
-            assert_eq!(find(&test.ring().await, &handoff_to("subject-b")), []);
+            assert_eq!(
+                find(&test.ring().await, &handoff_to("subject-b")),
+                [0_usize; 0]
+            );
             let write = frame(&test.pool, &set, &[(2, &[11])]);
             shard.write(b, LIVE, write).expect("written");
             shard.committed().await.expect("the commit ends");
@@ -5116,7 +5125,7 @@ mod tests {
                 assert_eq!(shard.readers.listed(), [place]);
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
-                assert_eq!(shard.readers.listed(), []);
+                assert_eq!(shard.readers.listed(), [0_usize; 0]);
             });
         }
 
@@ -5152,7 +5161,7 @@ mod tests {
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
-                assert_eq!(shard.readers.listed(), []);
+                assert_eq!(shard.readers.listed(), [0_usize; 0]);
                 write(&test, &mut shard, a, &[20]);
                 assert_eq!(woken(&mut shard), []);
                 shard.committed().await.expect("the commit ends");
@@ -5168,7 +5177,7 @@ mod tests {
                 let mut shard = test.shard(AREA).await;
                 let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
                 write(&test, &mut shard, a, &[10]);
-                assert_eq!(shard.readers.listed(), []);
+                assert_eq!(shard.readers.listed(), [0_usize; 0]);
                 let reader = complete(&mut shard, Slot::new(0));
                 write(&test, &mut shard, a, &[20]);
                 let place = shard.place(Slot::new(0));
@@ -5197,7 +5206,7 @@ mod tests {
                 assert_eq!(shard.readers.listed(), [place], "no commit ended");
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), []);
-                assert_eq!(shard.readers.listed(), []);
+                assert_eq!(shard.readers.listed(), [0_usize; 0]);
             });
         }
 
