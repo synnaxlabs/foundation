@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use pyo3::exceptions::PyConnectionError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple};
+use pyo3::types::{PyCFunction, PyDict, PyTuple};
 use pyo3::wrap_pymodule;
 use sdk::write::{End, Outcome, Refusal};
 use types::channel;
@@ -696,27 +696,49 @@ fn logged(
     })
 }
 
-/// The classes, joined by `, `, of the context chain of the error of `answer` under
-/// `warn`, with a handler of the `foundation` logger whose `emit` runs `body`, and the
-/// `unwritten` of the one error of the chain that has it.
+/// A frame and the indexes of the frame that `write::answer` answers.
+type Answer<'a> = (&'a [(usize, Outcome)], &'a [usize]);
+
+/// A logging handler whose `emit` runs `{body}`, and `run`, which answers `count`
+/// frames, each in an `except` block of the program when `excepted` holds, and checks
+/// that the program keeps its error.
+const FAILING: &str = "
+import logging, sys
+stored = OSError('stored')
+class Failing(logging.Handler):
+    def emit(self, record):
+{body}
+handler = Failing()
+def run(answer, count, excepted):
+    for n in range(count):
+        if not excepted:
+            error = answer(n)
+            assert sys.exception() is None
+            continue
+        try:
+            raise ValueError('program')
+        except ValueError as program:
+            error = answer(n)
+            assert sys.exception() is program
+            assert program.__context__ is None
+    return error
+";
+
+/// The classes, joined by `, `, of the context chain of the error of the last of
+/// `answers` under `warn`, with a handler of the `foundation` logger whose `emit` runs
+/// `body`, and the `unwritten` of the one error of the chain that has it. With
+/// `excepted`, each answer runs in an `except` block of the program.
 fn failing(
     places: &[sdk::Place],
-    outcomes: &[(usize, Outcome)],
-    frame: &[usize],
+    answers: &[Answer<'_>],
     body: &str,
+    excepted: bool,
 ) -> (String, Vec<String>) {
     Python::initialize();
     Python::attach(|py| {
         let globals = PyDict::new(py);
-        let source = format!(
-            "import logging\n\
-             class Failing(logging.Handler):\n    def emit(self, record):\n{}\n\
-             handler = Failing()\n",
-            body.lines()
-                .map(|line| format!("        {line}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
+        let body: Vec<_> = body.lines().map(|line| format!("        {line}")).collect();
+        let source = FAILING.replace("{body}", &body.join("\n"));
         py.run(&CString::new(source).unwrap(), Some(&globals), None)
             .unwrap();
         let handler = globals.get_item("handler").unwrap().unwrap();
@@ -726,49 +748,102 @@ fn failing(
             .call_method1("getLogger", ("foundation",))
             .unwrap();
         foundation.call_method1("addHandler", (&handler,)).unwrap();
-        let firsts = crate::write::firsts(places, &crate::write::named(places));
-        let error = crate::write::answer(
-            py,
-            places,
-            &firsts,
-            crate::Loss::Warn,
-            outcomes,
-            frame.to_vec(),
-        )
-        .unwrap_err();
+        let places = places.to_vec();
+        let owned: Vec<_> = answers
+            .iter()
+            .map(|(outcomes, frame)| (outcomes.to_vec(), frame.to_vec()))
+            .collect();
+        let count = owned.len();
+        let answer = PyCFunction::new_closure(py, None, None, move |args, _| {
+            let (outcomes, frame) = &owned[args.get_item(0)?.extract::<usize>()?];
+            let firsts = crate::write::firsts(&places, &crate::write::named(&places));
+            let warn = crate::Loss::Warn;
+            let answered = crate::write::answer(
+                args.py(),
+                &places,
+                &firsts,
+                warn,
+                outcomes,
+                frame.clone(),
+            );
+            PyResult::Ok(answered.unwrap_err().into_value(args.py()))
+        })
+        .unwrap();
+        let run = globals.get_item("run").unwrap().unwrap();
+        let error = run.call1((answer, count, excepted)).unwrap();
         foundation
             .call_method1("removeHandler", (&handler,))
             .unwrap();
-        let chain: Vec<PyErr> =
-            std::iter::successors(Some(error), |raised| raised.context(py))
-                .take(8)
-                .collect();
-        let listed: Vec<_> = chain
-            .iter()
-            .filter(|raised| raised.value(py).hasattr("unwritten").unwrap())
-            .collect();
-        assert_eq!(listed.len(), 1);
-        (
-            chain
-                .iter()
-                .map(|raised| raised.get_type(py).name().unwrap().to_string())
-                .collect::<Vec<_>>()
-                .join(", "),
-            listed[0]
-                .value(py)
-                .getattr("unwritten")
-                .unwrap()
-                .extract()
-                .unwrap(),
-        )
+        chained(error)
     })
+}
+
+/// The classes, joined by `, `, of the context chain of `error`, and the `unwritten`
+/// of the one error of the chain that has it.
+fn chained(error: Bound<'_, PyAny>) -> (String, Vec<String>) {
+    let chain: Vec<_> = std::iter::successors(Some(error), |raised| {
+        Some(raised.getattr("__context__").unwrap()).filter(|next| !next.is_none())
+    })
+    .take(8)
+    .collect();
+    let listed: Vec<_> = chain
+        .iter()
+        .filter(|raised| raised.hasattr("unwritten").unwrap())
+        .collect();
+    assert_eq!(listed.len(), 1);
+    (
+        chain
+            .iter()
+            .map(|raised| raised.get_type().name().unwrap().to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+        listed[0].getattr("unwritten").unwrap().extract().unwrap(),
+    )
+}
+
+/// The error of a logging handler that raises goes up, chained to `Rejected` or
+/// `GroupEnded` as in an `except` block of it.
+fn chains(
+    places: &[sdk::Place],
+    refused: &[(usize, Outcome)],
+    ended: &[(usize, Outcome)],
+) {
+    let chain = |classes: &str, unwritten: &[&str]| {
+        let unwritten = unwritten.iter().map(|&name| name.to_owned()).collect();
+        (classes.to_owned(), unwritten)
+    };
+    let cell = ["cell.a", "cell.time"];
+    let rejected =
+        |body, excepted| failing(places, &[(refused, &[1, 2, 3])], body, excepted);
+    let raises = "raise RuntimeError('the handler failed')";
+    assert_eq!(
+        rejected(raises, false),
+        chain("RuntimeError, Rejected", &cell)
+    );
+    let over = failing(places, &[(ended, &[0, 2])], raises, true);
+    assert_eq!(over, chain("RuntimeError, GroupEnded, ValueError", &[]));
+    let interrupt = rejected("raise KeyboardInterrupt", false);
+    assert_eq!(interrupt, chain("KeyboardInterrupt, Rejected", &cell));
+    let own = "try:\n    raise OSError('disk')\n\
+               except OSError:\n    raise RuntimeError('x')";
+    let full = chain("RuntimeError, OSError, Rejected, ValueError", &cell);
+    assert_eq!(rejected(own, true), full);
+    let cycle = "a = RuntimeError('a')\nb = OSError('b')\n\
+                 a.__context__ = b\nb.__context__ = a\nraise a";
+    assert_eq!(
+        rejected(cycle, false),
+        chain("RuntimeError, Rejected", &cell)
+    );
+    let twice = [(refused, &[1, 2, 3][..]), (ended, &[0, 2])];
+    let stored = failing(places, &twice, "raise stored", true);
+    assert_eq!(stored, chain("OSError, GroupEnded, ValueError", &[]));
 }
 
 /// A frame with a refusal and a loss raises `Rejected` with the seqs of the lost group
 /// in `lost` for each loss, and with `warn` also logs the warning of the loss. A frame
 /// with an end and a loss raises `GroupEnded` with `lost`, and one with no loss gives
-/// an empty `lost` and logs nothing. The error of a logging handler that raises goes
-/// up, with `Rejected` or `GroupEnded` at the end of its context chain.
+/// an empty `lost` and logs nothing. A handler error goes up as `chains` states, in
+/// this test, as the two share the `foundation` logger.
 #[test]
 fn answer_gives_the_seqs_of_the_lost_groups_in_lost_for_each_loss() {
     let places = grouped();
@@ -815,29 +890,7 @@ fn answer_gives_the_seqs_of_the_lost_groups_in_lost_for_each_loss() {
         logged(&places, crate::Loss::Warn, &whole, &[1]),
         ("Rejected".to_owned(), Vec::new(), Vec::new())
     );
-    let cell = || vec!["cell.a".to_owned(), "cell.time".to_owned()];
-    let rejected = |body| failing(&places, &refused, &[1, 2, 3], body);
-    let raises = "raise RuntimeError('the handler failed')";
-    assert_eq!(
-        rejected(raises),
-        ("RuntimeError, Rejected".to_owned(), cell())
-    );
-    assert_eq!(
-        failing(&places, &ended, &[0, 2], raises),
-        ("RuntimeError, GroupEnded".to_owned(), Vec::new())
-    );
-    let interrupt = rejected("raise KeyboardInterrupt");
-    assert_eq!(
-        interrupt,
-        ("KeyboardInterrupt, Rejected".to_owned(), cell())
-    );
-    let handled = "try:\n    raise OSError('disk')\n\
-                   except OSError:\n    raise RuntimeError('x')";
-    let chain = ("RuntimeError, OSError, Rejected".to_owned(), cell());
-    assert_eq!(rejected(handled), chain);
-    let cycle = "a = RuntimeError('a')\nb = OSError('b')\n\
-                 a.__context__ = b\nb.__context__ = a\nraise a";
-    assert_eq!(rejected(cycle), chain);
+    chains(&places, &refused, &ended);
 }
 
 /// A writer of `plant.time`, `plant.a`, and `plant.time` whose frame gives the stamp at

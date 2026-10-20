@@ -4,6 +4,7 @@ use std::fmt::Display;
 use std::mem;
 use std::ops::Range;
 use std::process;
+use std::ptr;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use numpy::datetime::{Datetime, Timedelta, units::Nanoseconds};
@@ -15,6 +16,7 @@ use program::write::End;
 use pyo3::exceptions::{
     PyKeyError, PyOverflowError, PyRuntimeError, PyTypeError, PyValueError,
 };
+use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::sync::MutexExt;
 use pyo3::types::{PyBool, PyDict, PyInt, PyString, PyTuple};
@@ -464,20 +466,25 @@ fn untaken(written: Result<&[(usize, Outcome)], sdk::Error>) -> Untaken {
 /// What the text of a loss in a frame of a writer names.
 const LOST: &str = "samples were lost";
 
-/// `failed` with `raised` at the end of its context chain, as Python chains an error
-/// raised while it handles another. A cycle in the chain ends at its last new error.
-fn chained(py: Python<'_>, failed: PyErr, raised: PyErr) -> PyErr {
-    let mut seen = vec![failed.value(py).as_ptr()];
-    let mut tail = failed.clone_ref(py);
-    while let Some(next) = tail
-        .context(py)
-        .filter(|next| !seen.contains(&next.value(py).as_ptr()))
-    {
-        seen.push(next.value(py).as_ptr());
-        tail = next;
-    }
-    tail.set_context(py, Some(raised));
-    failed
+/// Runs `act` with `raised` as the error that Python handles, so Python chains an
+/// error raised in `act` to `raised` as in an `except` block of it, and then gives back
+/// the error that Python handled before.
+#[expect(
+    unsafe_code,
+    reason = "PyO3 has no safe call that sets the error that Python handles"
+)]
+fn handling<T>(py: Python<'_>, raised: &PyErr, act: impl FnOnce() -> T) -> T {
+    // SAFETY: `py` proves that the GIL is held; the call gives a new reference or null.
+    let before = unsafe { ffi::PyErr_GetHandledException() };
+    // SAFETY: `before` is a new reference or null, and the `Bound` takes it.
+    let before = unsafe { Bound::<PyAny>::from_owned_ptr_or_opt(py, before) };
+    // SAFETY: the GIL is held, and the call takes its own reference to `raised`.
+    unsafe { ffi::PyErr_SetHandledException(raised.value(py).as_ptr()) };
+    let acted = act();
+    let before = before.as_ref().map_or(ptr::null_mut(), Bound::as_ptr);
+    // SAFETY: the GIL is held, and the call takes its own reference to `before`.
+    unsafe { ffi::PyErr_SetHandledException(before) };
+    acted
 }
 
 /// Answers a frame whose groups did not all get `Taken`, by the first rule that holds:
@@ -533,11 +540,11 @@ pub(crate) fn answer(
         value.setattr("unwritten", PyTuple::new(py, unwritten)?)?;
         value.setattr("lost", crate::seqs(py, gone())?)?;
         if loss == Loss::Warn && gone().next().is_some() {
-            // The error of a logging handler goes up, so the program can still reach
-            // the lists through its context chain.
-            if let Err(failed) = loss.act(py, LOST, gone(), py.None().bind(py)) {
-                return Err(chained(py, failed, raised));
-            }
+            // The error of a logging handler goes up, with `raised` in its context
+            // chain, so the program can still reach the lists.
+            handling(py, &raised, || {
+                loss.act(py, LOST, gone(), py.None().bind(py))
+            })?;
         }
         Err(raised)
     };
