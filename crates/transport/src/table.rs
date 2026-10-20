@@ -280,10 +280,11 @@ impl Table {
         Some(session)
     }
 
-    /// Pings `open`, the session that this node dialed to `node`, on the one task
-    /// of the entry, unless that task runs already. When the peer answers a ping sent
-    /// after the held session `held` arrived, the held session closes. When `open`
-    /// ends or drops first, the held session wins.
+    /// Pings `open`, the session that this node dialed to `node`, and closes the held
+    /// session `held` once the peer answers a ping on the open session sent after
+    /// `held` arrived. One task per entry does this. When it runs already, it pings
+    /// again after its ping if the held or the open session changed. When no session
+    /// is open after a ping, the held session wins.
     fn prove(&mut self, node: PublicKey, open: &Session, mut held: session::Weak) {
         let entry = self.nodes.get_mut(&node);
         let entry = entry.expect("invariant: the entry holds a session");
@@ -292,6 +293,7 @@ impl Table {
         }
         entry.proving = true;
         let this = rc::Weak::clone(&self.this);
+        let mut pinged = open.downgrade();
         let mut ping = open.quic().ping();
         self.tasks.spawn(async move {
             loop {
@@ -303,10 +305,12 @@ impl Table {
                 let mut table = table.borrow_mut();
                 let entry = table.nodes.get_mut(&node);
                 let entry = entry.expect("invariant: a prune keeps a proving entry");
-                let newer = entry.held.as_ref().filter(|session| !held.is(session));
                 let open = entry.session.open();
-                if let (Some(session), Some(open)) = (newer, &open) {
+                if let (Some(session), Some(open)) = (&entry.held, &open)
+                    && (!held.is(session) || !pinged.is(open))
+                {
                     held = session.downgrade();
+                    pinged = open.downgrade();
                     ping = open.quic().ping();
                     continue;
                 }
@@ -1031,22 +1035,28 @@ mod tests {
         entry.dialed
     }
 
-    /// After a random delay under 750 us, dials `peer` at `at` on `transport`.
-    async fn dial_late(
-        transport: &Transport,
+    /// After a random delay under 750 us, dials `peer` at `at` on `transport`, and
+    /// then waits `wait`. It checks that the open session is the one that the lower
+    /// key dialed, and that each other session of `sessions` ended with `Code(0)`.
+    /// Returns the open session.
+    async fn dial_once(
+        (transport, sessions): &(Rc<Transport>, Sessions),
         node: &Node,
         peer: PublicKey,
         at: &[Address],
+        lower: bool,
+        wait: Span,
     ) -> Session {
         let offset = node.entropy().rng().below(750_000);
         let offset = Span::from_nanos(i64::try_from(offset).expect("small"));
         node.clock().sleep(offset).await;
-        transport.dial(peer, at).await.expect("a session")
-    }
-
-    /// Checks that each of `sessions` ends with `Code(0)`, from either side.
-    async fn ended_with_0(sessions: impl Iterator<Item = &Session>) {
-        for session in sessions {
+        let dialed = transport.dial(peer, at).await.expect("a session");
+        sessions.borrow_mut().push(dialed);
+        node.clock().sleep(wait).await;
+        let open = transport.dial(peer, &[]).await.expect("the open session");
+        assert_eq!(own(transport, &open), lower);
+        let kept: Vec<_> = sessions.borrow_mut().drain(..).collect();
+        for session in kept.iter().filter(|s| !s.downgrade().is(&open)) {
             let error = session.closed().await;
             assert!(
                 matches!(
@@ -1057,27 +1067,19 @@ mod tests {
                 "{error:?}"
             );
         }
+        open
     }
 
     /// A node of [`two_nodes_that_dial_each_other_keep_the_session_of_the_lower_key`]
-    /// with `key`. After a random delay under 750 us, it dials `peer` at `at`. A
-    /// session reaches the peer three one-way delays of 250 us after its dial, so
-    /// both dials start before either session arrives, and one may end first. It
-    /// keeps each session that `dial` and `accept` give, and checks that each one
-    /// but the open one ended with `Code(0)`.
+    /// with `key`, as [`dial_once`] with a wait of 100 ms. A session reaches the peer
+    /// three one-way delays of 250 us after its dial, so both dials start before
+    /// either session arrives, and one may end first.
     fn dial_at_once(node: &Node, key: PrivateKey, peer: PublicKey, at: [Address; 1]) {
         let lower = key.public() < peer;
         testing::shard(node, key, move |config, node| async move {
-            let (transport, sessions) = accepting(config, &node);
-            let dialed = dial_late(&transport, &node, peer, &at).await;
-            sessions.borrow_mut().push(dialed);
-            node.clock()
-                .sleep(testing::spans(Span::MILLISECOND, 100))
-                .await;
-            let open = transport.dial(peer, &[]).await.expect("the open session");
-            assert_eq!(own(&transport, &open), lower);
-            let held: Vec<_> = sessions.borrow_mut().drain(..).collect();
-            ended_with_0(held.iter().filter(|s| !s.downgrade().is(&open))).await;
+            let accepting = accepting(config, &node);
+            let wait = testing::spans(Span::MILLISECOND, 100);
+            let open = dial_once(&accepting, &node, peer, &at, lower, wait).await;
             // The higher node must find the open session first.
             if lower {
                 node.clock()
@@ -1093,23 +1095,19 @@ mod tests {
 
     /// A node of
     /// [`two_nodes_that_dial_each_other_on_a_lossy_link_close_the_loser_with_code_0`]
-    /// with `key`, as [`dial_at_once`] on a link of 20 ms. It checks that each
-    /// session that `dial` and `accept` gave and that is not open after 3 s ended
-    /// with `Code(0)`.
+    /// with `key`, as [`dial_once`] with an idle timeout of 30 s and a wait of 10 s.
     fn dial_through_loss(
         node: &Node,
         key: PrivateKey,
         peer: PublicKey,
         at: [Address; 1],
     ) {
+        let lower = key.public() < peer;
         testing::start(node, move |shard, node| async move {
             let config = shard.config(key, testing::spans(Span::SECOND, 30));
-            let (transport, sessions) = accepting(config, &node);
-            let dialed = dial_late(&transport, &node, peer, &at).await;
-            sessions.borrow_mut().push(dialed);
-            node.clock().sleep(testing::spans(Span::SECOND, 3)).await;
-            let kept: Vec<_> = sessions.borrow_mut().drain(..).collect();
-            ended_with_0(kept.iter().filter(|session| !session.quic().live())).await;
+            let accepting = accepting(config, &node);
+            let wait = testing::spans(Span::SECOND, 10);
+            drop(dial_once(&accepting, &node, peer, &at, lower, wait).await);
         });
     }
 
