@@ -157,11 +157,17 @@ class Node:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        self.watcher = subprocess.Popen(
-            ["sh", "-c", WATCH, str(self.process.pid), self.dir.name, LOOPS],
-            stdin=subprocess.PIPE,
-            start_new_session=True,
-        )
+        try:
+            self.watcher = subprocess.Popen(
+                ["sh", "-c", WATCH, str(self.process.pid), self.dir.name, LOOPS],
+                stdin=subprocess.PIPE,
+                start_new_session=True,
+            )
+        except BaseException:
+            self.process.kill()
+            self.process.communicate()
+            self.dir.cleanup()
+            raise
         line = self.process.stdout.readline()
         if not line:
             error = self.stop()
@@ -595,6 +601,34 @@ class NodeTest(unittest.TestCase):
         )
         self.assertEqual(state, (True, -signal.SIGKILL, False))
 
+    def test_a_node_whose_watcher_fails_to_start_stops_and_its_directory_goes(
+        self,
+    ) -> None:
+        node = Node.__new__(Node)
+        popen = subprocess.Popen
+        calls = []
+
+        def failing(*arguments, **options) -> subprocess.Popen:
+            calls.append(arguments)
+            if len(calls) == 2:
+                raise BlockingIOError("no process")
+            return popen(*arguments, **options)
+
+        slow = self.binary("echo; exec sleep 1000")
+        try:
+            with mock.patch.dict(os.environ, {"FOUNDATION_NODE": slow}):
+                with mock.patch.object(subprocess, "Popen", failing):
+                    with self.assertRaises(BlockingIOError) as raised:
+                        node.start()
+            state = (node.process.poll(), os.path.exists(node.dir.name))
+        finally:
+            if node.process.poll() is None:
+                node.process.kill()
+                node.process.communicate()
+            node.dir.cleanup()
+        self.assertEqual(str(raised.exception), "no process")
+        self.assertEqual(state, (-signal.SIGKILL, False))
+
     def test_a_stop_kills_a_node_that_ignores_sigterm(self) -> None:
         deaf = self.binary('trap "" TERM; echo; while :; do sleep 0.1; done')
         node = Node.__new__(Node)
@@ -671,6 +705,7 @@ class NodeTest(unittest.TestCase):
                 deaf.stdout.readline(),
                 deaf.wait(PATIENCE),
                 watcher.wait(PATIENCE),
+                os.path.exists(directory),
             )
         finally:
             deaf.kill()
@@ -679,8 +714,7 @@ class NodeTest(unittest.TestCase):
             watcher.kill()
             watcher.wait()
             shutil.rmtree(directory, ignore_errors=True)
-        self.assertEqual(state, (b"term\n", -signal.SIGKILL, 0))
-        self.assertFalse(os.path.exists(directory))
+        self.assertEqual(state, (b"term\n", -signal.SIGKILL, 0, False))
 
 
 class ArgumentTest(unittest.TestCase):
