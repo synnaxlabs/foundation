@@ -25,20 +25,12 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
-use connector::cancel::Token;
-use connector::kind::{self, Channels, Error, Kind, Table};
 use connector::poll::Writer;
 use connector::stamp::{Fit, Fitted};
-use connector::testing::{self, Rig};
-use document::Document;
-use document::diagnostic::Diagnostic;
-use spec::channel::{Channel, Data, Kind as ChannelKind};
-use spec::data_type::DataType;
-use spec::definition::Definition;
-use types::channel;
-use types::name::Name;
-use types::sample::{Scalar, Type};
 use types::time::{Interval, Monotonic, Span, Stamp};
+
+#[path = "../tests/common/stamped.rs"]
+mod stamped;
 
 #[global_allocator]
 static ALLOCATOR: counting::Allocator = counting::Allocator::new();
@@ -59,82 +51,25 @@ fn main() {
             tasks,
         };
         let stamped = Arc::new(Mutex::new(None));
-        let kind = Stamped(Arc::clone(&stamped));
-        let rig = Rig::open(env, node.net(), Table::new().with("stamped", kind)).await;
-        rig.define(definitions());
-        let connector: Name = "plant.stamp".parse().expect("a valid name");
-        let writer = rig.writer(connector.clone(), vec![value()]).await;
+        let into = Arc::clone(&stamped);
+        let rig = stamped::rig(env, node.net(), move |writer| {
+            let lines = [request(writer), sample(writer)];
+            *into.lock().expect("no panic") = Some(lines);
+        })
+        .await;
+        let writer = rig
+            .writer(stamped::connector(), vec![stamped::value()])
+            .await;
         let now = time("now", || {
             black_box(writer.now());
         });
         drop(writer);
-        let (token, config) = (Token::new(), Document::default());
-        let opened = rig
-            .open_connector("stamped", connector, &config, &token)
-            .await;
-        opened.run().await.expect("the connector ends ok");
+        stamped::run(&rig).await;
         let lines = stamped.lock().expect("no panic").take();
         let [request, sample] = lines.expect("the run times its lines");
         [now, request, before(), between(), old(), mesh(), sample]
     });
     print(&lines.expect("the run ends"));
-}
-
-/// The channel that the [`Stamped`] kind writes.
-fn value() -> Name {
-    "plant.stamp.value".parse().expect("a valid name")
-}
-
-/// An index `plant.stamp.time` and its `f64` channel [`value`].
-fn definitions() -> Vec<(Name, Definition)> {
-    let index = channel::Key::from_u128(100);
-    let kind = ChannelKind::Index {
-        error: None,
-        control: None,
-    };
-    let time = Definition::Channel(Channel { key: index, kind });
-    let data = Data::new(
-        index,
-        None,
-        DataType::Sample(Type::Scalar(Scalar::F64)),
-        None,
-    );
-    let kind = ChannelKind::Data(data.expect("no unit"));
-    let key = channel::Key::from_u128(101);
-    let data = Definition::Channel(Channel { key, kind });
-    let time_name = "plant.stamp.time".parse().expect("a valid name");
-    vec![(time_name, time), (value(), data)]
-}
-
-/// A kind that opens a [`Writer`] of [`value`], and puts its lines `request` and
-/// `sample` in the place that it holds.
-struct Stamped(Arc<Mutex<Option<[Line; 2]>>>);
-
-impl Kind for Stamped {
-    type Config = ();
-    const SCHEMA: document::schema::Body = testing::READS;
-
-    fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
-        Ok(())
-    }
-
-    fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
-        Ok(Channels {
-            writes: vec![value()],
-            counts: connector::poll::COUNTS
-                .map(|count| count.parse().expect("a valid name"))
-                .to_vec(),
-            ..Channels::default()
-        })
-    }
-
-    async fn run(&self, ctx: kind::Context<()>) -> Result<(), Error> {
-        let writer = Writer::open(&ctx, vec![value()]).await?;
-        let mut writer = writer.expect("a live token");
-        let lines = [request(&mut writer), sample(&mut writer)];
-        *self.0.lock().expect("no panic") = Some(lines);
-        Ok(())
-    }
 }
 
 /// The line `request`.

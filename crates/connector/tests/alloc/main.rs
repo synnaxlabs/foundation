@@ -1,7 +1,7 @@
 //! Polling a registered wait or race allocates nothing, and so do a tick from the third
 //! call on, a stamped request and a sample stamp of a `poll::Writer`, each call of a
-//! fit, and a set of a status count. This binary has no test harness: the count covers each thread, and a
-//! harness allocates on its own thread at any time.
+//! fit, and a set of a status count. This binary has no test harness: the count
+//! covers each thread, and a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -149,6 +149,9 @@ fn check<F: Future>(mut f: Pin<&mut F>, token: &Token, wakers: &[Waker], name: &
     );
 }
 
+#[path = "../common/stamped.rs"]
+mod stamped;
+
 mod stamps {
     use std::future;
     use std::pin::pin;
@@ -157,121 +160,48 @@ mod stamps {
     use std::sync::atomic::Ordering::Relaxed;
     use std::task::{self, Waker};
 
-    use connector::cancel::Token;
-    use connector::kind::{Channels, Context, Error, Kind, Table};
-    use connector::poll::{COUNTS, Writer};
-    use connector::testing::{READS, Rig};
-    use document::Document;
-    use document::diagnostic::Diagnostic;
-    use spec::channel::{Channel, Data, Kind as ChannelKind};
-    use spec::data_type::DataType;
-    use spec::definition::Definition;
-    use types::channel;
-    use types::name::Name;
-    use types::sample::{Scalar, Type};
     use types::time::{Interval, Span};
 
-    use super::ALLOCATOR;
+    use super::{ALLOCATOR, stamped};
 
-    /// A kind that opens a [`Writer`] of [`value`], and counts the allocations of 64
-    /// polls of a stamped request that is ready, after one warm-up request, and of 64
-    /// sample stamps.
-    struct Stamped {
-        requests: Arc<AtomicU64>,
-        samples: Arc<AtomicU64>,
-    }
-
-    impl Kind for Stamped {
-        type Config = ();
-        const SCHEMA: document::schema::Body = READS;
-
-        fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
-            Ok(())
-        }
-
-        fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
-            let counts = COUNTS.map(|count| count.parse().expect("a valid name"));
-            Ok(Channels {
-                writes: vec![value()],
-                counts: counts.to_vec(),
-                ..Channels::default()
-            })
-        }
-
-        async fn run(&self, ctx: Context<()>) -> Result<(), Error> {
-            let writer = Writer::open(&ctx, vec![value()]).await?;
-            let mut writer = writer.expect("a live token");
-            let ((), first) = writer.request(future::ready(())).await;
-            let mut cx = task::Context::from_waker(Waker::noop());
-            let ((), requests) = ALLOCATOR.count(|| {
-                for _ in 0..64 {
-                    let request = pin!(writer.request(future::ready(())));
-                    assert!(request.poll(&mut cx).is_ready(), "a ready request");
-                }
-            });
-            let ((), samples) = ALLOCATOR.count(|| {
-                for n in 1..=64 {
-                    let earliest = first + Span::from_nanos(n * 1_000);
-                    let latest = earliest + Span::from_nanos(200);
-                    let time = Interval { earliest, latest };
-                    std::hint::black_box(writer.sample(time, earliest));
-                }
-            });
-            self.requests.store(requests, Relaxed);
-            self.samples.store(samples, Relaxed);
-            Ok(())
-        }
-    }
-
-    /// The channel that [`Stamped`] writes.
-    fn value() -> Name {
-        "plant.stamp.value".parse().expect("a valid name")
-    }
-
-    /// An index `plant.stamp.time` and its `f64` channel [`value`].
-    fn definitions() -> Vec<(Name, Definition)> {
-        let index = channel::Key::from_u128(100);
-        let kind = ChannelKind::Index {
-            error: None,
-            control: None,
-        };
-        let time = Definition::Channel(Channel { key: index, kind });
-        let sample = DataType::Sample(Type::Scalar(Scalar::F64));
-        let data = Data::new(index, None, sample, None).expect("no unit");
-        let key = channel::Key::from_u128(101);
-        let data = Definition::Channel(Channel {
-            key,
-            kind: ChannelKind::Data(data),
-        });
-        let name = "plant.stamp.time".parse().expect("a valid name");
-        vec![(name, time), (value(), data)]
-    }
-
-    /// Checks that a stamped request that is ready and a sample stamp of a
-    /// `poll::Writer` allocate nothing.
+    /// Checks that 64 polls of a stamped request of a `poll::Writer` that is ready,
+    /// after one warm-up request, and 64 sample stamps allocate nothing.
     pub(super) fn check() {
         let requests = Arc::new(AtomicU64::new(1));
         let samples = Arc::new(AtomicU64::new(1));
-        let kind = Stamped {
-            requests: Arc::clone(&requests),
-            samples: Arc::clone(&samples),
-        };
+        let (into_requests, into_samples) =
+            (Arc::clone(&requests), Arc::clone(&samples));
         let mut sim = sim::Sim::new(sim::Config::default());
         let node = sim.node(sim::node::Config::default());
         let result = sim.run_on(&node, |node, tasks| async move {
-            let kinds = Table::new().with("stamped", kind);
-            let rig = Rig::open(super::env(&node, tasks), node.net(), kinds).await;
-            rig.define(definitions());
-            let connector: Name = "plant.stamp".parse().expect("a valid name");
-            let (token, config) = (Token::new(), Document::default());
-            rig.open_connector("stamped", connector, &config, &token)
-                .await
-                .run()
-                .await
+            let env = super::env(&node, tasks);
+            let rig = stamped::rig(env, node.net(), move |writer| {
+                let mut cx = task::Context::from_waker(Waker::noop());
+                let warm = pin!(writer.request(future::ready(()))).poll(&mut cx);
+                let task::Poll::Ready(((), first)) = warm else {
+                    panic!("a ready request")
+                };
+                let ((), counted) = ALLOCATOR.count(|| {
+                    for _ in 0..64 {
+                        let request = pin!(writer.request(future::ready(())));
+                        assert!(request.poll(&mut cx).is_ready(), "a ready request");
+                    }
+                });
+                into_requests.store(counted, Relaxed);
+                let ((), counted) = ALLOCATOR.count(|| {
+                    for n in 1..=64 {
+                        let earliest = first + Span::from_nanos(n * 1_000);
+                        let latest = earliest + Span::from_nanos(200);
+                        let time = Interval { earliest, latest };
+                        std::hint::black_box(writer.sample(time, earliest));
+                    }
+                });
+                into_samples.store(counted, Relaxed);
+            })
+            .await;
+            stamped::run(&rig).await;
         });
-        result
-            .expect("the run ends")
-            .expect("the connector ends ok");
+        result.expect("the run ends");
         let requests = requests.load(Relaxed);
         assert_eq!(requests, 0, "a stamped request allocates nothing");
         assert_eq!(samples.load(Relaxed), 0, "a sample stamp allocates nothing");
