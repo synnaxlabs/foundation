@@ -133,28 +133,25 @@ impl Request {
     }
 
     /// A `CreateMonitoredItems` request on the subscription `subscription` of an item
-    /// for the Value of each of `nodes`, with the client handle `first + i` for
-    /// `nodes[i]`, that reports each change of the status or the value with both
-    /// timestamps, samples at `sampling` ms, and queues `queue` values, the oldest
-    /// dropped first.
+    /// for the Value of the node of each of `items`, with its client handle, that
+    /// reports each change of the status or the value with both timestamps, samples at
+    /// `sampling` ms, and queues `queue` values, the oldest dropped first.
     ///
     /// # Aborts
     ///
     /// As [`Request::browse`].
     pub(super) fn monitor(
         subscription: u32,
-        nodes: &[ffi::Node<'_>],
-        first: u32,
+        items: &[ffi::Item<'_>],
         sampling: f64,
         queue: u32,
     ) -> Self {
-        // SAFETY: `nodes` holds its count, and C copies each name.
+        // SAFETY: `items` holds the count, and C copies each name.
         let raw = unsafe {
             ffi::shim_monitor_new(
                 subscription,
-                nodes.as_ptr(),
-                nodes.len(),
-                first,
+                items.as_ptr(),
+                items.len(),
                 sampling,
                 queue,
             )

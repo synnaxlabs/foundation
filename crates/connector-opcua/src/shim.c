@@ -1571,15 +1571,24 @@ UA_CreateSubscriptionRequest *shim_subscribe_new(UA_Double interval,
     return request;
 }
 
+/* An item of a CreateMonitoredItems request, as `ffi::Item` gives it: its node and
+ * its client handle. */
+typedef struct {
+    shim_node node;
+    UA_UInt32 handle;
+} shim_item;
+
+_Static_assert(sizeof(shim_item) == 32 && offsetof(shim_item, handle) == 24,
+               "shim_item changed");
+
 /* Gives a CreateMonitoredItems request on the subscription `subscription` of an item
- * for the Value of each of the `count` nodes at `nodes`, with the client handle
- * `first + i` for `nodes[i]`, that reports each change of the status or the value with
- * both timestamps, samples at `sampling` ms, and queues `queue` values, the oldest
- * dropped first. It copies the names. Gives NULL when an allocation fails. */
+ * for the Value of the node of each of the `count` items at `items`, with its client
+ * handle, that reports each change of the status or the value with both timestamps,
+ * samples at `sampling` ms, and queues `queue` values, the oldest dropped first. It
+ * copies the names. Gives NULL when an allocation fails. */
 UA_CreateMonitoredItemsRequest *shim_monitor_new(UA_UInt32 subscription,
-                                                 const shim_node *nodes, size_t count,
-                                                 UA_UInt32 first, UA_Double sampling,
-                                                 UA_UInt32 queue) {
+                                                 const shim_item *items, size_t count,
+                                                 UA_Double sampling, UA_UInt32 queue) {
     UA_CreateMonitoredItemsRequest *request = UA_CreateMonitoredItemsRequest_new();
     if(!request)
         return NULL;
@@ -1596,11 +1605,11 @@ UA_CreateMonitoredItemsRequest *shim_monitor_new(UA_UInt32 subscription,
         UA_MonitoredItemCreateRequest *item = &request->itemsToCreate[i];
         item->itemToMonitor.attributeId = UA_ATTRIBUTEID_VALUE;
         item->monitoringMode = UA_MONITORINGMODE_REPORTING;
-        item->requestedParameters.clientHandle = first + (UA_UInt32)i;
+        item->requestedParameters.clientHandle = items[i].handle;
         item->requestedParameters.samplingInterval = sampling;
         item->requestedParameters.queueSize = queue;
         item->requestedParameters.discardOldest = true;
-        UA_NodeId id = shim_node_id(nodes[i]);
+        UA_NodeId id = shim_node_id(items[i].node);
         if(UA_NodeId_copy(&id, &item->itemToMonitor.nodeId) != UA_STATUSCODE_GOOD) {
             UA_CreateMonitoredItemsRequest_delete(request);
             return NULL;

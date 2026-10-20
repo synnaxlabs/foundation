@@ -47,7 +47,8 @@
   grew after the connect (`laptop.architect-2`, item 2 of 6279727836).
   `Writer::write` never waits, so the longest wait of a drive, while a change waits in
   the client and no Publish request goes out, is the 5 s timeout of the `CurrentTime`
-  read. The client asks for a keep-alive of 1 min, and the lifetime of a subscription
+  read, and 5 s more for each `CreateMonitoredItems` call of the try after it. The
+  client asks for a keep-alive of 1 min, and the lifetime of a subscription
   is at least three keep-alives, so it passes only when no Publish request reaches the
   server for about 3 min. The values that the server samples past the queue in such a
   gap are lost with no count, as the polled mode loses the reads of a link that is
@@ -56,20 +57,34 @@
   the `error` status channel holds at the time of the end, and `restarts` counts it
   (`laptop.monitor`, the condition on the lifetime end of the PR 5 key choices,
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6283679034).
-  A subscription that ends, or a node that the server does not watch, ends the run with
-  `kind::Error::Device` (`laptop.architect-2`, section 3 of
+  A subscription that ends ends the run with `kind::Error::Device`
+  (`laptop.architect-2`, section 3 of
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6157348272). The
   run closes its session, the supervisor connects again with its backoff, and the next
   run subscribes again, so data starts again after a server restart with no user step
   (`laptop.monitor`, round 2 of #3435, step 4 of
-  https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6278830972). The
-  polled mode counts a node that the server does not watch as `bad` and writes the
-  others. Lost, a simple version first: leave out an item that the server does not
-  watch, note it, and try it again at each read of `CurrentTime`
-  (https://github.com/synnaxlabs/foundation/issues/3509). A node whose
-  CreateMonitoredItems call alone is past one message of the server ends the run with
-  `kind::Error::Config` and `opcua.large-watch`, as `opcua.large-read` does for a
-  Read, unless an answer of the subscribe is `BadServiceUnsupported` or
+  https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6278830972). A
+  node that the server does not watch is left out, as the polled mode leaves out a
+  node that the server does not have: the run writes the others, counts the node as
+  `bad` at the subscribe and at each try, and notes "the server does not watch the
+  node `{node}` of the channel `{channel}`: {status}" for the first such node, before
+  the note of a node of another type. After each read of `CurrentTime`, the run asks
+  the server to watch those nodes in one `CreateMonitoredItems` call, or more past
+  `MaxMonitoredItemsPerCall` or one message. A node that the server then watches
+  writes its first value, and its note goes. At the subscribe or at a try, an item
+  status of `BadTooManyMonitoredItems` ends the run with `kind::Error::Device`, as the
+  server can have room at the next connect. So does an item status that is not Bad,
+  such as `GoodOverload`: the server holds the item, and open62541 keeps none, so a
+  try would make another. So does a `CreateMonitoredItems` call whose service result
+  is not Good, other than at the subscribe as below (`laptop.architect-2`,
+  2026-10-20T04:52:46Z, the design of
+  https://github.com/synnaxlabs/foundation/issues/3509; `laptop.monitor`,
+  2026-10-20T19:20:29Z,
+  https://github.com/synnaxlabs/foundation/issues/3509#issuecomment-6299274721, of the
+  plan https://github.com/synnaxlabs/foundation/issues/3509#issuecomment-6299268355). A
+  node whose CreateMonitoredItems call alone is past one message of the server ends
+  the run with `kind::Error::Config` and `opcua.large-watch`, as `opcua.large-read`
+  does for a Read, unless an answer of the subscribe is `BadServiceUnsupported` or
   `BadNotImplemented`, which makes the kind poll, as below (`laptop.architect-2`,
   2026-10-20T06:08:01Z,
   https://github.com/synnaxlabs/foundation/pull/3507#issuecomment-6284605117).

@@ -251,15 +251,15 @@ fn called_again(kind: [u8; 4]) -> Result<Revised, Status> {
     })
 }
 
-/// A create answer whose service result is not Good fails, as open62541 then makes
-/// no subscription or item: the subscribe at a `CreateSubscription`, and each item of
-/// the call at a `CreateMonitoredItems`, also with too few results.
+/// A create answer whose service result is not Good fails the subscribe, as open62541
+/// then makes no subscription or item: at a `CreateSubscription`, and at a
+/// `CreateMonitoredItems`, also with too few results.
 #[test]
 fn a_create_answer_that_is_not_good_fails() {
     let subscribe = called_again(SUBSCRIBE_RESPONSE);
-    let monitor = called_again(MONITOR_RESPONSE).map(|revised| revised.items);
-    let items = vec![Err(GOOD_CALL_AGAIN); 2];
-    assert_eq!((subscribe, monitor), (Err(GOOD_CALL_AGAIN), Ok(items)));
+    let monitor = called_again(MONITOR_RESPONSE);
+    let failed = Err(GOOD_CALL_AGAIN);
+    assert_eq!((subscribe, monitor), (failed.clone(), failed));
 }
 
 /// A Publish answer of `BadSessionClosed` makes open62541 delete the subscription
@@ -576,16 +576,14 @@ fn an_end_with_no_publish_request_queued_ends_the_changes() {
     );
 }
 
-/// A call that the server refuses gives its status to each item of it.
+/// A call that the server refuses ends the subscribe with its status.
 #[test]
-fn a_refused_call_gives_its_status_to_each_item() {
+fn a_refused_call_ends_the_subscribe_with_its_status() {
     let (revised, calls, changes) =
         monitored(3, SAMPLING, |peer| peer.server.refuse_monitors_past(2));
-    let refused = Err(Status::BAD_TOO_MANY_OPERATIONS);
-    let revised = revised.expect("the subscription");
     assert_eq!(
-        (revised.items, calls, changes),
-        (vec![refused; 3], 1, vec![])
+        (revised, calls, changes),
+        (Err(Status::BAD_TOO_MANY_OPERATIONS), 1, vec![])
     );
 }
 
@@ -1126,4 +1124,63 @@ fn a_publish_answer_that_fails_to_decode_ends_the_changes() {
     assert_eq!(got.0, Ok(vec![changed_to(0.0, false)]));
     assert_eq!(got.1, Err("BadDecodingError"));
     assert_eq!(got.2, Err("BadDecodingError"));
+}
+
+/// What [`watched`] gives: the items of the subscribe, the nodes that the watch did
+/// not watch, the reserved block after each, and the index and value of each change of
+/// the first second.
+type Watched = (
+    Result<Revised, Status>,
+    Result<Vec<(usize, Status)>, Status>,
+    [(usize, usize); 2],
+    Vec<(usize, Result<Value, Fault>)>,
+);
+
+/// Subscribes a client to the nodes 0, 1, and 2 of [`numbered`] on a server that has
+/// only 0 and 2, then adds 1 and watches it.
+fn watched() -> Watched {
+    run(0, async |node| {
+        serve(&node, 4, async |mut peer| {
+            peer.server.set_publishing(10.0);
+            for index in [0, 2] {
+                peer.server
+                    .add_scalar(&numbered(index), Value::F64(f64::from(index)));
+            }
+            let nodes: Vec<Node> = (0..3).map(numbered).collect();
+            let mut client = peer.connected().await;
+            let revised = client.subscribe(&nodes, SAMPLING, Span::ZERO).await;
+            let subscribed = blocks(&client);
+            peer.server.add_scalar(&numbered(1), Value::F64(1.0));
+            let items = client.watch().await;
+            let grown = blocks(&client);
+            let mut changes = Vec::new();
+            let mut wait = pin!(peer.clock.sleep(ms(1000)));
+            loop {
+                let got = client.changes(wait.as_mut()).await.expect("no end");
+                if got.is_empty() {
+                    break;
+                }
+                changes.extend(got.iter().map(|change| (change.index, change.value)));
+            }
+            client.close().await;
+            (revised, items, [subscribed, grown], changes)
+        })
+        .await
+    })
+    .0
+}
+
+/// A watch makes an item on the subscription for a node that the subscribe could
+/// not watch. Its change gives the index of the node in the list of the subscribe,
+/// and the reserve grows by its queue of 4 values: 104 bytes a change and 1 KiB.
+#[test]
+fn a_watch_makes_an_item_whose_changes_give_the_index_of_its_node() {
+    let (revised, items, blocks, mut changes) = watched();
+    let mut subscribed = made(3);
+    subscribed.items[1] = Err(Status::BAD_NODE_ID_UNKNOWN);
+    assert_eq!(revised, Ok(subscribed));
+    assert_eq!(items, Ok(vec![]));
+    assert_eq!(blocks, [(1, 1024 + 8 * 104), (1, 1024 + 12 * 104)]);
+    changes.sort_by_key(|&(index, _)| index);
+    assert_eq!(changes, numbers(3));
 }

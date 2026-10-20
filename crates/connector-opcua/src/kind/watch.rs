@@ -29,13 +29,17 @@ const OFFSET: i64 = 1 << 62;
 /// Subscribes to each node of the reads of `ctx` at the rate of `ctx`, and writes each
 /// change until the cancel. It reads the current time of the server first, then each
 /// [`READ`], and at once when a server timestamp disagrees with the fit or goes back.
-/// Gives the status when the server answers the subscribe with
-/// `BadServiceUnsupported` or `BadNotImplemented`, and `None` at the cancel.
+/// It leaves out each node that the server does not watch, counts it as `bad` and
+/// names the first in the note, and asks the server to watch them again after each
+/// read of the current time. Gives the status when the server answers the subscribe
+/// with `BadServiceUnsupported` or `BadNotImplemented`, and `None` at the cancel.
 ///
 /// # Errors
 ///
-/// [`Error::Device`] when a read of the current time or the subscribe fails, when
-/// the server does not watch a node, and when the subscription ends.
+/// [`Error::Device`] when a read of the current time, the subscribe, or a call to
+/// watch a node again fails, when the server has no room to watch a node
+/// (`BadTooManyMonitoredItems`) or gives an item a status that is not Bad, and when
+/// the subscription ends.
 /// [`Error::Config`] with `opcua.no-timestamp` for a Good change with no timestamp that
 /// maps to mesh time, and with `opcua.large-watch` for a node whose
 /// `CreateMonitoredItems` call alone is past one message of the server. The errors of
@@ -63,10 +67,6 @@ pub(super) async fn run(
             revised.map_err(|status| failed(client.url(), Call::Subscribe, status))?
         }
     };
-    let mut refused = revised.items.iter().filter_map(|item| item.as_ref().err());
-    if let Some(&status) = refused.find(|&&status| unsupported(status)) {
-        return Ok(Some(status));
-    }
     if let Some(large) = revised.large.first() {
         return Err(too_large(
             LARGE_WATCH,
@@ -75,15 +75,10 @@ pub(super) async fn run(
             large,
         ));
     }
-    for (read, item) in reads.iter().zip(&revised.items) {
-        if let &Err(status) = item {
-            return Err(super::device(Failure::Unwatched {
-                node: read.node.to_string(),
-                channel: read.channel.to_string(),
-                status,
-            }));
-        }
-    }
+    let unwatched: Vec<(usize, Status)> = (revised.items.iter().enumerate())
+        .filter_map(|(at, item)| Some((at, *item.as_ref().err()?)))
+        .collect();
+    refused(frames, reads, &unwatched)?;
     ctx.clear_error();
     let missed = ctx.count("missed");
     let mut drive = Drive::new(reads.len());
@@ -109,6 +104,12 @@ pub(super) async fn run(
             };
             read?;
             due = ctx.clock().now() + READ;
+            let Some(unwatched) = ctx.cancel().race(client.watch()).await else {
+                break;
+            };
+            let unwatched = unwatched
+                .map_err(|status| failed(client.url(), Call::Subscribe, status))?;
+            refused(frames, reads, &unwatched)?;
         }
         drive.write(frames, &server.fit, reads)?;
     }
@@ -199,6 +200,31 @@ impl Server {
         _ = self.fit.between(time, sent, answered);
         Ok(answered - sent)
     }
+}
+
+/// Counts each read of `unwatched`, whose node the server does not watch, with the
+/// status of its item, as `bad`, and names the first in the note of `frames`.
+///
+/// # Errors
+///
+/// [`Error::Device`] for the first read whose status is `BadTooManyMonitoredItems`, as
+/// the server has no room for it, or is not Bad, as the server can hold its item and a
+/// try would make another.
+fn refused(
+    frames: &mut Frames<'_>,
+    reads: &[Read],
+    unwatched: &[(usize, Status)],
+) -> Result<(), Error> {
+    let ends = |&&(_, status): &&(usize, Status)| {
+        !status.bad() || status == Status::BAD_TOO_MANY_MONITORED_ITEMS
+    };
+    if let Some(&(at, status)) = unwatched.iter().find(ends) {
+        return Err(super::device(Failure::unwatched(&reads[at], status)));
+    }
+    let count = u64::try_from(unwatched.len()).unwrap_or(u64::MAX);
+    frames.left.add(count, 0, 0);
+    frames.unwatched(unwatched.first().copied());
+    Ok(())
 }
 
 /// Whether `status` says that the server has no subscription service.
