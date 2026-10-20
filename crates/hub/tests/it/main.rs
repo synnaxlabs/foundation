@@ -37,6 +37,7 @@ mod net;
 
 #[path = "../common/agent.rs"]
 mod agent;
+mod away;
 mod definitions;
 mod forward;
 mod link;

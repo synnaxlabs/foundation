@@ -202,7 +202,9 @@ async fn serve_each(hub: Hub, transport: Transport, tasks: Tasks, steps: Arc<Ste
 /// The next stream of `session` whose header names the hub protocol, with the header
 /// read. The mesh at [`NODE`] sends `raft` messages on the same session to its learner
 /// [`OTHER`], and this home, which runs no mesh, drops each mesh stream.
-async fn accept_hub(session: &Session) -> Result<Incoming, transport::Error> {
+pub(super) async fn accept_hub(
+    session: &Session,
+) -> Result<Incoming, transport::Error> {
     loop {
         let mut incoming = session.accept().await?;
         let header = incoming.receiver.recv().await?;

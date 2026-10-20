@@ -20,7 +20,7 @@ use wire::header::MALFORMED;
 use wire::hub::client::write::Open;
 use wire::hub::client::{BODY_BYTES_MAX, Mode, Place, Places, REFUSED};
 use wire::hub::write::{End, Head, Outcome, Reply, Time};
-use wire::hub::{BUSY, NOT_HOME, UNKNOWN};
+use wire::hub::{BUSY, FAILED, NOT_HOME, UNKNOWN};
 
 use super::link::{as_agent, serve_session_after};
 use super::read::{finish, read_session};
@@ -1690,10 +1690,10 @@ fn stops_a_write_on_two_indexes_whose_one_home_is_another_node_as_not_home() {
     );
 }
 
-/// A node serves a write only of an index whose home it is: a write whose home is
-/// another node stops with `NOT_HOME`, and takes no control there.
+/// A write whose home is another node goes there, so it stops as `FAILED` when no
+/// node answers at the home's addresses.
 #[test]
-fn stops_a_write_whose_home_is_another_node_as_not_home() {
+fn stops_a_write_whose_home_does_not_answer_as_failed() {
     let served = Arc::new(Mutex::new(Vec::new()));
     let kept = Arc::clone(&served);
     let home = move |node, tasks| split_home(node, tasks, kept);
@@ -1701,18 +1701,16 @@ fn stops_a_write_whose_home_is_another_node_as_not_home() {
         as_agent(node, tasks, at, |mut agent| async move {
             agent.admit().await;
             let mut stream = agent.write(&["value"]).await;
-            assert_eq!(stream.recv().await, reset_with(NOT_HOME));
+            assert_eq!(stream.recv().await, reset_with(FAILED));
             finish(&mut agent).await;
         })
     });
-    let remote = writer::Error::Remote {
+    let forward = serve::Error::Forward {
         home: region::OTHER,
+        refusal: wire::hub::client::Refusal::Failed,
     };
     let served = std::mem::take(&mut *served.lock().expect("not poisoned"));
-    assert_eq!(
-        served,
-        [Err(serve::Error::Writer(Box::new(remote))), Ok(Got::Ended)]
-    );
+    assert_eq!(served, [Err(forward), Ok(Got::Ended)]);
 }
 
 /// A write whose channel moves to a second index while it waits for the home of its

@@ -1,9 +1,9 @@
 //! The hello that a session admitted, its renewals, and its end.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::future::poll_fn;
 use std::pin::pin;
-use std::task::Poll;
+use std::task::{Poll, Waker};
 
 use access::proof::{self, Admitted};
 use types::ed25519::PublicKey;
@@ -21,6 +21,10 @@ pub(crate) struct Admission {
     /// The public key of the node that carried each hello of the session.
     peer: PublicKey,
     admitted: RefCell<Option<(Admitted, [u8; 64])>>,
+    /// The count of hellos admitted.
+    count: Cell<u64>,
+    /// The waker of each task that waits for a hello after a count.
+    waiting: RefCell<Vec<Waker>>,
 }
 
 impl Admission {
@@ -30,6 +34,8 @@ impl Admission {
         Self {
             peer,
             admitted: RefCell::default(),
+            count: Cell::default(),
+            waiting: RefCell::default(),
         }
     }
 
@@ -55,7 +61,44 @@ impl Admission {
         }
         .map_err(|error| Error::Access(Box::new(error)))?;
         *admitted = Some((next, signature));
+        self.count.set(self.count.get() + 1);
+        for waker in self.waiting.take() {
+            waker.wake();
+        }
         Ok(())
+    }
+
+    /// The admitted hello and its signature, with the count of hellos admitted
+    /// through it.
+    ///
+    /// # Panics
+    ///
+    /// When no hello is admitted.
+    pub(crate) fn signed(&self) -> (Signed, u64) {
+        let admitted = self.admitted.borrow();
+        let (admitted, signature) = admitted
+            .as_ref()
+            .expect("invariant: a session holds a hello only after its admission");
+        let signed = Signed {
+            hello: admitted.hello().clone(),
+            signature: *signature,
+        };
+        (signed, self.count.get())
+    }
+
+    /// Waits until the session admits a hello after the first `count`.
+    pub(crate) async fn renewed(&self, count: u64) {
+        poll_fn(|cx| {
+            if self.count.get() > count {
+                return Poll::Ready(());
+            }
+            let mut waiting = self.waiting.borrow_mut();
+            if !waiting.iter().any(|waker| waker.will_wake(cx.waker())) {
+                waiting.push(cx.waker().clone());
+            }
+            Poll::Pending
+        })
+        .await;
     }
 
     /// The subject of the admitted hello, or `None` before one. A renewal never

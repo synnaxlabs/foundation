@@ -146,6 +146,16 @@ pub enum Error {
     Writer(Box<writer::Error>),
     /// The ends of a frame of a write break a rule of its key set. Code `MALFORMED`.
     Frame(types::frame::Error),
+    /// The home of the index of a program's write is `home`, another node, and the
+    /// forward of the write to it ended before its places. Code: `refusal`, the code
+    /// that `home` stopped the forward with, or `FAILED` when the session to `home`
+    /// failed, `home` broke HUB WIRE, or `home` takes smaller messages than this node.
+    Forward {
+        /// The home.
+        home: node::Key,
+        /// The refusal that the program gets.
+        refusal: Refusal,
+    },
 }
 
 impl Error {
@@ -175,6 +185,7 @@ impl Error {
             Self::Reader(error) => Some(Code(client::read::refused(error).code())),
             Self::Ended(ended) => Some(Code(client::read::ended(ended).code())),
             Self::Writer(error) => Some(Code(client::write::refused(error).code())),
+            Self::Forward { refusal, .. } => Some(Code(refusal.code())),
         }
     }
 }
@@ -264,6 +275,11 @@ impl fmt::Display for Error {
             Self::Frame(error) => {
                 write!(f, "a frame of a write is not valid: {error}")
             }
+            Self::Forward { home, refusal } => write!(
+                f,
+                "the forward of the write to node {home}, the home of its index, \
+                 ended: {refusal}"
+            ),
         }
     }
 }
