@@ -143,6 +143,17 @@
   https://github.com/synnaxlabs/foundation/pull/3335#issuecomment-6266662803; OK of
   `laptop.monitor`, 2026-10-19T12:33:19Z:
   https://github.com/synnaxlabs/foundation/pull/3335#issuecomment-6267301786).
+  Amended (2026-10-20, PR 5d of #336): `join::ask` asks the voters of the ticket in
+  the ticket's order, in at most 8 rounds with a pause of 1 s between them, and gives
+  the founding of the first voter that admits the node. The dial and the first answer
+  come within 10 s, and each part within 10 s of the message before it. So voters
+  that do not answer give `Error::Unjoined`, with the miss of each voter in the last
+  round, after at most 8 x (10 s for each voter + 1 s): 248 s for 3 voters. `Unled`
+  is the miss `Uncommitted`, whose text is "no leader committed the join". The node
+  stops a reply half that carries a message that a join stream does not carry with
+  code 2. The opaque `join::Refused` keeps `region::Refused` and `ticket::Refused`
+  private (`laptop.architect`, 2026-10-20T07:51:19Z, items 1 and 2 of
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6286140973).
   An idle voter holds no copy of the founding: the `Mesh` keeps a `Weak` of the
   checked `founding` file, and each answer holds the strong copy, so answers at one
   time share one copy. One read runs at one time, and an answer that starts during it
