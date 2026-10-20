@@ -171,9 +171,9 @@ pub fn assert_examples<K>(
                     continue;
                 }
                 let held = at(&example, &path).attributes.get(attribute.name);
-                let site = absent.iter_mut().find(|(site, name, _)| {
-                    std::ptr::eq(*site, body) && *name == attribute.name
-                });
+                let site = absent
+                    .iter_mut()
+                    .find(|(site, name, _)| *site == body && *name == attribute.name);
                 match site {
                     Some((_, _, seen)) => *seen |= held.is_none(),
                     None => absent.push((body, attribute.name, held.is_none())),
@@ -517,6 +517,27 @@ mod tests {
         let examples = [&["b"][..], &["b", "x", "y"]]
             .map(|keys| ((), &CYCLE, document(keys, Vec::new())));
         assert_examples(examples, |(), held| {
+            let get = |key| held.attributes.get(key).is_some();
+            if get("x") == get("y") {
+                Vec::new()
+            } else {
+                vec![problem()]
+            }
+        });
+    }
+
+    mod far {
+        #[inline(never)]
+        pub(super) fn cycle() -> &'static super::Body {
+            &super::CYCLE
+        }
+    }
+
+    #[test]
+    fn takes_a_when_left_out_at_another_reference_to_its_body() {
+        let held = ((), &CYCLE, document(&["b", "x", "y"], Vec::new()));
+        let left = ((), far::cycle(), document(&["b"], Vec::new()));
+        assert_examples([held, left], |(), held| {
             let get = |key| held.attributes.get(key).is_some();
             if get("x") == get("y") {
                 Vec::new()
