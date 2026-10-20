@@ -24,7 +24,9 @@ pub(crate) struct Admission {
     admitted: RefCell<Option<(Admitted, [u8; 64])>>,
     /// The count of hellos admitted.
     count: Cell<u64>,
-    /// The waker of each [`Renewal`] that waits, by its key.
+    /// The waker of each [`Renewal`] that waits, by its key. Only [`Admission::wake`]
+    /// drains it, and it moves `count` with the drain: a [`Renewal`] reads an unchanged
+    /// `count` as its waker still here.
     waiting: RefCell<wait::Set>,
     /// The key of the next [`Renewal`].
     key: Cell<u64>,
@@ -209,8 +211,8 @@ pub(crate) struct Renewal<'a> {
     key: u64,
     /// The count of hellos admitted through the last hello that it gave.
     seen: Cell<u64>,
-    /// The waker that the set holds for it, and the count of hellos admitted when the
-    /// waker went in.
+    /// The waker that it put in the set last, and the count of hellos admitted then. The
+    /// set still holds that waker while the count is the same.
     held: Cell<Option<(Waker, u64)>>,
 }
 
@@ -300,8 +302,10 @@ mod tests {
         Admission::new(PrivateKey([3; 32]).public())
     }
 
-    /// Takes the entry out by hand, which no production path does without a count
-    /// or a drop, to show that the second poll does not touch the set.
+    /// Takes the entry out by hand, which no production path does without a count or a
+    /// drop, to show that the second poll does not touch the set. No caller sees the
+    /// skip: an insert of a waker of the same task changes nothing, so only the time of
+    /// the poll shows it, which the `forward` bench measures.
     #[test]
     fn a_poll_with_the_same_waker_leaves_the_set_alone() {
         let admission = admission();
@@ -310,12 +314,17 @@ mod tests {
         renewal.register(&Context::from_waker(&waker));
         let taken = admission.waiting.borrow_mut().remove(renewal.key);
         assert!(taken.is_some_and(|taken| taken.will_wake(&waker)));
-        renewal.register(&Context::from_waker(&waker.clone()));
-        assert!(admission.waiting.borrow_mut().remove(renewal.key).is_none());
+        for _ in 0..2 {
+            renewal.register(&Context::from_waker(&waker.clone()));
+            assert!(admission.waiting.borrow_mut().remove(renewal.key).is_none());
+        }
         admission.wake();
         assert_eq!(task.wakes(), 0);
     }
 
+    /// No caller sees this case: `away.rs` polls each renewal in one task, and `os` and
+    /// `sim` give one waker for each task. No crate call drains the set without a
+    /// `State`, so the test calls `wake`.
     #[test]
     fn a_poll_with_another_task_inserts_its_waker() {
         let admission = admission();
@@ -341,6 +350,23 @@ mod tests {
         renewal.register(&Context::from_waker(&waker));
         admission.wake();
         assert_eq!(task.wakes(), 2);
+    }
+
+    /// The last drop of the held waker of a drained renewal drops a task whose renewal
+    /// borrows the map, so it comes after the borrow of the insert.
+    #[test]
+    fn a_held_waker_drops_after_the_borrow_of_the_insert() {
+        let admission: &'static Admission = Box::leak(Box::new(admission()));
+        let renewal = admission.renewal();
+        let held = waker::holding(admission.renewal());
+        renewal.register(&Context::from_waker(&held));
+        drop(held);
+        admission.wake();
+        let (_task, waker) = task();
+        renewal.register(&Context::from_waker(&waker));
+        let mut woken = Vec::new();
+        admission.waiting.borrow_mut().drain(&mut woken);
+        assert_eq!(woken.len(), 1);
     }
 
     #[test]
