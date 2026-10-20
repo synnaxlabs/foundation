@@ -39,23 +39,52 @@
   supersedes the second sentence of the SPEC APPLY text of
   https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059603551. A put
   gives `Error::Pool` or `Error::Blob` on a failure. The node then puts the listed
-  chunks with `blob::peer::put` on each other voter of both halves of `raft.voters()`,
-  all at once, in calls of at most 16 chunks in order, each of which fails after
-  `peer::DEADLINE` (10 s on the `env` clock) with no result, its dials included. A call
-  whose session ended dials once more, inside its own deadline, as a session to a peer
-  that restarted ends only at its first use. A miss gives the cause of the last attempt.
-  A holder is the node when it is a voter, or a voter whose calls each ended `Ok` while
-  a half that holds it lacked a majority; another failed dial or call, also a failed
-  read of the node's store for a call, leaves a voter no holder. So the holders are at
-  most the sum of the majorities of the halves, at most 128, which `HOLDERS_MAX` holds
-  (SPEC CHANGE). `Error::Stopped` comes as for `Mesh::set_home`, also while the puts
-  wait. Once the holders are a majority of each half, the node drops the puts still open
-  and proposes. When the holders are not a majority of each half once each put ended, or
-  at the apply, the call gives `Error::Quorum { held, voters, missed }` for the first
-  half that lacks one, the incoming half first, and proposes nothing before the apply.
-  `missed` gives each voter whose put failed, in key order, with its name and why:
-  `Miss::Deadline`, `Unknown` (no record of the voter), `Dial`, or `Put`. It is empty
-  for a refusal at the apply. Decided by `laptop.architect`, 2026-10-19T17:02:16Z
+  chunks with a `blob::peer::Push` on each other voter of both halves of
+  `raft.voters()`, all at once, on one stream in order. Each step fails after
+  `peer::DEADLINE` (10 s on the `env` clock) with no result: the dial with the open of
+  the stream, and the `Stored` of each chunk. So a slow voter that stores a
+  chunk within each 10 s stays a holder, and a silent one misses 10 s after its last
+  `Stored`. A step that fails on a session that ended dials once more and goes on from
+  its chunk, as a session to a peer that restarted ends only at its first use. A session
+  that stored a chunk earns one more redial. So does one session that ends with code
+  0, as it lost to a session that the peer dialed at the same time, at the start and
+  after each session that stored a chunk. Another session that ends with no chunk
+  stored ends the put after one redial. So a peer that ends each session with code 0
+  and stores nothing ends a put after at most two redials. Code 0 also ends a session
+  for other causes: #3574 gives a lost session a signal of its own. With no listed
+  chunk, the node dials no voter (`laptop.architect`, 2026-10-20T10:05:20Z:
+  https://github.com/synnaxlabs/foundation/issues/3405#issuecomment-6288473151, on the
+  plan https://github.com/synnaxlabs/foundation/issues/3405#issuecomment-6288441342,
+  which supersedes the calls of 16 chunks and their deadline of
+  https://github.com/synnaxlabs/foundation/pull/3399#issuecomment-6273462159 and of
+  question 2 of
+  https://github.com/synnaxlabs/foundation/issues/1231#issuecomment-6272668202, and the
+  one redial for each call of item 2 of
+  https://github.com/synnaxlabs/foundation/pull/3399#issuecomment-6273716895). The
+  redial on code 0 and its bound: `laptop.architect`, 2026-10-20T10:43:31Z:
+  https://github.com/synnaxlabs/foundation/pull/3568#issuecomment-6289097402, approved
+  at https://github.com/synnaxlabs/foundation/pull/3568#issuecomment-6289266030. A
+  miss gives the cause of the last attempt. A voter whose chunks each got `Stored` is
+  a holder, also when the end of its stream fails or passes `peer::DEADLINE`, and the
+  put dials it no more (`laptop.architect`, 2026-10-20T10:26:52Z:
+  https://github.com/synnaxlabs/foundation/pull/3568#issuecomment-6288829862).
+  The put still waits for that end: a normal end takes one round trip, a drop of the
+  `Push` at the last `Stored` resets each stream at the peer, and an end on `tasks`
+  needs a `Push` that outlives the apply. Look again when a measured apply waits on the
+  end of a put (`laptop.architect`, 2026-10-20T10:59:58Z:
+  https://github.com/synnaxlabs/foundation/pull/3568#issuecomment-6289355671).
+  A holder is the node when it is a voter, or a voter whose put ended `Ok` while a half
+  that holds it lacked a majority; another failed step, also a failed read of the node's
+  store for a put, leaves a voter no holder. So the holders are at most the sum of the
+  majorities of the halves, at most 128, which `HOLDERS_MAX` holds (SPEC CHANGE).
+  `Error::Stopped` comes as for `Mesh::set_home`, also while the puts wait. Once the
+  holders are a majority of each half, the node drops the puts still open and proposes.
+  When the holders are not a majority of each half once each put ended, or at the apply,
+  the call gives `Error::Quorum { held, voters, missed }` for the first half that lacks
+  one, the incoming half first, and proposes nothing before the apply. `missed` gives
+  each voter whose put failed, in key order, with its name and why: `Miss::Deadline`,
+  `Unknown` (no record of the voter), `Dial`, or `Put`. It is empty for a refusal at the
+  apply. Decided by `laptop.architect`, 2026-10-19T17:02:16Z
   (https://github.com/synnaxlabs/foundation/issues/1231#issuecomment-6272668202), which
   supersedes the count before the put of item 2 of
   https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643 and the one

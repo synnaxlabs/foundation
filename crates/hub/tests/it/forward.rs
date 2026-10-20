@@ -9,16 +9,14 @@ use std::sync::{Arc, Mutex};
 use access::proof::{Error as Refusal, Field, Kind};
 use block::Pool;
 use hub::{serve, writer};
-use transport::{Address, Class, Code, Session};
+use transport::{Address, Code, Session};
 use types::authority::Authority;
 use types::frame::{Form, Path};
 use types::hello::Hello;
 use types::time::Span;
-use wire::Protocol;
 use wire::header::MALFORMED;
 use wire::hub::client::write::Open;
 use wire::hub::client::{BODY_BYTES_MAX, CHANGED, EXPIRED, REFUSED, UNSYNCED, VIA};
-use wire::hub::forward::{Forward, places};
 use wire::hub::write::{Head, Time};
 use wire::hub::{BUSY, NOT_HOME};
 
@@ -28,6 +26,7 @@ use crate::agent::place;
 use crate::agent::{
     AGENT, Agent, CONNECTION, LIFE, SECOND, SUBJECT, Stream, name, reset_with, signed,
 };
+use crate::forwarded::{self, run};
 use crate::net::{HOME, NODE, PEER, own_pool, public_key, transport};
 use crate::sessions::{
     Got, OTHER as UNLISTED, closed_with, recorded, rules, run_program, serve_each,
@@ -64,18 +63,9 @@ impl Member {
         }
     }
 
-    /// Opens a forward of a group of `places` places, and sends its header, the
-    /// forward, and `hello` signed by [`AGENT`].
+    /// As [`forwarded::forward`], on the member's session.
     async fn forward(&self, places: u32, hello: Hello) -> Stream {
-        let (sender, receiver) =
-            self.session.open(Class::Complete).await.expect("opens");
-        let mut stream = Stream::new(Rc::clone(&self.pool), sender, receiver);
-        stream.send(&wire::header::encode(Protocol::Hub)).await;
-        let mut out = [0; Forward::LEN];
-        Forward { places }.encode(&mut out);
-        stream.send(&out).await;
-        stream.send(&signed(hello, &AGENT)).await;
-        stream
+        forwarded::forward(&self.session, &self.pool, places, hello).await
     }
 
     /// As [`Member::forward`], then a write of `channels` signed by [`AGENT`], and the
@@ -105,13 +95,6 @@ fn open(channels: &[&str]) -> Open {
         lease: None,
         channels: channels.iter().map(|channel| name(channel)).collect(),
     }
-}
-
-/// The run of `at` in one message.
-fn run(at: &[u32]) -> Vec<u8> {
-    let mut out = vec![0; at.len() * places::LEN];
-    places::encode(at.iter().copied(), &mut out);
-    out
 }
 
 /// Makes this node the home of `time`.

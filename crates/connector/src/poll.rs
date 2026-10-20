@@ -5,15 +5,14 @@ use std::mem;
 
 use document::diagnostic::{Code, Diagnostic};
 use hub::Time;
-use hub::home::{Outcome, Refusal, order};
 use types::authority::Authority;
-use types::frame::{self, Draft, Form, Label, Path, key_set};
+use types::frame::key_set;
 use types::name::Name;
 use types::sample::{Scalar, Type, Value};
 use types::time::{Interval, Span, Stamp};
 
 use crate::kind::{Context, Error};
-use crate::stamp::Stamps;
+use crate::stamp;
 use crate::status;
 
 #[cfg(test)]
@@ -32,8 +31,7 @@ const INDEX: Code = Code::new("connector.index");
 /// as `lost`. No write allocates after the first.
 #[derive(Debug)]
 pub struct Writer {
-    hub: hub::writer::Writer,
-    stamps: Stamps,
+    stamped: stamp::Writer,
     /// The frame that keeps each value.
     all: Shape,
     /// The sample of each entry of the key set.
@@ -42,10 +40,6 @@ pub struct Writer {
     slots: Vec<Option<Value>>,
     /// The frame of the last write that left out a value.
     kept: Kept,
-    /// The series of the groups that a frame writes again.
-    again: Vec<(usize, usize)>,
-    /// The groups that the home refused as `Backwards`, in order.
-    backwards: Vec<u32>,
     applied: status::Count,
     lost: status::Count,
 }
@@ -57,8 +51,6 @@ struct Shape {
     series: Vec<(usize, usize)>,
     /// The count of data samples of each group in the frame, by its number.
     samples: Vec<u64>,
-    /// The group of each index in the frame, in the order of the key set.
-    groups: Vec<u32>,
 }
 
 /// The frame of the last write that left out a value. Each `Vec` has the capacity of
@@ -165,61 +157,51 @@ impl Writer {
                 }
             })
             .collect();
-        let groups = (fills.iter())
-            .filter(|fill| fill.channel.is_none())
-            .map(|fill| fill.group)
-            .collect();
         let width = |entry: &key_set::Entry| entry.data_type.width().unwrap_or(0);
         let series: Vec<_> = entries.iter().map(width).enumerate().collect();
-        let all = Shape {
-            series,
-            samples,
-            groups,
-        };
+        let all = Shape { series, samples };
         let [applied, lost] = COUNTS;
         Ok(Self {
-            again: Vec::with_capacity(all.series.len()),
-            backwards: Vec::with_capacity(all.samples.len()),
             slots: vec![None; writer.entries().len()],
             kept: Kept::new(&all, writer.entries().len()),
             all,
             fills,
-            stamps: Stamps::default(),
             applied: ctx.count(applied),
             lost: ctx.count(lost),
-            hub: writer,
+            stamped: stamp::Writer::new(writer),
         })
     }
 
     /// The sample type of each channel, in the order of `channels`.
     #[must_use]
     pub fn types(&self) -> impl ExactSizeIterator<Item = Type> + '_ {
-        let entries = self.hub.set().entries();
-        (self.hub.entries().iter()).map(|&entry| entries[entry].data_type)
+        let hub = self.stamped.hub();
+        let entries = hub.set().entries();
+        (hub.entries().iter()).map(|&entry| entries[entry].data_type)
     }
 
     /// The mesh time of the writer's hub, as [`hub::writer::Writer::time`] gives it.
     #[must_use]
     pub fn time(&self) -> Time {
-        self.hub.time()
+        self.stamped.hub().time()
     }
 
     /// Runs `request`, and gives its output with the stamp of its frame: the midpoint
     /// of the mesh times before and after it, or 1 ns after the last stamp.
     pub async fn request<T>(&mut self, request: impl Future<Output = T>) -> (T, Stamp) {
-        self.stamps.request(&self.hub, request).await
+        self.stamped.request(request).await
     }
 
     /// Gives the stamp of a frame of samples whose true mesh time is within `time`, and
-    /// whose values hold until at least `held`, with its error, as [`Stamps::sample`]
-    /// gives them. Each stamp is after the stamp of each frame that this writer wrote
-    /// or stamped before.
+    /// whose values hold until at least `held`, with its error, as
+    /// [`stamp::Stamps::sample`] gives them. Each stamp is after the stamp of each frame
+    /// that this writer wrote or stamped before.
     ///
     /// # Panics
     ///
     /// When the last stamp is `i64::MAX` ns.
     pub fn sample(&mut self, time: Interval, held: Stamp) -> (Stamp, Span) {
-        self.stamps.sample(time, held)
+        self.stamped.sample(time, held)
     }
 
     /// Writes one frame at `stamp` with the value of each channel that `values` gives,
@@ -259,74 +241,48 @@ impl Writer {
     /// `write`, so that only the fill is built for each iterator.
     fn send(&mut self, stamp: Stamp) -> Result<(), Error> {
         let Self {
-            hub: writer,
-            stamps,
+            stamped,
             all,
             fills,
             slots,
             kept,
-            again,
-            backwards,
             applied,
             lost,
         } = self;
         let values = &*slots;
         let shape = if values.iter().all(Option::is_some) {
             kept.channels.clear();
-            all.borrow()
+            all
         } else {
             kept.sort(all, fills, values);
-            if kept.shape.groups.is_empty() {
+            if kept.shape.series.is_empty() {
                 return Ok(());
             }
-            kept.shape.borrow()
+            &kept.shape
         };
-        let mut out = Out {
-            writer,
-            applied,
-            lost,
+        let fill = |stamp, entry, bytes: &mut [u8]| {
+            let Fill {
+                channel, scalar, ..
+            } = fills[entry];
+            match channel {
+                Some(channel) => value(values, channel, scalar).write(bytes),
+                None => Value::Stamp(stamp).write(bytes),
+            }
         };
-        let first = out.send(fills, shape, values, stamp, backwards)?;
-        let Some(before) = first else {
-            return Ok(());
-        };
-        let stamp = stamps.after(before);
-        let refused =
-            |&&(entry, _): &&(usize, usize)| backwards.contains(&fills[entry].group);
-        again.clear();
-        again.extend(shape.series.iter().filter(refused));
-        let shape = Borrowed {
-            series: again,
-            groups: backwards,
-            ..shape
-        };
-        let last = out.send(fills, shape, values, stamp, &mut Vec::new())?;
-        if let Some(again) = last {
-            panic!(
-                "invariant: a frame stamped after {before}, the last stamp of its \
-                 index, is not backwards, but the home gives {again} as last"
-            );
+        let groups = stamped.write(stamp, &shape.series, fill)?;
+        let (mut wrote, mut gone) = (0, 0);
+        for &(group, applied) in groups {
+            let n = shape.samples[to_usize(group)];
+            if applied {
+                wrote += n;
+            } else {
+                gone += n;
+            }
         }
+        applied.add(wrote);
+        lost.add(gone);
         Ok(())
     }
-}
-
-impl Shape {
-    fn borrow(&self) -> Borrowed<'_> {
-        Borrowed {
-            series: &self.series,
-            samples: &self.samples,
-            groups: &self.groups,
-        }
-    }
-}
-
-/// A [`Shape`] to send.
-#[derive(Clone, Copy)]
-struct Borrowed<'a> {
-    series: &'a [(usize, usize)],
-    samples: &'a [u64],
-    groups: &'a [u32],
 }
 
 impl Kept {
@@ -338,7 +294,6 @@ impl Kept {
             shape: Shape {
                 series: Vec::with_capacity(all.series.len()),
                 samples: Vec::with_capacity(all.samples.len()),
-                groups: Vec::with_capacity(all.groups.len()),
             },
         }
     }
@@ -369,115 +324,6 @@ impl Kept {
         };
         shape.series.clear();
         shape.series.extend(all.series.iter().filter(held));
-        shape.groups.clear();
-        let present = |&&group: &&u32| samples[to_usize(group)] > 0;
-        shape.groups.extend(all.groups.iter().filter(present));
-    }
-}
-
-/// The writer of the frames, and the counts of their samples.
-struct Out<'a> {
-    writer: &'a mut hub::writer::Writer,
-    applied: &'a status::Count,
-    lost: &'a status::Count,
-}
-
-impl Out<'_> {
-    /// Writes one frame of `shape` with `values` at `stamp`, each series filled as
-    /// `fills` gives, and counts its samples. A frame for which the pool has no block
-    /// now loses its samples.
-    ///
-    /// Returns the latest stamp that the home gives for a group that it refuses as
-    /// `Backwards`, and puts those groups in `backwards`.
-    ///
-    /// # Errors
-    ///
-    /// As [`Writer::write`].
-    ///
-    /// # Panics
-    ///
-    /// When the home refuses a group as `Expired` or `Codec`, which a writer with no
-    /// lease and a raw frame never gets.
-    fn send(
-        &mut self,
-        fills: &[Fill],
-        shape: Borrowed<'_>,
-        values: &[Option<Value>],
-        stamp: Stamp,
-        backwards: &mut Vec<u32>,
-    ) -> Result<Option<Stamp>, Error> {
-        let Borrowed {
-            series,
-            samples,
-            groups,
-        } = shape;
-        let mut draft = match self.writer.draft(Form::Raw, series) {
-            Ok(draft) => draft,
-            Err(frame::Error::Pool(
-                block::Error::Exhausted { .. } | block::Error::Refused { .. },
-            )) => {
-                let lost = groups.iter().map(|&group| samples[to_usize(group)]).sum();
-                self.lost.add(lost);
-                return Ok(None);
-            }
-            Err(error) => return Err(error.into()),
-        };
-        fill(&mut draft, fills, values, stamp, groups);
-        let outcomes = self.writer.write(Label::Path(Path::Live), draft)?;
-        backwards.clear();
-        let mut latest = None;
-        let (mut wrote, mut gone) = (0, 0);
-        for (&group, outcome) in groups.iter().zip(outcomes) {
-            let n = samples[to_usize(group)];
-            match outcome {
-                Outcome::Applied { .. } => wrote += n,
-                Outcome::Refused {
-                    refusal: Refusal::Order(order::Error::Backwards { before, .. }),
-                    ..
-                } => {
-                    backwards.push(group);
-                    latest = latest.max(Some(*before));
-                }
-                Outcome::Lost { .. }
-                | Outcome::Refused {
-                    refusal: Refusal::Waiting | Refusal::Reserved | Refusal::Order(_),
-                    ..
-                } => gone += n,
-                Outcome::Refused {
-                    refusal: refusal @ (Refusal::Expired | Refusal::Codec { .. }),
-                    ..
-                } => panic!(
-                    "invariant: the home refuses no frame with no lease in raw form, \
-                     but gives {refusal}"
-                ),
-            }
-        }
-        self.applied.add(wrote);
-        self.lost.add(gone);
-        Ok(latest)
-    }
-}
-
-/// Fills each series of `draft` with one sample: `stamp` in each index of `groups`, and
-/// the value of its channel in each other.
-fn fill(
-    draft: &mut Draft,
-    fills: &[Fill],
-    values: &[Option<Value>],
-    stamp: Stamp,
-    groups: &[u32],
-) {
-    for (entry, bytes) in draft.iter_mut() {
-        let Fill {
-            channel, scalar, ..
-        } = fills[entry];
-        match channel {
-            None => Value::Stamp(stamp).write(bytes),
-            Some(channel) => value(values, channel, scalar).write(bytes),
-        }
-    }
-    for &group in groups {
-        draft.set_count(group, 1);
     }
 }
 

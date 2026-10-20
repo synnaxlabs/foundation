@@ -28,6 +28,9 @@ pub(crate) fn public_key(key: &PrivateKey) -> PublicKey {
         .expect("a public key")
 }
 
+/// The streams that the peer of each session may open at once, unless a test sets it.
+pub(crate) const STREAMS: u32 = 16;
+
 /// A transport of `node` at `PORT` that proves `key` and takes messages of at most
 /// `message` bytes.
 pub(crate) fn transport(
@@ -37,17 +40,18 @@ pub(crate) fn transport(
     key: PrivateKey,
     message: usize,
 ) -> Transport {
-    transport_sized(node, tasks, pool, key, (message, 1 << 20))
+    transport_sized(node, tasks, pool, key, (message, 1 << 20), STREAMS)
 }
 
-/// As [`transport`], with messages of at most `sizes.0` bytes and a window of
-/// `sizes.1` bytes.
+/// As [`transport`], with messages of at most `sizes.0` bytes, a window of `sizes.1`
+/// bytes, and `streams` streams that the peer of each session may open at once.
 pub(crate) fn transport_sized(
     node: &sim::node::Node,
     tasks: &Tasks,
     pool: &Rc<Pool>,
     key: PrivateKey,
     (message, window): (usize, usize),
+    streams: u32,
 ) -> Transport {
     let at = SocketAddr::new(node.addresses()[0], PORT);
     let mut parts = Port::bind(&node.net(), at)
@@ -57,7 +61,7 @@ pub(crate) fn transport_sized(
         private_key: key,
         message_bytes_max: NonZeroUsize::new(message).expect("not 0"),
         window_bytes: window,
-        streams_max: NonZeroU32::new(16).expect("not 0"),
+        streams_max: NonZeroU32::new(streams).expect("not 0"),
         idle: Span::from_nanos(60 * Span::SECOND.nanos()),
         clock: node.clock(),
         entropy: node.entropy(),

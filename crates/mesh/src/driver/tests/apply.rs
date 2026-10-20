@@ -789,7 +789,7 @@ fn an_apply_in_a_region_of_two_voters_commits_and_each_uses_the_spec() {
 }
 
 // Voter 2 takes the put and never answers, and voter 3 is down, so the apply ends at
-// the deadline of its call on voter 2.
+// the deadline of the `Stored` of its first chunk on voter 2.
 #[test]
 fn an_apply_whose_one_live_peer_never_answers_gives_quorum_at_the_deadline() {
     let mut cluster = Cluster::new(0);
@@ -809,19 +809,41 @@ fn an_apply_whose_one_live_peer_never_answers_gives_quorum_at_the_deadline() {
     assert_eq!(cluster.board().applied, [(1, base(), Err(quorum))]);
 }
 
-// Each chunk takes about 1 s over links of 300 ms, so the first call of 16 chunks on
-// each voter passes the deadline.
+// Each chunk takes about 1 s over links of 300 ms, so a put of the 41 chunks on a voter
+// takes about 41 s, and each `Stored` comes within the deadline.
 #[test]
-fn an_apply_over_links_of_300_ms_names_each_voter_whose_call_passed_the_deadline() {
+fn an_apply_over_links_of_300_ms_commits_as_each_chunk_ends_within_the_deadline() {
     let mut cluster = Cluster::new(0);
     cluster.delay(Span::from_nanos(300 * Span::MILLISECOND.nanos()));
     cluster.start();
     cluster.run(seconds(10));
-    let labels: Vec<String> = (0..40).map(|at| format!("plant.s{at}")).collect();
-    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-    let definitions = create_subjects(&labels, 512);
+    let definitions = create_largest(40);
     cluster.change(1, base(), &definitions);
-    cluster.run(seconds(60));
+    cluster.run(seconds(120));
+    let board = cluster.board();
+    let moved = pointer(1, &definitions);
+    assert_eq!(board.applied, [(1, moved, Ok(moved))]);
+    assert_used(&board, &IDS, moved, &definitions);
+}
+
+// Voter 3 is down. Voter 2 stores chunks for 15 s over links of 300 ms, about one a
+// second, and then its links are cut. With seed 0, its last `Stored` was sent before
+// the cut and comes within 300 ms of it, so its put misses between 10 s and 10.5 s
+// after the cut. A deadline of the whole call would miss at 10 s after its start.
+#[test]
+fn a_voter_that_goes_silent_in_its_put_misses_the_deadline_after_its_last_stored() {
+    let mut cluster = Cluster::new(0);
+    cluster.delay(Span::from_nanos(300 * Span::MILLISECOND.nanos()));
+    cluster.start_voter(1);
+    cluster.start_voter(2);
+    cluster.run(seconds(10));
+    cluster.change(1, base(), &create_largest(40));
+    cluster.run(seconds(15));
+    cluster.link(1, 2, 1.0);
+    cluster.link(2, 1, 1.0);
+    cluster.run(peer::DEADLINE);
+    assert_eq!(cluster.board().applied, []);
+    cluster.run(Span::from_nanos(500 * Span::MILLISECOND.nanos()));
     let quorum = Error::Quorum {
         held: 1,
         voters: 3,
@@ -830,14 +852,240 @@ fn an_apply_over_links_of_300_ms_names_each_voter_whose_call_passed_the_deadline
     assert_eq!(
         quorum.to_string(),
         "1 of 3 voters hold the chunks of the spec change, not a majority; \
-         plant.node2: a call of its put of at most 16 chunks passed the deadline of 10 \
-         s; plant.node3: a call of its put of at most 16 chunks passed the deadline of \
-         10 s"
+         plant.node2: a step of its put passed the deadline of 10s; plant.node3: a \
+         step of its put passed the deadline of 10s"
     );
     assert_eq!(cluster.board().applied, [(1, base(), Err(quorum))]);
 }
 
-// Voter `id`, whose call of its put passed the deadline.
+// Voter 3 is down, and voter 2 restarts after each span of `restarts` in turn, in a
+// put of about 41 s, over 16 seeds. The put dials voter 2 again after each restart,
+// as the session before each stored a chunk, or lost to the dial of voter 2 at its
+// start. So the apply commits.
+fn restart_in_put(restarts: &[i64]) {
+    const DELAY: Span = Span::from_nanos(300 * Span::MILLISECOND.nanos());
+    for seed in 0..16 {
+        let mut cluster = Cluster::new(seed);
+        cluster.delay(DELAY);
+        cluster.start_voter(1);
+        cluster.start_voter(2);
+        cluster.run(seconds(10));
+        let definitions = create_largest(40);
+        cluster.change(1, base(), &definitions);
+        for &run in restarts {
+            cluster.run(seconds(run));
+            let node = cluster.node(2).clone();
+            cluster.sim.crash(&node, Crash::Power);
+            cluster.start_voter(2);
+        }
+        cluster.run(seconds(120));
+        let moved = pointer(1, &definitions);
+        let board = cluster.board();
+        assert_eq!(board.applied, [(1, moved, Ok(moved))], "seed {seed}");
+        assert_used(&board, &[1, 2], moved, &definitions);
+        assert!(
+            !board.blobs.contains_key(&1),
+            "seed {seed}: {:?}",
+            board.blobs
+        );
+    }
+}
+
+#[test]
+fn an_apply_counts_a_voter_that_restarts_once_in_its_put() {
+    restart_in_put(&[10]);
+}
+
+#[test]
+fn an_apply_counts_a_voter_that_restarts_twice_in_its_put() {
+    restart_in_put(&[10, 15]);
+}
+
+// Voter 3 is down, and voter 2 restarts at 10 s and again 1 s later, before the
+// redialed session stores a chunk, which takes about 1 s over links of 300 ms. A
+// session that ends with no chunk stored ends the put after one redial.
+#[test]
+fn an_apply_misses_a_voter_whose_redialed_session_ends_with_no_chunk_stored() {
+    let mut cluster = Cluster::new(0);
+    cluster.delay(Span::from_nanos(300 * Span::MILLISECOND.nanos()));
+    cluster.start_voter(1);
+    cluster.start_voter(2);
+    cluster.run(seconds(10));
+    cluster.change(1, base(), &create_largest(40));
+    for run in [10, 1] {
+        cluster.run(seconds(run));
+        let node = cluster.node(2).clone();
+        cluster.sim.crash(&node, Crash::Power);
+        cluster.start_voter(2);
+    }
+    cluster.run(seconds(120));
+    let broken = blob::peer::Error::Stream(transport::Error::Broken {
+        reason: "reset by peer".to_owned(),
+    });
+    let quorum = Error::Quorum {
+        held: 1,
+        voters: 3,
+        missed: vec![
+            Missed {
+                node: key(2),
+                name: Some(name("plant.node2")),
+                cause: Miss::Put(broken),
+            },
+            late(3),
+        ],
+    };
+    assert_eq!(
+        quorum.to_string(),
+        "1 of 3 voters hold the chunks of the spec change, not a majority; \
+         plant.node2: its put failed: the blob stream failed: the connection broke: \
+         reset by peer; plant.node3: a step of its put passed the deadline of 10s"
+    );
+    assert_eq!(cluster.board().applied, [(1, base(), Err(quorum))]);
+}
+
+// Voter 3 is down, and voter 2 closes the session of each blob stream with code 0, as
+// one that lost to a dial of the peer does. The put dials once more, and once more for
+// the code 0, so voter 2 serves three blob streams and misses.
+#[test]
+fn an_apply_redials_a_voter_once_for_a_session_that_ends_with_code_0() {
+    let mut cluster = Cluster::new(0);
+    cluster.start_voter(1);
+    cluster.start_voter(2);
+    cluster.run(seconds(5));
+    cluster.board.lock().unwrap().closes = [(2, [0, 0, 0].into())].into();
+    cluster.change(1, base(), &create_largest(1));
+    cluster.run(seconds(15));
+    let closed =
+        blob::peer::Error::Stream(transport::Error::PeerClosed { code: Code(0) });
+    let quorum = Error::Quorum {
+        held: 1,
+        voters: 3,
+        missed: vec![
+            Missed {
+                node: key(2),
+                name: Some(name("plant.node2")),
+                cause: Miss::Put(closed),
+            },
+            late(3),
+        ],
+    };
+    let board = cluster.board();
+    assert_eq!(board.applied, [(1, base(), Err(quorum))]);
+    assert_eq!(board.blobs, [(2, 3)].into());
+}
+
+// Voter 3 is down, and voter 2 closes the sessions of its first two blob streams with
+// `codes`, in order, then serves. Gives whether the apply committed, the blob streams
+// that each node served, and those served to a clean end.
+fn closes(codes: [u32; 2]) -> (bool, BTreeMap<u8, usize>, BTreeMap<u8, usize>) {
+    let mut cluster = Cluster::new(0);
+    cluster.start_voter(1);
+    cluster.start_voter(2);
+    cluster.run(seconds(5));
+    cluster.board.lock().unwrap().closes = [(2, codes.into())].into();
+    let definitions = create_largest(1);
+    cluster.change(1, base(), &definitions);
+    cluster.run(seconds(30));
+    let moved = pointer(1, &definitions);
+    let board = cluster.board();
+    (
+        board.applied == [(1, moved, Ok(moved))],
+        board.blobs,
+        board.clean,
+    )
+}
+
+// The session that ends with code 0 earns its own redial, so the plain redial is left
+// for the other session, whichever ends first. The put ends the stream that it does
+// not lose.
+#[test]
+fn an_apply_redials_a_voter_for_a_code_0_end_before_or_after_another_end() {
+    let committed = (true, [(2, 3)].into(), [(2, 1)].into());
+    assert_eq!(closes([7, 0]), committed, "code 7, then code 0");
+    assert_eq!(closes([0, 7]), committed, "code 0, then code 7");
+}
+
+// Voter 3 is down, and voter 2 restarts 1.5 s into the apply, after the last `Stored`
+// of its put and before the end of its stream, so the end fails with an error. Each
+// chunk is durable on voter 2, so it is a holder, and the put opens no second stream
+// to it.
+#[test]
+fn an_apply_counts_a_voter_whose_stream_end_fails_with_an_error_after_each_stored() {
+    let mut cluster = Cluster::new(0);
+    cluster.delay(Span::from_nanos(300 * Span::MILLISECOND.nanos()));
+    cluster.start_voter(1);
+    cluster.start_voter(2);
+    cluster.run(seconds(10));
+    let definitions = create_largest(1);
+    cluster.change(1, base(), &definitions);
+    cluster.run(Span::from_nanos(1500 * Span::MILLISECOND.nanos()));
+    let node = cluster.node(2).clone();
+    cluster.sim.crash(&node, Crash::Power);
+    cluster.start_voter(2);
+    cluster.run(seconds(30));
+    let moved = pointer(1, &definitions);
+    let board = cluster.board();
+    assert_eq!(board.applied, [(1, moved, Ok(moved))]);
+    assert_eq!(board.blobs, [(2, 1)].into());
+}
+
+// Voter 3 is down, and the links of voter 2 break 1.5 s into the apply, after the
+// last `Stored` of its put and before the end of its stream, so the end passes its
+// deadline. Each chunk is durable on voter 2, so it is a holder, and the put opens no
+// second stream to it.
+#[test]
+fn an_apply_counts_a_voter_whose_stream_end_passes_the_deadline_after_each_stored() {
+    let mut cluster = Cluster::new(0);
+    cluster.delay(Span::from_nanos(300 * Span::MILLISECOND.nanos()));
+    cluster.start_voter(1);
+    cluster.start_voter(2);
+    cluster.run(seconds(10));
+    let definitions = create_largest(1);
+    cluster.change(1, base(), &definitions);
+    cluster.run(Span::from_nanos(1500 * Span::MILLISECOND.nanos()));
+    cluster.link(1, 2, 1.0);
+    cluster.link(2, 1, 1.0);
+    cluster.run(seconds(12));
+    let board = cluster.board();
+    assert_eq!(board.applied, []);
+    assert_eq!(board.blobs, [(2, 1)].into());
+    cluster.delay(Span::from_nanos(300 * Span::MILLISECOND.nanos()));
+    cluster.run(seconds(60));
+    let moved = pointer(1, &definitions);
+    assert_eq!(cluster.board().applied, [(1, moved, Ok(moved))]);
+}
+
+// Voter 3 holds each blob stream with no answer, and the links of voters 1 and 2
+// break 1.5 s into the apply, after the last `Stored` of the put on voter 2. The end
+// of that stream never comes, so the put ends `Ok` at its deadline, and the apply
+// commits with voter 3 before the links come back.
+#[test]
+fn an_apply_counts_a_voter_whose_stream_never_ends_at_the_deadline_of_the_end() {
+    let mut cluster = Cluster::new(0);
+    cluster.delay(Span::from_nanos(300 * Span::MILLISECOND.nanos()));
+    cluster.start();
+    cluster.run(seconds(10));
+    let (led, _) = cluster.take();
+    assert!(!led.contains(&2), "voter 2 led: {led:?}");
+    cluster.board.lock().unwrap().silent = [3].into();
+    let definitions = create_largest(1);
+    cluster.change(1, base(), &definitions);
+    cluster.run(Span::from_nanos(1500 * Span::MILLISECOND.nanos()));
+    cluster.link(1, 2, 1.0);
+    cluster.link(2, 1, 1.0);
+    cluster.run(seconds(15));
+    let moved = pointer(1, &definitions);
+    assert_eq!(cluster.board().applied, [(1, moved, Ok(moved))]);
+}
+
+// `count` subjects of 512 keys, each of which fills one chunk of 16 417 bytes.
+pub(super) fn create_largest(count: usize) -> BTreeMap<Name, Definition> {
+    let labels: Vec<String> = (0..count).map(|at| format!("plant.s{at}")).collect();
+    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+    create_subjects(&labels, 512)
+}
+
+// Voter `id`, a step of whose put passed the deadline.
 fn late(id: u8) -> Missed {
     Missed {
         node: key(id),
@@ -1056,8 +1304,8 @@ fn spread_names_a_voter_that_this_node_has_no_record_of() {
     });
 }
 
-// Each chunk takes a round trip of 200 ms, so one call of all 1024 chunks would miss
-// the deadline.
+// Each chunk takes a round trip of 200 ms, so the put of all 1024 chunks on a voter
+// takes more than 200 s, and each `Stored` comes within the deadline.
 #[test]
 fn an_apply_of_the_most_chunks_commits_over_links_of_100_ms() {
     let mut cluster = Cluster::new(0);
@@ -1074,17 +1322,14 @@ fn an_apply_of_the_most_chunks_commits_over_links_of_100_ms() {
 }
 
 // Each of 40 subjects of 512 keys fills one chunk of 16 417 bytes, the size at which
-// the chunker cuts, and each chunk takes about 340 ms, so a call of 32 chunks would
-// miss the deadline.
+// the chunker cuts.
 #[test]
 fn an_apply_of_the_largest_chunks_commits_over_links_of_100_ms() {
     let mut cluster = Cluster::new(0);
     cluster.delay(Span::from_nanos(100 * Span::MILLISECOND.nanos()));
     cluster.start();
     cluster.run(seconds(10));
-    let labels: Vec<String> = (0..40).map(|at| format!("plant.s{at}")).collect();
-    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-    let definitions = create_subjects(&labels, 512);
+    let definitions = create_largest(40);
     let mut chunks = Chunks::default();
     let update = spec::region::tree(&mut chunks, &definitions);
     let largest = update.chunks.iter().map(|&d| chunks.get(d).unwrap().len());

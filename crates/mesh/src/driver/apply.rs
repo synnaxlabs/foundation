@@ -25,22 +25,23 @@ impl Mesh {
     /// returned. The change lists each chunk of the new tree that the tree of `base`
     /// lacks, or each chunk of the new tree when the store cannot give the tree of
     /// `base`. It then puts the listed chunks on each other voter of both halves of the
-    /// voters, all at once, in calls of at most 16 chunks, each of which fails after 10
-    /// seconds with no result, and proposes once the holders are a majority of each
-    /// half. A holder is this node when it is a voter, or a voter whose calls each
-    /// ended `Ok` while a half that holds it lacked a majority. A voter whose put fails
-    /// is no holder. A follower forwards the change to the leader. Returns the pointer
-    /// once its entry has committed and this node applied it: `base` when the tree of
-    /// `definitions` is the tree of `base` and each index of `homes` has a home in this
-    /// node's state, as such a change leaves the pointer, and else a new pointer. It
-    /// tries again when a new leader replaces the entry, and after each tick while no
-    /// leader takes it, as [`Mesh::set_home`] does. On `Ok`, the pointer is the one
-    /// this call makes, and each index of `homes` has a home in this node's state when
-    /// the call settles, the listed one or another. A call whose entry finds that
-    /// pointer, after a lost answer or an equal change of another call, returns it when
-    /// each index of `homes` has a home then, and else gives `Stale`. A retry that
-    /// finds a later pointer gives `Stale`, even when an entry of this call applied
-    /// before it.
+    /// voters, all at once, on one stream to each, and proposes once the holders are a
+    /// majority of each half. Each step of a put fails after 10 seconds with no
+    /// result: the dial with the open of the stream, and the `Stored` of each chunk. A
+    /// holder is this node when it is a voter, or a voter whose chunks each got
+    /// `Stored`, also when the end of its stream fails, while a half that holds it
+    /// lacked a majority. A voter whose put fails is no holder. A follower forwards the
+    /// change to the leader. Returns the pointer once its entry has committed and this
+    /// node applied it: `base` when the tree of `definitions` is the tree of `base` and
+    /// each index of `homes` has a home in this node's state, as such a change leaves
+    /// the pointer, and else a new pointer. It tries again when a new leader replaces
+    /// the entry, and after each tick while no leader takes it, as [`Mesh::set_home`]
+    /// does. On `Ok`, the pointer is the one this call makes, and each index of `homes`
+    /// has a home in this node's state when the call settles, the listed one or
+    /// another. A call whose entry finds that pointer, after a lost answer or an equal
+    /// change of another call, returns it when each index of `homes` has a home then,
+    /// and else gives `Stale`. A retry that finds a later pointer gives `Stale`, even
+    /// when an entry of this call applied before it.
     ///
     /// # Errors
     ///

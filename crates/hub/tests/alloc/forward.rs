@@ -11,10 +11,9 @@ use transport::Address;
 use types::channel;
 use types::sample::{Scalar, Type};
 use types::time::Span;
-use wire::hub::write::{Outcome, Reply};
 
-use crate::agent::{Stream, place};
-use crate::forwarded::{Forwarded, send_places};
+use crate::agent::place;
+use crate::forwarded::{Forwarded, answer, send_places};
 use crate::write::{Groups, Progress, Run, SPACING, TAKE, wait, write};
 use crate::{ALLOCATOR, COUNTED, WARM, common, net, region, serving, sessions};
 
@@ -174,44 +173,10 @@ async fn serve_home(node: sim::node::Node, tasks: Tasks, run: Run) {
         let mut first = n * burst;
         while first < end {
             let window = first..end.min(first + IN_FLIGHT);
-            for _ in 0..3 * (window.end - window.start) {
-                next(&mut stream).await;
-            }
-            for seq in window.clone() {
-                reply(&mut stream, seq).await;
-            }
             first = window.end;
+            answer(&mut stream, window).await;
         }
     }
     // A drop now could reset the stream before the last replies reach the member.
     drop(stream.recv().await);
-}
-
-/// Sends the outcome and `Stored` of the frame of `seq`, which the home takes.
-async fn reply(stream: &mut Stream, seq: u64) {
-    let taken = Outcome::Taken {
-        range: types::frame::Range { seq, count: 1 },
-    };
-    let replies = [
-        Reply::Outcome {
-            frame: seq + 1,
-            group: 0,
-            outcome: taken,
-        },
-        Reply::Stored {
-            group: 0,
-            frames: seq + 1,
-        },
-    ];
-    for reply in replies {
-        let mut out = vec![0; reply.encoded_len()];
-        reply.encode(&mut out);
-        stream.send(&out).await;
-    }
-}
-
-/// The next message of `stream`.
-async fn next(stream: &mut Stream) -> Vec<u8> {
-    let message = stream.recv().await.expect("receives");
-    message.expect("a message before the finish")
 }
