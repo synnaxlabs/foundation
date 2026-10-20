@@ -3538,8 +3538,7 @@ mod tests {
             let max = shard.write_body_max(&set);
             assert_eq!(max, 238_694);
             let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
-            let mut first = 10;
-            let mut written = Vec::new();
+            let (mut first, mut seq) = (10, 0);
             for _ in 0..2 {
                 let (stamps, bytes) = noisy_within(first, |len| len <= max);
                 assert!(max - bytes.len() < 8, "{} of {max}", bytes.len());
@@ -3547,10 +3546,11 @@ mod tests {
                 let count = u32::try_from(stamps.len()).expect("a count");
                 let at =
                     encoded_frame(shard.pool(), &set, &[(0, &bytes)], &[(0, count)]);
-                written.push(shard.write(a, LIVE, at).map(<[Outcome]>::len));
+                let written = shard.write(a, LIVE, at).map(<[Outcome]>::to_vec);
+                assert_eq!(written, Ok(vec![applied(0, seq, count)]));
+                seq += u64::from(count);
                 shard.committed().await.expect("the commit ends");
             }
-            assert_eq!(written, [Ok(1), Ok(1)]);
         });
     }
 
@@ -3571,9 +3571,11 @@ mod tests {
             let max = shard.write_body_max(&set);
             assert_eq!([max, shard.buffer.block_max()], [12_771, 26_625]);
             let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let count = |len: usize| u32::try_from(len).expect("a count");
             let stamps = stepped(10, max / 8);
             let most = frame(shard.pool(), &set, &[(0, &stamps)]);
-            let mut written = vec![shard.write(a, LIVE, most).map(<[Outcome]>::len)];
+            let mut written = vec![shard.write(a, LIVE, most).map(<[Outcome]>::to_vec)];
+            let mut expected = vec![Ok(vec![applied(0, 0, count(stamps.len()))])];
             shard.committed().await.expect("the commit ends");
             let writers = create_pool(4 * POOL);
             for (first, over) in [(LATER, 0), (2 * LATER, 1)] {
@@ -3588,10 +3590,15 @@ mod tests {
                     }
                 }
                 let at = frame(&writers, &set, &[(0, &stamps[..low + over])]);
-                written.push(shard.write(a, LIVE, at).map(<[Outcome]>::len));
+                written.push(shard.write(a, LIVE, at).map(<[Outcome]>::to_vec));
                 shard.committed().await.expect("the commit ends");
+                if over == 0 {
+                    let seq = u64::try_from(max / 8).expect("a seq");
+                    expected.push(Ok(vec![applied(0, seq, count(low))]));
+                }
             }
-            assert_eq!(written, [Ok(1), Ok(1), Err(Error::Large)]);
+            expected.push(Err(Error::Large));
+            assert_eq!(written, expected);
         });
     }
 
@@ -3615,7 +3622,7 @@ mod tests {
             let max = shard.write_body_max(&set);
             assert_eq!(max, 154_514);
             let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
-            let mut first = 10;
+            let (mut first, mut seqs) = (10, [0; 32]);
             for _ in 0..2 {
                 let (rest, tail) = noisy_within(first, |len| len <= max / 32 - 8);
                 let body = |len| {
@@ -3640,8 +3647,14 @@ mod tests {
                     .map(|n| (n, if n == 0 { count(&head) } else { count(&rest) }))
                     .collect();
                 let at = encoded_frame(shard.pool(), &set, &series, &counts);
-                let written = shard.write(a, LIVE, at).map(<[Outcome]>::len);
-                assert_eq!(written, Ok(32), "{first}");
+                let written = shard.write(a, LIVE, at).map(<[Outcome]>::to_vec);
+                let outcomes =
+                    std::iter::zip(&mut seqs, &counts).map(|(seq, &(n, count))| {
+                        let outcome = applied(n, *seq, count);
+                        *seq += u64::from(count);
+                        outcome
+                    });
+                assert_eq!(written, Ok(outcomes.collect()), "{first}");
                 shard.committed().await.expect("the commit ends");
             }
         });
@@ -3685,7 +3698,8 @@ mod tests {
             for n in 0..512 {
                 assert!(shard.carry(Slot::new(n), key(Slot::new(n))));
             }
-            let bounds = [(512, 0, Err(Error::Large)), (511, 83_977, Ok(511))];
+            let applied = Ok((0..511).map(|n| applied(n, 0, 1)).collect());
+            let bounds = [(512, 0, Err(Error::Large)), (511, 83_977, applied)];
             for (stamp, (count, max, expected)) in (10..).zip(bounds) {
                 let set = intern(&groups[..count]);
                 assert_eq!(shard.write_body_max(&set), max, "{count}");
@@ -3693,7 +3707,7 @@ mod tests {
                 let stamps: Vec<(usize, &[i64])> =
                     (0..count).map(|n| (n, slice::from_ref(&stamp))).collect();
                 let draft = frame(&test.pool, &set, &stamps);
-                let written = shard.write(a, LIVE, draft).map(<[Outcome]>::len);
+                let written = shard.write(a, LIVE, draft).map(<[Outcome]>::to_vec);
                 assert_eq!(written, expected, "{count}");
                 shard.close_writer(a);
             }
