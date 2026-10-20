@@ -126,8 +126,10 @@
   2026-10-20T07:12:26Z
   (https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6285493756).
 
-  The cost of a forward is the member's serve: the `forward` bench of `hub` (#3484)
-  shows that the home's serve of a forward costs as much as a direct write. It is over
+  The cost of a forward is the member's serve: in the `forward` bench of `hub` (#3484),
+  the home's serve of a forward is within 3% of a direct write at the median of 6 runs
+  on the quiet host:
+  https://github.com/synnaxlabs/foundation/pull/3579#issuecomment-6290402550. It is over
   the cost limit of P1 (`docs/claude/performance.md`), and accepted: at 1x64 the member
   costs 35 ns a sample against 68 ns for the home's write on the quiet host, so a
   forward never sets the ceiling of a write, and a program that writes at its home pays
