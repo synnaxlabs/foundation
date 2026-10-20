@@ -15,14 +15,22 @@ use types::frame;
 
 use crate::profile::Profile;
 
+// Each file runs as a caller whose profile names a subject with no key file, so that
+// a test that reads the profile of the caller fails.
 const SUITE: &CStr = c"
-import io, sys, unittest
+import io, os, sys, tempfile, unittest
+from unittest import mock
 sys.modules['foundation._native'] = native
 sys.path.insert(0, str(package))
 sys.path.insert(0, str(top))
 stream = io.StringIO()
 suite = unittest.TestLoader().loadTestsFromName(module)
-result = unittest.TextTestRunner(stream, verbosity=2).run(suite)
+with tempfile.TemporaryDirectory(prefix='foundation-python-') as caller:
+    profile = os.path.join(caller, 'profile.hcl')
+    with open(profile, 'w') as file:
+        file.write('subject = \"caller\"\\nprivate_key = \"caller.key\"\\n')
+    with mock.patch.dict(os.environ, {'FOUNDATION_PROFILE': profile}):
+        result = unittest.TextTestRunner(stream, verbosity=2).run(suite)
 passed = result.wasSuccessful() and result.testsRun > len(result.skipped)
 report = stream.getvalue()
 ";
