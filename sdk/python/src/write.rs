@@ -20,11 +20,12 @@ use pyo3::sync::MutexExt;
 use pyo3::types::{PyBool, PyDict, PyInt, PyString, PyTuple};
 use sdk::Place;
 use sdk::write::{Outcome, Refusal};
+use types::frame;
 use types::hash;
 use types::sample::{Scalar, Type, Value};
 use types::time::{Span, Stamp};
 
-use crate::{Loss, PartialWrite, Rejected, Stopped, error, owned, stop};
+use crate::{Loss, PartialWrite, Rejected, Stopped, owned, stop};
 
 /// A writer of channels of any index at their homes, which `Client.open_writer` opens.
 /// A `with` block closes it at its end. Its calls take turns to send: a call waits,
@@ -125,8 +126,8 @@ impl Writer {
 
     /// Calls `send` on the `sdk` writer with `buffers` and the GIL released, keeps
     /// `buffers` for the next call, and then returns `None` when the node took each
-    /// group, raises as [`raised`] says for the outcomes of a frame that it did not
-    /// take whole, or raises the exception of the error. `places` gives the places of
+    /// group, answers as [`answer`] says for the outcomes of a frame that it did not
+    /// take whole, or raises the exception of the error as [`raised`] maps it. `places` gives the places of
     /// the items of the frame. Raises `RuntimeError` after a close.
     fn send<F>(
         &self,
@@ -152,13 +153,8 @@ impl Writer {
         };
         match untaken {
             Ok(None) => Ok(()),
-            Ok(Some(outcomes)) => {
-                raised(py, &self.places, self.loss, &outcomes, &frame)
-            }
-            Err(e @ sdk::Error::Stream(program::Error::Refused(_))) => Err(
-                crate::exception(py, &e, format!("{e}; the writer has ended")),
-            ),
-            Err(e) => Err(error(py, &e)),
+            Ok(Some(outcomes)) => answer(py, &self.places, self.loss, &outcomes, frame),
+            Err(e) => Err(raised(py, &self.places, &e)),
         }
     }
 
@@ -210,10 +206,10 @@ impl Writer {
 #[pymethods]
 impl Writer {
     /// The name, the type, and the place of the index of each place, in place order,
-    /// the type as the spec writes it (`f64`, `timestamp`). An index's own place is
-    /// its index. Place `n` is channel `n` of the open; then comes the index of each
-    /// group that the open did not name, in the order of the first channel of each
-    /// group.
+    /// the type as the spec writes it (`f64`, `timestamp`). The place of an index is
+    /// its first place, also at a repeat of it. Place `n` is channel `n` of the open;
+    /// then comes the index of each group that the open did not name, in the order of
+    /// the first channel of each group.
     #[getter]
     fn places<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         crate::places(py, &self.places)
@@ -376,7 +372,7 @@ impl Writer {
         let state = self.lock(py).take();
         state.map_or(Ok(()), |state| {
             py.detach(|| state.writer.close())
-                .map_err(|e| closed(py, &self.places, &e))
+                .map_err(|e| raised(py, &self.places, &e))
         })
     }
 
@@ -463,19 +459,20 @@ fn untaken(written: Result<&[(usize, Outcome)], sdk::Error>) -> Untaken {
     }
 }
 
-/// Raises for a frame whose groups did not all get `Taken`, by the first rule that
-/// holds: a group whose write ended raises `PartialWrite` when the node took another
-/// group, else `Stopped`; a refused group raises `Rejected`; and a lost group does what
-/// `loss` says, with the channels of the lost groups. `outcomes` is the place of the
-/// index and the outcome of each group, in the order of their index places, and
-/// `frame` the places of the items of the call, of the writer of `places`. The channels
-/// of the frame are those of `frame` and the index of each group.
-pub(crate) fn raised(
+/// Answers a frame whose groups did not all get `Taken`, by the first rule that holds:
+/// a group whose write ended raises `PartialWrite` when the node took another group,
+/// else `Stopped`; a refused group raises `Rejected`; and a lost group does what `loss`
+/// says, with the channels of the lost groups, so it gives `Ok` for `warn` and
+/// `ignore`. `outcomes` is the place of the index and the outcome of each group, in
+/// the order of their index places, and `frame` the places of the items of the call,
+/// of the writer of `places`. The channels of the frame are those of `frame` and the
+/// index of each group, each named once.
+pub(crate) fn answer(
     py: Python<'_>,
     places: &[Place],
     loss: Loss,
     outcomes: &[(usize, Outcome)],
-    frame: &[usize],
+    frame: Vec<usize>,
 ) -> PyResult<()> {
     let outcome = |place: usize| {
         let index = places[place].index;
@@ -484,18 +481,7 @@ pub(crate) fn raised(
             .expect("invariant: each group of the frame has its outcome");
         outcomes[at].1
     };
-    let indexes = outcomes.iter().map(|&(index, _)| index);
-    let mut frame: Vec<_> = frame.iter().copied().chain(indexes).collect();
-    frame.sort_unstable();
-    frame.dedup();
-    let (mut written, mut unwritten) = (Vec::new(), Vec::new());
-    for &place in &frame {
-        let name = places[place].name.as_str();
-        match outcome(place) {
-            Outcome::Taken { .. } => written.push(name),
-            _ => unwritten.push(name),
-        }
-    }
+    let frame = channels(places, outcomes, frame);
     let ended = outcomes.iter().find_map(|&(_, outcome)| match outcome {
         Outcome::Ended(end) => Some(end),
         _ => None,
@@ -504,30 +490,48 @@ pub(crate) fn raised(
         Outcome::Refused(refusal) => Some(refusal),
         _ => None,
     });
-    let text = || causes(places, outcomes, &written, &unwritten);
-    let raised = match (ended, refused) {
+    let split = || {
+        let (mut written, mut unwritten) = (Vec::new(), Vec::new());
+        for &place in &frame {
+            let name = places[place].name.as_str();
+            match outcome(place) {
+                Outcome::Taken { .. } => written.push(name),
+                _ => unwritten.push(name),
+            }
+        }
+        let text = causes(places, outcomes, &written, &unwritten);
+        (written, unwritten, text)
+    };
+    let listed = |raised: PyErr, written: Vec<&str>, unwritten: Vec<&str>| {
+        let value = raised.value(py);
+        value.setattr("written", PyTuple::new(py, written)?)?;
+        value.setattr("unwritten", PyTuple::new(py, unwritten)?)?;
+        Err(raised)
+    };
+    match (ended, refused) {
         (Some(end), _) => {
+            let (written, unwritten, text) = split();
             let scope = if places.iter().all(|place| place.index == places[0].index) {
                 "the writer has ended"
             } else {
                 "each later frame of an ended group raises again, and the other groups \
                  go on"
             };
-            let text = format!("{}; {scope}", text());
-            let raised = if written.is_empty() {
-                Stopped::new_err(text)
-            } else {
-                PartialWrite::new_err(text)
-            };
-            crate::coded(py, raised, stop(end))
+            let text = format!("{text}; {scope}");
+            if written.is_empty() {
+                return Err(crate::coded(py, Stopped::new_err(text), stop(end)));
+            }
+            let raised = crate::coded(py, PartialWrite::new_err(text), stop(end));
+            listed(raised, written, unwritten)
         }
         (None, Some(refusal)) => {
-            let raised = Rejected::new_err(text());
+            let (written, unwritten, text) = split();
+            let raised = Rejected::new_err(text);
             raised.value(py).setattr("code", rejection(refusal).0)?;
-            raised
+            listed(raised, written, unwritten)
         }
         (None, None) => {
-            let gone = frame.into_iter().filter_map(|place| match outcome(place) {
+            let gone = frame.iter().filter_map(|&place| match outcome(place) {
                 Outcome::Lost { range } => {
                     let start = u128::from(range.seq);
                     let seqs = start..start + u128::from(range.count);
@@ -535,17 +539,29 @@ pub(crate) fn raised(
                 }
                 _ => None,
             });
-            return loss.act(py, "samples were lost", gone, py.None().bind(py));
+            loss.act(py, "samples were lost", gone, py.None().bind(py))
         }
-    };
-    if raised.is_instance_of::<PartialWrite>(py)
-        || raised.is_instance_of::<Rejected>(py)
-    {
-        let value = raised.value(py);
-        value.setattr("written", PyTuple::new(py, written)?)?;
-        value.setattr("unwritten", PyTuple::new(py, unwritten)?)?;
     }
-    Err(raised)
+}
+
+/// The first place of each channel of a frame of the items at `frame` of a writer of
+/// `places` and of the index of each group of `outcomes`, once each, in place order.
+fn channels(
+    places: &[Place],
+    outcomes: &[(usize, Outcome)],
+    mut frame: Vec<usize>,
+) -> Vec<usize> {
+    frame.extend(outcomes.iter().map(|&(index, _)| index));
+    for place in &mut frame {
+        let key = places[*place].key;
+        *place = places
+            .iter()
+            .position(|other| other.key == key)
+            .unwrap_or(*place);
+    }
+    frame.sort_unstable();
+    frame.dedup();
+    frame
 }
 
 /// The cause of each group of `outcomes` that the node did not take, by the name of its
@@ -596,23 +612,56 @@ fn why(end: End) -> &'static str {
     }
 }
 
-/// The exception of `error`, which the close of a writer of `places` gave. For
-/// `Unstored`, its text names the index and the end of each group.
-pub(crate) fn closed(py: Python<'_>, places: &[Place], error: &sdk::Error) -> PyErr {
-    let sdk::Error::Stream(program::Error::Unstored(groups)) = error else {
-        return crate::error(py, error);
+/// The exception of `error`, which a call or the close of a writer of `places` gave.
+/// Its text names the channels at the places of `error`: for `Unstored`, the index and
+/// the end of each group, with the code of the first; for a refusal of the stream, it
+/// adds that the writer has ended.
+pub(crate) fn raised(py: Python<'_>, places: &[Place], error: &sdk::Error) -> PyErr {
+    let name = |place: usize| places[place].name.as_str();
+    let text = match error {
+        sdk::Error::Stream(program::Error::Refused(_)) => {
+            format!("{error}; the writer has ended")
+        }
+        sdk::Error::Stream(program::Error::Unstored(groups)) => {
+            let named: Vec<_> = groups
+                .iter()
+                .map(|&(index, end)| {
+                    format!("{} ({})", name(index), crate::code(stop(end)))
+                })
+                .collect();
+            let writes = if named.len() == 1 { "write" } else { "writes" };
+            let text = format!(
+                "the {writes} of {} ended: a frame that the node took may not be on disk",
+                named.join(", ")
+            );
+            let (_, end) = groups.first().expect("invariant: Unstored names a group");
+            return crate::coded(py, Stopped::new_err(text), stop(*end));
+        }
+        sdk::Error::Stream(program::Error::Count {
+            place,
+            count,
+            other,
+            other_count,
+        }) => format!(
+            "channels {} and {} are of one index but hold {count} and {other_count} \
+             samples",
+            name(*place),
+            name(*other)
+        ),
+        sdk::Error::Stream(program::Error::Layout(frame::Error::IndexAbsent {
+            entry,
+            index,
+        })) => format!(
+            "the frame holds {} but not its index, {}",
+            name(*entry),
+            name(*index)
+        ),
+        sdk::Error::Stream(program::Error::Layout(frame::Error::Unordered {
+            entry,
+            ..
+        })) => format!("the frame holds {} twice", name(*entry)),
+        _ => return crate::error(py, error),
     };
-    let named: Vec<_> = groups
-        .iter()
-        .map(|&(index, end)| {
-            format!("{} ({})", places[index].name, crate::code(stop(end)))
-        })
-        .collect();
-    let writes = if named.len() == 1 { "write" } else { "writes" };
-    let text = format!(
-        "the {writes} of {} ended: a frame that the node took may not be on disk",
-        named.join(", ")
-    );
     crate::exception(py, error, text)
 }
 

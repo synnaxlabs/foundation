@@ -69,7 +69,8 @@ pyo3::create_exception!(
      `waiting`, `reserved`, `expired`, `order`, `codec`, `full`, or `large`. `written` \
      and `unwritten` are the names of the channels of the frame in the groups that \
      the node took and did not take, in place order. Its text names the cause of each \
-     group that the node did not take. The writer goes on."
+     group that the node did not take. The writer goes on. To write the frame again, \
+     write only the channels of `unwritten`: the node took those of `written`."
 );
 pyo3::create_exception!(
     foundation,
@@ -90,9 +91,10 @@ pyo3::create_exception!(
     "Samples were lost. A writer with `on_loss=\"raise\"` raises it when the node \
      found no room for a live frame, so its samples are a gap in the log, and goes \
      on, as a later frame can find room: `seqs` is a `dict` from the name of each \
-     channel of the frame to the `range` of the seqs of its lost samples, and `frame` \
-     is `None`. A reader with `on_loss=\"raise\"` raises it for a frame after a loss, \
-     and closes: `seqs` is `Frame.lost` of that frame, and `frame` is the frame."
+     channel of the lost groups of the frame, the index of each included, to the \
+     `range` of the seqs of its lost samples, and `frame` is `None`. A reader with \
+     `on_loss=\"raise\"` raises it for a frame after a loss, and closes: `seqs` is \
+     `Frame.lost` of that frame, and `frame` is the frame."
 );
 
 #[pymodule]
@@ -948,10 +950,6 @@ fn exception(py: Python<'_>, error: &sdk::Error, text: String) -> PyErr {
         sdk::Error::Stream(program::Error::Refused(refusal)) => {
             coded(py, Stopped::new_err(text), *refusal)
         }
-        sdk::Error::Stream(program::Error::Unstored(groups)) => {
-            let (_, end) = groups.first().expect("invariant: Unstored names a group");
-            coded(py, Stopped::new_err(text), stop(*end))
-        }
         sdk::Error::Stream(
             program::Error::Layout(_)
             | program::Error::Unsent { .. }
@@ -976,10 +974,12 @@ fn exception(py: Python<'_>, error: &sdk::Error, text: String) -> PyErr {
             | program::Error::Frame(_)
             | program::Error::Unplaced(_),
         ) => PyConnectionError::new_err(text),
-        sdk::Error::Partial { outcomes, .. } => unreachable!(
-            "invariant: the writer maps each Partial to the outcomes of its groups, \
-             got {outcomes:?}"
-        ),
+        sdk::Error::Partial { .. }
+        | sdk::Error::Stream(program::Error::Unstored(_)) => {
+            unreachable!(
+                "invariant: the writer maps each error of its groups, got {error:?}"
+            )
+        }
         sdk::Error::Panicked => PanicException::new_err(text),
         sdk::Error::Value { .. } => PyTypeError::new_err(text),
     }

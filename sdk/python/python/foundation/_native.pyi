@@ -112,7 +112,8 @@ class Rejected(Exception):
     `reserved`, `expired`, `order`, `codec`, `full`, or `large`. `written` and
     `unwritten` are the names of the channels of the frame in the groups that the node
     took and did not take, in place order. Its text names the cause of each group that
-    the node did not take. The writer goes on.
+    the node did not take. The writer goes on. To write the frame again, write only the
+    channels of `unwritten`: the node took those of `written`.
     """
 
     code: str
@@ -135,9 +136,10 @@ class DataLost(Exception):
     """Samples were lost. A writer with `on_loss="raise"` raises it when the node found
     no room for a live frame, so its samples are a gap in the log, and goes on, as a
     later frame can find room: `seqs` is a `dict` from the name of each channel of the
-    frame to the `range` of the seqs of its lost samples, and `frame` is `None`. A
-    reader with `on_loss="raise"` raises it for a frame after a loss, and closes: `seqs`
-    is `Frame.lost` of that frame, and `frame` is the frame.
+    lost groups of the frame, the index of each included, to the `range` of the seqs of
+    its lost samples, and `frame` is `None`. A reader with `on_loss="raise"` raises it
+    for a frame after a loss, and closes: `seqs` is `Frame.lost` of that frame, and
+    `frame` is the frame.
     """
 
     seqs: dict[str, range]
@@ -248,9 +250,10 @@ class Writer:
     @property
     def places(self) -> tuple[tuple[str, str, int], ...]:
         """The name, the type, and the place of the index of each place, in place order,
-        the type as the spec writes it (`f64`, `timestamp`). An index's own place is its
-        index. Place `n` is channel `n` of the open; then comes the index of each group
-        that the open did not name, in the order of the first channel of each group.
+        the type as the spec writes it (`f64`, `timestamp`). The place of an index is
+        its first place, also at a repeat of it. Place `n` is channel `n` of the open;
+        then comes the index of each group that the open did not name, in the order of
+        the first channel of each group.
         """
 
     def write(self, values: dict[Any, Any] | _Value) -> None:

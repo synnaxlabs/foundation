@@ -81,13 +81,10 @@ def order(channels: str) -> str:
     )
 
 
-def absent(entry: int, index: int) -> str:
-    """The text of the `ValueError` of a call that gives place `entry` and no stamp of
-    its index, place `index`."""
-    return (
-        f"the series of the draft are not valid: entry {entry} is present but its "
-        f"index, entry {index}, is absent"
-    )
+def absent(channel: str, index: str) -> str:
+    """The text of the `ValueError` of a call that gives `channel` and no stamp of its
+    index, `index`."""
+    return f"the frame holds {channel} but not its index, {index}"
 
 
 def planted(node: Node, channels: str = CHANNELS) -> foundation.Client:
@@ -240,7 +237,7 @@ class WriterTest(unittest.TestCase):
         with self.client.open_writer(["plant.a", "other.a"]) as writer:
             with self.assertRaises(ValueError) as raised:
                 writer.write({"plant.a": 1.5, "other.a": 2.5, "other.time": start})
-            self.assertEqual(str(raised.exception), absent(0, 2))
+            self.assertEqual(str(raised.exception), absent("plant.a", "plant.time"))
             series = {
                 "plant.a": np.zeros(2),
                 "plant.time": np.arange(start, start + 2, dtype=np.int64),
@@ -248,8 +245,61 @@ class WriterTest(unittest.TestCase):
             }
             with self.assertRaises(ValueError) as raised:
                 writer.write_series(series)
-            self.assertEqual(str(raised.exception), absent(1, 3))
+            self.assertEqual(str(raised.exception), absent("other.a", "other.time"))
             self.assertIsNone(writer.write({"plant.a": 1.5, "other.a": 2.5}))
+
+    def test_a_rejected_stamp_at_a_repeat_of_the_index_names_it_once(self) -> None:
+        channels = ["plant.time", "plant.a", "plant.time"]
+        with self.client.open_writer(channels) as writer:
+            self.assertEqual(
+                writer.places,
+                (
+                    ("plant.time", "timestamp", 0),
+                    ("plant.a", "f64", 0),
+                    ("plant.time", "timestamp", 0),
+                ),
+            )
+            stamp = time.time_ns() + 10**9
+            self.assertIsNone(writer.write({1: 1.5, 2: stamp}))
+            with self.assertRaises(foundation.Rejected) as raised:
+                writer.write({1: 2.5, 2: stamp})
+            self.assertEqual(raised.exception.code, "order")
+            self.assertEqual(raised.exception.written, ())
+            self.assertEqual(raised.exception.unwritten, ("plant.time", "plant.a"))
+            self.assertEqual(
+                str(raised.exception), order("plant.time, plant.a")
+            )
+
+    def test_an_order_refusal_of_one_group_of_two_rejects_that_group_only(
+        self,
+    ) -> None:
+        with self.client.open_writer(["plant.a", "other.a"]) as writer:
+            stamp = time.time_ns() + 10**9
+            values = {"plant.a": 1.5, "other.a": 2.5}
+            self.assertIsNone(
+                writer.write({**values, "plant.time": stamp, "other.time": stamp})
+            )
+            with self.assertRaises(foundation.Rejected) as raised:
+                writer.write({**values, "plant.time": stamp, "other.time": stamp + 1})
+            self.assertEqual(raised.exception.code, "order")
+            self.assertEqual(raised.exception.written, ("other.a", "other.time"))
+            self.assertEqual(raised.exception.unwritten, ("plant.a", "plant.time"))
+            self.assertEqual(
+                str(raised.exception),
+                "the node refused the frame of plant.time (order: a stamp is not "
+                "after the stamp before it); channels plant.a, plant.time were not "
+                "written; channels other.a, other.time were",
+            )
+            series = {
+                "plant.a": np.zeros(2),
+                "plant.time": np.array([stamp + 1, stamp + 2], dtype=np.int64),
+                "other.a": np.zeros(3),
+                "other.time": np.array([stamp, stamp + 5, stamp + 6], dtype=np.int64),
+            }
+            with self.assertRaises(foundation.Rejected) as raised:
+                writer.write_series(series)
+            self.assertEqual(raised.exception.written, ("plant.a", "plant.time"))
+            self.assertEqual(raised.exception.unwritten, ("other.a", "other.time"))
 
     def test_a_removed_channel_ends_its_group_and_the_other_group_goes_on(
         self,
@@ -387,8 +437,7 @@ class WriterTest(unittest.TestCase):
             (
                 {"plant.a": 1.0, 0: 2.0},
                 ValueError,
-                "the series of the draft are not valid: entry 0 follows entry 0: "
-                "entries must increase",
+                "the frame holds plant.a twice",
             ),
             (
                 {},
@@ -485,12 +534,13 @@ class WriterTest(unittest.TestCase):
             (
                 {"plant.a": floats, "plant.time": stamps[:99]},
                 ValueError,
-                "places 0 and 2 are of one index but hold 100 and 99 samples",
+                "channels plant.a and plant.time are of one index but hold 100 and 99 "
+                "samples",
             ),
             (
                 {"plant.a": floats},
                 ValueError,
-                absent(0, 2),
+                absent("plant.a", "plant.time"),
             ),
             (
                 {},

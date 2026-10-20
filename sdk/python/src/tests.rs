@@ -355,30 +355,6 @@ fn raised_raises_connection_error_for_an_error_of_the_pool_of_a_reader() {
     });
 }
 
-/// Maps a write that ended with a frame that may not be on disk to `Stopped`, with the
-/// code of a stream that the node stopped for the cause of its group's end, and its
-/// text.
-#[test]
-fn error_raises_stopped_with_the_code_of_the_end_of_an_unstored_write() {
-    let ends = [
-        (program::write::End::Removed, "unknown"),
-        (program::write::End::Failed, "failed"),
-    ];
-    Python::initialize();
-    Python::attach(|py| {
-        for (end, code) in ends {
-            let unstored = program::Error::Unstored(vec![(1, end)]);
-            let text = unstored.to_string();
-            let error = super::error(py, &sdk::Error::Stream(unstored));
-            assert_eq!(error.get_type(py).name().unwrap().to_string(), "Stopped");
-            let value = error.value(py);
-            assert_eq!(value.to_string(), text);
-            let given: String = value.getattr("code").unwrap().extract().unwrap();
-            assert_eq!(given, code, "{end:?}");
-        }
-    });
-}
-
 /// The places of a writer of the indexes `plant.time`, `cell.time`, `line.time`, and
 /// `other.time`, with one channel of each, the channels first.
 fn grouped() -> Vec<sdk::Place> {
@@ -417,7 +393,7 @@ type Raised = (
     Option<(Vec<String>, Vec<String>)>,
 );
 
-/// What `raised` raises for a frame of the items at `frame` of a writer of `places`,
+/// What `answer` raises for a frame of the items at `frame` of a writer of `places`,
 /// with `outcomes`.
 fn untaken(
     places: &[sdk::Place],
@@ -427,8 +403,8 @@ fn untaken(
 ) -> Raised {
     Python::initialize();
     Python::attach(|py| {
-        let error =
-            crate::write::raised(py, places, loss, outcomes, frame).unwrap_err();
+        let error = crate::write::answer(py, places, loss, outcomes, frame.to_vec())
+            .unwrap_err();
         let value = error.value(py);
         let code = value
             .getattr("code")
@@ -454,7 +430,7 @@ fn names(names: &[&str]) -> Vec<String> {
 /// the node took another group, and its text names the cause of each group that the
 /// node did not take.
 #[test]
-fn raised_names_the_cause_of_each_group_that_the_node_did_not_take() {
+fn answer_names_the_cause_of_each_group_that_the_node_did_not_take() {
     let outcomes = [
         (4, Outcome::Ended(End::Removed)),
         (5, Outcome::Refused(Refusal::Full)),
@@ -502,7 +478,7 @@ fn raised_names_the_cause_of_each_group_that_the_node_did_not_take() {
 /// With no end, a refusal raises `Rejected` with the code of the first refused group,
 /// and an end with no group taken raises `Stopped` with the code of the first end.
 #[test]
-fn raised_raises_for_an_end_then_a_refusal() {
+fn answer_raises_for_an_end_then_a_refusal() {
     let refused = [
         (5, Outcome::Refused(Refusal::Waiting)),
         (6, Outcome::Refused(Refusal::Large)),
@@ -563,7 +539,7 @@ fn raised_raises_for_an_end_then_a_refusal() {
 /// The end of the group of a writer of one index raises `Stopped` with the code of a
 /// stream that the node stopped for the same cause, and says that the writer ended.
 #[test]
-fn raised_ends_a_writer_of_one_index_at_the_end_of_its_group() {
+fn answer_ends_a_writer_of_one_index_at_the_end_of_its_group() {
     let grouped = grouped();
     let places = [0, 4].map(|place| sdk::Place {
         index: 1,
@@ -602,7 +578,7 @@ fn raised_ends_a_writer_of_one_index_at_the_end_of_its_group() {
 /// A loss with no end and no refusal does what the loss says with the channels of the
 /// lost groups only, the index of each included.
 #[test]
-fn raised_gives_the_seqs_of_the_lost_groups_only() {
+fn answer_gives_the_seqs_of_the_lost_groups_only() {
     let outcomes = [
         (5, Outcome::Taken { range: range(0, 2) }),
         (
@@ -621,12 +597,12 @@ fn raised_gives_the_seqs_of_the_lost_groups_only() {
     let places = grouped();
     Python::initialize();
     Python::attach(|py| {
-        let raised = crate::write::raised(
+        let raised = crate::write::answer(
             py,
             &places,
             crate::Loss::Raise,
             &outcomes,
-            &[7, 3, 1, 2],
+            vec![7, 3, 1, 2],
         );
         let error = raised.unwrap_err();
         assert_eq!(error.get_type(py).name().unwrap().to_string(), "DataLost");
@@ -649,46 +625,120 @@ fn raised_gives_the_seqs_of_the_lost_groups_only() {
                 .unwrap();
         }
         assert!(seqs.eq(expected).unwrap(), "{seqs}");
-        crate::write::raised(py, &places, crate::Loss::Ignore, &outcomes, &[2, 3])
+        crate::write::answer(py, &places, crate::Loss::Ignore, &outcomes, vec![2, 3])
             .unwrap();
     });
 }
 
-/// A close that gives `Unstored` raises `Stopped` with the code of the end of its
-/// first group and a text that names the index and the end of each group. Another
-/// error of a close raises as each call does.
+/// A writer of `plant.time`, `plant.a`, and `plant.time` whose frame gives the stamp at
+/// place 2, the repeat of the index, names the index once.
 #[test]
-fn closed_names_the_index_and_the_end_of_each_unstored_group() {
+fn answer_names_a_repeat_of_the_index_once() {
+    let grouped = grouped();
+    let places = [4, 0, 4].map(|place| sdk::Place {
+        index: 0,
+        ..grouped[place].clone()
+    });
+    let refused = [(0, Outcome::Refused(Refusal::Order))];
+    assert_eq!(
+        untaken(&places, crate::Loss::Raise, &refused, &[1, 2]),
+        (
+            "Rejected".to_owned(),
+            "the node refused the frame of plant.time (order: a stamp is not after the \
+             stamp before it); channels plant.time, plant.a were not written; no \
+             channel was"
+                .to_owned(),
+            Some("order".to_owned()),
+            Some((Vec::new(), names(&["plant.time", "plant.a"]))),
+        )
+    );
+    let lost = [(
+        0,
+        Outcome::Lost {
+            range: range(10, 1),
+        },
+    )];
+    assert_eq!(
+        untaken(&places, crate::Loss::Raise, &lost, &[1, 2]).1,
+        "samples were lost: plant.time (1), plant.a (1)"
+    );
+}
+
+/// The writer's map of an error names the channels at its places: a close that gives
+/// `Unstored` raises `Stopped` with the code of the end of its first group and names
+/// the index and the end of each group; a refusal of the stream says that the writer
+/// has ended; and a count, an absent index, and a channel given twice raise
+/// `ValueError`. Another error raises as each call does.
+#[test]
+fn raised_names_the_channels_at_the_places_of_each_error_of_a_writer() {
     let places = grouped();
+    let stream = sdk::Error::Stream;
+    let layout = |error| stream(program::Error::Layout(error));
     let cases = [
         (
-            vec![(4, End::Removed)],
-            "unknown",
+            stream(program::Error::Unstored(vec![(4, End::Removed)])),
+            "Stopped",
             "the write of plant.time (unknown) ended: a frame that the node took may \
              not be on disk",
+            Some("unknown"),
         ),
         (
-            vec![(6, End::Failed), (4, End::Removed)],
-            "failed",
+            stream(program::Error::Unstored(vec![
+                (6, End::Failed),
+                (4, End::Removed),
+            ])),
+            "Stopped",
             "the writes of line.time (failed), plant.time (unknown) ended: a frame \
              that the node took may not be on disk",
+            Some("failed"),
+        ),
+        (
+            stream(program::Error::Refused(program::Refusal::Busy)),
+            "Stopped",
+            "the node had no memory for a response, a request body, a read, or a \
+             write; the writer has ended",
+            Some("busy"),
+        ),
+        (
+            stream(program::Error::Count {
+                place: 0,
+                count: 2,
+                other: 4,
+                other_count: 3,
+            }),
+            "ValueError",
+            "channels plant.a and plant.time are of one index but hold 2 and 3 samples",
+            None,
+        ),
+        (
+            layout(frame::Error::IndexAbsent { entry: 1, index: 5 }),
+            "ValueError",
+            "the frame holds cell.a but not its index, cell.time",
+            None,
+        ),
+        (
+            layout(frame::Error::Unordered { entry: 2, last: 2 }),
+            "ValueError",
+            "the frame holds line.a twice",
+            None,
+        ),
+        (
+            sdk::Error::Closed,
+            "RuntimeError",
+            "the client is closed",
+            None,
         ),
     ];
     Python::initialize();
     Python::attach(|py| {
-        for (groups, code, text) in cases {
-            let unstored = sdk::Error::Stream(program::Error::Unstored(groups));
-            let raised = crate::write::closed(py, &places, &unstored);
-            assert_eq!(raised.get_type(py).name().unwrap().to_string(), "Stopped");
+        for (error, class, text, code) in cases {
+            let raised = crate::write::raised(py, &places, &error);
+            assert_eq!(raised.get_type(py).name().unwrap().to_string(), class);
             let value = raised.value(py);
             assert_eq!(value.to_string(), text);
-            let given: String = value.getattr("code").unwrap().extract().unwrap();
-            assert_eq!(given, code);
+            let given = value.getattr("code").ok().map(|code| code.to_string());
+            assert_eq!(given.as_deref(), code, "{error:?}");
         }
-        let raised = crate::write::closed(py, &places, &sdk::Error::Closed);
-        let name = raised.get_type(py).name().unwrap().to_string();
-        assert_eq!(name, "RuntimeError");
-        assert_eq!(raised.value(py).to_string(), sdk::Error::Closed.to_string());
     });
 }
 
