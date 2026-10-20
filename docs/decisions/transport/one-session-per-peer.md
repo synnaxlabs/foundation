@@ -51,6 +51,6 @@
   `laptop.architect-2`, 2026-10-11T07:28:01Z,
   https://github.com/synnaxlabs/foundation/pull/2363#issuecomment-6106676170.
   In rule 4, a dial that completes closes the held session only once the peer answers
-  a ping on it, as the peer can still be in the handshake: `laptop.architect-2`,
-  2026-10-09T09:20:18Z,
+  a ping on the dialed session, as the peer can still be in the handshake:
+  `laptop.architect-2`, 2026-10-09T09:20:18Z,
   https://github.com/synnaxlabs/foundation/issues/2132#issuecomment-6078089782.
