@@ -548,6 +548,14 @@ impl<'a> Frames<'a> {
         }
         written
     }
+
+    /// Clears the note when it names a read whose last value is not Good, by
+    /// `faulted` of each read, as a frame with that value does.
+    fn faulted(&mut self, faulted: &[bool]) {
+        if self.note.noted.is_some_and(|(at, _)| faulted[at]) {
+            self.note.set(self.ctx, None);
+        }
+    }
 }
 
 impl Left {

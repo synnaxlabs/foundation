@@ -2596,3 +2596,96 @@ fn a_cancel_during_a_read_of_the_current_time_ends_after_the_grace() {
         assert!(outcome.result.is_ok(), "{stop:?}: {:?}", outcome.result);
     }
 }
+
+/// A Bad value of the node of the note clears the note in both modes, as a frame with
+/// that value does, and the Good changes of the other nodes after it keep it clear.
+#[test]
+fn a_node_of_another_type_that_goes_bad_clears_the_note_in_both_modes() {
+    for polled in [true, false] {
+        let rate = if polled { "10Hz" } else { "20Hz" };
+        let outcome = scene(4840, rate, polled, Setup::three(), |scene| async move {
+            scene.variables.set(B, crate::value::Value::I32(1));
+            scene.after(ms(1_530), |scene| async move {
+                scene.variables.set_quality(B, Quality(0x8000_0000));
+            });
+            for at in [2_530, 3_530] {
+                scene.after(ms(at), |scene| async move {
+                    scene.variables.change(Quality::GOOD);
+                });
+            }
+            scene.supervise(ms(4_550)).await
+        });
+        assert!(outcome.result.is_ok(), "{polled}: {:?}", outcome.result);
+        assert_eq!(errors(&outcome.statuses), [], "{polled}");
+        let mistyped = "leaves out the values of the node `ns=3;i=7` of the channel \
+                        `plant.b`: they are of type Int32, and the channel has samples \
+                        of type f64";
+        assert_eq!(notes(&outcome.statuses), [mistyped], "{polled}");
+        let after: Vec<(u64, String)> = (outcome.statuses.iter())
+            .filter_map(|frame| {
+                let bad = *fixed(frame, BAD)?.last()?;
+                let note = text(frame, NOTE)?.last()?.clone();
+                (bad > 0).then_some((bad, note))
+            })
+            .collect();
+        assert!(!after.is_empty(), "{polled}");
+        for (bad, note) in &after {
+            assert_eq!(note, "", "{polled}: bad {bad}: {after:?}");
+        }
+    }
+}
+
+/// A server with no `CreateMonitoredItems` service is polled also when the
+/// `CreateMonitoredItems` call of a node is past one message of the server (524057 of
+/// 524047 bytes), and its Read fits (524037 bytes).
+#[test]
+fn polls_a_server_with_no_monitored_items_and_a_node_whose_watch_is_too_large() {
+    let node = format!("ns=3;s={}", "x".repeat(523_950));
+    let long = || {
+        let mut setup = Setup::three();
+        setup.nodes[1].clone_from(&node);
+        setup.reads[1].1.clone_from(&node);
+        setup
+    };
+    let setup = long();
+    let polled = run(
+        long(),
+        |scene| async move { scene.supervise(ms(1_050)).await },
+    );
+    assert!(polled.result.is_ok(), "polled: {:?}", polled.result);
+    assert_eq!(errors(&polled.statuses), [], "polled");
+    assert_eq!(keys(&polled.frames), vec![vec![1, 2, 3, 4]; 11], "polled");
+    let outcome = unsubscribed(CREATE_MONITORED_ITEMS, setup, |scene| async move {
+        scene.supervise(ms(1_050)).await
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    assert_eq!(errors(&outcome.statuses), []);
+    assert_eq!(notes(&outcome.statuses), [POLLS]);
+    assert_eq!(keys(&outcome.frames), vec![vec![1, 2, 3, 4]; 11]);
+}
+
+/// A cancel while the first read of the current time, or the `CreateSubscription`,
+/// is in flight, on a server that stops as the request reaches it, ends the run
+/// [`GRACE`] after it.
+#[test]
+fn a_cancel_while_the_subscribe_is_in_flight_ends_after_the_grace() {
+    for request in [CURRENT_TIME, CREATE_SUBSCRIPTION] {
+        let setup = Setup::three();
+        let outcome = scene(RELAY, "20Hz", false, setup, move |scene| async move {
+            let node = scene.node.clone();
+            let stops = Rc::clone(&scene);
+            let up = move |message: &mut Vec<u8>| {
+                let time = is(message, READ_REQUEST)
+                    && message.windows(4).any(|node| node == CURRENT_TIME);
+                if time && request == CURRENT_TIME || is(message, request) {
+                    stops.gate.close();
+                }
+            };
+            let end = relayed_up(&node, up, ends_after_the_cancel(&scene, ms(500)));
+            assert_eq!(Box::pin(end).await, GRACE, "{request:?}");
+            Ok(())
+        });
+        assert!(outcome.result.is_ok(), "{request:?}: {:?}", outcome.result);
+        assert_eq!(errors(&outcome.statuses), [], "{request:?}");
+    }
+}

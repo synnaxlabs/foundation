@@ -63,6 +63,10 @@ pub(super) async fn run(
             revised.map_err(|status| failed(client.url(), Call::Subscribe, status))?
         }
     };
+    let mut refused = revised.items.iter().filter_map(|item| item.as_ref().err());
+    if let Some(&status) = refused.find(|&&status| unsupported(status)) {
+        return Ok(Some(status));
+    }
     if let Some(large) = revised.large.first() {
         return Err(too_large(
             LARGE_WATCH,
@@ -73,9 +77,6 @@ pub(super) async fn run(
     }
     for (read, item) in reads.iter().zip(&revised.items) {
         if let &Err(status) = item {
-            if unsupported(status) {
-                return Ok(Some(status));
-            }
             return Err(super::device(Failure::Unwatched {
                 node: read.node.to_string(),
                 channel: read.channel.to_string(),
@@ -222,6 +223,8 @@ struct Drive {
     next: Vec<Option<Monotonic>>,
     /// The device time of the last entry of each read, in the order of changes.
     last: Vec<Option<Monotonic>>,
+    /// Whether the last change of each read is Bad or Uncertain.
+    faulted: Vec<bool>,
     /// The device time of the newest server timestamp of the last drive with one.
     newest: Option<Monotonic>,
     /// The count of changes with an overflow.
@@ -254,6 +257,7 @@ impl Drive {
             slots: vec![None; reads],
             next: vec![None; reads],
             last: vec![None; reads],
+            faulted: vec![false; reads],
             newest: None,
             overflows: 0,
             bad: 0,
@@ -265,7 +269,8 @@ impl Drive {
     /// timestamp to `fit`. Gives whether `fit` needs a read of the current time: one
     /// of them restarted it, or the newest of them is older than the newest of the
     /// last drive with one, as from a clock that went back. A Bad or Uncertain change
-    /// makes no entry and adds to its count. The device time of an entry is at least
+    /// makes no entry and adds to its count, and [`Drive::write`] clears a note of its
+    /// read when it is the last change of that read. The device time of an entry is at least
     /// that of the entry before it of its read, so each read keeps the order of its
     /// changes.
     ///
@@ -282,6 +287,7 @@ impl Drive {
     ) -> Result<bool, Error> {
         self.entries.clear();
         self.last.fill(None);
+        self.faulted.fill(false);
         (self.overflows, self.bad, self.uncertain) = (0, 0, 0);
         let (mut unsure, mut newest) = (false, None);
         for (order, change) in changes.iter().enumerate() {
@@ -291,6 +297,8 @@ impl Drive {
                 newest = newest.max(Some(server));
             }
             self.overflows += u64::from(change.overflow);
+            let faulted = &mut self.faulted[change.index];
+            *faulted = true;
             if let Err(fault) = &change.value {
                 match Why::fault(*fault) {
                     Why::Bad => {
@@ -304,6 +312,7 @@ impl Drive {
                     Why::Mistyped(_) => {}
                 }
             }
+            *faulted = false;
             let at = match (timestamp(change.source), server) {
                 (Some(source), Some(server)) => source.min(server),
                 (source, server) => {
@@ -401,6 +410,7 @@ impl Drive {
             frames.write(values, stamp)?;
             start = end;
         }
+        frames.faulted(&self.faulted);
         Ok(())
     }
 }
