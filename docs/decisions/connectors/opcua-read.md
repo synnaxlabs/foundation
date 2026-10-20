@@ -200,20 +200,30 @@
   At `subscribe`, the client reserves in each change buffer the changes of
   `PUBLISHES` answers, each of the changes that the revised queues of the items hold
   (at least 1 an item), at most the most that fit an answer. It also reserves the
-  memory of the decode of one such answer: open62541 decodes each Publish answer into
-  memory that the client keeps, and frees after the answer each block past the
-  reserved one (`laptop.architect-2`, 2026-10-19T21:52:11Z,
-  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6278199669). A
+  memory of the decode of one such answer (`laptop.architect-2`,
+  2026-10-19T21:52:11Z,
+  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6278199669). The
+  reserve is 360 B for each change, at most about 5.0 MB a client at the default
+  receive limit (P1 accepted by `laptop.architect-2`, 2026-10-20T02:01:06Z,
+  https://github.com/synnaxlabs/foundation/pull/3462#issuecomment-6281584662). Lost: a
+  reserve at the first answer, which saves memory only at a node whose take never
+  waited. open62541 decodes each Publish answer into memory that the client keeps.
+  After an answer that took more than one block, it keeps the memory of that answer as
+  one block, so the memory never shrinks, and a later answer of that size allocates none
+  (`laptop.architect-2`, 2026-10-19T23:31:50Z,
+  https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6279663796). A
   server that sends more changes than the queues hold grows the change buffers, which
   do not shrink. Each buffer holds the changes of at most `PUBLISHES` answers, each at
   most the receive limit over the 5 bytes of the smallest notification, so with the
-  doubling of a `Vec` the 2 buffers of a client hold at most about 54 MB.
-  `subscribe(nodes, sampling, round_trip)` asks for a publishing interval of the longer
-  of `sampling` and 100 ms, at most 1 min, a keep-alive count of max(1, floor(1 min /
-  interval)), and a queue of each item that holds the samples of the larger of two
-  revised publishing intervals and two of `round_trip` (OPCUA SUBSCRIBE). When the
-  revised interval is not positive, or times the larger of 1 and the revised
-  keep-alive count is over 5 min, half of the 10 min timeout of a Publish
+  doubling of a `Vec` the 2 buffers of a client hold at most about 54 MB, and the
+  memory of the decode about 11 MB, or less than 3 times that while an answer larger
+  than the kept memory decodes. `subscribe(nodes, sampling, round_trip)` asks for a
+  publishing interval of the longer of `sampling` and 100 ms, at most 1 min, a
+  keep-alive count of max(1, floor(1 min / interval)), and a queue of each item that
+  holds the samples of the larger of two revised publishing intervals and two of
+  `round_trip` (OPCUA SUBSCRIBE). When the revised interval is not positive, or times
+  the larger of 1 and the revised keep-alive count is over 5 min, half of the 10 min
+  timeout of a Publish
   request in open62541, `subscribe` fails with `BadOutOfRange` and sends no Publish
   request: the client sends Publish requests only after this check. At
   `BadNoSubscription` in a Publish answer, the patched open62541 deletes each local
@@ -233,7 +243,10 @@
   it. `subscribe` sets the count once, and open62541 alone writes it after, so a
   refusal while a change waits lowers it as at any other time, and the resume keeps it
   (`laptop.architect-2`, 2026-10-20T00:39:50Z,
-  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6280562003). The
+  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6280562003). Lost: a
+  count of 0 as the stop, which the resume sets again over the count that a refusal
+  lowered while a change waited (`laptop.architect-2`, 2026-10-20T01:03:31Z,
+  https://github.com/synnaxlabs/foundation/pull/3462#issuecomment-6280867776). The
   `subscribe` rule caps the publishing interval of item 1 of
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6157348272 at 1 min,
   and adds the keep-alive count. Lost: no check, as a server that revises the keep-alive

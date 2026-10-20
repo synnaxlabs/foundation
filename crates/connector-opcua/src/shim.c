@@ -19,10 +19,10 @@
 #include "timer.h"
 #pragma GCC diagnostic pop
 
-/* `shim_client_publishes` calls `__Client_Subscriptions_backgroundPublish`, which
+/* `shim_client_publish_resume` calls `__Client_Subscriptions_backgroundPublish`, which
  * asserts a client lock that only a build with threads takes. */
 #if UA_MULTITHREADING >= 100
-#error "shim_client_publishes takes no client lock"
+#error "shim_client_publish_resume takes no client lock"
 #endif
 
 #include "shim.h"
@@ -801,10 +801,14 @@ void shim_client_publish_count(UA_Client *client, UA_UInt16 count) {
     UA_Client_getConfig(client)->outStandingPublishRequests = count;
 }
 
-/* Stops the Publish requests of `client` while `stopped`, or sends the ones that it
- * lacks. */
-void shim_client_publishes(UA_Client *client, UA_Boolean stopped) {
-    client->publishStopped = stopped;
+/* Stops the Publish requests of `client` until `shim_client_publish_resume`. */
+void shim_client_publish_stop(UA_Client *client) {
+    client->publishStopped = true;
+}
+
+/* Sends the Publish requests that `client` lacks, and each later one. */
+void shim_client_publish_resume(UA_Client *client) {
+    client->publishStopped = false;
     __Client_Subscriptions_backgroundPublish(client);
 }
 

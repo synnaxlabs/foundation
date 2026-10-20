@@ -87,22 +87,25 @@ fn the_drop_frees_the_client() {
 }
 
 /// A `Variant` (23, as `ffi` is private) of 7 `ExtensionObject` values, then the
-/// zeros that #435 needs.
+/// zeros that #435 needs. The decode under the arena `calloc` adds 4: its value, its
+/// block, and its encoding in C and in Rust.
 fn the_fuzz_round_trip_allocates_for_each_step() {
     let mut data = vec![23, 0, 0x96, 7, 0, 0, 0];
     data.resize(data.len() + 7 * 4, 0);
     let ((), count) = ALLOCATOR.count(|| connector_opcua::fuzz::decode(&data));
-    assert_eq!(count, 10, "the round trip of a Variant");
+    assert_eq!(count, 14, "the round trip of a Variant");
 }
 
 /// A `Boolean` (0) with no byte fails before C allocates, so only the memory of the
-/// value is allocated.
+/// value is allocated, and the value of the decode under the arena `calloc`, which
+/// takes no block.
 fn a_failed_decode_stops_the_round_trip() {
     let ((), count) = ALLOCATOR.count(|| connector_opcua::fuzz::decode(&[0, 0]));
-    assert_eq!(count, 1, "a failed decode");
-    // A `Variant` of a `Boolean` with no byte: C allocates the `Boolean` first.
+    assert_eq!(count, 2, "a failed decode");
+    // A `Variant` of a `Boolean` with no byte: C allocates the `Boolean` first, and the
+    // arena its block.
     let ((), count) = ALLOCATOR.count(|| connector_opcua::fuzz::decode(&[23, 0, 0x01]));
-    assert_eq!(count, 2, "a failed decode after C allocates");
+    assert_eq!(count, 4, "a failed decode after C allocates");
 }
 
 /// The delay of the default link.
@@ -279,15 +282,13 @@ fn a_publish_answer_allocates_a_fixed_count() {
 /// The most changes in a Publish answer at the default receive limit of open62541.
 const MOST: usize = 13_785;
 
-/// After `subscribe`, the client is not driven while the server answers each Publish
-/// request in flight with the most changes. A read then takes in the 2 such answers,
-/// and `changes` gives them, 3 times. The subscribe reserves the memory of
-/// both change buffers and of the decode, so each drive allocates the same count: the
-/// read, the segments of the sim net, and the Publish requests that `changes` sends
-/// again.
-fn the_first_drives_allocate_no_change_buffer() {
-    let drives = subscribed(2 * MOST, async |client, clock| {
-        client.subscribe(2 * MOST).await;
+/// The changes, and the allocations of the read and of `changes`, of the first 3
+/// drives of a client of `count` counters. Before each drive, the client is not driven
+/// for 1 s while the server answers each Publish request in flight, and a read takes
+/// in those answers.
+fn first_drives(count: usize) -> Vec<(usize, u64, u64)> {
+    subscribed(count, async move |client, clock| {
+        client.subscribe(count).await;
         let mut drives = Vec::new();
         for _ in 0..3 {
             clock.sleep(Span::SECOND).await;
@@ -296,11 +297,26 @@ fn the_first_drives_allocate_no_change_buffer() {
             drives.push((changes, read, count));
         }
         drives
-    });
+    })
+}
+
+/// The subscribe reserves the memory of both change buffers and of the decode for
+/// answers of min(most, the sum of the queues) changes, so each of the first drives
+/// allocates the same count: the read, the segments of the sim net, and the Publish
+/// requests that `changes` sends again. Of 100 counters the queues of 2 bound an answer
+/// at 200 changes, and a drive that also takes an answer that comes in its own poll
+/// allocates for that answer only. Of `2 * MOST` counters the receive limit does.
+fn the_first_drives_allocate_no_change_buffer() {
     assert_eq!(
-        drives,
+        first_drives(100),
+        [(300, 7, 7), (200, 6, 4), (300, 7, 7)],
+        "the changes and counts of 3 drives of 100 counters"
+    );
+    assert_eq!(
+        first_drives(2 * MOST),
         [(2 * MOST, 62, 7); 3],
-        "the changes and counts of 3 drives"
+        "the changes and counts of 3 drives of {} counters",
+        2 * MOST
     );
 }
 

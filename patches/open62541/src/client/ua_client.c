@@ -44,10 +44,11 @@ PublishBlock_new(size_t size, PublishBlock *next) {
     return block;
 }
 
-static void *
-PublishArena_calloc(void *context, size_t nelem, size_t elsize) {
+void *
+__Client_PublishArena_calloc(void *context, size_t nelem, size_t elsize) {
     PublishArena *arena = (PublishArena*)context;
-    /* The decoder bounds nelem * elsize by the bytes of the message */
+    if(elsize && nelem > (SIZE_MAX - 15) / elsize)
+        return NULL;
     size_t size = (nelem * elsize + 15) & ~(size_t)15;
     PublishBlock *block = arena->blocks;
     if(!block || block->size - block->used < size) {
@@ -63,18 +64,26 @@ PublishArena_calloc(void *context, size_t nelem, size_t elsize) {
     return p;
 }
 
+/* Keeps the memory of an answer that took more than one block as one block, so a
+ * later answer of that size allocates nothing. It frees the blocks first, so the
+ * memory never holds both. */
 static void
 PublishArena_reset(PublishArena *arena) {
     PublishBlock *block = arena->blocks;
     if(!block)
         return;
-    while(block->next) {
+    if(!block->next) {
+        block->used = 0;
+        return;
+    }
+    size_t used = 0;
+    while(block) {
         PublishBlock *next = block->next;
+        used += block->used;
         UA_free(block);
         block = next;
     }
-    block->used = 0;
-    arena->blocks = block;
+    arena->blocks = PublishBlock_new(used, NULL);
 }
 
 UA_StatusCode
@@ -376,7 +385,6 @@ UA_Client_clear(UA_Client *client) {
     client->namespaces = NULL;
     client->namespacesSize = 0;
 
-    PublishArena_reset(&client->publishArena);
     UA_free(client->publishArena.blocks);
     client->publishArena.blocks = NULL;
 
@@ -648,7 +656,7 @@ processMSGResponse(UA_Client *client, UA_UInt32 requestId,
     opt.customTypes = config->customDataTypes;
     opt.namespaceMapping = client->channel.namespaceMapping;
     if(arena) {
-        opt.calloc = PublishArena_calloc;
+        opt.calloc = __Client_PublishArena_calloc;
         opt.callocContext = &client->publishArena;
     }
     retval = UA_decodeBinaryInternal(msg, &offset, response, responseType, &opt);
