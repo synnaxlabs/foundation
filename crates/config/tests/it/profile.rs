@@ -350,6 +350,21 @@ fn a_private_key_pasted_as_the_path_is_only_an_alarm() {
     assert!(!problems[0].1.contains(body), "{problems:?}");
 }
 
+/// A private key in a `node` block and one outside it each get their own fix, in
+/// source order.
+#[test]
+fn each_alarm_gets_the_fix_of_its_place() {
+    let file = openssh::key_file(&PrivateKey([1; 32]), "");
+    let text = format!(
+        "node \"10.0.0.5:7400\" {{\n  public_key = <<EOT\n{file}EOT\n}}\n\
+         private_key = <<EOT\n{file}EOT\n"
+    );
+    let fixes: Vec<_> = problems(&text).into_iter().map(|(_, _, fix)| fix).collect();
+    let node = "Remove the private key from this file now, and use the line that \
+                `foundation profile` prints";
+    assert_eq!(fixes, [node, PASTED_KEY]);
+}
+
 /// A private key pasted as a node's `public_key` or into its label gives only the
 /// alarm, as in a config file, so no message quotes it.
 #[test]
@@ -369,7 +384,9 @@ fn a_private_key_in_a_node_block_is_only_an_alarm() {
             .iter()
             .map(|(code, _, fix)| (*code, fix.as_str()))
             .collect();
-        assert_eq!(codes, [("config.private-key", PASTED_KEY)], "{text}");
+        let fix = "Remove the private key from this file now, and use the line that \
+                   `foundation profile` prints";
+        assert_eq!(codes, [("config.private-key", fix)], "{text}");
         assert!(!problems[0].1.contains(body), "{problems:?}");
     }
 }
