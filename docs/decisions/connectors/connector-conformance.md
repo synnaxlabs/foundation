@@ -3,21 +3,25 @@
   kind crate runs them as its `conformance` test, from `<kind>/main.rs`: a `Suite` and
   one `suite!` line, which expands to one `#[test]` for each scenario, and two that
   check that a scenario that is not done at `RING` fails. A `<kind>/main.rs` can also
-  hold a test of that kind alone, which uses `scenarios::run` and the `pub(crate)`
-  items of `scenarios.rs` (`opcua`: a config with no `read` block;
-  `laptop.architect-2`, 2026-10-18T22:00:39Z:
+  hold a test of that kind alone, which uses `scenarios::run` and the `pub(crate)` items
+  of `scenarios.rs` (`opcua`: a config with no `read` block; `laptop.architect-2`,
+  2026-10-18T22:00:39Z:
   https://github.com/synnaxlabs/foundation/pull/3272#issuecomment-6255674282). The
   `[[test]]` entry of each kind is part of the oracle. The scenarios use only public
   items: the rig of `connector::testing`, `hub::testing::Env`, the sim, `env`,
   `document`, `types`, and the `kind`, `status`, and `cancel` modules of `connector`.
-  Each runs two sim nodes:
-  the plant (the rig and the connector) and the device (the kind's simulator). A `Suite`
-  gives plain inputs: its table, a setup that defines what the connector needs and
-  starts each writer that feeds it, its simulator, the name of its progress count, its
-  backoff form, and the configs that its check refuses with their exact diagnostics.
-  People own the scenarios. A kind that fails one has a defect, or the person changes
-  the scenario. The scenarios cover kinds whose device is a TCP address: a device that
-  is not TCP waits on #3075, until the first suite of a kind with no TCP carrier.
+  Each runs two sim nodes: the plant (the rig and the connector) and the device (the
+  kind's simulator). A `Suite` gives plain inputs: its table, a setup that defines what
+  the connector needs and starts each writer that feeds it, its simulator, the name of
+  its progress count, its backoff form, and the configs that its check refuses with
+  their exact diagnostics. The simulator of `opcua` changes each variable every 100 ms,
+  so the suite runs the default mode, which subscribes, and its progress grows.
+  `polled = true` keeps its crate and ONE NODE tests (`laptop.architect-2`,
+  2026-10-20T10:03:28Z:
+  https://github.com/synnaxlabs/foundation/pull/3548#issuecomment-6288442532). People
+  own the scenarios. A kind that fails one has a defect, or the person changes the
+  scenario. The scenarios cover kinds whose device is a TCP address: a device that is
+  not TCP waits on #3075, until the first suite of a kind with no TCP carrier.
 
   "Heals" means: within `HEAL` (the backoff cap of 1 min, plus 10 s), the state is
   Running, the error is gone, and the progress count grows past its value at the start
