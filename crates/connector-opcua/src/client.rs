@@ -272,10 +272,6 @@ impl fmt::Display for Credential {
 /// The mode of a secure channel. open62541 takes the endpoint in the mode of the
 /// highest security level that the server offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the config gives the mode in PR 2d of #2934")
-)]
 pub(crate) enum Mode {
     Sign,
     SignAndEncrypt,
