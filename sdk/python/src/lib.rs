@@ -101,16 +101,16 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
 ///
 /// The profile is the HCL file that `FOUNDATION_PROFILE` names, else
 /// `~/.foundation/profile.hcl`. Its `subject` gives the subject, with the key of its
-/// `private_key` file, else of `~/.foundation/<subject>.key`. A `private_key` path
-/// that starts with `~/` is in the home directory, and a relative one is in the
-/// directory of the profile. Each `node` block pins the public key of the node at its
-/// address. With no other source, the subject is the login name of the user, with the
-/// key of `~/.foundation/<login>.key`. A key file in `~/.foundation` that is not there
-/// is made, as `ssh-keygen -t ed25519 -N ""` makes it. With no source of the public
-/// key, the node that answers at `address` is trusted on first use: the profile pins
-/// its key, and the logger `foundation` gets one WARNING. `strict`, else the profile's
-/// `strict`, refuses a node with no source of its key. Other Python threads run while
-/// it waits.
+/// `private_key` file, else of `~/.foundation/<subject>.key`. A `private_key` path that
+/// starts with `~/` is in the home directory, and a relative one is in the directory of
+/// the profile's path, also when the profile is a link. Each `node` block pins the
+/// public key of the node at its address. With no other source, the subject is the
+/// login name of the user, with the key of `~/.foundation/<login>.key`. A key file in
+/// `~/.foundation` that is not there is made, as `ssh-keygen -t ed25519 -N ""` makes
+/// it. With no source of the public key, the node that answers at `address` is trusted
+/// on first use: the profile pins its key, and the logger `foundation` gets one
+/// WARNING. `strict`, else the profile's `strict`, refuses a node with no source of its
+/// key. Other Python threads run while it waits.
 ///
 /// Raises `TypeError` for an argument of a wrong type, `ValueError` for an argument
 /// that does not parse, a `private_key` with no `subject`, a profile with a problem, no

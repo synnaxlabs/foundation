@@ -105,8 +105,9 @@ impl Profile {
     /// The private key of `subject` in the key file `named`, else in
     /// `~/.foundation/<subject>.key`, which [`made`] makes when it is not there. A
     /// `named` path that starts with `~/` is in the home directory, and a relative one
-    /// is in the directory of the profile. Raises `ValueError` as [`made`] does,
-    /// and `OSError` when a file cannot be read or written, or `named` is not there.
+    /// is in the directory of the profile's path, also when the profile is a link.
+    /// Raises `ValueError` as [`made`] does, and `OSError` when a file cannot be read
+    /// or written, or `named` is not there.
     pub(crate) fn private_key(
         &self,
         py: Python<'_>,

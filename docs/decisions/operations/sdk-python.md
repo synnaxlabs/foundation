@@ -29,9 +29,9 @@
   `docs/decisions/config/profile.md`). An empty `FOUNDATION_PROFILE` counts as unset.
   Its `subject` gives the subject, with the key of its `private_key` file, else of
   `~/.foundation/<subject>.key`. A `private_key` path that starts with `~/` is in the
-  home directory, and a relative one is in the profile's directory; each other path is
-  as written. A file that the profile names and that is not there raises, and is not
-  made (item 4 of
+  home directory, and a relative one is in the directory of the profile's path, also
+  when the profile is a link; each other path is as written. A file that the profile
+  names and that is not there raises, and is not made (item 4 of
   https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6251937504; item 1
   of https://github.com/synnaxlabs/foundation/pull/3473#issuecomment-6281062553). A
   `subject` argument with no `private_key` takes the key of
