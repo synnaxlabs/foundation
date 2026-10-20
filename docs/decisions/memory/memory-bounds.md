@@ -97,13 +97,16 @@
   the decode of its open until the stream ends. Its decoded names, 16 bytes and the
   length of each, count from that decode until the stream sends its places. A forward
   holds the places of its group with its names, 4 bytes for each channel of its open,
-  before it reads a place (#3104 PR 3b, HUB FORWARD). A write open
+  from that decode, before it reads a place. It holds its ends and counts from its last
+  place until the stream ends, for the channels of its group only (#3104 PR 3b, HUB
+  FORWARD). A write open
   is at most `OPEN_BYTES_MAX` (64 KiB), with at least 2 bytes for each channel, so its
   ends and counts are at most 640 KiB, and the budget bounds the places of all write
   streams of a node at 1,677,721. The cost: the writers of a subject hold their ends and
   counts in its share until their streams end, so wide writers can make the requests
   and read opens of that subject stop with `BUSY`. Limits: the budget counts only the
-  ends, the counts that come before a draft, and the names. Other memory of a write
+  ends, the counts that come before a draft, the names, and the places of a forward.
+  Other memory of a write
   stream that grows with its channels (its key set and the home's writer) is not
   counted (`laptop.architect`,
   2026-10-18T07:45:01Z:
