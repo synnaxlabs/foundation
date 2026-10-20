@@ -368,7 +368,9 @@ fn a_pin_keeps_the_key_that_another_program_pinned_after_the_read() {
     let [first, second] = [1, 2].map(|byte| PrivateKey([byte; 32]).public());
     Python::initialize();
     Python::attach(|_| {
-        let profile = Profile { path: path.clone() };
+        let profile = Profile {
+            path: Some(path.clone()),
+        };
         fs::create_dir_all(&dir).unwrap();
         let text = format!(
             "node \"{at}\" {{\n  public_key = \"{}\"\n}}\n",
@@ -402,7 +404,9 @@ fn a_pin_waits_for_the_lock_of_a_rival() {
         .open(dir.join("profile.hcl.lock"))
         .unwrap();
     rival.lock().unwrap();
-    let profile = Profile { path: path.clone() };
+    let profile = Profile {
+        path: Some(path.clone()),
+    };
     let pinning = thread::spawn(move || profile.pin(at, second).map_err(drop));
     thread::sleep(Duration::from_millis(200));
     assert!(!pinning.is_finished());
@@ -424,7 +428,7 @@ fn a_pin_writes_a_profile_of_a_bare_name_in_the_working_directory() {
     let at: SocketAddr = "10.0.0.5:7400".parse().unwrap();
     let key = PrivateKey([4; 32]).public();
     let profile = Profile {
-        path: PathBuf::from(&name),
+        path: Some(PathBuf::from(&name)),
     };
     let pinned = profile.pin(at, key).map_err(drop);
     let text = fs::read_to_string(&name);
@@ -454,7 +458,10 @@ fn a_pin_raises_the_error_of_the_sync_of_its_directory() {
     let path = dir.join("profile.hcl");
     let at: SocketAddr = "10.0.0.5:7400".parse().unwrap();
     let key = PrivateKey([5; 32]).public();
-    let pinned = Profile { path: path.clone() }.pin(at, key);
+    let pinned = Profile {
+        path: Some(path.clone()),
+    }
+    .pin(at, key);
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
     fs::remove_dir_all(&dir).unwrap();
     Python::initialize();
@@ -482,7 +489,9 @@ fn a_pin_keeps_a_linked_profile_a_link() {
     std::os::unix::fs::symlink(&target, &path).unwrap();
     let at: SocketAddr = "10.0.0.5:7400".parse().unwrap();
     let key = PrivateKey([3; 32]).public();
-    let profile = Profile { path: path.clone() };
+    let profile = Profile {
+        path: Some(path.clone()),
+    };
     assert_eq!(profile.pin(at, key).map_err(drop), Ok(key));
     assert!(fs::symlink_metadata(&path).unwrap().is_symlink());
     assert_eq!(
@@ -516,7 +525,9 @@ fn a_pin_of_a_profile_that_links_to_no_file_keeps_the_link() {
     std::os::unix::fs::symlink(&target, &path).unwrap();
     let at: SocketAddr = "10.0.0.5:7400".parse().unwrap();
     let key = PrivateKey([3; 32]).public();
-    let profile = Profile { path: path.clone() };
+    let profile = Profile {
+        path: Some(path.clone()),
+    };
     assert_eq!(profile.pin(at, key).map_err(drop), Ok(key));
     let linked = fs::symlink_metadata(&path).unwrap().is_symlink();
     let written = fs::read_to_string(&target).ok();
@@ -546,7 +557,7 @@ fn a_private_key_of_a_tilde_and_a_user_is_in_the_directory_of_the_profile() {
     )
     .unwrap();
     let profile = Profile {
-        path: dir.join("profile.hcl"),
+        path: Some(dir.join("profile.hcl")),
     };
     Python::initialize();
     let read = Python::attach(|py| {
@@ -587,7 +598,7 @@ fn a_private_key_of_a_linked_profile_is_next_to_the_link() {
     )
     .unwrap();
     let profile = Profile {
-        path: dir.join("links/profile.hcl"),
+        path: Some(dir.join("links/profile.hcl")),
     };
     Python::initialize();
     let read = Python::attach(|py| {
@@ -611,7 +622,9 @@ fn a_pin_of_a_profile_that_links_to_itself_raises() {
     let path = dir.join("profile.hcl");
     std::os::unix::fs::symlink(&path, &path).unwrap();
     let looped = fs::canonicalize(&path).unwrap_err();
-    let profile = Profile { path: path.clone() };
+    let profile = Profile {
+        path: Some(path.clone()),
+    };
     let at: SocketAddr = "10.0.0.5:7400".parse().unwrap();
     Python::initialize();
     Python::attach(|py| {

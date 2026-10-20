@@ -74,6 +74,25 @@ def home(cleanup) -> str:
     return dir.name
 
 
+@contextlib.contextmanager
+def homeless(test: unittest.TestCase) -> typing.Iterator[None]:
+    """Runs the block as a user with no home directory, in a new working directory,
+    and asserts that the block leaves no file there."""
+    environ = dict(os.environ)
+    environ.pop("HOME")
+    unknown = KeyError("getpwuid(): uid not found")
+    work = tempfile.TemporaryDirectory(prefix="foundation-python-")
+    test.addCleanup(work.cleanup)
+    with (
+        unittest.mock.patch.dict(os.environ, environ, clear=True),
+        unittest.mock.patch("pwd.getpwuid", side_effect=unknown),
+        contextlib.chdir(work.name),
+    ):
+        test.assertEqual(os.path.expanduser("~"), "~")
+        yield
+    test.assertEqual(os.listdir(work.name), [])
+
+
 def setUpModule() -> None:
     home(unittest.addModuleCleanup)
 
@@ -925,7 +944,7 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(
             str(raised.exception),
             f"{mine}: {passphrase}remove `private_key` from {self.profile}, and "
-            f"connect makes {key}",
+            "connect makes ~/.foundation/alice.key",
         )
 
     def test_a_key_file_of_another_problem_is_refused_with_its_fix(self) -> None:
@@ -1034,7 +1053,7 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(
             str(raised.exception),
             f"{self.dir}/mine.key: no file is there: remove `private_key` from "
-            f"{self.profile}, and connect makes {self.dir}/alice.key",
+            f"{self.profile}, and connect makes ~/.foundation/alice.key",
         )
         self.assertEqual(os.listdir(self.dir), ["profile.hcl"])
 
@@ -1061,19 +1080,13 @@ class ProfileTest(unittest.TestCase):
         )
 
     def test_a_user_with_no_home_directory_gets_the_fix_and_no_file(self) -> None:
-        environ = dict(os.environ)
-        environ.pop("HOME")
-        unknown = KeyError("getpwuid(): uid not found")
-        work = tempfile.TemporaryDirectory(prefix="foundation-python-")
-        self.addCleanup(work.cleanup)
-        with (
-            unittest.mock.patch.dict(os.environ, environ, clear=True),
-            unittest.mock.patch("pwd.getpwuid", side_effect=unknown),
-            contextlib.chdir(work.name),
-        ):
-            self.assertEqual(os.path.expanduser("~"), "~")
+        with homeless(self):
             with self.assertRaises(OSError) as raised:
                 foundation.connect(self.node.address, subject="alice")
+            with self.assertRaises(OSError) as pinned:
+                foundation.connect(
+                    self.node.address, subject="plant.dave", private_key=bytes(32)
+                )
             with self.assertRaises(foundation.Refused) as refused:
                 foundation.connect(
                     self.node.address,
@@ -1083,10 +1096,38 @@ class ProfileTest(unittest.TestCase):
                 )
         self.assertEqual(
             str(raised.exception),
-            "the user has no home directory for ~/.foundation: set HOME",
+            "the user has no home directory for ~/.foundation/alice.key: set HOME",
+        )
+        self.assertEqual(
+            str(pinned.exception),
+            "the user has no home directory for ~/.foundation/profile.hcl: set HOME",
         )
         self.assertEqual(str(refused.exception), refusal("plant.dave", ZERO))
-        self.assertEqual(os.listdir(work.name), [])
+
+    def test_a_user_with_no_home_directory_connects_with_the_data_directory(
+        self,
+    ) -> None:
+        with homeless(self):
+            with called(self, foundation.connect, data=self.node.data) as client:
+                self.assertEqual(client.address, self.node.address)
+
+    def test_a_user_with_no_home_directory_takes_the_key_file_of_a_profile(
+        self,
+    ) -> None:
+        dir = os.path.join(os.path.dirname(self.dir), "conf")
+        os.makedirs(dir)
+        profile = os.path.join(dir, "profile.hcl")
+        with open(profile, "w") as file:
+            file.write('subject = "plant.bob"\nprivate_key = "bob.key"\n')
+        bob = os.path.join(dir, "bob.key")
+        keygen("-q", "-t", "ed25519", "-N", "", "-f", bob)
+        with homeless(self):
+            with unittest.mock.patch.dict(os.environ, {"FOUNDATION_PROFILE": profile}):
+                with self.assertRaises(foundation.Refused) as raised:
+                    foundation.connect(
+                        self.node.address, public_key=self.node.public_key()
+                    )
+        self.assertEqual(str(raised.exception), refusal("plant.bob", line(bob)))
 
     def test_another_error_of_the_login_name_is_raised_as_it_is(self) -> None:
         broken = RuntimeError("the password database is broken")

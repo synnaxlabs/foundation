@@ -15,11 +15,15 @@ use pyo3::prelude::*;
 use types::ed25519::{PrivateKey, PublicKey};
 use types::name::Name;
 
+/// The profile of the host when `FOUNDATION_PROFILE` names no file.
+const DEFAULT: &str = "~/.foundation/profile.hcl";
+
 /// The file of the profile of the host.
 pub(crate) struct Profile {
-    /// The file that `FOUNDATION_PROFILE` names, else `~/.foundation/profile.hcl`. An
-    /// empty `FOUNDATION_PROFILE` counts as unset.
-    pub(crate) path: PathBuf,
+    /// The file that `FOUNDATION_PROFILE` names, else `~/.foundation/profile.hcl`, or
+    /// `None` when the user has no home directory for it. An empty
+    /// `FOUNDATION_PROFILE` counts as unset.
+    pub(crate) path: Option<PathBuf>,
 }
 
 impl Profile {
@@ -30,18 +34,36 @@ impl Profile {
             .call_method1("get", ("FOUNDATION_PROFILE",))?
             .extract()?;
         let path = match named.filter(|path| !path.as_os_str().is_empty()) {
-            Some(path) => path,
-            None => home(py)?.join("profile.hcl"),
+            Some(path) => Some(path),
+            None => home(py)?.map(|home| home.join(".foundation/profile.hcl")),
         };
         Ok(Self { path })
     }
 
-    /// What the file holds, or an empty profile when it is not there. Raises
-    /// `ValueError` for a profile with a problem, with each problem by line, or that is
-    /// not UTF-8, and `OSError` when the file cannot be read.
+    /// The path of the file as a message names it: `~/.foundation/profile.hcl` when
+    /// the user has no home directory.
+    pub(crate) fn shown(&self) -> &Path {
+        self.path.as_deref().unwrap_or(Path::new(DEFAULT))
+    }
+
+    /// What the file holds, or an empty profile when it is not there or the user has
+    /// no home directory for it. Raises `ValueError` for a profile with a problem, with
+    /// each problem by line, or that is not UTF-8, and `OSError` when the file cannot
+    /// be read.
     pub(crate) fn read(&self) -> PyResult<config::profile::Profile> {
-        let text = text(&self.path)?.unwrap_or_default();
-        decoded(&self.path, &text)
+        let text = match &self.path {
+            Some(path) => text(path)?.unwrap_or_default(),
+            None => String::new(),
+        };
+        decoded(self.shown(), &text)
+    }
+
+    /// The path of the file. Raises `OSError` when the user has no home directory
+    /// for it.
+    fn file(&self) -> PyResult<&Path> {
+        self.path
+            .as_deref()
+            .ok_or_else(|| homeless(Path::new(DEFAULT)))
     }
 
     /// Pins `public_key` as the key of the node at `address` in the file, unless a
@@ -51,18 +73,18 @@ impl Profile {
     /// and the file changes in one rename, which is on the disk before it returns.
     /// Makes each missing directory of the path with mode 0700, and the file with
     /// mode 0600. Raises `ValueError` when the file has a problem, and `OSError` when
-    /// it cannot be read or written.
+    /// it cannot be read or written, or the user has no home directory for it.
     pub(crate) fn pin(
         &self,
         address: SocketAddr,
         public_key: PublicKey,
     ) -> PyResult<PublicKey> {
-        let os =
-            |e: io::Error| PyOSError::new_err(format!("{}: {e}", self.path.display()));
-        let path = match fs::canonicalize(&self.path) {
+        let file = self.file()?;
+        let os = |e: io::Error| PyOSError::new_err(format!("{}: {e}", file.display()));
+        let path = match fs::canonicalize(file) {
             Ok(path) => path,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                linked(&self.path).map_err(os)?
+                linked(file).map_err(os)?
             }
             Err(e) => return Err(os(e)),
         };
@@ -74,7 +96,7 @@ impl Profile {
         .map_err(os)?;
         lock.lock().map_err(os)?;
         let text = text(&path)?.unwrap_or_default();
-        if let Some(pinned) = decoded(&self.path, &text)?.nodes.get(&address) {
+        if let Some(pinned) = decoded(file, &text)?.nodes.get(&address) {
             return Ok(*pinned);
         }
         let mut document = config_hcl::read(Source(0), &text)
@@ -107,34 +129,29 @@ impl Profile {
     /// `named` path that starts with `~/` is in the home directory, and a relative one
     /// is in the directory of the profile's path, also when the profile is a link.
     /// Raises `ValueError` as [`made`] does, and `OSError` when a file cannot be read
-    /// or written, or `named` is not there.
+    /// or written, `named` is not there, or the user has no home directory for the
+    /// file.
     pub(crate) fn private_key(
         &self,
         py: Python<'_>,
         subject: &Name,
         named: Option<&Path>,
     ) -> PyResult<PrivateKey> {
-        let default = home(py)?.join(format!("{subject}.key"));
+        let default = Path::new("~/.foundation").join(format!("{subject}.key"));
         let Some(named) = named else {
             let fix = "move the file away, and connect makes a new key there";
-            return made(subject, &default, fix);
+            return made(subject, &expanded(py, &default)?, fix);
         };
         let fix = format!(
             "remove `private_key` from {}, and connect makes {}",
-            self.path.display(),
+            self.shown().display(),
             default.display()
         );
-        let path = self.path.with_file_name("").join(expanded(py, named)?);
+        let path = self.file()?.with_file_name("").join(expanded(py, named)?);
         key(&path, &fix)?.ok_or_else(|| {
             PyOSError::new_err(format!("{}: no file is there: {fix}", path.display()))
         })
     }
-}
-
-/// The directory `~/.foundation`, where the profile and each key file of a subject
-/// are by default.
-fn home(py: Python<'_>) -> PyResult<PathBuf> {
-    expanded(py, Path::new("~/.foundation"))
 }
 
 /// `path` in the home directory when it starts with `~/`, else `path` as written.
@@ -143,19 +160,27 @@ fn expanded(py: Python<'_>, path: &Path) -> PyResult<PathBuf> {
     let Some(within) = path.to_str().and_then(|path| path.strip_prefix("~/")) else {
         return Ok(path.to_owned());
     };
+    let home = home(py)?.ok_or_else(|| homeless(path))?;
+    Ok(home.join(within.trim_start_matches('/')))
+}
+
+/// The home directory of the user, or `None` when the user has none.
+fn home(py: Python<'_>) -> PyResult<Option<PathBuf>> {
     // With no `HOME` and no entry of the uid in the password file, `expanduser` gives
     // `~` as it is.
     let home: PathBuf = py
         .import("os.path")?
         .call_method1("expanduser", ("~",))?
         .extract()?;
-    if !home.is_absolute() {
-        return Err(PyOSError::new_err(format!(
-            "the user has no home directory for {}: set HOME",
-            path.display()
-        )));
-    }
-    Ok(home.join(within.trim_start_matches('/')))
+    Ok(Some(home).filter(|home| home.is_absolute()))
+}
+
+/// The error for `path` in the home directory of a user that has none.
+fn homeless(path: &Path) -> PyErr {
+    PyOSError::new_err(format!(
+        "the user has no home directory for {}: set HOME",
+        path.display()
+    ))
 }
 
 /// The private key of `subject` in the OpenSSH file `path`. When there is no file,
