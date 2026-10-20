@@ -87,3 +87,28 @@ fn a_learner_that_the_leader_reaches_dials_no_voter() {
         assert_eq!(peers, [Some(leader)], "run {seed}");
     }
 }
+
+// With no leader, node 4 names the voters in key order, one each two election
+// timeouts, and starts again after the last. Each look falls half a tick after a
+// tick.
+#[test]
+fn a_learner_that_no_leader_reaches_names_each_voter_in_turn() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 4, &MEMBERS, &IDS).await.unwrap();
+        let clock = node.clock();
+        clock.sleep(Span::from_nanos(TICK.nanos() / 2)).await;
+        let mut turns = Vec::new();
+        let mut turn = None;
+        let quiet = 2 * ELECTION_TICKS;
+        for tick in 0..=4 * quiet {
+            let now = mesh.group.borrow().turn;
+            if now != turn {
+                turns.push((tick, now));
+                turn = now;
+            }
+            clock.sleep(TICK).await;
+        }
+        let at = |turn, id| (turn * quiet, Some(key(id)));
+        assert_eq!(turns, [at(1, 1), at(2, 2), at(3, 3), at(4, 1)]);
+    });
+}
