@@ -83,20 +83,34 @@
   places, so a mesh whose limits differ fails at its first forwarded write. The member
   gives `serve::Error::Limit`, whose text names both limits and tells the user to give
   each node of the mesh the same limit (condition of `laptop.monitor` on key choice 8).
-  A reply before the places that `Opening` refuses gives `FAILED` to the program and
-  `MALFORMED` to the home. A code of the home before the places stops the program's
-  stream with that code, `NOT_HOME` included, as `serve::Error::Forward { home, refusal
-  }`, and an end of the stream with no code gives `FAILED`. The member finds no new home
-  (#3541). After the places, the member splices: each message of the program goes to the
+  A reply before the places that `Opening` refuses, or a count of places over the
+  channels of the open plus one, gives `FAILED` to the program and `MALFORMED` to the
+  home. The member holds the places in the subject's share until it sends them to the
+  program, so a home that sends more than the share holds gives `BUSY`. While it waits
+  for the places, it sends the home each renewal of the hello. A code of the home before
+  the places stops the program's stream with that code, `NOT_HOME` included, as
+  `serve::Error::Forward { home, refusal }`, and an end of the stream with no code gives
+  `FAILED`. The member finds no new home (#3541). A write whose lease is zero gets
+  `MALFORMED` before the find of its home, not the `FAILED` of a forward that the home
+  refuses. After the places, the member splices: each message of the program goes to the
   home as it came, each renewal of the hello goes between frames, and each reply goes to
   the program as it came. It reads no more of the program while 64 frames have an
-  outcome due. When the home stops the stream, the member ends group 0 with
-  `Reply::Ended`: `REFUSED`, `VIA`, and `CHANGED` give `End::Refused`, `UNKNOWN` gives
-  `End::Removed`, and each other code gives `End::Failed`. A reply that `Replies`
-  refuses, or a finish of the home before the program's, gives `End::Failed` and
-  `MALFORMED` to the home. A close of the program's session resets the stream to the
-  home with code 0. A split of each message for a home with smaller messages: #3542,
-  not before the demo. Plan:
+  outcome due, so a forward moves at most 64 frames in each round trip to the home
+  (answer 4 of
+  https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6269021946). When
+  the forward is cut, the member resets the program's write with the code of the home,
+  and with `FAILED` in place of `MALFORMED`. It also gives `FAILED` for a reply that
+  `Replies` refuses, a finish of the home before the program's, a finish with an outcome
+  due, and an error of the session to the home. For the first three, it stops the home
+  with `MALFORMED`. A reply that the member read but did not send has an unknown fate,
+  as for each reset of a write. Lost: an end of group 0 with `Reply::Ended`, which needs
+  an end of unknown fate in `wire` (PR 4b). The cut reset: `laptop.monitor`, key choice
+  4, 2026-10-20T08:17:05Z
+  (https://github.com/synnaxlabs/foundation/pull/3546#issuecomment-6286607969), and
+  `laptop.architect`, 2026-10-20T08:21:06Z, with the lease check as its condition
+  (https://github.com/synnaxlabs/foundation/pull/3546#issuecomment-6286674415). A close
+  of the program's session resets the stream to the home with code 0. A split of each
+  message for a home with smaller messages: #3542, not before the demo. Plan:
   https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6284841084, with the
   changes of
   https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6284933117. The doc

@@ -102,10 +102,12 @@
   are those of the channels of its group only (#3104 PR 3b, HUB FORWARD;
   `laptop.architect`, 2026-10-20T02:03:30Z:
   https://github.com/synnaxlabs/foundation/pull/3480#issuecomment-6281613899). The
-  member that forwards a write holds the ends and counts of each channel of its open
-  and one index, from the decode of its open until the stream ends, and its open,
-  encoded, in place of its names until the forward sends it (#3104 PR 4a, HUB
-  FORWARD). A write
+  member that forwards a write holds the ends and counts of each channel of its open and
+  one index, from the find of its home until the stream ends, and its open, encoded, in
+  place of its names until the forward sends it. It also holds the places of the home,
+  the size of a `Place` for each place that the home counts and the bytes of each
+  message of places after the first, until it sends them to the program (#3104 PR 4a,
+  HUB FORWARD). A write
   open is at most `OPEN_BYTES_MAX` (64 KiB), with at least 2 bytes for each channel, and
   each channel adds at most two places, itself and its index, so its ends and counts
   are at most 1,280 KiB, and the budget bounds the places of all write streams of a
