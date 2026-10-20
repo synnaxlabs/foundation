@@ -90,13 +90,15 @@ beside them.
 A plan whose change can reach the cost limit states its trigger, and the architect OKs
 it with the plan: each bench line, the statistic that decides (the p99 for a latency
 target), the commits that the run compares, and the slowdown that adds the judgment,
-which is the cost limit in the unit of the line. The run compares the head with the
-base of the PR (`.claude/agents/performance.md`) and, for work that spans PRs, also with
-the base of its first PR. A slowdown at the trigger in either span adds the judgment, so
-a speedup that merges between them does not hide the cost. The judgment names the PR
-that made the cost, which the commits show. A span in which each function of product
-code that the line runs has the same instructions at both commits adds no judgment
-(BENCH BASELINES, `docs/decisions/testing/bench-baselines.md`). The run then decides,
-with no new ruling on the trigger: under the trigger, the PR gives its numbers; at or
-over it, the PR adds the P1 judgment, which the architect accepts or rejects (#3283,
-#3581).
+which is the cost limit in the unit of the line. The run compares the head with the base
+of the PR (`.claude/agents/performance.md`) and, for a plan of more than one PR, also
+with the base of the first PR of the plan. A slowdown at the trigger in either span adds
+the judgment, so a speedup that merges between them does not hide the cost. The judgment
+names the PR of the plan that made the cost, from the result of the own span of each PR
+of the plan. A part of the cost that no PR of the plan made goes to the daily run (BENCH
+BASELINES, `docs/decisions/testing/bench-baselines.md`), not to the judgment. A line
+with no time at a base gives only its numbers for that span. A span in which each
+function of product code that the line runs in its timed loop has the same instructions
+at both commits adds no judgment (BENCH BASELINES). The run then decides, with no new
+ruling on the trigger: under the trigger, the PR gives its numbers; at or over it, the
+PR adds the P1 judgment, which the architect accepts or rejects (#3283, #3581).

@@ -97,11 +97,14 @@
   2026-10-16T09:02:58Z:
   https://github.com/synnaxlabs/foundation/pull/2846#issuecomment-6211989872. Supersedes
   "at `main`" of the #2044 amendment above.
-  Amended (2026-10-20): for work that spans PRs, the run of a PR whose plan states a P1
-  trigger (`docs/claude/performance.md`, "The six questions") also compares its head
-  with the base of the first PR of the work. A result at or over the cost limit in that
-  span also needs the P1 judgment, which names the PR that made the cost. The amendment
-  of same instructions above holds for that span. Decided by `laptop.director`,
-  2026-10-20T14:25:46Z:
-  https://github.com/synnaxlabs/foundation/pull/3602#issuecomment-6293171744. Adds a
+  Amended (2026-10-20): for a plan of more than one PR whose change can reach the cost
+  limit (`docs/claude/performance.md`, "The six questions"), the run of each PR of the
+  plan also compares its head with the base of the first PR of the plan. A result at or
+  over the cost limit in that span also needs the P1 judgment, which names the PR of the
+  plan that made the cost. A part of the cost that no PR of the plan made goes to the
+  daily run, not to the judgment. The amendment of same instructions above holds for
+  that span. Decided by `laptop.director`, 2026-10-20T14:25:46Z:
+  https://github.com/synnaxlabs/foundation/pull/3602#issuecomment-6293171744, with no
+  question to the person at 2026-10-20T14:34:27Z:
+  https://github.com/synnaxlabs/foundation/pull/3602#issuecomment-6293359065. Adds a
   compare to the one of the 2026-10-16 amendment above.
