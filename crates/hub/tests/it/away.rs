@@ -536,6 +536,53 @@ fn frees_the_places_of_a_forward_once_it_sends_them() {
     assert_eq!(served, [Err(share), Err(held), Ok(Got::Ended)]);
 }
 
+/// The member holds the places of a forward in the share of its subject while it sends
+/// them to a program that takes none. The frames of 10 001 channels hold 200 020
+/// bytes, and the places 3 280 006.
+#[test]
+fn holds_the_places_of_a_forward_while_it_sends_them() {
+    const COUNT: usize = 10_000;
+    let served = away(
+        27,
+        |mut home| async move {
+            let mut out = [0; Places::LEN];
+            let count = u32::try_from(COUNT).expect("a count");
+            Places { count }.encode(&mut out);
+            home.stream.send(&out).await;
+            let places: Vec<Place> = (0..COUNT)
+                .map(|place| {
+                    let data_type = if place == 0 { STAMP } else { I64 };
+                    let key = u128::try_from(place).expect("a key") + 1;
+                    at(key, data_type, &format!("{place:0>255}"), 0)
+                })
+                .collect();
+            for message in place::messages(&places, MESSAGE) {
+                let mut out = vec![0; message.encoded_len()];
+                message.encode(&mut out);
+                home.stream.send(&out).await;
+                // Paced, so the pool of 1 MiB of the home keeps room for the next.
+                home.node.clock().sleep(Span::MILLISECOND).await;
+            }
+            assert_eq!(home.stream.recv().await, reset_with(0));
+        },
+        |mut agent, _| async move {
+            let write = agent.write(&["value"; COUNT]).await;
+            agent.node.clock().sleep(QUIET).await;
+            let mut busy = agent.unfinished(BODY_BYTES_MAX - 39, &[]).await;
+            assert_eq!(busy.recv().await, reset_with(BUSY));
+            drop(write);
+            super::read::finish(&mut agent).await;
+        },
+    );
+    let share = serve::Error::Share {
+        subject: name(SUBJECT),
+        length: BODY_BYTES_MAX - 39,
+        held: 200_020 + 3_280_006,
+    };
+    let closed = serve::Error::Stream(transport::Error::Closed { code: Code(0) });
+    assert_eq!(served, [Err(share), Ok(Got::Ended), Err(closed)]);
+}
+
 /// Renews the hello of `agent` with one that echoes `challenge`, keeps its nonce in
 /// `nonces`, and gives the next challenge once the member admitted it.
 async fn renew(
