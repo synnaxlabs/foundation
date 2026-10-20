@@ -7,6 +7,7 @@ use std::path::Path;
 
 use connector::kind::Table;
 use env::paths::Paths;
+use types::ed25519::PublicKey;
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -22,6 +23,7 @@ mod mcp;
 mod node;
 mod operation;
 mod plan;
+mod profile;
 mod reference;
 mod remote;
 pub mod roots;
@@ -42,7 +44,7 @@ use operation::Parsed;
 use remote::Link;
 use scope::Scope;
 pub use serve::serve;
-pub use start::{Log, Profile, Start};
+pub use start::{Log, Start};
 
 /// What the process does once [`cli`] returns.
 #[derive(Debug, PartialEq, Eq)]
@@ -51,9 +53,6 @@ pub enum Run {
     Exit(u8),
     /// Start a node with these arguments. `cli` wrote nothing for it.
     Start(Start),
-    /// Print the `node` block of a program's profile that pins the node of `data`.
-    /// `cli` wrote nothing for it.
-    Profile(Profile),
 }
 
 /// Runs one command line, such as `["foundation", "version", "--json"]`, and returns
@@ -82,8 +81,14 @@ pub enum Run {
 /// that is a directory; it reads no file of a directory in it. `foundation mcp` runs
 /// each tool call of `plan`, `apply`, `status`, `browse`, and `import` on the node of
 /// its own `--data`. It calls `reach` at its first such call, and again only at the
-/// call after a [`Failure`] of what `reach` gave. `start` and the other operations call
-/// neither.
+/// call after a [`Failure`] of what `reach` gave.
+///
+/// `profile` calls `public_key` with its data directory once, and does not call
+/// `reach`. It writes the `node` block of a profile, in HCL, that pins the key that
+/// `public_key` gives at the address of its argument. With `--json`, it writes
+/// `{"address": "<ip:port>", "public_key": "<the line of an OpenSSH .pub file>"}`. A
+/// [`Failure`] of `public_key` is the error of the command, with status 1. `start` and
+/// the other operations call neither `reach` nor `public_key`.
 ///
 /// `docs` states the body of each kind of `kinds`.
 ///
@@ -108,6 +113,7 @@ pub async fn cli<C>(
     front_ends: &FrontEnds,
     kinds: &Table,
     mut reach: impl AsyncFnMut(&Path) -> Result<C, Failure>,
+    mut public_key: impl AsyncFnMut(&Path) -> Result<PublicKey, Failure>,
 ) -> Run
 where
     C: AsyncFn(&[u8]) -> Result<Vec<u8>, Failure>,
@@ -117,7 +123,16 @@ where
     let json = json(&args);
     let done = match operation::parse(&args, json) {
         Ok(Parsed::Start(start)) => return Run::Start(start),
-        Ok(Parsed::Profile(profile)) => return Run::Profile(profile),
+        Ok(Parsed::Profile { address, data }) => match public_key(&data).await {
+            Ok(public_key) => {
+                let pin = profile::Pin {
+                    address,
+                    public_key,
+                };
+                write(&mut output, &render(json, &pin, || pin.text()))
+            }
+            Err(failure) => Err(Stop::Failed(Error::Node(failure))),
+        },
         Ok(Parsed::Run { request, data }) => {
             let mut link = Link::new(async || reach(&data).await);
             match request

@@ -17,6 +17,7 @@ use env::threads::Threads;
 use node::Budget;
 use ops::{Failure, Run, Start};
 use types::byte::Size;
+use types::ed25519::PublicKey;
 use types::name::Name;
 
 /// The most pool budget that a first start gives.
@@ -31,6 +32,7 @@ const PANIC: Duration = Duration::from_secs(1);
 const BUSY: Code = Code::new("node.busy");
 const DATA: Code = Code::new("node.data");
 const UNNAMED: Code = Code::new("node.unnamed");
+const UNSTARTED: Code = Code::new("node.unstarted");
 const RENAMED: Code = Code::new("node.renamed");
 const NAME: Code = Code::new("node.name");
 const RESERVED: Code = Code::new("node.reserved");
@@ -76,7 +78,6 @@ fn run(args: &[OsString], vars: BTreeMap<OsString, OsString>) -> Result<u8, Fail
     match command_line(&shards, args.to_vec())? {
         Run::Exit(status) => Ok(status),
         Run::Start(start) => node(&start, shards, vars).map(|()| 0),
-        Run::Profile(_) => unreachable!("invariant: `command_line` runs a profile"),
     }
 }
 
@@ -110,7 +111,7 @@ fn command_line(shards: &Shards, args: Vec<OsString>) -> Result<Run, Failure> {
             input.read(ops::line).await
         };
         let run = ops::cli(
-            args.clone(),
+            args,
             input,
             io::stdout().lock(),
             io::stderr().lock(),
@@ -118,12 +119,9 @@ fn command_line(shards: &Shards, args: Vec<OsString>) -> Result<Run, Failure> {
             &node::front_ends(),
             &node::kinds(),
             async |dir: &Path| reach(dir, &tasks, &opened).await.map(send),
+            async |dir: &Path| public_key(dir, &opened).await,
         )
         .await;
-        let run = match run {
-            Run::Profile(asked) => Run::Exit(profile(&asked, &args, &opened).await),
-            run => run,
-        };
         ran.send(run).expect("invariant: `main` keeps the receiver");
     });
     let shard = shard.map_err(failed)?;
@@ -171,7 +169,7 @@ async fn reach(
     opened: &mpsc::Sender<env::thread::Handle>,
 ) -> Result<program::Session, Failure> {
     let reached = node::client::reach(node::client::Config {
-        files: files(dir, opened)?,
+        files: files(dir, opened).map_err(|error| stored(dir, error))?,
         net: net(),
         clock: os::clock(),
         entropy: os::entropy(),
@@ -190,55 +188,52 @@ async fn reach(
 fn files(
     dir: &Path,
     opened: &mpsc::Sender<env::thread::Handle>,
-) -> Result<env::files::Files, Failure> {
-    let threads = os::threads().map_err(failed)?;
-    let (disk, handle) =
-        os::stored(dir, &threads, "files-reach").map_err(|error| stored(dir, error))?;
+) -> Result<env::files::Files, os::Error> {
+    let threads = os::threads()?;
+    let (disk, handle) = os::stored(dir, &threads, "files-reach")?;
     opened
         .send(handle)
         .expect("invariant: `main` keeps the receiver");
     Ok(env::files::Files::new(disk))
 }
 
-/// Writes the `node` block of a profile that pins the node that runs on the data
-/// directory of `asked`, at its address, to standard output, as JSON with `--json`,
-/// and gives the exit status. A failure goes to standard error through [`ops::fail`]
-/// of `args`.
-async fn profile(
-    asked: &ops::Profile,
-    args: &[OsString],
+/// The public key of the node of the data directory `dir`, from its file `node.key`.
+/// It sends the handle of the I/O thread that reads `dir` to `opened`, for the main
+/// thread to join.
+async fn public_key(
+    dir: &Path,
     opened: &mpsc::Sender<env::thread::Handle>,
-) -> u8 {
-    let dir = &asked.data;
-    let local = match files(dir, opened) {
-        Ok(files) => sector::local::read(&files)
-            .await
-            .map_err(|error| unreached(dir, node::client::Error::Local(error))),
-        Err(failure) => Err(failure),
+) -> Result<PublicKey, Failure> {
+    let files = match files(dir, opened) {
+        Ok(files) => files,
+        Err(os::Error::Dir(error)) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(unstarted(dir));
+        }
+        Err(error) => return Err(stored(dir, error)),
     };
-    let public_key = match local {
-        Ok(local) => local.public_key,
-        Err(failure) => return ops::fail(args, &failure, io::stderr().lock()),
-    };
-    let text = if asked.json {
-        let line = config::openssh::line(public_key);
-        format!(
-            "{}\n",
-            serde_json::json!({ "address": asked.address, "public_key": line })
-        )
-    } else {
-        let document = document::Document {
-            blocks: vec![config::profile::node(asked.address, public_key)],
-            ..document::Document::default()
-        };
-        let document = document::encoding::Checked::new(document)
-            .unwrap_or_else(|_| unreachable!("invariant: a node block is shallow"));
-        config_hcl::write(&document)
-            .unwrap_or_else(|_| unreachable!("invariant: HCL holds a node block"))
-    };
-    match io::stdout().lock().write_all(text.as_bytes()) {
-        Ok(()) => 0,
-        Err(_) => 1,
+    node::public_key(&files).await.map_err(|error| match error {
+        node::Error::Unstarted => unstarted(dir),
+        node::Error::Directory(error) => unreadable(dir, error),
+        error => failed(error),
+    })
+}
+
+/// The failure of a data directory `dir` where no node has started.
+fn unstarted(dir: &Path) -> Failure {
+    Failure {
+        code: UNSTARTED,
+        message: format!("no node has started in {}", dir.display()),
+        fix: match quoted(dir) {
+            Some(dir) => format!(
+                "Start the node once with `foundation start --data={dir}`, with \
+                 `--name <name>`"
+            ),
+            None => {
+                "Start the node once with `foundation start`, with `--data` set to \
+                     that directory and `--name <name>`"
+                    .to_owned()
+            }
+        },
     }
 }
 

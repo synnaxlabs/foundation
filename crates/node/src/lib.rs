@@ -555,6 +555,20 @@ pub async fn name(
     }
 }
 
+/// The public key of the node of the data directory `files`, from its file
+/// `node.key`. Writes nothing, and reads also while a node runs on `files`.
+///
+/// # Errors
+///
+/// [`Error::Unstarted`] when `files` holds no file `node.key`, [`Error::Key`] for a
+/// file `node.key` that a node did not write, and [`Error::Directory`] for a file
+/// call that fails.
+pub async fn public_key(
+    files: &env::files::Files,
+) -> Result<types::ed25519::PublicKey, Error> {
+    identity::public_key(files).await?.ok_or(Error::Unstarted)
+}
+
 /// The error of [`Node::join`]: `failed`, else the first shard error by core, else
 /// the first panic by core. `shards` gives each shard's join and error in order of
 /// core.
@@ -1593,6 +1607,8 @@ pub enum Error {
     /// The data directory holds no node name and stores no founding, and the start gave
     /// no name.
     Unnamed,
+    /// The data directory holds no file `node.key`: no node has started on it.
+    Unstarted,
     /// The data directory has the directory of a mesh, and the file `node.key` is not
     /// there, or, with no file `name`, it holds a key with no card in the founding of
     /// its region. A start that gives it wrote no file `name` and no new `node.key`,
@@ -1643,6 +1659,7 @@ impl Error {
             | Self::Name
             | Self::Renamed { .. }
             | Self::Unnamed
+            | Self::Unstarted
             | Self::NoCard
             | Self::Reserved { .. }
             | Self::Long { .. }
@@ -1726,6 +1743,9 @@ impl fmt::Display for Error {
             ),
             Self::Unnamed => f.write_str(
                 "the data directory holds no node name; give the node a name",
+            ),
+            Self::Unstarted => f.write_str(
+                "the data directory holds no file `node.key`; start the node once",
             ),
             Self::NoCard => f.write_str(
                 "the data directory has the directory of a mesh, and the file \

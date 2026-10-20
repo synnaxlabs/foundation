@@ -1006,6 +1006,7 @@ dependencies = [
  "access",
  "clap",
  "config",
+ "config-hcl",
  "connector",
  "document",
  "env",

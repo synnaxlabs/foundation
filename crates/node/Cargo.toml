@@ -21,7 +21,6 @@ block = { path = "../block" }
 buffer = { path = "../buffer" }
 program = { path = "../program" }
 clock = { path = "../clock" }
-config = { path = "../config" }
 config-hcl = { path = "../config-hcl" }
 connector = { path = "../connector" }
 connector-influx = { path = "../connector-influx" }
@@ -50,6 +49,7 @@ wire = { path = "../wire" }
 block = { path = "../block", features = ["sim"] }
 bytes = { workspace = true }
 codec = { path = "../codec" }
+config = { path = "../config" }
 connector = { path = "../connector", features = ["sim"] }
 connector-influx = { path = "../connector-influx", features = ["sim"] }
 connector-opcua = { path = "../connector-opcua", features = ["sim"] }

@@ -1,5 +1,5 @@
 use std::ffi::OsString;
-use std::net::SocketAddr;
+use std::net::{AddrParseError, SocketAddr};
 use std::path::PathBuf;
 
 use clap::error::{ContextKind, ContextValue, ErrorKind};
@@ -16,7 +16,7 @@ use crate::error::{Among, Error};
 use crate::remote::{self, Link};
 use crate::scope::Scope;
 use crate::serve::Point;
-use crate::{Failure, Log, Profile, Start, browse, import, plan, status};
+use crate::{Failure, Log, Start, browse, import, plan, status};
 
 /// The data directory of a command that names none.
 pub(crate) const DATA: &str = "foundation-data";
@@ -107,7 +107,7 @@ enum Command {
     Start(StartArgs),
     /// Print the `node` block that pins the node of a data directory in the profile of
     /// a program on another host, such as one that connects with `strict`. The node
-    /// must run.
+    /// must have started once.
     Profile(ProfileArgs),
     Plan(PlanArgs),
     Apply(ApplyArgs),
@@ -243,10 +243,23 @@ fn named(value: &str) -> Result<(String, String), String> {
         .ok_or_else(|| format!("`{value}` has no `=` between a name and a path"))
 }
 
+/// `value` as an address that a program on another host can dial.
+fn dialable(value: &str) -> Result<SocketAddr, String> {
+    let address: SocketAddr =
+        value.parse().map_err(|e: AddrParseError| e.to_string())?;
+    if address.ip().to_canonical().is_unspecified() || address.port() == 0 {
+        return Err(format!(
+            "`{address}` has an unspecified IP or port 0, which no program can dial"
+        ));
+    }
+    Ok(address)
+}
+
 #[derive(clap::Args)]
 struct ProfileArgs {
-    /// The address where a program on another host dials the node, such as
-    /// `10.0.0.5:7400`: the `--listen` address, or the address of a NAT in front of it.
+    /// `10.0.0.5:7400`: the address where a program on another host dials the node,
+    /// not an unspecified IP or port 0.
+    #[arg(value_parser = dialable)]
     address: SocketAddr,
     #[command(flatten)]
     node: NodeArgs,
@@ -412,7 +425,11 @@ pub(crate) enum Parsed {
         data: PathBuf,
     },
     Start(Start),
-    Profile(Profile),
+    /// Write the `node` block that pins the node of `data` at `address`.
+    Profile {
+        address: SocketAddr,
+        data: PathBuf,
+    },
     Help(String),
     /// Serve MCP, with each tool call on the node of `data`, and its files under the
     /// folders `files`, else the working directory.
@@ -466,11 +483,7 @@ pub(crate) fn parse(args: &[OsString], json: bool) -> Result<Parsed, Error> {
         Command::Profile(ProfileArgs {
             address,
             node: NodeArgs { data },
-        }) => Ok(Parsed::Profile(Profile {
-            data,
-            json,
-            address,
-        })),
+        }) => Ok(Parsed::Profile { address, data }),
         Command::Plan(PlanArgs { input, node }) => Ok(on(Request::Plan(input), node)),
         Command::Apply(ApplyArgs { input, node }) => {
             Ok(on(Request::Apply(input), node))

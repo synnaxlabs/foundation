@@ -38,3 +38,33 @@
   `node` block. The map of address to key states that an address has one key, and
   the decoder refuses the second block, so a `Pin` adds a type with no rule of its
   own.
+
+  `foundation profile [--data <dir>] [--json] <address>` prints the `node` block that
+  pins the node of `<dir>` (default `foundation-data`) at `<address>`, for the profile
+  of a program on another host. The operator runs it on the node's host (item 4 of the
+  plan review, 2026-10-19T23:24:32Z,
+  https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279566176). The
+  node must have started once: `node::public_key` reads the public key from the file
+  `node.key`, so a node that runs, that stopped, or that crashed gives its key. It
+  writes nothing and needs no lock. A data directory with no `node.key`
+  (`node::Error::Unstarted`) gives `node.unstarted` with the fix "Start the node once
+  with `foundation start --data=<dir>`, with `--name <name>`", a file that this user
+  cannot read gives `node.unreadable`, and a `node.key` that a node did not write gives
+  `node.failed`. `<address>` is where the program dials the node: an unspecified IP or
+  port 0 gives `ops.argument`. The output is the block as HCL, which
+  `config_hcl::write` gives, or with `--json` one line `{"address": "<ip:port>",
+  "public_key": "<the line of an OpenSSH .pub file>"}`, a format of kind (f).
+  `ops::cli` writes either, and each error, in the one output form of OPS OUTPUT, with
+  the key from its `public_key` input, which `node` gives as a read of
+  `node::public_key` (NODE START). `profile` calls `public_key` once and never calls
+  `reach`. It is not an MCP tool, as `start` is not. `ops` takes `config-hcl` as a
+  normal dependency for it.
+  `laptop.architect-2` gave this shape in
+  https://github.com/synnaxlabs/foundation/pull/3479#issuecomment-6281210000
+  (2026-10-20T01:31:13Z) and
+  https://github.com/synnaxlabs/foundation/pull/3479#issuecomment-6281253212
+  (2026-10-20T01:34:49Z). Lost: a read of the file `address` through
+  `sector::local::read`, which refuses a node that stopped; the `hcl` front end of
+  `FrontEnds` as the writer, which keeps the format of a file that `ops` writes in
+  `node`'s table; and a `Run::Profile` that `node` writes, which gives a second output
+  form.

@@ -61,6 +61,7 @@ fn offline(
         &front_ends,
         &kinds,
         reach,
+        crate::common::unkeyed,
     );
     let Poll::Ready(run) = pin!(cli).poll(&mut Context::from_waker(Waker::noop()))
     else {
@@ -916,7 +917,7 @@ mod start {
     fn log(args: &[&str]) -> Log {
         match start(args) {
             Run::Start(start) => start.log,
-            run => panic!("start gave {run:?}"),
+            Run::Exit(status) => panic!("start exited with {status}"),
         }
     }
 
@@ -1233,60 +1234,221 @@ mod start {
 }
 
 mod profile {
+    use std::cell::{Cell, RefCell};
     use std::ffi::OsString;
-    use std::io;
-    use std::path::PathBuf;
+    use std::io::{self, Write};
+    use std::path::{Path, PathBuf};
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
 
-    use super::offline;
-    use crate::{Profile, Run};
+    use document::diagnostic::Code;
+    use serde_json::json;
+    use types::ed25519::PublicKey;
 
-    /// The run of `foundation profile` with `args`, its output, and its errors.
-    fn profile(args: &[&str]) -> (Run, String, String) {
+    use super::serve::Failing;
+    use super::{Exit, HELP, cli, failed};
+    use crate::{Failure, Run};
+
+    /// The line of an OpenSSH `.pub` file of [`key`].
+    const LINE: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINdamAGCsQq31Uv+08lkBzoO4XLz2qYjJa8CGmj3B1Ea";
+
+    /// The public key of test 1 of RFC 8032.
+    fn key() -> PublicKey {
+        PublicKey::new([
+            215, 90, 152, 1, 130, 177, 10, 183, 213, 75, 254, 211, 201, 100, 7, 58, 14,
+            225, 114, 243, 218, 166, 35, 37, 175, 2, 26, 104, 247, 7, 81, 26,
+        ])
+        .expect("not of small order")
+    }
+
+    /// The exit of `foundation profile` with `args`, with a `public_key` that gives
+    /// `read`, and each data directory that it gave to `public_key`.
+    fn profile(
+        args: &[&str],
+        read: &Result<PublicKey, Failure>,
+    ) -> (Exit, Vec<PathBuf>) {
+        let mut stdout = Vec::new();
+        let (status, stderr, asked) = written(args, read, &mut stdout);
+        let exit = Exit {
+            stdout: String::from_utf8(stdout).expect("UTF-8"),
+            stderr,
+            status,
+        };
+        (exit, asked)
+    }
+
+    /// As [`profile`], with standard output `output`: the status, standard error, and
+    /// each data directory that it gave to `public_key`.
+    fn written(
+        args: &[&str],
+        read: &Result<PublicKey, Failure>,
+        output: impl Write,
+    ) -> (u8, String, Vec<PathBuf>) {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let paths = sim.node(sim::node::Config::default()).paths();
+        let request = async |_: &[u8]| -> Result<Vec<u8>, Failure> {
+            panic!("a command sent a request")
+        };
+        let reached = Cell::new(0);
+        let reach = async |_: &Path| {
+            reached.set(reached.get() + 1);
+            Ok(request)
+        };
+        let asked = RefCell::new(Vec::new());
+        let public_key = async |dir: &Path| {
+            asked.borrow_mut().push(dir.to_owned());
+            read.clone()
+        };
         let args = ["foundation", "profile"]
             .iter()
             .chain(args)
             .map(OsString::from);
-        let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let run = offline(args, io::empty(), &mut stdout, &mut stderr);
-        let text = |bytes| String::from_utf8(bytes).expect("UTF-8");
-        (run, text(stdout), text(stderr))
+        let front_ends = crate::common::front_ends();
+        let kinds = crate::common::create_kinds();
+        let cli = crate::cli(
+            args,
+            async || panic!("a command read input"),
+            output,
+            &mut stderr,
+            &paths,
+            &front_ends,
+            &kinds,
+            reach,
+            public_key,
+        );
+        let Poll::Ready(Run::Exit(status)) =
+            pin!(cli).poll(&mut Context::from_waker(Waker::noop()))
+        else {
+            panic!("a command waited or did not exit");
+        };
+        assert_eq!(reached.get(), 0, "a command reached its node");
+        let stderr = String::from_utf8(stderr).expect("UTF-8");
+        (status, stderr, asked.into_inner())
     }
 
     #[test]
-    fn gives_the_address_the_data_directory_and_json_to_the_node() {
-        let expected = Profile {
-            data: PathBuf::from("d"),
-            json: true,
-            address: "[::1]:7400".parse().unwrap(),
+    fn writes_the_node_block_of_the_key_of_the_node_of_data() {
+        let exit = Exit {
+            stdout: format!(
+                "node \"10.0.0.5:7400\" {{\n  public_key = \"{LINE}\"\n}}\n"
+            ),
+            stderr: String::new(),
+            status: 0,
         };
         assert_eq!(
-            profile(&["[::1]:7400", "--data", "d", "--json"]),
-            (Run::Profile(expected), String::new(), String::new())
+            profile(&["10.0.0.5:7400", "--data", "d"], &Ok(key())),
+            (exit, vec![PathBuf::from("d")])
         );
     }
 
     #[test]
-    fn takes_foundation_data_by_default() {
-        let (run, ..) = profile(&["10.0.0.5:7400"]);
-        let expected = Profile {
-            data: PathBuf::from("foundation-data"),
-            json: false,
-            address: "10.0.0.5:7400".parse().unwrap(),
+    fn writes_the_address_and_the_key_as_json() {
+        let (exit, asked) = profile(&["[::1]:7400", "--json"], &Ok(key()));
+        let json: serde_json::Value = serde_json::from_str(&exit.stdout).expect("JSON");
+        assert_eq!(
+            (exit.stdout.lines().count(), json, exit.stderr, exit.status),
+            (
+                1,
+                json!({ "address": "[::1]:7400", "public_key": LINE }),
+                String::new(),
+                0
+            )
+        );
+        assert_eq!(asked, vec![PathBuf::from("foundation-data")]);
+    }
+
+    #[test]
+    fn a_failure_of_the_key_is_the_error_of_the_command() {
+        let failure = Failure {
+            code: Code::new("node.not-running"),
+            message: "no node runs in d".to_owned(),
+            fix: "Start it".to_owned(),
         };
-        assert_eq!(run, Run::Profile(expected));
+        let exit = Exit {
+            stdout: String::new(),
+            stderr: "error[node.not-running]: no node runs in d\nfix: Start it\n"
+                .to_owned(),
+            status: 1,
+        };
+        assert_eq!(
+            profile(&["10.0.0.5:7400", "--data", "d"], &Err(failure.clone())).0,
+            exit
+        );
+        let exit = Exit {
+            stdout: String::new(),
+            stderr: format!(
+                "{}\n",
+                json!({ "errors": [{ "code": "node.not-running",
+                    "message": "no node runs in d", "fix": "Start it", "notes": [] }] })
+            ),
+            status: 1,
+        };
+        assert_eq!(
+            profile(&["10.0.0.5:7400", "--data", "d", "--json"], &Err(failure)).0,
+            exit
+        );
+    }
+
+    #[test]
+    fn a_closed_output_ends_the_command_without_an_error() {
+        assert_eq!(
+            written(
+                &["10.0.0.5:7400"],
+                &Ok(key()),
+                Failing(io::ErrorKind::BrokenPipe)
+            ),
+            (0, String::new(), vec![PathBuf::from("foundation-data")])
+        );
+    }
+
+    #[test]
+    fn an_output_that_fails_is_an_error() {
+        let full = Failing(io::ErrorKind::StorageFull);
+        let message = io::Error::from(io::ErrorKind::StorageFull).to_string();
+        assert_eq!(
+            written(&["10.0.0.5:7400"], &Ok(key()), full),
+            (
+                1,
+                format!(
+                    "error[ops.output]: standard output could not be written: \
+                     {message}\nfix: Give standard output a destination that can be \
+                     written\n"
+                ),
+                vec![PathBuf::from("foundation-data")]
+            )
+        );
     }
 
     #[test]
     fn refuses_an_address_with_no_port() {
-        let (run, out, errors) = profile(&["10.0.0.5"]);
-        assert_eq!((run, out.as_str()), (Run::Exit(2), ""));
         assert_eq!(
-            errors,
-            "error[ops.argument]: invalid value for one of the arguments: `<ADDRESS>`: \
-             invalid socket address syntax\nfix: Match the arguments to `foundation \
-             --help` or `foundation <operation> --help`\n"
+            cli(&["profile", "10.0.0.5"]),
+            failed(&format!(
+                "error[ops.argument]: invalid value for one of the arguments: \
+                 `<ADDRESS>`: invalid socket address syntax\nfix: {HELP}\n"
+            ))
         );
+    }
+
+    #[test]
+    fn refuses_an_address_that_no_program_can_dial() {
+        for (given, shown) in [
+            ("0.0.0.0:7400", "0.0.0.0:7400"),
+            ("[::]:7400", "[::]:7400"),
+            ("[::ffff:0.0.0.0]:7400", "[::ffff:0.0.0.0]:7400"),
+            ("10.0.0.5:0", "10.0.0.5:0"),
+        ] {
+            assert_eq!(
+                cli(&["profile", given]),
+                failed(&format!(
+                    "error[ops.argument]: invalid value for one of the arguments: \
+                     `<ADDRESS>`: `{shown}` has an unspecified IP or port 0, which no \
+                     program can dial\nfix: {HELP}\n"
+                )),
+                "{given}"
+            );
+        }
     }
 }
 
@@ -1532,7 +1694,7 @@ mod serve {
     const PING: &str = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n";
     const PONG: &str = "{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":{}}\n";
 
-    struct Failing(io::ErrorKind);
+    pub(super) struct Failing(pub(super) io::ErrorKind);
 
     impl Read for Failing {
         fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
