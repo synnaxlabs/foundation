@@ -2,7 +2,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::future::poll_fn;
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::task::Poll;
 
@@ -354,9 +354,17 @@ pub(crate) async fn later(
         }
         Ok(Some((subject, First::Write(open)))) => {
             let (state, admission) = (&session.state, &session.client.admission);
-            write::serve(state, admission, subject, open, &mut receiver, &mut sender)
-                .await
-                .map(|()| Served::Ended)
+            // A trait object, so that the write's frame path has its own poll, apart
+            // from the shape of the forward's code.
+            let write: Pin<Box<dyn Future<Output = _>>> = Box::pin(write::serve(
+                state,
+                admission,
+                subject,
+                open,
+                &mut receiver,
+                &mut sender,
+            ));
+            write.await.map(|()| Served::Ended)
         }
         Err(error) => Err(error),
     };
