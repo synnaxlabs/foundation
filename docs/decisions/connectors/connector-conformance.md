@@ -84,7 +84,18 @@
      A kind whose check gives no writes passes with no check, until the read form of
      #2642.
 
-  Scenarios 6 (random faults) and 7 (no secret in a status) come in #2642. The
+  6. **Random faults.** Over 1000 seeds, each a run of its own: the connector runs,
+     then meets 1 to 8 faults at random times in 15 s, each one of: new links to and
+     from the device (a delay below 2 s, a jitter below 500 ms, a loss of 0 to 1 in
+     quarters, and a duplication of 0 to 0.5), a stop of the simulator, a crash of the
+     device node, or a start of the simulator. The seed draws the faults and seeds the
+     sim. While they come: no panic, never class Config, each error text at most 1024
+     bytes, and no count and no restart count goes down. After the last fault, both
+     links are as at the start and the simulator serves: heals. A failed run panics
+     with its replay command, which sets `CONFORMANCE_SEED` to its seed in hex. The
+     longest run takes 67.1 s of plant time (`modbus`, box1, at 2026-10-20).
+
+  Scenario 7 (no secret in a status) comes in #2642. The
   numbers are tunable by the architect of `connector`. Plan of `laptop.architect-2` at
   2026-10-13T21:22:43Z
   (https://github.com/synnaxlabs/foundation/issues/2247#issuecomment-6155477394), with

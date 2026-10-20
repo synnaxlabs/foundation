@@ -22,6 +22,10 @@ cargo test -p connector-opcua --all-features --test conformance
 cargo test -p connector-influx --all-features --test conformance
 ```
 
+A failed run of `heals_after_random_faults` prints the command that replays it, such as
+`CONFORMANCE_SEED=0x2a cargo test -p connector-modbus --all-features --test conformance
+heals_after_random_faults`.
+
 ## Rules
 
 - People own the scenarios. A kind that fails one has a defect, or the person changes
