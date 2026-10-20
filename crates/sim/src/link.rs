@@ -21,7 +21,7 @@ pub struct Config {
     pub jitter: Span,
     /// The chance, from 0 to 1, that a datagram or a TCP segment is lost. 1 cuts the
     /// link. A lost TCP segment goes again after a timeout, and the later segments of
-    /// its direction wait for it.
+    /// its stream in its direction wait for it.
     pub loss: f64,
     /// The chance, from 0 to 1, that a datagram arrives twice.
     pub duplication: f64,
