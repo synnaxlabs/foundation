@@ -1258,6 +1258,7 @@ fn room(appended: Result<(), buffer::Rejected>) -> Result<bool, Error> {
 mod tests {
     use std::path::{Path as FilePath, PathBuf};
     use std::rc::Rc;
+    use std::slice;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::Waker;
     use std::time::Instant;
@@ -3488,6 +3489,101 @@ mod tests {
             };
             let draft = Draft::new(shard.pool(), &set, Form::Raw, &lens);
             assert_eq!(draft.map(|_| ()), Err(frame::Error::Pool(error)));
+        });
+    }
+
+    /// The record binds a group of three series, less the padding of 7 bytes that each
+    /// series after the first may take.
+    #[test]
+    fn bounds_a_frame_of_one_group_of_three_series_by_the_record() {
+        run(155, |mut test| async move {
+            test.pool = Rc::new(create_pool(RECORD.budget));
+            let buffer = test.create_buffer(RECORD.area, RECORD.body_max, 4).await;
+            let shard = test.over(buffer).await;
+            let set = intern(&[Group {
+                index: key(Slot::new(0)),
+                data: &[
+                    (key(Slot::new(1)), Type::Scalar(Scalar::I64)),
+                    (key(Slot::new(2)), Type::Scalar(Scalar::I64)),
+                ],
+            }]);
+            assert_eq!(shard.write_body_max(&set), 8000);
+        });
+    }
+
+    /// A record holds the two parts of at most 511 entries, so a frame of 512 groups
+    /// gives `Large` whatever its size.
+    #[test]
+    fn bounds_a_frame_of_more_groups_than_a_record_holds_to_0() {
+        run(156, |mut test| async move {
+            test.pool = Rc::new(create_pool(LARGEST.budget));
+            let buffer = test
+                .create_buffer(LARGEST.area, LARGEST.body_max, 512)
+                .await;
+            let mut shard = test.over(buffer).await;
+            let groups: Vec<_> = (0..512)
+                .map(|n| Group {
+                    index: key(Slot::new(n)),
+                    data: &[],
+                })
+                .collect();
+            for n in 0..512 {
+                assert!(shard.carry(Slot::new(n), key(Slot::new(n))));
+            }
+            let bounds = [(512, 0, Err(Error::Large)), (511, 512_008, Ok(511))];
+            for (stamp, (count, max, expected)) in (10..).zip(bounds) {
+                let set = intern(&groups[..count]);
+                assert_eq!(shard.write_body_max(&set), max, "{count}");
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                let stamps: Vec<(usize, &[i64])> =
+                    (0..count).map(|n| (n, slice::from_ref(&stamp))).collect();
+                let draft = frame(&test.pool, &set, &stamps);
+                let written = shard.write(a, LIVE, draft).map(<[Outcome]>::len);
+                assert_eq!(written, expected, "{count}");
+                shard.close_writer(a);
+            }
+        });
+    }
+
+    /// With no room for the handoff, the shard checks the size of the batch itself.
+    #[test]
+    fn refuses_a_live_frame_of_more_groups_than_a_record_holds_with_no_room() {
+        run(157, |mut test| async move {
+            test.pool = Rc::new(create_pool(LARGEST.budget));
+            let buffer = test
+                .create_buffer(LARGEST.area, LARGEST.body_max, 512)
+                .await;
+            let mut shard = test.over(buffer).await;
+            let groups: Vec<_> = (0..512)
+                .map(|n| Group {
+                    index: key(Slot::new(n)),
+                    data: &[],
+                })
+                .collect();
+            for n in 0..512 {
+                assert!(shard.carry(Slot::new(n), key(Slot::new(n))));
+            }
+            let set = intern(&groups);
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let mut stamp = 10;
+            for count in [50_000, 1] {
+                loop {
+                    let stamps = stepped(stamp, count);
+                    stamp = stamps[count - 1] + 1;
+                    let write = frame(&test.pool, &set, &[(0, &stamps)]);
+                    let written = shard.write(a, LIVE, write).expect("written");
+                    if matches!(written, [Outcome::Lost { .. }]) {
+                        break;
+                    }
+                    shard.committed().await.expect("the commit ends");
+                }
+            }
+            let b = shard.open_writer(writer("b", 2, &set)).expect("synced");
+            assert!(shard.indexes[0].handoff().is_some(), "no room at the open");
+            let stamps: Vec<(usize, &[i64])> =
+                (0..512).map(|n| (n, slice::from_ref(&stamp))).collect();
+            let write = frame(&test.pool, &set, &stamps);
+            assert_eq!(shard.write(b, LIVE, write), Err(Error::Large));
         });
     }
 
