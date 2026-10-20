@@ -18,29 +18,11 @@ pub use fit::{Fit, Fitted};
 /// read its samples or of the mesh time of its sample, or the nanosecond after the
 /// stamp before it when that is later, so no two are equal and none goes back.
 #[derive(Debug, Default)]
-pub struct Stamps {
+struct Stamps {
     last: Option<Stamp>,
 }
 
 impl Stamps {
-    /// Runs `request`, and gives its output with its stamp: the midpoint of the mesh
-    /// times of `writer` before and after it, or 1 ns after the last stamp when that
-    /// is later.
-    ///
-    /// # Panics
-    ///
-    /// When the last stamp is `i64::MAX` ns.
-    pub async fn request<T>(
-        &mut self,
-        writer: &hub::writer::Writer,
-        request: impl Future<Output = T>,
-    ) -> (T, Stamp) {
-        let sent = writer.now();
-        let output = request.await;
-        let answered = writer.now();
-        (output, self.next(midpoint(sent, answered)))
-    }
-
     /// Gives the stamp of a sample whose true mesh time is within `time`, with its ends
     /// in either order, and whose value holds until at least `held`, with the error of
     /// that stamp. The stamp is the midpoint of `time`, or 1 ns after the last stamp
@@ -51,7 +33,7 @@ impl Stamps {
     /// # Panics
     ///
     /// When the last stamp is `i64::MAX` ns.
-    pub fn sample(&mut self, time: Interval, held: Stamp) -> (Stamp, Span) {
+    fn sample(&mut self, time: Interval, held: Stamp) -> (Stamp, Span) {
         let midpoint = midpoint(time.earliest, time.latest);
         let stamp = self.next(midpoint);
         let half = time
@@ -73,7 +55,7 @@ impl Stamps {
     ///
     /// When `before` is under the last stamp, which a refusal of the frame of the last
     /// stamp never gives, or is `i64::MAX` ns.
-    pub fn after(&mut self, before: Stamp) -> Stamp {
+    fn after(&mut self, before: Stamp) -> Stamp {
         if let Some(last) = self.last {
             assert!(
                 before >= last,
@@ -92,7 +74,7 @@ impl Stamps {
     /// # Panics
     ///
     /// When the last stamp is `i64::MAX` ns.
-    pub(crate) fn next(&mut self, stamp: Stamp) -> Stamp {
+    fn next(&mut self, stamp: Stamp) -> Stamp {
         let stamp = self
             .last
             .map_or(stamp, |last| stamp.max(last + Span::NANOSECOND));
@@ -163,15 +145,28 @@ impl Writer {
         &self.hub
     }
 
-    /// As [`Stamps::request`] on the hub's writer.
+    /// Runs `request`, and gives its output with its stamp: the midpoint of the mesh
+    /// times of the hub's writer before and after it, or 1 ns after the last stamp
+    /// when that is later.
+    ///
+    /// # Panics
+    ///
+    /// When the last stamp is `i64::MAX` ns.
     pub(crate) async fn request<T>(
         &mut self,
         request: impl Future<Output = T>,
     ) -> (T, Stamp) {
-        self.stamps.request(&self.hub, request).await
+        let sent = self.hub.now();
+        let output = request.await;
+        let answered = self.hub.now();
+        (output, self.stamps.next(midpoint(sent, answered)))
     }
 
-    /// As [`Stamps::next`].
+    /// Gives `stamp`, or the nanosecond after the last stamp when that is later.
+    ///
+    /// # Panics
+    ///
+    /// When the last stamp is `i64::MAX` ns.
     pub(crate) fn next(&mut self, stamp: Stamp) -> Stamp {
         self.stamps.next(stamp)
     }

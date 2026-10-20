@@ -39,14 +39,14 @@ fn with_writer<T: Send + 'static>(
 fn a_request_is_stamped_at_its_midpoint() {
     let config = sim::node::Config::default();
     let (sent, answered, output, stamp) = with_writer(config, async |writer, clock| {
-        let mut stamps = Stamps::default();
-        let sent = writer.now();
+        let mut stamped = stamp::Writer::new(writer);
+        let sent = stamped.hub().now();
         let request = async {
             clock.sleep(Span::from_nanos(3_000)).await;
             7
         };
-        let (output, stamp) = stamps.request(&writer, request).await;
-        (sent, writer.now(), output, stamp)
+        let (output, stamp) = stamped.request(request).await;
+        (sent, stamped.hub().now(), output, stamp)
     });
     assert_eq!(answered - sent, Span::from_nanos(3_000));
     assert_eq!(output, 7);
@@ -56,12 +56,12 @@ fn a_request_is_stamped_at_its_midpoint() {
 #[test]
 fn a_request_with_no_wait_is_stamped_after_the_one_before() {
     let (now, stamps) = with_writer(sim::node::Config::default(), async |writer, _| {
-        let mut stamps = Stamps::default();
+        let mut stamped = stamp::Writer::new(writer);
         let mut given = Vec::new();
         for _ in 0..3 {
-            given.push(stamps.request(&writer, future::ready(())).await.1);
+            given.push(stamped.request(future::ready(())).await.1);
         }
-        (writer.now(), given)
+        (stamped.hub().now(), given)
     });
     let after = |n| now + Span::from_nanos(n);
     assert_eq!(stamps, [now, after(1), after(2)]);
@@ -71,10 +71,10 @@ fn a_request_with_no_wait_is_stamped_after_the_one_before() {
 fn a_request_after_a_refusal_is_stamped_after_its_stamp() {
     let (now, refused, stamp) =
         with_writer(sim::node::Config::default(), async |writer, _| {
-            let mut stamps = Stamps::default();
-            let now = writer.now();
-            let refused = stamps.after(now + Span::from_nanos(20));
-            let ((), stamp) = stamps.request(&writer, future::ready(())).await;
+            let mut stamped = stamp::Writer::new(writer);
+            let now = stamped.hub().now();
+            let refused = stamped.stamps.after(now + Span::from_nanos(20));
+            let ((), stamp) = stamped.request(future::ready(())).await;
             (now, refused, stamp)
         });
     assert_eq!(refused, now + Span::from_nanos(21));
@@ -89,10 +89,10 @@ fn a_request_near_the_end_of_time_is_stamped_at_its_midpoint() {
         ..Default::default()
     };
     let (sent, stamp) = with_writer(config, async |writer, clock| {
-        let mut stamps = Stamps::default();
-        let sent = writer.now();
+        let mut stamped = stamp::Writer::new(writer);
+        let sent = stamped.hub().now();
         let request = clock.sleep(Span::from_nanos(2 * Span::SECOND.nanos() + 1));
-        (sent, stamps.request(&writer, request).await.1)
+        (sent, stamped.request(request).await.1)
     });
     assert_eq!(stamp, sent + Span::SECOND);
 }
@@ -104,10 +104,10 @@ fn a_request_before_the_epoch_is_stamped_at_its_midpoint_rounded_down() {
         ..Default::default()
     };
     let (sent, stamp) = with_writer(config, async |writer, clock| {
-        let mut stamps = Stamps::default();
-        let sent = writer.now();
+        let mut stamped = stamp::Writer::new(writer);
+        let sent = stamped.hub().now();
         let request = clock.sleep(Span::from_nanos(2 * Span::SECOND.nanos() + 1));
-        (sent, stamps.request(&writer, request).await.1)
+        (sent, stamped.request(request).await.1)
     });
     assert!(sent.nanos() < 0, "{sent:?}");
     assert_eq!(stamp, sent + Span::SECOND);

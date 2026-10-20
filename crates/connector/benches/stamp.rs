@@ -2,8 +2,8 @@
 //! stamp`.
 //!
 //! - `now`: one read of mesh time by `Writer::now`.
-//! - `request`: `Stamps::request` of a request that is ready at once, so the line is
-//!   its two reads of mesh time and the rule of the stamp.
+//! - `request`: `poll::Writer::request` of a request that is ready at once, so the
+//!   line is its two reads of mesh time and the rule of the stamp.
 //! - `before`: `Fit::before` of a fit that bounds the clock, one value later in device
 //!   time each call.
 //! - `between`: `Fit::between` of that fit, one read 1 us later in device time each
@@ -11,24 +11,33 @@
 //! - `old`: `Fit::before` of a fit whose newest reading is 1 s later in device time,
 //!   one value later in device time each call, up to that reading.
 //! - `mesh`: `Fit::mesh` of that fit.
-//! - `sample`: `Stamps::sample` of an interval 1 us later each call.
+//! - `sample`: `poll::Writer::sample` of an interval 1 us later each call.
 //!
 //! Each figure is ps per call, so a change under 1 ns shows, with the count of the
 //! allocations of the calls.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
+use std::future;
 use std::hint::black_box;
 use std::pin::pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
-use connector::kind::Table;
-use connector::stamp::{Fit, Fitted, Stamps};
+use connector::cancel::Token;
+use connector::kind::{self, Channels, Error, Kind, Table};
+use connector::poll::Writer;
+use connector::stamp::{Fit, Fitted};
 use connector::testing::{self, Rig};
-use hub::writer::Writer;
+use document::Document;
+use document::diagnostic::Diagnostic;
+use spec::channel::{Channel, Data, Kind as ChannelKind};
+use spec::data_type::DataType;
+use spec::definition::Definition;
 use types::channel;
 use types::name::Name;
+use types::sample::{Scalar, Type};
 use types::time::{Interval, Monotonic, Span, Stamp};
 
 #[global_allocator]
@@ -49,33 +58,96 @@ fn main() {
             entropy: node.entropy(),
             tasks,
         };
-        let rig = Rig::open(env, node.net(), Table::new()).await;
+        let stamped = Arc::new(Mutex::new(Vec::new()));
+        let kind = Stamped(Arc::clone(&stamped));
+        let rig = Rig::open(env, node.net(), Table::new().with("stamped", kind)).await;
+        rig.define(definitions());
         let connector: Name = "plant.stamp".parse().expect("a valid name");
-        let first = channel::Key::from_u128(100);
-        rig.define(testing::create_status(&connector, &[], first));
-        let state = "plant.stamp.status.state".parse().expect("a valid name");
-        let writer = rig.writer(connector, vec![state]).await;
-        [
-            time("now", || {
-                black_box(writer.now());
-            }),
-            request(&writer),
-            before(),
-            between(),
-            old(),
-            mesh(),
-            sample(),
-        ]
+        let writer = rig.writer(connector.clone(), vec![value()]).await;
+        let now = time("now", || {
+            black_box(writer.now());
+        });
+        drop(writer);
+        let (token, config) = (Token::new(), Document::default());
+        let opened = rig
+            .open_connector("stamped", connector, &config, &token)
+            .await;
+        opened.run().await.expect("the connector ends ok");
+        let [request, sample] = stamped
+            .lock()
+            .expect("no panic")
+            .drain(..)
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap_or_else(|_| panic!("the run times two lines"));
+        [now, request, before(), between(), old(), mesh(), sample]
     });
     print(&lines.expect("the run ends"));
 }
 
+/// The channel that the [`Stamped`] kind writes.
+fn value() -> Name {
+    "plant.stamp.value".parse().expect("a valid name")
+}
+
+/// An index `plant.stamp.time` and its `f64` channel [`value`].
+fn definitions() -> Vec<(Name, Definition)> {
+    let index = channel::Key::from_u128(100);
+    let kind = ChannelKind::Index {
+        error: None,
+        control: None,
+    };
+    let time = Definition::Channel(Channel { key: index, kind });
+    let data = Data::new(
+        index,
+        None,
+        DataType::Sample(Type::Scalar(Scalar::F64)),
+        None,
+    );
+    let kind = ChannelKind::Data(data.expect("no unit"));
+    let key = channel::Key::from_u128(101);
+    let data = Definition::Channel(Channel { key, kind });
+    let time_name = "plant.stamp.time".parse().expect("a valid name");
+    vec![(time_name, time), (value(), data)]
+}
+
+/// A kind that opens a [`Writer`] of [`value`], and puts its lines `request` and
+/// `sample` in the list that it holds.
+struct Stamped(Arc<Mutex<Vec<Line>>>);
+
+impl Kind for Stamped {
+    type Config = ();
+    const SCHEMA: document::schema::Body = testing::READS;
+
+    fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
+
+    fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
+        Ok(Channels {
+            writes: vec![value()],
+            counts: connector::poll::COUNTS
+                .map(|count| count.parse().expect("a name"))
+                .to_vec(),
+            ..Channels::default()
+        })
+    }
+
+    async fn run(&self, ctx: kind::Context<()>) -> Result<(), Error> {
+        let writer = Writer::open(&ctx, vec![value()]).await?;
+        let mut writer = writer.expect("no cancel");
+        let request = request(&mut writer);
+        let sample = sample(&mut writer);
+        self.0.lock().expect("no panic").extend([request, sample]);
+        Ok(())
+    }
+}
+
 /// The line `request`.
-fn request(writer: &Writer) -> Line {
-    let mut stamps = Stamps::default();
+fn request(writer: &mut Writer) -> Line {
     let mut cx = Context::from_waker(Waker::noop());
     time("request", || {
-        let request = pin!(stamps.request(writer, async { black_box(7_u8) }));
+        let request = pin!(writer.request(future::ready(black_box(7_u8))));
         let Poll::Ready(stamped) = request.poll(&mut cx) else {
             panic!("the request is ready")
         };
@@ -148,16 +220,15 @@ fn mesh() -> Line {
 }
 
 /// The line `sample`.
-fn sample() -> Line {
-    let mut stamps = Stamps::default();
-    let mut earliest = Stamp::from_nanos(0);
+fn sample(writer: &mut Writer) -> Line {
+    let mut earliest = writer.time().now();
     time("sample", || {
         earliest = earliest + Span::MICROSECOND;
         let interval = Interval {
             earliest,
             latest: earliest + Span::from_nanos(200),
         };
-        black_box(stamps.sample(black_box(interval), earliest));
+        black_box(writer.sample(black_box(interval), earliest));
     })
 }
 

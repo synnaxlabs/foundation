@@ -192,10 +192,12 @@ impl Writer {
         self.stamped.request(request).await
     }
 
-    /// Gives the stamp of a frame of samples whose true mesh time is within `time`, and
-    /// whose values hold until at least `held`, with its error, as
-    /// [`stamp::Stamps::sample`] gives them. Each stamp is after the stamp of each frame
-    /// that this writer wrote or stamped before.
+    /// Gives the stamp of a frame of samples whose true mesh time is within `time`, with
+    /// its ends in either order, and whose values hold until at least `held`, with the
+    /// error of that stamp. The stamp is the midpoint of `time`, or 1 ns after the stamp
+    /// of each frame that this writer wrote or stamped before, when that is later. The
+    /// error is half the width of `time`, rounded up, plus how far the stamp is past the
+    /// later of the midpoint and `held`, and stops at `i64::MAX` ns.
     ///
     /// # Panics
     ///
