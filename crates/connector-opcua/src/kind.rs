@@ -135,8 +135,10 @@ impl kind::Kind for Kind {
     /// [`Error::Device`], at once, when the client loses its channel or its session
     /// between two ticks. With no `polled`, also [`Error::Device`] when a read of the
     /// current time or the subscribe fails, when the server does not watch a node, and
-    /// when the subscription ends, and [`Error::Config`] with `opcua.no-timestamp` for
-    /// a change with no timestamp that maps to mesh time.
+    /// when the subscription ends, and [`Error::Config`] with `opcua.large-watch` when
+    /// the `CreateMonitoredItems` call of one node alone is past one message of the
+    /// server, and with `opcua.no-timestamp` for a Good change with no timestamp that
+    /// maps to mesh time.
     fn run(&self, ctx: Context<Config>) -> impl Future<Output = Result<(), Error>> {
         run(ctx)
     }
