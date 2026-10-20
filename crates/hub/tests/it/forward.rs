@@ -11,6 +11,7 @@ use block::Pool;
 use hub::{serve, writer};
 use transport::{Address, Class, Code, Session};
 use types::authority::Authority;
+use types::frame::{Form, Path};
 use types::hello::Hello;
 use types::time::Span;
 use wire::Protocol;
@@ -18,6 +19,7 @@ use wire::header::MALFORMED;
 use wire::hub::client::write::Open;
 use wire::hub::client::{BODY_BYTES_MAX, CHANGED, EXPIRED, REFUSED, VIA};
 use wire::hub::forward::{Forward, places};
+use wire::hub::write::{Head, Time};
 use wire::hub::{BUSY, NOT_HOME};
 
 use super::write::{end, place, send, stored, taken};
@@ -448,4 +450,139 @@ fn stops_a_forward_whose_places_pass_the_share_as_busy() {
     };
     let closed = || Err(serve::Error::Stream(closed_with(0)));
     assert_eq!(served, [Err(share), closed(), closed()]);
+}
+
+/// A message of a run of counts whose first byte is the kind of a hello is data: the
+/// counts of this frame of 4 samples come in their own message.
+#[test]
+fn takes_a_frame_whose_counts_start_with_the_kind_of_a_hello() {
+    let served = forwarded(4112, homed, |member| async move {
+        let mut stream = member.write(&["value"], &[0]).await;
+        stream.started().await;
+        let mut head = [0; Head::LEN];
+        Head {
+            time: Time::Frame(Path::Live),
+            form: Form::Raw,
+            series: 2,
+        }
+        .encode(&mut head);
+        stream.send(&head).await;
+        let mut ends = vec![0; 2 * wire::hub::ends::LEN];
+        wire::hub::ends::encode([(0, 32), (1, 64)], &mut ends);
+        stream.send(&ends).await;
+        stream.send(&4_u32.to_le_bytes()).await;
+        let body: Vec<u8> = [1_i64, 2, 3, 4, 10, 20, 30, 40]
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect();
+        stream.send(&body).await;
+        assert_eq!(stream.reply().await, taken(1, 0, 4));
+        assert_eq!(end(&mut stream).await, [stored(1)]);
+    });
+    assert_eq!(served, [Ok(Got::Ended)]);
+}
+
+/// During the wait for the home, a renewal signed with another key stops the forward
+/// as `REFUSED`, a renewal of another subject as `CHANGED`, and a message that is not
+/// a hello as `MALFORMED`.
+#[test]
+fn stops_a_forward_at_a_bad_message_while_it_waits_for_its_home() {
+    let during = async |test: &Test| test.clock.sleep(SHORT).await;
+    let served = forwarded(4113, during, |member| async move {
+        let mut stream = member.write(&["value"], &[0]).await;
+        stream.send(&signed(member.hello(LIFE), &UNLISTED)).await;
+        assert_eq!(stream.recv().await, reset_with(REFUSED));
+        let mut stream = member.write(&["value"], &[0]).await;
+        let hello = Hello {
+            subject: name(SECOND),
+            ..member.hello(LIFE)
+        };
+        stream.send(&signed(hello, &AGENT)).await;
+        assert_eq!(stream.recv().await, reset_with(CHANGED));
+        let mut stream = member.write(&["value"], &[0]).await;
+        let mut head = [0; Head::LEN];
+        Head {
+            time: Time::Node,
+            form: Form::Raw,
+            series: 1,
+        }
+        .encode(&mut head);
+        stream.send(&head).await;
+        assert_eq!(stream.recv().await, reset_with(MALFORMED));
+    });
+    let changed = Refusal::Changed {
+        field: Field::Subject,
+    };
+    let kind = wire::hub::client::Error::Kind { kind: 7 };
+    assert_eq!(
+        served,
+        [
+            Err(serve::Error::Access(Refusal::Signature)),
+            Err(serve::Error::Access(changed)),
+            Err(serve::Error::Client(kind)),
+        ]
+    );
+}
+
+/// Between frames, a cut hello stops the forward as `MALFORMED`.
+#[test]
+fn stops_a_forward_at_a_cut_hello_between_frames_as_malformed() {
+    let served = forwarded(4114, homed, |member| async move {
+        let mut stream = member.write(&["value"], &[0]).await;
+        stream.started().await;
+        send(&mut stream, &[1], &[10]).await;
+        assert_eq!(stream.reply().await, taken(1, 0, 1));
+        assert_eq!(stream.reply().await, stored(1));
+        let hello = signed(member.hello(LIFE), &AGENT);
+        stream.send(&hello[..10]).await;
+        assert_eq!(stream.recv().await, reset_with(MALFORMED));
+    });
+    let cut = wire::hub::client::Error::Length { len: 10 };
+    assert_eq!(served, [Err(serve::Error::Client(cut))]);
+}
+
+/// A forward holds the ends and counts of its group after its last place: 40 bytes
+/// for `value` and its index, past the share that its names and places fit.
+#[test]
+fn stops_a_forward_whose_ends_pass_the_share_as_busy() {
+    let held = BODY_BYTES_MAX - 52 - 39;
+    let served = forwarded_with(
+        4115,
+        2,
+        homed,
+        async |_| {},
+        move |member| async move {
+            let (node, tasks) = (&member.node, member.tasks.clone());
+            let mut agent = Agent::dial(node, tasks, member.at, name(SUBJECT)).await;
+            agent.admit().await;
+            let _holding = agent.unfinished(held, &[]).await;
+            member.sleep(Span::MILLISECOND).await;
+            let mut busy = member.write(&["value", "value-b"], &[0]).await;
+            assert_eq!(busy.recv().await, reset_with(BUSY));
+            agent.session.close(Code(0));
+        },
+    );
+    let share = serve::Error::Share {
+        subject: name(SUBJECT),
+        length: 40,
+        held: held + 52,
+    };
+    let closed = || Err(serve::Error::Stream(closed_with(0)));
+    assert_eq!(served, [Err(share), closed(), closed()]);
+}
+
+/// A first hello that has ended stops the forward as `EXPIRED`.
+#[test]
+fn stops_a_forward_whose_first_hello_has_ended_as_expired() {
+    let served = forwarded(4116, homed, |member| async move {
+        let mut stream = member.forward(1, member.hello(Span::ZERO)).await;
+        assert_eq!(stream.recv().await, reset_with(EXPIRED));
+    });
+    assert!(
+        matches!(
+            served[..],
+            [Err(serve::Error::Access(Refusal::Expired { .. }))]
+        ),
+        "{served:?}"
+    );
 }
