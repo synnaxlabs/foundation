@@ -1617,6 +1617,22 @@ mod stored {
     }
 
     #[test]
+    fn reads_the_seqs_after_the_spec_read() {
+        let mut lab = lab();
+        lab.writes.clear();
+        lab.write(Node(0), "edge.value", 1000, 10_000);
+        lab.run(Duration::from_secs(1));
+        let before = lab.written("edge.value").count();
+        let mut store = Store::default();
+        let line = format!("value value={before} 2000\n");
+        store.write(line.as_bytes()).unwrap();
+        lab.stores.get_mut("influx").unwrap().store = store;
+        let stored = lab.stored("influx", "edge.value");
+        assert_eq!(stored.samples, 1, "{before} {stored:?}");
+        lab.stop();
+    }
+
+    #[test]
     #[should_panic(expected = "lab failure: no Influx store at other")]
     fn panics_with_no_store_at_the_address() {
         lab().stored("other", "edge.value");
