@@ -131,10 +131,14 @@ fn influx_error(rig: &Rig) -> Error {
     })
 }
 
-/// `hcl` with `opcua` in place of `localhost:50000` and `influx` in place of
-/// `localhost:8086`.
+/// `hcl` with `opcua` in place of `localhost:50000`, `influx` in place of
+/// `localhost:8086`, and its OPC UA connector polled, so that it reads each node at
+/// each tick.
 fn served(hcl: &str, opcua: SocketAddr, influx: SocketAddr) -> String {
-    hcl.replace("localhost:50000", &opcua.to_string())
+    let rate = "  rate    = \"10Hz\"\n";
+    let polled = hcl.replacen(rate, &format!("{rate}  polled  = true\n"), 1);
+    assert_ne!(polled, hcl, "the config has an OPC UA connector at 10 Hz");
+    (polled.replace("localhost:50000", &opcua.to_string()))
         .replace("localhost:8086", &influx.to_string())
 }
 
@@ -738,6 +742,7 @@ fn each_config_names_the_served_addresses() {
         assert!(hcl.contains("\"opc.tcp://127.0.0.1:4840\""), "{hcl}");
         assert!(hcl.contains("\"http://127.0.0.1:9086\""), "{hcl}");
         assert!(!hcl.contains("localhost"), "{hcl}");
+        assert!(hcl.contains("\n  polled  = true\n"), "{hcl}");
     }
 }
 
