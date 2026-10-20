@@ -391,6 +391,14 @@ impl Server {
         assert_eq!(status, Status::GOOD, "open62541 refused the token policies");
     }
 
+    /// Refuses each later session with `BadIdentityTokenInvalid`, as a server does that
+    /// gives that status for a wrong password.
+    #[cfg(test)]
+    pub(crate) fn invalidate_tokens(&self) {
+        // SAFETY: the server lives.
+        unsafe { ffi::test::shim_server_invalidate_tokens(self.raw()) };
+    }
+
     /// The number of the `DataType` of the variable `node`, in namespace 0.
     ///
     /// # Panics

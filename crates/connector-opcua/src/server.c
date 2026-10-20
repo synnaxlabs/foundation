@@ -436,6 +436,26 @@ UA_StatusCode shim_server_users(UA_Server *server,
                                     logins);
 }
 
+static UA_StatusCode invalid_token(UA_Server *server, UA_AccessControl *ac,
+                                   const UA_EndpointDescription *endpoint,
+                                   const UA_ByteString *certificate,
+                                   const UA_NodeId *session,
+                                   const UA_ExtensionObject *token, void **context) {
+    (void)server;
+    (void)ac;
+    (void)endpoint;
+    (void)certificate;
+    (void)session;
+    (void)token;
+    (void)context;
+    return UA_STATUSCODE_BADIDENTITYTOKENINVALID;
+}
+
+/* Makes `server` refuse each later session with `BadIdentityTokenInvalid`. */
+void shim_server_invalidate_tokens(UA_Server *server) {
+    UA_Server_getConfig(server)->accessControl.activateSession = invalid_token;
+}
+
 /* Gives each endpoint of `server` one user token policy, a user name with the policy
  * None, and lets in its password on a channel in the policy None. */
 UA_StatusCode shim_server_cleartext(UA_Server *server) {

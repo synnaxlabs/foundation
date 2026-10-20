@@ -520,10 +520,20 @@ struct Secure {
     /// The `user` of the connector and its password, the secret [`PASSWORD`], which is
     /// written before the run when it is `Some`. No `user` when it is `None`.
     user: Option<(&'static str, Option<&'static [u8]>)>,
-    /// The only logins that the server lets in, else an anonymous user.
-    users: Option<&'static [(&'static str, &'static [u8])]>,
+    /// The sessions that the server lets in.
+    login: Login,
     /// The user token policy of the server has the policy `None`.
     cleartext: bool,
+}
+
+/// The sessions that the server of a scene lets in.
+#[derive(Clone, Copy)]
+enum Login {
+    Anonymous,
+    /// Only the user names and passwords of the list.
+    Only(&'static [(&'static str, &'static [u8])]),
+    /// No session: it refuses each with `BadIdentityTokenInvalid`.
+    Invalid,
 }
 
 /// The secret of the certificate of [`PLC`].
@@ -556,7 +566,7 @@ impl Secure {
                 Some(SERVER.certificate),
             ],
             user: None,
-            users: None,
+            login: Login::Anonymous,
             cleartext: false,
         }
     }
@@ -568,7 +578,7 @@ impl Secure {
         };
         Self {
             user: Some((user, Some(password))),
-            users: Some(LOGINS),
+            login: Login::Only(LOGINS),
             ..Self::of(policy)
         }
     }
@@ -583,8 +593,10 @@ impl Secure {
     ) {
         variables.secure(self.server, self.policy, self.offered);
         variables.set_clock(self.ahead);
-        if let Some(users) = self.users {
-            variables.admit(users);
+        match self.login {
+            Login::Anonymous => {}
+            Login::Only(users) => variables.admit(users),
+            Login::Invalid => variables.invalidate_tokens(),
         }
         if self.cleartext {
             variables.cleartext();
@@ -3325,25 +3337,16 @@ fn a_wrong_password_names_the_user_and_the_password() {
     connect_fails(secure, "BadUserAccessDenied", &cause);
 }
 
+/// A server can refuse a wrong password with `BadIdentityTokenInvalid` in place of
+/// `BadUserAccessDenied`.
 #[test]
-fn a_refused_identity_token_names_the_user_and_the_password() {
-    let security = Security {
-        user: Some(config::User {
-            name: "operator".into(),
-            password: secret::Source::Secret(name(PASSWORD)),
-        }),
-        ..cause_security()
+fn an_invalid_token_names_the_user_and_the_password() {
+    let secure = Secure {
+        login: Login::Invalid,
+        ..Secure::with_user(Policy::Basic256Sha256)
     };
-    let password = secret::Value::new(b"pass".to_vec());
-    let secured = secured_on(&security, CLIENT.certificate, Some(password));
-    for status in [
-        Status::BAD_USER_ACCESS_DENIED,
-        Status::BAD_IDENTITY_TOKEN_INVALID,
-    ] {
-        let cause = cause(status, Some(&secured));
-        let refused = format!("the server {REFUSED}");
-        assert_eq!(cause, Some(refused), "{}", status.name());
-    }
+    let cause = format!("the server {REFUSED}");
+    connect_fails(secure, "BadIdentityTokenInvalid", &cause);
 }
 
 /// A server can send `BadIdentityTokenRejected` for a token that it refuses, so with a
@@ -3381,7 +3384,7 @@ fn a_refused_anonymous_user_names_no_cause() {
 #[test]
 fn a_server_with_no_users_asks_to_turn_them_on() {
     let secure = Secure {
-        users: None,
+        login: Login::Anonymous,
         ..Secure::with_user(Policy::Basic256Sha256)
     };
     let cause = rejected(client::Mode::SignAndEncrypt);

@@ -91,6 +91,10 @@ struct State {
     /// starts.
     #[cfg(test)]
     cleartext: bool,
+    /// Whether a server refuses each session as [`Server::invalidate_tokens`] says, set
+    /// before it starts.
+    #[cfg(test)]
+    invalidating: bool,
     /// The credentials and the one policy and mode of a server, set before it starts.
     security: Option<(Credentials<'static>, Policy, Mode)>,
 }
@@ -174,6 +178,8 @@ impl Variables {
             users: None,
             #[cfg(test)]
             cleartext: false,
+            #[cfg(test)]
+            invalidating: false,
             security: None,
         })))
     }
@@ -295,6 +301,13 @@ impl Variables {
         self.state().cleartext = true;
     }
 
+    /// Makes a server that starts later refuse each session, as
+    /// [`Server::invalidate_tokens`] says.
+    #[cfg(test)]
+    pub(crate) fn invalidate_tokens(&self) {
+        self.state().invalidating = true;
+    }
+
     /// Gives each later answer of the state of the server the status `quality`.
     #[cfg(test)]
     pub(crate) fn answer_states(&self, quality: Quality) {
@@ -316,11 +329,12 @@ impl Variables {
 
     /// Gives `server` the most nodes of a Read of [`Variables::refuse_reads_past`], the
     /// timeout of [`Variables::time_out_sessions`], the limits of
-    /// [`Variables::limit_queues`], the logins of [`Variables::admit`], and the token
-    /// policy of [`Variables::cleartext`], and makes it answer the reads of its state.
+    /// [`Variables::limit_queues`], the logins of [`Variables::admit`], the token
+    /// policy of [`Variables::cleartext`], and the refusal of
+    /// [`Variables::invalidate_tokens`], and makes it answer the reads of its state.
     #[cfg(test)]
     fn hook(&self, server: &Server) {
-        let (most, session, queues, users, cleartext) = {
+        let (most, session, queues, users, cleartext, invalidating) = {
             let state = self.state();
             let State {
                 most,
@@ -328,9 +342,10 @@ impl Variables {
                 queues,
                 users,
                 cleartext,
+                invalidating,
                 ..
             } = *state;
-            (most, session, queues, users, cleartext)
+            (most, session, queues, users, cleartext, invalidating)
         };
         if let Some(most) = most {
             server.refuse_reads_past(most);
@@ -347,6 +362,9 @@ impl Variables {
         }
         if cleartext {
             server.cleartext();
+        }
+        if invalidating {
+            server.invalidate_tokens();
         }
         let variables = Variables::clone(self);
         server.set_source(&state_node(), move || {

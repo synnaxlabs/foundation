@@ -382,6 +382,7 @@ unsafe extern "C" {
         count: usize,
     ) -> u32;
     pub(crate) fn shim_server_cleartext(server: *mut Server) -> u32;
+    pub(crate) fn shim_server_invalidate_tokens(server: *mut Server);
     pub(crate) fn shim_server_data_type(
         server: *mut Server,
         node: Node<'_>,
