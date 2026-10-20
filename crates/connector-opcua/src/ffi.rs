@@ -1029,3 +1029,6 @@ unsafe extern "C" {
 #[cfg(any(test, feature = "sim"))]
 #[cfg_attr(not(test), expect(dead_code, reason = "`bench` uses only some"))]
 pub(crate) mod test;
+
+#[cfg(test)]
+mod tests;
