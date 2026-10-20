@@ -102,6 +102,25 @@ def public_key(line: str) -> bytes:
     return base64.b64decode(line.split()[1])[-32:]
 
 
+def mismatched() -> str:
+    """An OpenSSH key file with the public key of `ZERO` and the private key
+    `bytes([1] * 32)`, whose public key is another."""
+
+    def string(data: bytes) -> bytes:
+        return len(data).to_bytes(4, "big") + data
+
+    public = base64.b64decode(ZERO.split()[1])
+    private = bytes(8) + public + string(bytes([1] * 32) + public_key(ZERO))
+    private += string(b"")
+    private += bytes(range(1, 1 + -len(private) % 8))
+    body = b"openssh-key-v1\0" + string(b"none") + string(b"none") + string(b"")
+    body += (1).to_bytes(4, "big") + string(public) + string(private)
+    text = base64.b64encode(body).decode()
+    lines = [text[i : i + 70] for i in range(0, len(text), 70)]
+    begin, end = "BEGIN OPENSSH PRIVATE KEY", "END OPENSSH PRIVATE KEY"
+    return "\n".join([f"-----{begin}-----", *lines, f"-----{end}-----", ""])
+
+
 def blocks(subject: str, key: str) -> str:
     """The blocks that admit `subject` with the line `key` to read each channel."""
     return (
@@ -891,10 +910,14 @@ class ProfileTest(unittest.TestCase):
         keygen("-q", "-t", "ed25519", "-N", "pass", "-f", key)
         with self.assertRaises(ValueError) as raised:
             foundation.connect(self.node.address)
+        passphrase = (
+            "config.key-passphrase: the private key has a passphrase. Use a key file "
+            'with no passphrase, as `ssh-keygen -t ed25519 -N ""` writes it. Or '
+        )
         self.assertEqual(
             str(raised.exception),
-            f"{key}: the private key has a passphrase: move the file away, and "
-            "connect makes a new key there",
+            f"{key}: {passphrase}move the file away, and connect makes a new key "
+            "there",
         )
         mine = os.path.join(self.dir, "mine.key")
         os.rename(key, mine)
@@ -904,8 +927,41 @@ class ProfileTest(unittest.TestCase):
             foundation.connect(self.node.address)
         self.assertEqual(
             str(raised.exception),
-            f"{mine}: the private key has a passphrase: remove `private_key` from "
-            f"{self.profile}, and connect makes {key}",
+            f"{mine}: {passphrase}remove `private_key` from {self.profile}, and "
+            f"connect makes {key}",
+        )
+
+    def test_a_key_file_of_another_problem_is_refused_with_its_fix(self) -> None:
+        os.makedirs(self.dir)
+        key = os.path.join(self.dir, "alice.key")
+        new_key = (
+            'Make a new key with `ssh-keygen -t ed25519 -N ""`, and add its `.pub` '
+            "line to `keys` of the `subject` block"
+        )
+
+        def refused(expected: str) -> None:
+            with self.assertRaises(ValueError) as raised:
+                foundation.connect(self.node.address)
+            self.assertEqual(str(raised.exception), f"{key}: {expected}")
+
+        keygen("-q", "-t", "ed25519", "-N", "", "-f", key)
+        os.replace(f"{key}.pub", key)
+        refused(
+            "config.key-format: the file is not an OpenSSH private key. Use the "
+            'private key file that `ssh-keygen -t ed25519 -N ""` writes, not its '
+            "`.pub` file"
+        )
+        os.remove(key)
+        keygen("-q", "-t", "ecdsa", "-N", "", "-f", key)
+        refused(
+            'config.key-algorithm: the private key is "ECDSA", and a subject takes '
+            f"only `ssh-ed25519`. {new_key}"
+        )
+        with open(key, "w") as file:
+            file.write(mismatched())
+        refused(
+            "config.key-mismatch: the public key of the file is not the key of its "
+            f"private key. {new_key}"
         )
 
     def test_a_profile_with_a_problem_is_refused_by_line(self) -> None:

@@ -227,13 +227,15 @@ fn decoded(path: &Path, text: &str) -> PyResult<config::profile::Profile> {
         })
 }
 
-/// The `ValueError` of the key file `path` that `error` refuses, with `fix` for a key
-/// with a passphrase.
+/// The `ValueError` of the key file `path` that `error` refuses, as `<path>: <code>:
+/// <message>. <fix>`. For a key with a passphrase, `Or <fix>` follows as a second
+/// fix.
 fn unreadable(path: &Path, error: Unreadable, fix: &str) -> PyErr {
-    let path = path.display();
+    let (path, code, first) = (path.display(), error.code(), error.fix());
+    let text = format!("{path}: {code}: {error}. {first}");
     PyValueError::new_err(match error {
-        Unreadable::Passphrase => format!("{path}: {error}: {fix}"),
-        error => format!("{path}: {error}"),
+        Unreadable::Passphrase => format!("{text}. Or {fix}"),
+        Unreadable::Format | Unreadable::Algorithm(_) | Unreadable::Mismatch => text,
     })
 }
 
