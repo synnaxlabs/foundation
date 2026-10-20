@@ -95,8 +95,8 @@
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6157622562. Lost: a
   Device error (it never ends); a Config error that asks for `polled = true`; a read of
   `ServerProfileArray` first. The fallback connects only through the run value of the
-  first connect, over its secure channel. No path builds a second run value, and no
-  stage of a run takes the secure channel as an argument. No test runs the fallback over
+  first connect, with its credentials and mode. No path builds a second run value, and
+  no stage of a run takes the credentials as an argument. No test runs the fallback over
   a secure channel: a relay cannot change a signed message, and open62541 has one
   service table for the process, so no hook of one server refuses a subscribe
   (`laptop.architect-2`, 2026-10-20T12:29:05Z,
