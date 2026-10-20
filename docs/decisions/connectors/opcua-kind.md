@@ -1,9 +1,10 @@
 - **OPCUA KIND (#435)** Five choices of the `opcua` kind, each approved by the person as
   `box2.builder-6` recommended (2026-10-13T20:14:06Z, "All 5 decisions are approved for
   OPC UA": https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6154297722).
-  Security: the kind connects with the mode None and an anonymous user now, so it is
-  only for an isolated network or a test. SignAndEncrypt is the next part of #435,
-  before a release, with user names, passwords, and certificates (question:
+  Security: with no `certificate`, the kind connects with the mode None and an
+  anonymous user, so it is only for an isolated network or a test. With `certificate`,
+  it connects with SignAndEncrypt or Sign (the secure channel item below). User names
+  and passwords come in a later part of #2934, before a release (question:
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6150341828). Tests:
   the tests of the kind and exit test 1 run against the open62541 test server on the
   simulated clock and network. One more test on real I/O against `opc-plc` runs in CI
@@ -221,10 +222,10 @@
   https://github.com/synnaxlabs/foundation/issues/3269#issuecomment-6255400141), and the
   new check case at 2026-10-18T21:35:52Z:
   https://github.com/synnaxlabs/foundation/issues/3269#issuecomment-6255436768).
-  Secure channel: `opcua` takes `certificate`, `key`, and `trust`, each a secret source
-  (`file(...)` or `secret(...)`), and the bool `unencrypted`. With `certificate`, the
-  channel is `SignAndEncrypt`, or `Sign` with `unencrypted = true`. With no
-  `certificate`, the mode is None. Five codes split the refusals of the config:
+- **Secure channel (#2934).** `opcua` takes `certificate`, `key`, and `trust`, each a
+  secret source (`file(...)` or `secret(...)`), and the bool `unencrypted`. With
+  `certificate`, the channel is `SignAndEncrypt`, or `Sign` with `unencrypted = true`.
+  With no `certificate`, the mode is None. Five codes split the refusals of the config:
   `opcua.no-certificate` for each of `key`, `trust`, and `unencrypted` with no
   `certificate`, `opcua.no-key` for a `certificate` with no `key`, `opcua.no-trust` for
   a `certificate` with no `trust`, and `opcua.bad-unencrypted` for an `unencrypted` that
@@ -233,10 +234,18 @@
   `Context::secret` at their start, before the connect, so a missing file gives `Retry`
   and the next run reads it. Lost: a read at `parse`, which is pure and keeps a stale
   value until the config changes. When the client refuses a credential, a run or a
-  browse gives `Error::Config` with `opcua.credentials`, the text "{source}: {refusal}"
-  with the source of the credential that the refusal names, and a fix for that
-  credential. No production arm panics on a refusal (`laptop.architect-2`,
-  2026-10-17T06:46:05Z, the schema:
+  browse gives `Error::Retry` with the text "{source}: {refusal}. {fix}": the source of
+  the credential that the refusal names, and a fix for that credential. The supervisor
+  restarts the run with backoff, and each run reads the sources again, so a replaced
+  file, or a certificate whose validity window opens later, heals with no change of the
+  spec, as INFLUX KIND does for a bad `ca`. This replaces key choice 7 of the plan
+  (https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6230820716), in
+  which a bad own certificate or key ended the run with `Error::Config` until a change
+  of the spec (the person, through `laptop.monitor`, 2026-10-20T02:25Z:
+  https://github.com/synnaxlabs/foundation/pull/3471#issuecomment-6281907935). `session`
+  keeps one invariant `expect`: a connect with no credentials gives no refusal, as
+  `Client::connect` takes the credentials as an `Option` and `Refused` is a variant of
+  its error for each input (`laptop.architect-2`, 2026-10-17T06:46:05Z, the schema:
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6230838999;
   2026-10-19T23:51:54Z, PR 2d:
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6279925761;

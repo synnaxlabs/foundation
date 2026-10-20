@@ -31,7 +31,6 @@ mod tests;
 
 const SAMPLE_TYPE: Code = Code::new("opcua.sample-type");
 const LARGE_READ: Code = Code::new("opcua.large-read");
-const CREDENTIALS: Code = Code::new("opcua.credentials");
 
 /// The note of a run with no `read` block.
 const NO_READ: &str = "the connector has no `read` block, so it reads nothing. \
@@ -105,16 +104,16 @@ impl kind::Kind for Kind {
     /// # Errors
     ///
     /// The errors of [`Context::secret`] for each source of the secure channel, and
-    /// [`Error::Config`] with `opcua.credentials` and the source when the client
-    /// refuses a credential. The error of [`Context::writer`] and of each failed write.
-    /// [`Error::Config`] with `connector.index` for each channel that is an index; that
-    /// error comes alone. Else [`Error::Config`] with `opcua.sample-type` for each
-    /// channel whose sample type is not `bool`, `i8` to `u64`, `f32`, or `f64`, and
-    /// with `opcua.large-read` when the Read of one node alone is past one message of
-    /// the server. [`Error::Device`] when the connect, a read, or one check fails: a
-    /// check fails on a bad service result or on no answer in 5 s. Also
-    /// [`Error::Device`], at once, when the client loses its channel or its session
-    /// between two ticks.
+    /// [`Error::Retry`] with the source when the client refuses a credential, so the
+    /// next run reads the sources again. The error of [`Context::writer`] and of each
+    /// failed write. [`Error::Config`] with `connector.index` for each channel that is
+    /// an index; that error comes alone. Else [`Error::Config`] with
+    /// `opcua.sample-type` for each channel whose sample type is not `bool`, `i8` to
+    /// `u64`, `f32`, or `f64`, and with `opcua.large-read` when the Read of one node
+    /// alone is past one message of the server. [`Error::Device`] when the connect, a
+    /// read, or one check fails: a check fails on a bad service result or on no answer
+    /// in 5 s. Also [`Error::Device`], at once, when the client loses its channel or
+    /// its session between two ticks.
     fn run(&self, ctx: Context<Config>) -> impl Future<Output = Result<(), Error>> {
         run(ctx)
     }
@@ -299,8 +298,8 @@ impl<'a> Secured<'a> {
         }
     }
 
-    /// The [`Error::Config`] of `refusal`, with the source of the credential that it
-    /// names.
+    /// The [`Error::Retry`] of `refusal`, with the source of the credential that it
+    /// names and its fix.
     fn refused(&self, refusal: Refusal) -> Error {
         let (source, fix) = match refusal.credential() {
             Credential::Certificate => (
@@ -319,13 +318,7 @@ impl<'a> Secured<'a> {
                  issued it",
             ),
         };
-        let message = format!("{source}: {refusal}");
-        Error::Config(vec![Diagnostic::new(
-            CREDENTIALS,
-            None,
-            message,
-            fix.into(),
-        )])
+        Error::Retry(format!("{source}: {refusal}. {fix}").into())
     }
 }
 
@@ -335,8 +328,8 @@ impl<'a> Secured<'a> {
 ///
 /// # Errors
 ///
-/// [`Error::Device`] with the address when the connect fails. [`Error::Config`] with
-/// `opcua.credentials` and the source when the client refuses a credential.
+/// [`Error::Device`] with the address when the connect fails. [`Error::Retry`] with
+/// the source when the client refuses a credential.
 #[expect(clippy::too_many_arguments, reason = "each is an input of the connect")]
 async fn session<T>(
     time: event::Time,

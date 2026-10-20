@@ -1993,10 +1993,17 @@ fn secured(secure: Secure) -> Record {
     })
 }
 
-/// The [`CREDENTIALS`] error of `text` on the secret `secret`, with `fix`.
-fn credentials(secret: &str, text: &str, fix: &str) -> Diagnostic {
-    let message = format!("secret(\"{secret}\"): {text}");
-    Diagnostic::new(CREDENTIALS, None, message, fix.into())
+/// The errors of [`PLC`] supervised for 1.05 s over `secure`, which writes no frame.
+fn refusals(secure: Secure) -> Vec<(u64, String)> {
+    let outcome = secured(secure);
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    assert_eq!(outcome.frames, []);
+    errors(&outcome.statuses)
+}
+
+/// The error of `text` on the secret `secret`, with `fix`, that a later run can heal.
+fn credentials(secret: &str, text: &str, fix: &str) -> (u64, String) {
+    (RETRY, format!("secret(\"{secret}\"): {text}. {fix}"))
 }
 
 const CERTIFICATE_FIX: &str = "Give a DER or PEM certificate with an RSA key, the URI \
@@ -2044,10 +2051,7 @@ fn refuses_a_key_with_a_byte_past_0x7f_in_a_pem_line_with_its_secret() {
     secure.credentials[1] = Some(HIGH_PEM.key);
     let text = "line 2 of the key, in a PEM block, holds a byte of 0x80 to 0xFF, which \
                 PEM does not allow";
-    assert_eq!(
-        diagnostics(secured(secure).result),
-        [credentials(KEY, text, KEY_FIX)]
-    );
+    assert_eq!(refusals(secure), [credentials(KEY, text, KEY_FIX)]);
 }
 
 #[test]
@@ -2055,10 +2059,7 @@ fn refuses_the_key_of_another_certificate_with_the_secret_of_the_key() {
     let mut secure = Secure::of(Policy::Basic256Sha256);
     secure.credentials[1] = Some(OTHER.key);
     let text = "the key is not the key of the certificate";
-    assert_eq!(
-        diagnostics(secured(secure).result),
-        [credentials(KEY, text, KEY_FIX)]
-    );
+    assert_eq!(refusals(secure), [credentials(KEY, text, KEY_FIX)]);
 }
 
 /// The default wall time of a sim node is in 2026, past the window of [`CLIENT`].
@@ -2070,7 +2071,7 @@ fn refuses_a_certificate_outside_its_window_at_the_mesh_time() {
     };
     let text = "the time is outside the validity window of the certificate";
     assert_eq!(
-        diagnostics(secured(secure).result),
+        refusals(secure),
         [credentials(CERTIFICATE, text, CERTIFICATE_FIX)]
     );
 }
@@ -2080,10 +2081,7 @@ fn refuses_a_trust_with_no_certificate_with_the_secret_of_the_trust() {
     let mut secure = Secure::of(Policy::Basic256Sha256);
     secure.credentials[2] = Some(b"no certificate");
     let text = "the trust holds no certificate in DER or PEM";
-    assert_eq!(
-        diagnostics(secured(secure).result),
-        [credentials(TRUST, text, TRUST_FIX)]
-    );
+    assert_eq!(refusals(secure), [credentials(TRUST, text, TRUST_FIX)]);
 }
 
 /// A run with no secret of the key ends with the error of the store, and the run
@@ -2105,6 +2103,45 @@ fn a_missing_secret_ends_the_run_until_it_is_written() {
     assert_eq!(errors(&outcome.statuses), [(RETRY, unread.to_owned())]);
     assert!(!outcome.frames.is_empty());
     assert_eq!(values(&outcome.frames, 2), served(&outcome, A));
+}
+
+/// A key that the client refuses, replaced by the right key, heals at a later run with
+/// no change of the spec.
+#[test]
+fn a_replaced_key_heals_the_run() {
+    let mut secure = Secure::of(Policy::Basic256Sha256);
+    secure.credentials[1] = Some(OTHER.key);
+    let outcome = run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
+        scene.after(ms(1_050), |scene| async move {
+            testing::create_secret(&scene.node.files(), &name(KEY), CLIENT.key).await;
+        });
+        scene.supervise(ms(5_050)).await
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    let text = "the key is not the key of the certificate";
+    assert_eq!(errors(&outcome.statuses), [credentials(KEY, text, KEY_FIX)]);
+    assert!(!outcome.frames.is_empty());
+    assert_eq!(values(&outcome.frames, 2), served(&outcome, A));
+}
+
+/// A certificate whose window opens 2 s after the start of the node reads once the
+/// window opens.
+#[test]
+fn a_certificate_whose_window_opens_later_reads_once_it_opens() {
+    let secure = Secure {
+        wall: START - Span::from_nanos(2 * Span::SECOND.nanos()),
+        ..Secure::of(Policy::Basic256Sha256)
+    };
+    let outcome = run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
+        scene.supervise(ms(10_050)).await
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    let text = "the time is outside the validity window of the certificate";
+    assert_eq!(
+        errors(&outcome.statuses),
+        [credentials(CERTIFICATE, text, CERTIFICATE_FIX)]
+    );
+    assert!(!outcome.frames.is_empty());
 }
 
 /// A browse of the kind connects over the secure channel of the config.
@@ -2155,8 +2192,8 @@ fn a_browse_refuses_the_key_of_another_certificate() {
     });
     let found = found.lock().expect("no panic under the lock").take();
     let text = "the key is not the key of the certificate";
-    assert_eq!(
-        diagnostics(found.expect("the browse ran")),
-        [credentials(KEY, text, KEY_FIX)]
-    );
+    let Some(Err(Error::Retry(error))) = found else {
+        panic!("a retry: {found:?}");
+    };
+    assert_eq!((RETRY, error.to_string()), credentials(KEY, text, KEY_FIX));
 }
