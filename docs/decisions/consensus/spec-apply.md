@@ -39,11 +39,19 @@
   supersedes the second sentence of the SPEC APPLY text of
   https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059603551. A put
   gives `Error::Pool` or `Error::Blob` on a failure. The node then puts the listed
-  chunks with `blob::peer::put` on each other voter of both halves of `raft.voters()`,
-  all at once, in calls of at most 16 chunks in order, each of which fails after
-  `peer::DEADLINE` (10 s on the `env` clock) with no result, its dials included. A call
-  whose session ended dials once more, inside its own deadline, as a session to a peer
-  that restarted ends only at its first use. A miss gives the cause of the last attempt.
+  chunks with a `blob::peer::Push` on each other voter of both halves of
+  `raft.voters()`, all at once, on one stream in order. Each step fails after
+  `peer::DEADLINE` (10 s on the `env` clock) with no result: the dial with the open of
+  the stream, the `Stored` of each chunk, and the end. So a slow voter that stores a
+  chunk within each 10 s stays a holder, and a silent one misses 10 s after its last
+  `Stored`. A step that fails on a session that ended dials once more and goes on from
+  its chunk, as a session to a peer that restarted ends only at its first use; a session
+  that stored a chunk earns one more redial. No listed chunk dials no voter
+  (`laptop.architect`, RULING-PENDING:
+  https://github.com/synnaxlabs/foundation/issues/3405, on the plan
+  https://github.com/synnaxlabs/foundation/issues/3405#issuecomment-6288441342, which
+  supersedes the calls of 16 chunks and their deadline). A miss gives the cause of the
+  last attempt.
   A holder is the node when it is a voter, or a voter whose calls each ended `Ok` while
   a half that holds it lacked a majority; another failed dial or call, also a failed
   read of the node's store for a call, leaves a voter no holder. So the holders are at

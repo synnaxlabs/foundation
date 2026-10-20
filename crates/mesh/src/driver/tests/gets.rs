@@ -1,9 +1,8 @@
 //! Tests of the read of the spec in use that gets a missing chunk from a peer, on a
 //! cluster of three nodes.
 
-use super::apply::{assert_used, base, create_subjects, pointer};
+use super::apply::{assert_used, base, create_largest, create_subjects, pointer};
 use super::*;
-use crate::driver::peer::DEADLINE;
 use crate::used::Cause;
 
 // Voter 3 is down at the apply, so it holds no chunk of the change.
@@ -27,7 +26,7 @@ fn a_voter_down_at_the_apply_uses_the_spec_when_it_comes_back() {
 }
 
 // Voter 3 is down at the apply of a change of 40 subjects, so it lacks each of its 41
-// listed chunks. Voter 2 takes three puts at the apply, and voter 3 gets the chunks
+// listed chunks. Voter 2 takes one put at the apply, and voter 3 gets the chunks
 // from voter 1, the first voter, in three calls of `CHUNKS`, one stream each.
 #[test]
 fn a_voter_that_lacks_many_chunks_gets_them_in_calls_of_chunks() {
@@ -36,7 +35,7 @@ fn a_voter_that_lacks_many_chunks_gets_them_in_calls_of_chunks() {
     cluster.run(seconds(10));
     let board = cluster.board();
     assert_used(&board, &[3], pointer(1, &definitions), &definitions);
-    assert_eq!(board.blobs, [(1, 3), (2, 3)].into());
+    assert_eq!(board.blobs, [(1, 3), (2, 1)].into());
 }
 
 // As above, but voter 1 loses power before voter 3 starts. Voter 3 asks voter 1 once,
@@ -65,7 +64,7 @@ fn a_silent_first_voter_costs_the_deadline_once_for_all_calls() {
     cluster.run(Span::from_nanos(2 * DEADLINE.nanos() - TICK.nanos()));
     let board = cluster.board();
     assert_used(&board, &[3], pointer(1, &definitions), &definitions);
-    assert_eq!(board.blobs, [(1, 1), (2, 6)].into());
+    assert_eq!(board.blobs, [(1, 1), (2, 4)].into());
 }
 
 // Voter 3 is down at two changes. The second lists only the chunks that it adds, so
@@ -222,9 +221,7 @@ fn lacking(seed: u64) -> (Cluster, BTreeMap<Name, Definition>) {
     cluster.start_voter(1);
     cluster.start_voter(2);
     cluster.run(seconds(5));
-    let labels: Vec<String> = (0..40).map(|at| format!("plant.s{at}")).collect();
-    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-    let definitions = create_subjects(&labels, 512);
+    let definitions = create_largest(40);
     cluster.change(1, base(), &definitions);
     cluster.run(seconds(10));
     (cluster, definitions)

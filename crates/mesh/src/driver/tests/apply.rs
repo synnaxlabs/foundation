@@ -809,19 +809,40 @@ fn an_apply_whose_one_live_peer_never_answers_gives_quorum_at_the_deadline() {
     assert_eq!(cluster.board().applied, [(1, base(), Err(quorum))]);
 }
 
-// Each chunk takes about 1 s over links of 300 ms, so the first call of 16 chunks on
-// each voter passes the deadline.
+// Each chunk takes about 1 s over links of 300 ms, so a put of the 41 chunks on a voter
+// takes about 41 s, and each `Stored` comes within the deadline.
 #[test]
-fn an_apply_over_links_of_300_ms_names_each_voter_whose_call_passed_the_deadline() {
+fn an_apply_over_links_of_300_ms_commits_as_each_chunk_ends_within_the_deadline() {
     let mut cluster = Cluster::new(0);
     cluster.delay(Span::from_nanos(300 * Span::MILLISECOND.nanos()));
     cluster.start();
     cluster.run(seconds(10));
-    let labels: Vec<String> = (0..40).map(|at| format!("plant.s{at}")).collect();
-    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-    let definitions = create_subjects(&labels, 512);
+    let definitions = create_largest(40);
     cluster.change(1, base(), &definitions);
-    cluster.run(seconds(60));
+    cluster.run(seconds(120));
+    let board = cluster.board();
+    let moved = pointer(1, &definitions);
+    assert_eq!(board.applied, [(1, moved, Ok(moved))]);
+    assert_used(&board, &IDS, moved, &definitions);
+}
+
+// Voter 3 is down. Voter 2 stores the first chunks over links of 300 ms, and then its
+// links are cut at 15 s, so its put misses 10 s after its last `Stored`, which came at
+// most one chunk before the cut.
+#[test]
+fn a_voter_that_goes_silent_in_its_put_misses_the_deadline_after_its_last_stored() {
+    let mut cluster = Cluster::new(0);
+    cluster.delay(Span::from_nanos(300 * Span::MILLISECOND.nanos()));
+    cluster.start_voter(1);
+    cluster.start_voter(2);
+    cluster.run(seconds(10));
+    cluster.change(1, base(), &create_largest(40));
+    cluster.run(seconds(15));
+    cluster.link(1, 2, 1.0);
+    cluster.link(2, 1, 1.0);
+    cluster.run(seconds(8));
+    assert_eq!(cluster.board().applied, []);
+    cluster.run(seconds(3));
     let quorum = Error::Quorum {
         held: 1,
         voters: 3,
@@ -830,14 +851,43 @@ fn an_apply_over_links_of_300_ms_names_each_voter_whose_call_passed_the_deadline
     assert_eq!(
         quorum.to_string(),
         "1 of 3 voters hold the chunks of the spec change, not a majority; \
-         plant.node2: a call of its put of at most 16 chunks passed the deadline of 10 \
-         s; plant.node3: a call of its put of at most 16 chunks passed the deadline of \
-         10 s"
+         plant.node2: a step of its put passed the deadline of 10s; plant.node3: a \
+         step of its put passed the deadline of 10s"
     );
     assert_eq!(cluster.board().applied, [(1, base(), Err(quorum))]);
 }
 
-// Voter `id`, whose call of its put passed the deadline.
+// Voter 3 is down, and voter 2 restarts at 10 s and at 25 s in a put of about 41 s.
+// The put dials voter 2 again after each restart, as the session before each stored a
+// chunk, so the apply commits.
+#[test]
+fn an_apply_counts_a_voter_that_restarts_twice_in_its_put() {
+    let mut cluster = Cluster::new(0);
+    cluster.delay(Span::from_nanos(300 * Span::MILLISECOND.nanos()));
+    cluster.start_voter(1);
+    cluster.start_voter(2);
+    cluster.run(seconds(10));
+    let definitions = create_largest(40);
+    cluster.change(1, base(), &definitions);
+    for run in [10, 15] {
+        cluster.run(seconds(run));
+        let node = cluster.node(2).clone();
+        cluster.sim.crash(&node, Crash::Power);
+        cluster.start_voter(2);
+    }
+    cluster.run(seconds(120));
+    let moved = pointer(1, &definitions);
+    assert_eq!(cluster.board().applied, [(1, moved, Ok(moved))]);
+}
+
+// `count` subjects of 512 keys, each of which fills one chunk of 16 417 bytes.
+pub(super) fn create_largest(count: usize) -> BTreeMap<Name, Definition> {
+    let labels: Vec<String> = (0..count).map(|at| format!("plant.s{at}")).collect();
+    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+    create_subjects(&labels, 512)
+}
+
+// Voter `id`, a step of whose put passed the deadline.
 fn late(id: u8) -> Missed {
     Missed {
         node: key(id),
@@ -1074,17 +1124,14 @@ fn an_apply_of_the_most_chunks_commits_over_links_of_100_ms() {
 }
 
 // Each of 40 subjects of 512 keys fills one chunk of 16 417 bytes, the size at which
-// the chunker cuts, and each chunk takes about 340 ms, so a call of 32 chunks would
-// miss the deadline.
+// the chunker cuts.
 #[test]
 fn an_apply_of_the_largest_chunks_commits_over_links_of_100_ms() {
     let mut cluster = Cluster::new(0);
     cluster.delay(Span::from_nanos(100 * Span::MILLISECOND.nanos()));
     cluster.start();
     cluster.run(seconds(10));
-    let labels: Vec<String> = (0..40).map(|at| format!("plant.s{at}")).collect();
-    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-    let definitions = create_subjects(&labels, 512);
+    let definitions = create_largest(40);
     let mut chunks = Chunks::default();
     let update = spec::region::tree(&mut chunks, &definitions);
     let largest = update.chunks.iter().map(|&d| chunks.get(d).unwrap().len());

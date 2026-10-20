@@ -186,8 +186,8 @@ async fn fetch(
 }
 
 /// Puts each of `digests` from `store` on the peer of `session`, in order, one at a
-/// time. It returns once the peer stored each one, so each is durable on the peer. A
-/// drop of the future ends the stream with code 0.
+/// time, on one [`Push`]. It returns once the peer stored each one, so each is durable
+/// on the peer. A drop of the future ends the stream with code 0.
 ///
 /// # Errors
 ///
@@ -203,45 +203,102 @@ pub async fn put(
     if digests.is_empty() {
         return Ok(());
     }
-    let (mut sender, mut receiver) = session.open(Class::Complete).await?;
-    let pushed = push(store, &mut sender, &mut receiver, digests).await;
-    if let Err(error) = &pushed
-        && let Some(code) = error.code()
-    {
-        stop(sender, receiver, code);
+    let mut push = Push::open(store, session).await?;
+    for &digest in digests {
+        push = push.put(digest).await?;
     }
-    pushed
+    push.finish().await
 }
 
-/// Puts each of `digests` on one stream and waits for the end of the peer's half.
-async fn push(
-    store: &Store,
-    sender: &mut Sender,
-    receiver: &mut Receiver,
-    digests: &[Digest],
-) -> Result<(), Error> {
-    header(store, sender).await?;
-    for &digest in digests {
-        let Some(chunk) = store.get(digest).await? else {
+/// An open put of chunks on one stream to a peer, for a caller that bounds each step
+/// on its own. A drop ends the stream with code 0.
+#[derive(Debug)]
+pub struct Push<'a> {
+    store: &'a Store,
+    sender: Sender,
+    receiver: Receiver,
+}
+
+impl<'a> Push<'a> {
+    /// Opens a stream on `session` and sends the blob header.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Stream`] when the stream or its session fails, and [`Error::Store`]
+    /// when the pool has no block.
+    pub async fn open(store: &'a Store, session: &Session) -> Result<Self, Error> {
+        let (mut sender, receiver) = session.open(Class::Complete).await?;
+        header(store, &mut sender).await?;
+        Ok(Self {
+            store,
+            sender,
+            receiver,
+        })
+    }
+
+    /// Puts the chunk of `digest` from the store on the peer, and returns once the
+    /// peer stored it, so it is durable on the peer. A drop of the future ends the
+    /// stream with code 0.
+    ///
+    /// # Errors
+    ///
+    /// As for [`put()`]. The stream ends, with the code of a fault of the peer.
+    pub async fn put(mut self, digest: Digest) -> Result<Self, Error> {
+        match self.send(digest).await {
+            Ok(()) => Ok(self),
+            Err(error) => Err(self.stop(error)),
+        }
+    }
+
+    /// Ends this half of the stream and waits for the end of the peer's half.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unexpected`] for a reply after the last put, which stops the stream
+    /// with `MALFORMED`, and [`Error::Stream`] when the stream or its session fails.
+    pub async fn finish(mut self) -> Result<(), Error> {
+        let ended = async {
+            self.sender.finish()?;
+            end(&mut self.receiver).await
+        };
+        match ended.await {
+            Ok(()) => Ok(()),
+            Err(error) => Err(self.stop(error)),
+        }
+    }
+
+    /// Sends the chunk of `digest` and waits for its `Stored`.
+    async fn send(&mut self, digest: Digest) -> Result<(), Error> {
+        let Some(chunk) = self.store.get(digest).await? else {
             return Err(Error::Absent { digest });
         };
         let refusal = |error| refused(digest, error);
         let len =
             u32::try_from(chunk.len()).expect("invariant: a block holds at most 2 GiB");
-        let mut head = store.pool.alloc(Put::LEN).map_err(crate::Error::Pool)?;
+        let mut head = self
+            .store
+            .pool
+            .alloc(Put::LEN)
+            .map_err(crate::Error::Pool)?;
         Put { digest, len }.encode(&mut head);
-        sender.send(head.freeze()).await.map_err(refusal)?;
-        send_chunk(sender, chunk).await.map_err(refusal)?;
-        let Some(message) = receiver.recv().await.map_err(refusal)? else {
+        self.sender.send(head.freeze()).await.map_err(refusal)?;
+        send_chunk(&mut self.sender, chunk).await.map_err(refusal)?;
+        let Some(message) = self.receiver.recv().await.map_err(refusal)? else {
             return Err(Error::Unanswered);
         };
         match unread(&message)? {
-            Reply::Stored { digest: of } if of == digest => {}
-            reply => return Err(Error::Unexpected { reply }),
+            Reply::Stored { digest: of } if of == digest => Ok(()),
+            reply => Err(Error::Unexpected { reply }),
         }
     }
-    sender.finish()?;
-    end(receiver).await
+
+    /// Ends the stream with the code of `error`, when it has one, and gives `error`.
+    fn stop(self, error: Error) -> Error {
+        if let Some(code) = error.code() {
+            stop(self.sender, self.receiver, code);
+        }
+        error
+    }
 }
 
 /// The error of a put of `digest` that `error` ended: the peer's refusal when the

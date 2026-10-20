@@ -17,20 +17,21 @@ use types::time::Span;
 use super::{Call, Mesh};
 use crate::error::{Error, Miss, Missed};
 
-/// How long one get or put of chunks on a peer may take, its dial included.
-pub(super) const DEADLINE: Span = Span::from_nanos(10 * Span::SECOND.nanos());
+/// How long one get of chunks from a peer may take, its dial included, and how long
+/// each step of a put on a peer may take.
+pub(crate) const DEADLINE: Span = Span::from_nanos(10 * Span::SECOND.nanos());
 
-/// The most chunks that one put on a peer carries, so that a call of the largest
+/// The most chunks that one get from a peer asks for, so that a call of the largest
 /// chunks ends within [`DEADLINE`] over links of 100 ms.
 pub(crate) const CHUNKS: usize = 16;
 
 impl Mesh {
     /// Puts each chunk of `digests` of the store on each voter of `voters` but this
     /// node, all at once, and gives the holders: this node when it is a voter, and
-    /// each voter whose put ended `Ok` within [`DEADLINE`]. Returns once the holders
-    /// are a majority of each half of `voters`, and drops the puts still open. A
-    /// voter counts only while a half that holds it lacks a majority, so the holders
-    /// are at most the sum of the majorities of the halves.
+    /// each voter whose put ended `Ok`, each step within [`DEADLINE`]. Returns once
+    /// the holders are a majority of each half of `voters`, and drops the puts still
+    /// open. A voter counts only while a half that holds it lacks a majority, so the
+    /// holders are at most the sum of the majorities of the halves.
     ///
     /// `Stopped` as soon as the group stops, and `Quorum` for the first half that
     /// lacks a majority once each put ended, with each voter whose put failed.
@@ -95,18 +96,60 @@ impl Mesh {
         Ok(holders)
     }
 
-    // Puts `digests` on `to` in calls of at most `CHUNKS` chunks, in order, and gives
-    // why the first call that did not end `Ok` failed. The card of `to` is read once,
-    // at the first call.
+    // Puts `digests` on `to` on one stream, in order, and gives why it failed. Each
+    // step ends within `DEADLINE`: the dial with the open of the stream, the `Stored`
+    // of each chunk, and the end. A step that fails on a session that ended dials once
+    // more and goes on from its chunk, and a session that stored a chunk earns one
+    // more redial. No chunk opens no stream. The card of `to` is read once.
     async fn put_on(&self, to: node::Key, digests: &[Digest]) -> Result<(), Miss> {
-        let contact = self.group.borrow().contact(to).ok_or(Miss::Unknown)?;
-        for chunks in digests.chunks(CHUNKS) {
-            let put = async |session: &Session| {
-                blob::peer::put(&self.store, session, chunks).await
-            };
-            ask(&self.transport, &self.clock, &contact, put).await?;
+        let (public_key, addresses) =
+            self.group.borrow().contact(to).ok_or(Miss::Unknown)?;
+        if digests.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        let mut left = digests;
+        let mut redial = true;
+        loop {
+            let dialed = step(&self.clock, async {
+                let dial = self.transport.dial(public_key, &addresses);
+                let session = dial.await.map_err(Failed::Dial)?;
+                let push = blob::peer::Push::open(&self.store, &session).await;
+                Ok::<_, Failed>((session, push))
+            });
+            let (session, push) = dialed.await??;
+            let before = left.len();
+            let pushed = match push {
+                Ok(push) => self.push(push, &mut left).await,
+                Err(error) => Err(Failed::Call(error)),
+            };
+            match pushed {
+                Ok(()) => return Ok(()),
+                Err(Failed::Call(_))
+                    if session.ended().is_some() && (redial || left.len() < before) =>
+                {
+                    redial = false;
+                }
+                Err(failed) => return Err(failed.into()),
+            }
+        }
+    }
+
+    // Puts `left` on `push`, each step within `DEADLINE`, and takes each chunk that
+    // the peer stored off `left`.
+    async fn push(
+        &self,
+        mut push: blob::peer::Push<'_>,
+        left: &mut &[Digest],
+    ) -> Result<(), Failed> {
+        while let Some((&digest, rest)) = left.split_first() {
+            push = step(&self.clock, push.put(digest))
+                .await?
+                .map_err(Failed::Call)?;
+            *left = rest;
+        }
+        step(&self.clock, push.finish())
+            .await?
+            .map_err(Failed::Call)
     }
 }
 
@@ -237,6 +280,13 @@ async fn ask<T>(
     within(clock, DEADLINE, redialed)
         .await
         .unwrap_or(Err(Failed::Deadline))
+}
+
+// The output of `future`, or `Failed::Deadline` when `DEADLINE` passes first.
+async fn step<F: Future>(clock: &Clock, future: F) -> Result<F::Output, Failed> {
+    within(clock, DEADLINE, future)
+        .await
+        .ok_or(Failed::Deadline)
 }
 
 /// The output of `future`, or `None` when `span` passes first.
