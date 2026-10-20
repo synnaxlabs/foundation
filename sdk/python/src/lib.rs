@@ -615,6 +615,7 @@ fn stop(end: program::write::End) -> program::Refusal {
     match end {
         program::write::End::Removed => program::Refusal::Unknown,
         program::write::End::Failed => program::Refusal::Failed,
+        program::write::End::Refused => program::Refusal::Refused,
     }
 }
 
