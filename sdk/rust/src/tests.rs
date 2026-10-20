@@ -136,9 +136,9 @@ fn start<F: Future<Output = ()> + 'static>(
 
 /// In each run where the links lose 10% of datagrams, a node that accepted the
 /// session of an answer sees its close within a second, not at the end of its idle
-/// timeout: the answer sends a lost close again until the close drains. The answer
-/// gives the key of the node. A run with a lost client Finished has no accept, as the
-/// close ends the handshake of the node.
+/// timeout: while the close drains, a packet of the node makes the answer send the
+/// close again. The answer gives the key of the node. A run with a lost client Finished
+/// has no accept, as the close ends the handshake of the node.
 #[test]
 fn a_node_that_accepted_an_answer_sees_its_close_when_a_close_is_lost() {
     let link = sim::link::Config {
