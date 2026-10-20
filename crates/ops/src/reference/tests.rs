@@ -133,6 +133,16 @@ const fn unless(name: &'static str, others: &'static [&'static str]) -> Attribut
     }
 }
 
+/// An attribute `name` that each of `others` needs.
+const fn when(name: &'static str, others: &'static [&'static str]) -> Attribute {
+    Attribute {
+        name,
+        value: "a value",
+        presence: Presence::When(others),
+        summary: "It.",
+    }
+}
+
 const UNLESS: Block = Block {
     keyword: "unless",
     label: None,
@@ -142,6 +152,9 @@ const UNLESS: Block = Block {
             unless("one", &["a"]),
             unless("two", &["a", "b"]),
             unless("three", &["a", "b", "c"]),
+            when("four", &["a"]),
+            when("five", &["a", "b"]),
+            when("six", &["a", "b", "c"]),
         ],
         blocks: &[],
         examples: &[],
@@ -149,12 +162,15 @@ const UNLESS: Block = Block {
 };
 
 #[test]
-fn unless_joins_the_names_it_takes() {
+fn unless_and_when_join_the_names_they_take() {
     let text = markdown(&[UNLESS], &Table::new());
     for line in [
         "- `one`: a value. Required unless the body holds `a`. It.\n",
         "- `two`: a value. Required unless the body holds `a` and `b`. It.\n",
         "- `three`: a value. Required unless the body holds `a`, `b`, and `c`. It.\n",
+        "- `four`: a value. Required when the body holds `a`. It.\n",
+        "- `five`: a value. Required when the body holds `a` or `b`. It.\n",
+        "- `six`: a value. Required when the body holds `a`, `b`, or `c`. It.\n",
     ] {
         assert!(text.contains(line), "{text}");
     }

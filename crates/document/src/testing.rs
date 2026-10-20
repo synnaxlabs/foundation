@@ -122,7 +122,7 @@ pub fn needs(body: &Body, key: &str, held: &Document) -> bool {
 /// Asserts that each example holds to its body. At each site of each example,
 /// `problems` finds none in the example, none with an attribute removed that its site
 /// does not need, and none with each attribute with a default of its site removed. Each
-/// name of each `Unless` of a site is an attribute of that site. Each item of
+/// name of each `Unless` and `When` of a site is an attribute of that site. Each item of
 /// `examples` is a key that `problems` gets, the body, and the example.
 ///
 /// # Panics
@@ -150,7 +150,9 @@ pub fn assert_examples<K>(
                 optional = optional.saturating_add(1);
             }
             for attribute in body.attributes {
-                let Presence::Unless(others) = attribute.presence else {
+                let (Presence::Unless(others) | Presence::When(others)) =
+                    attribute.presence
+                else {
                     continue;
                 };
                 assert!(!others.is_empty(), "{}: {}", body.summary, attribute.name);
@@ -273,6 +275,15 @@ mod tests {
 
     const UNNAMED: Body =
         holding("Unnamed.", &[attribute("u", Presence::Unless(&[]))], &[]);
+
+    const WHEN: Body = holding(
+        "When.",
+        &[
+            attribute("b", Presence::Default("1")),
+            attribute("w", Presence::When(&["z"])),
+        ],
+        &[],
+    );
 
     fn problem() -> Diagnostic {
         Diagnostic::new(
@@ -427,6 +438,13 @@ mod tests {
     fn fails_an_unless_that_names_no_attribute_of_its_body() {
         let example = document(&[], Vec::new());
         assert_examples([((), &UNKNOWN, example)], |(), _| Vec::new());
+    }
+
+    #[test]
+    #[should_panic(expected = "When.: w: z")]
+    fn fails_a_when_that_names_no_attribute_of_its_body() {
+        let example = document(&["b"], Vec::new());
+        assert_examples([((), &WHEN, example)], |(), _| Vec::new());
     }
 
     #[test]
