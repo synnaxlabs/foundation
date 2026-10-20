@@ -410,7 +410,9 @@ impl Writer {
             return Ok(());
         }
         let counts = &mut self.counts;
-        counts.fill(None);
+        for part in parts {
+            counts[part.group] = None;
+        }
         for part in parts {
             let lowest = &mut counts[part.group];
             let part = (part.place, part.count);
