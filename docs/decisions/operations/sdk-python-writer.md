@@ -34,8 +34,10 @@
      because a caller of `connect` that catches `ConnectionError` then misses a
      refused session; and a `session` attribute on `Refused`, because
      `except ConnectionError` then still catches a typo. `Stream` with `Layout`,
-     `Unsent`, `Body`, `Open`, `Unnamed`, or `Pool` raises `ValueError`: nothing was
-     sent, and the writer goes on, or, at the open, no writer or reader opened.
+     `Unsent`, `Count`, `Body`, `Open`, `Unnamed`, or `Pool` raises `ValueError`:
+     nothing was sent, and the writer goes on, or, at the open, no writer or reader
+     opened. The text of `Count`, `IndexAbsent`, and `Unordered` names the channels at
+     their places, such as "the frame holds plant.a but not its index, plant.time".
      `Stream` with `Unstored`, which only `close` gives, raises `Stopped` with the code
      of the end of the first group in the order of the index places (`Removed` gives
      `unknown`, `Failed` gives `failed`, `Refused` gives `refused`), and a text that
@@ -103,8 +105,10 @@
      refusal, then a loss, which does what `on_loss` says. `PartialWrite` and
      `Rejected` have `written` and `unwritten`, the channels of the frame, the index of
      each group included, in the groups that the node took and did not take, in place
-     order. The text of each names each group that the node did not take, by its
-     index, with its cause: the end, the refusal, or the count of lost samples. So a
+     order, each named once, also at a repeat of a channel. To write a frame again
+     after `Rejected`, a program writes only the channels of `unwritten`, as the node
+     took those of `written`. The text of each names each group that the node did not
+     take, by its index, with its cause: the end, the refusal, or the count of lost samples. So a
      loss in a frame that raises for an end or a refusal is not silent. Changed with
      item 1 (same links): `Stopped` was `Refused`. Changed for many indexes by
      `laptop.architect-2` at 2026-10-20T13:37:38Z
@@ -130,7 +134,10 @@
      run in that copy. Its cost is measured below, with the P1 judgment. The checks of
      one count for each group and of the stamps of each group or of none are those of
      `sdk` (`program::Error::Count` and `Layout(IndexAbsent)`), which raise
-     `ValueError` with the places of the caller.
+     `ValueError` with the places of the caller (`laptop.architect-2`,
+     2026-10-20T13:37:38Z,
+     https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6292172439),
+     and its text names the channels at those places (item 1).
   The key choices of the plan went ahead with `laptop.monitor` at 2026-10-19T01:13:34Z
   (https://github.com/synnaxlabs/foundation/issues/3320#issuecomment-6257555546), with
   one condition: the `TypeError` of an array of another dtype names the place, the
