@@ -351,10 +351,11 @@ impl Client {
 
 impl Client {
     /// Opens a writer on `config.channels` at the client's node, and blocks until the
-    /// node opened it. The node must be the home of their index. Each writer holds a
-    /// stream of the session, and the node bounds the streams of a session (64 by
-    /// default, one of them the hello): past that bound, the open waits until another
-    /// stream of the session ends, such as at the close or drop of a writer.
+    /// node opened it. A write whose index has another node of the region as its home
+    /// goes to that home through the client's node. Each writer holds a stream of the
+    /// session, and the node bounds the streams of a session (64 by default, one of
+    /// them the hello): past that bound, the open waits until another stream of the
+    /// session ends, such as at the close or drop of a writer.
     ///
     /// # Errors
     ///
@@ -362,9 +363,11 @@ impl Client {
     /// [`Error::Panicked`] when the client's thread panicked. [`Error::Session`] with
     /// the error that ended the session when it failed. Else [`Error::Stream`] with
     /// each error of `program::Session::writer`, such as `Refused(Refusal::Unknown)`
-    /// for a name of no channel, `Refused(Refusal::NotHome)` when the node is not the
-    /// home of their index, and `Refused(Refusal::Malformed)` for channels of more
-    /// than one index, each a `program::Refusal`.
+    /// for a name of no channel, `Refused(Refusal::NotHome)` when their channels are on
+    /// more than one index and the client's node is not the home of one, or the home of
+    /// their one index is not the home when the write reaches it, and
+    /// `Refused(Refusal::Malformed)` for channels of more than one index whose homes
+    /// are all the client's node, each a `program::Refusal`.
     pub fn open_writer(&self, config: write::Config) -> Result<write::Writer, Error> {
         write::Writer::open(&self.requests, &self.closed, config)
     }

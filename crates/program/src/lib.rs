@@ -229,8 +229,9 @@ impl Session {
     }
 
     /// Opens a writer on `config.channels` as the session's subject, and waits until
-    /// the node opened it. The node must be the home of each of their indexes. A write
-    /// takes no turn: it runs beside the requests and the reads.
+    /// the node opened it. A write of one index whose home is another node of the
+    /// region goes to that home through the node. A write takes no turn: it runs beside
+    /// the requests and the reads.
     ///
     /// # Errors
     ///
@@ -238,9 +239,12 @@ impl Session {
     /// open is over `OPEN_BYTES_MAX`, each with nothing sent. The error that ended the
     /// renewal, when it ended before or during the open. Else [`Error::Refused`] when
     /// the node stopped the write (`UNKNOWN` for a name of no channel, `FAILED` when
-    /// the home cannot open the write, `MALFORMED` for a lease that the home refuses,
-    /// `NOT_HOME` when the node is not the home of an index, `REFUSED` for a signature
-    /// that the node refuses, `BUSY` when the node has no room for the open),
+    /// the home cannot open the write or the forward to the home fails, `MALFORMED` for
+    /// a lease that is not longer than zero, `NOT_HOME` when the write has more than
+    /// one index and the node is not the home of one, or the home of its one index is
+    /// not the home when the write reaches it, `REFUSED` for a signature that the node
+    /// or the home refuses, `VIA` or `CHANGED` when the home refuses the hello that the
+    /// node carried, `BUSY` when the node or the home has no room for the open),
     /// [`Error::Transport`], [`Error::Message`] for places that `wire` refuses or a
     /// stream that ends before the last place, [`Error::Unplaced`] for places that hold
     /// no place of a channel of the open, and [`Error::Pool`] when no block of
