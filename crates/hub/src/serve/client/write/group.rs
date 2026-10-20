@@ -77,23 +77,21 @@ impl Group {
         self.number
     }
 
-    /// Whether the group took a frame since the last [`cover`](Self::cover).
-    pub(super) fn waiting(&self) -> bool {
-        self.taken.is_some()
-    }
-
     /// Writes the series of the group in `frame`, frame `count` of the stream, of
     /// `time`, and gives its outcome, after the `Ended` reply and its block when the
-    /// group ends at it. First takes the block of the next `Stored` from the home's
-    /// pool when the group holds none, so each taken frame has the block of its
-    /// `Stored`. A frame that finds no block for it or for the copy of its series is
-    /// refused as `Full` or `Large`, and the home does not see it.
+    /// group ends at it. Adds the number of the group to `waiting` when it takes the
+    /// frame while it took none since the last [`cover`](Self::cover). First takes
+    /// the block of the next `Stored` from the home's pool when the group holds none,
+    /// so each taken frame has the block of its `Stored`. A frame that finds no block
+    /// for it or for the copy of its series is refused as `Full` or `Large`, and the
+    /// home does not see it.
     pub(super) fn write(
         &mut self,
         state: &RefCell<State>,
         frame: Frame<'_>,
         time: Time,
         count: u64,
+        waiting: &mut Vec<u32>,
     ) -> (Option<(Unique, Reply)>, Outcome) {
         if let Some(end) = self.ended {
             return (None, Outcome::Ended(end));
@@ -120,7 +118,7 @@ impl Group {
             .as_mut()
             .expect("invariant: a group that did not end writes until the finish");
         match write(writer, draft, time, &mut self.stamped) {
-            Ok(outcome) => (None, self.counted(count, outcome)),
+            Ok(outcome) => (None, self.counted(count, outcome, waiting)),
             Err(end) => {
                 let block = self
                     .next
@@ -214,9 +212,18 @@ impl Group {
         (block, Reply::Ended { group, end })
     }
 
-    /// Counts a taken frame for the next commit, and gives `outcome`.
-    fn counted(&mut self, count: u64, outcome: Outcome) -> Outcome {
+    /// Counts a taken frame for the next commit, adds the group to `waiting` when it
+    /// took none before, and gives `outcome`.
+    fn counted(
+        &mut self,
+        count: u64,
+        outcome: Outcome,
+        waiting: &mut Vec<u32>,
+    ) -> Outcome {
         if let Outcome::Taken { .. } = outcome {
+            if self.taken.is_none() {
+                waiting.push(self.number);
+            }
             self.taken = Some(count);
             return outcome;
         }

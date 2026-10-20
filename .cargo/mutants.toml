@@ -267,9 +267,4 @@ exclude_re = [
   # With the mutant, the node refuses each writer of one index, and each writer test of
   # `crates/node/tests/it/sdk.rs` fails at its open.
   'sdk/rust/src/write\.rs:.*replace != with == in served$',
-  # With `false`, a group that takes frames while a commit is due is pushed to
-  # `Writes::waiting` once for each frame. `Writes::call` drops each repeat, as
-  # `Group::cover` gives `false` for it, so only the capacity of that private list
-  # grows.
-  'crates/hub/src/serve/client/write/group\.rs:.*replace Group::waiting -> bool with false$',
 ]

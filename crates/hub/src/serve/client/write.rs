@@ -344,18 +344,15 @@ impl Writes {
                 let block = block.take().expect(TAKEN);
                 let frame = Frame::Whole(draft);
                 let group = &mut groups[0];
-                if put(state, sender, group, *heads, block, frame, time).await? {
-                    waiting.push(0);
-                }
+                put(state, sender, group, waiting, *heads, block, frame, time).await?;
             }
             Spread::Many { pending, parts } => {
                 parts.split(&draft, pending.iter().map(|&(group, _)| group));
                 for (number, block) in pending.drain(..) {
                     let frame = parts.part(&draft, number);
                     let group = &mut groups[to_usize(number)];
-                    if put(state, sender, group, *heads, block, frame, time).await? {
-                        waiting.push(number);
-                    }
+                    put(state, sender, group, waiting, *heads, block, frame, time)
+                        .await?;
                 }
             }
         }
@@ -443,27 +440,28 @@ impl Writes {
     }
 }
 
-/// Writes `frame`, the frame `heads` of the stream, to `group`, and sends the `Ended` of
-/// the group when it ends at the frame, then the outcome of the frame in `block`.
-/// Returns whether the group took the frame while it waited for no commit, so it now
-/// waits for one.
+/// Writes `frame`, the frame `heads` of the stream, to `group`, which adds its number
+/// to `waiting` when it starts to wait for a commit, and sends the `Ended` of the group
+/// when it ends at the frame, then the outcome of the frame in `block`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parts of a frame that both paths of `Writes::write` give"
+)]
 async fn put(
     state: &RefCell<State>,
     sender: &mut Sender,
     group: &mut Group,
+    waiting: &mut Vec<u32>,
     heads: u64,
     block: Unique,
     frame: Frame<'_>,
     time: Time,
-) -> Result<bool, Error> {
-    let waiting = group.waiting();
-    let (ended, outcome) = group.write(state, frame, time, heads);
-    let starts = !waiting && matches!(outcome, Outcome::Taken { .. });
+) -> Result<(), Error> {
+    let (ended, outcome) = group.write(state, frame, time, heads, waiting);
     if let Some((block, reply)) = ended {
         send(sender, block, reply).await?;
     }
-    send(sender, block, reply(heads, group.number(), outcome)).await?;
-    Ok(starts)
+    send(sender, block, reply(heads, group.number(), outcome)).await
 }
 
 /// Sends `reply` in the last bytes of `block`.
