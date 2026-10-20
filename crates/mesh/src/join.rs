@@ -232,8 +232,8 @@ pub enum Miss {
     /// The dial or the answer did not come within 10 s.
     Deadline,
     /// After `Joined`, the founding or the end of the reply half did not come within
-    /// 10 s + its bytes / (100 KiB/s), or a message did not come within 10 s of the one
-    /// before it.
+    /// 10 s + its bytes / (100 KiB/s), or a message or the end of the half did not
+    /// come within 10 s of the message before it.
     Slow,
     /// The answer is not one that a join stream carries. The reply half stopped
     /// with code 2, or had ended.

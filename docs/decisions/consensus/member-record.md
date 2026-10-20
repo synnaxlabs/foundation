@@ -151,10 +151,11 @@
   half. So voters that do not answer give `Error::Unjoined`, with the miss of each
   voter in the last round, within `join::bound`: 8 x (10 s for each voter + 1 s),
   248 s for 3 voters. After `Joined`, the whole founding and the end of the half come
-  within 10 s + its bytes / (100 KiB/s), and each message within 10 s of the one
-  before it, or the miss is `Slow`. So each transfer of a founding that fails adds at
-  most 665.36 s, for the largest (`laptop.architect`, 2026-10-20T08:38:03Z, items A to
-  C of https://github.com/synnaxlabs/foundation/pull/3551#issuecomment-6286959971;
+  within 10 s + its bytes / (100 KiB/s), and each message and the end of the half
+  within 10 s of the message before it, or the miss is `Slow`. So each transfer of a
+  founding that fails adds at most 665.36 s, for the largest (`laptop.architect`,
+  2026-10-20T08:38:03Z, items A to C of
+  https://github.com/synnaxlabs/foundation/pull/3551#issuecomment-6286959971;
   665.36 s in place of its 665 s: 2026-10-20T08:58:14Z,
   https://github.com/synnaxlabs/foundation/pull/3551#issuecomment-6287323078; `Slow`
   and the drop of the half: 2026-10-20T09:24:55Z,
