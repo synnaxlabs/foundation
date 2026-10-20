@@ -225,9 +225,9 @@ impl Reader {
         crate::places(py, &self.places)
     }
 
-    /// The nanoseconds from the return of the frame of the last call of `__next__` that
-    /// gave one with no loss, to just before that call returned, or 0 before one. Only
-    /// in a build with the feature `sim`, for the bench.
+    /// The nanoseconds from the time the `sdk` reader gave the frame of the last call
+    /// of `__next__` that gave one with no loss, to just before that call returned, or
+    /// 0 before one. Only in a build with the feature `sim`, for the bench.
     #[cfg(feature = "sim")]
     #[getter]
     fn _part(&self) -> u64 {
