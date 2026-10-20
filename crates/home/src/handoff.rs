@@ -4,7 +4,7 @@
 use std::num::NonZeroU8;
 use std::str;
 
-use buffer::{Buffer, Layout};
+use buffer::{Buffer, Entry, Layout};
 use control::{Handoff, Writer};
 use types::authority::Authority;
 use types::channel::Slot;
@@ -28,10 +28,15 @@ const _: () = assert!(
     "a handoff fits one entry of any ring"
 );
 
-/// Appends the entry that records `handoff`, alone, with `head`, and returns what
-/// [`state::append`] does.
-pub(crate) fn append(buffer: &Buffer, handoff: Handoff<'_>, head: state::Head) -> bool {
-    state::append(buffer, TAG, body(handoff).as_deref(), head)
+/// Appends the entry that records `handoff` with `head`, then `with` in the same
+/// record, and returns what [`state::append`] does.
+pub(crate) fn append(
+    buffer: &Buffer,
+    handoff: Handoff<'_>,
+    head: state::Head,
+    with: Option<Entry>,
+) -> bool {
+    state::append(buffer, TAG, body(handoff).as_deref(), head, with)
 }
 
 /// The body of the entry that records `handoff`, or `None` when no writer holds

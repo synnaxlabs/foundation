@@ -19,6 +19,7 @@ use types::time::{Interval, Monotonic, Span, Stamp};
 
 use crate::Refusal;
 use crate::index::{Accepted, Index};
+use crate::publish::Target;
 use crate::reader;
 use crate::split::Split;
 use crate::writer::{self, Writer};
@@ -169,6 +170,9 @@ pub struct Shard {
     /// The gate for the next carry of each index that is not carried: the one that
     /// the open restored, or the one that a shed kept.
     kept: hash::Map<Slot, Gate>,
+    /// The control channel of each carried index that publishes its handoffs, by
+    /// the index's slot. Each names a carried control index.
+    controls: hash::Map<Slot, Target>,
     /// When [`advance`](Shard::advance) next restores records, ends holds, and appends
     /// changed records ([`Shard::arm`]).
     tick: Option<Monotonic>,
@@ -339,6 +343,7 @@ impl Shard {
             readers: reader::Set::new(named),
             decoder: stored::Decoder::default(),
             kept,
+            controls: hash::Map::default(),
             tick: None,
         }
     }
@@ -411,6 +416,8 @@ impl Shard {
             .now()
             .map(|mesh| target(&self.buffer, &self.indexes[place], mesh));
         self.readers.shed(place, target);
+        self.controls.remove(&slot);
+        self.controls.retain(|_, target| target.slot() != slot);
         let last = self.indexes.len() - 1;
         self.places.remove(&slot);
         let gate = self.indexes.swap_remove(place).gate;
@@ -425,6 +432,37 @@ impl Shard {
                 claim.place = place;
             }
         }
+    }
+
+    /// Publishes each later handoff of the index at `slot` on the control channel that
+    /// `control` holds, or stops for `None`. `control` is a key set of one group: the
+    /// control index and one data channel of type `string`. At each handoff that the
+    /// shard records for the index, it appends one sample on the live path of the
+    /// control index in the same record as the handoff, so a crash keeps both or
+    /// neither. The sample is the JSON object `{"subject","via","authority","after"}`
+    /// of the new holder, or `{}` when no writer holds control. `after` is the newest
+    /// live stamp of the index at `slot`, absent when it has none. The sample's stamp
+    /// is mesh time, kept strictly after the control index's newest stamp. A handoff
+    /// recorded before the call gets no sample. A shed of either index ends it.
+    ///
+    /// # Panics
+    ///
+    /// If the shard does not carry `slot` or the control index, if the control index
+    /// is the index at `slot`, or if `control` is not one group with one data channel
+    /// of type `string`.
+    pub fn publish(&mut self, slot: Slot, control: Option<Arc<KeySet>>) {
+        self.place(slot);
+        let Some(control) = control else {
+            self.controls.remove(&slot);
+            return;
+        };
+        let target = Target::new(control);
+        self.place(target.slot());
+        assert!(
+            target.slot() != slot,
+            "the index at {slot:?} cannot be its own control index"
+        );
+        self.controls.insert(slot, target);
     }
 
     /// When the shard next changes with no call, on its monotonic clock: the earliest
@@ -473,7 +511,8 @@ impl Shard {
             let Some(mesh) = mesh else {
                 continue;
             };
-            append_handoffs(&self.buffer, &mut self.indexes, iter::once(place), mesh);
+            let handoffs = self.handoffs();
+            handoffs.append(iter::once(place), mesh);
         }
         if self.tick.is_none_or(|tick| monotonic < tick) {
             return;
@@ -536,7 +575,7 @@ impl Shard {
             claims,
         };
         let places = session.claims.iter().map(|claim| claim.place);
-        append_handoffs(&self.buffer, &mut self.indexes, places, mesh);
+        self.handoffs().append(places, mesh);
         let key = writer::Key {
             shard: self.number,
             number: self.next,
@@ -562,7 +601,7 @@ impl Shard {
             self.indexes[claim.place].gate.close(claim.key, now);
         }
         let places = session.claims.iter().map(|claim| claim.place);
-        append_handoffs(&self.buffer, &mut self.indexes, places, mesh);
+        self.handoffs().append(places, mesh);
     }
 
     /// Applies `frame` to each index it holds, whole or not at all per index. The
@@ -610,7 +649,14 @@ impl Shard {
             .checks
             .iter()
             .map(|&(group, ..)| claim(&session.claims, group).place);
-        let recorded = append_handoffs(&self.buffer, &mut self.indexes, places, mesh);
+        let handoffs = Handoffs {
+            buffer: &self.buffer,
+            indexes: &mut self.indexes,
+            places: &self.places,
+            controls: &self.controls,
+            readers: &mut self.readers,
+        };
+        let recorded = handoffs.append(places, mesh);
         let entries = &mut scratch.entries;
         let made = freeze(
             entries,
@@ -1007,6 +1053,17 @@ impl Shard {
             .unwrap_or_else(|| self.indexes[place].live_tail())
     }
 
+    /// The append of handoffs over the shard's fields.
+    fn handoffs(&mut self) -> Handoffs<'_> {
+        Handoffs {
+            buffer: &self.buffer,
+            indexes: &mut self.indexes,
+            places: &self.places,
+            controls: &self.controls,
+            readers: &mut self.readers,
+        }
+    }
+
     /// The place in `indexes` of the index at `slot`.
     ///
     /// # Panics
@@ -1072,34 +1129,69 @@ fn freeze(
     Ok(())
 }
 
-/// Appends the unrecorded handoff of the index at each of `places`, each alone, on the
-/// live path at mesh time `mesh`, and marks it recorded when [`handoff::append`] says
-/// that it needs no later append. Returns whether every handoff was recorded.
-fn append_handoffs(
-    buffer: &Buffer,
-    indexes: &mut [Index],
-    places: impl Iterator<Item = usize>,
-    mesh: Stamp,
-) -> bool {
-    let mut all = true;
-    for place in places {
-        let index = &mut indexes[place];
-        let Some((handoff, first)) = index.handoff() else {
-            continue;
-        };
-        let head = state::Head {
-            index: index.key,
-            slot: index.slot,
-            first,
-            stored_at: mesh,
-        };
-        if handoff::append(buffer, handoff, head) {
-            index.gate.recorded();
-        } else {
-            all = false;
+/// What the append of handoffs changes: a borrow of each shard field but the writers
+/// and the scratch, so that a call can borrow those beside it.
+struct Handoffs<'a> {
+    buffer: &'a Buffer,
+    indexes: &'a mut [Index],
+    places: &'a hash::Map<Slot, usize>,
+    controls: &'a hash::Map<Slot, Target>,
+    readers: &'a mut reader::Set,
+}
+
+impl Handoffs<'_> {
+    /// Appends the unrecorded handoff of the index at each of `places` on the live
+    /// path at mesh time `mesh`, with its control sample in the same record when the
+    /// index has a control target, and marks it recorded when [`handoff::append`] says
+    /// that it needs no later append. The sample's frame then goes to the readers of
+    /// the control index. A handoff whose sample finds no block waits as one with no
+    /// room does. Returns whether every handoff was recorded.
+    fn append(self, places: impl Iterator<Item = usize>, mesh: Stamp) -> bool {
+        let mut all = true;
+        for place in places {
+            let index = &self.indexes[place];
+            let Some((handoff, first)) = index.handoff() else {
+                continue;
+            };
+            let head = state::Head {
+                index: index.key,
+                slot: index.slot,
+                first,
+                stored_at: mesh,
+            };
+            let Some(target) = self.controls.get(&index.slot) else {
+                if handoff::append(self.buffer, handoff, head, None) {
+                    self.indexes[place].gate.recorded();
+                } else {
+                    all = false;
+                }
+                continue;
+            };
+            let control = self.places[&target.slot()];
+            let accepted = self.indexes[control].companion(mesh);
+            let pool = self.buffer.pool();
+            let sample = target.sample(pool, handoff, index.newest(), &accepted, mesh);
+            let (frame, entry) = match sample {
+                Ok(sample) => sample,
+                Err(block::Error::TooLarge { .. }) => {
+                    panic!("invariant: a block holds a control sample")
+                }
+                Err(block::Error::Exhausted { .. } | block::Error::Refused { .. }) => {
+                    all = false;
+                    continue;
+                }
+            };
+            if !handoff::append(self.buffer, handoff, head, Some(entry)) {
+                all = false;
+                continue;
+            }
+            self.indexes[place].gate.recorded();
+            let seq = accepted.seq.clone();
+            self.indexes[control].add(accepted);
+            self.readers.applied(control, frame, target.set(), seq);
         }
+        all
     }
-    all
 }
 
 /// Spends the seq of each accepted group of `checks`, and makes the outcome of each
@@ -8759,5 +8851,408 @@ mod tests {
             assert_eq!(shard.write(a, LIVE, good), Ok(&[applied(2, 0, 1)][..]));
         })
         .expect("the run ends");
+    }
+
+    mod publish {
+        use super::*;
+
+        /// The control index of the tests, with a `string` channel at slot 4.
+        const CONTROL: Slot = Slot::new(3);
+
+        /// The index at slot 0 with an `i64` channel at slot 1.
+        fn controlled() -> Arc<KeySet> {
+            intern(&[Group {
+                index: key(Slot::new(0)),
+                data: &[(key(Slot::new(1)), Type::Scalar(Scalar::I64))],
+            }])
+        }
+
+        fn control() -> Arc<KeySet> {
+            intern(&[Group {
+                index: key(CONTROL),
+                data: &[(key(Slot::new(4)), Type::String)],
+            }])
+        }
+
+        impl Test {
+            /// A shard that carries slots 0, 2, and `CONTROL`, where slot 0 publishes
+            /// on the control channel of [`control`].
+            async fn published(&self) -> Shard {
+                let mut shard = self.open(AREA, 5).await;
+                for n in [0, 2, 3] {
+                    assert!(shard.carry(Slot::new(n), key(Slot::new(n))));
+                }
+                shard.publish(Slot::new(0), Some(control()));
+                shard
+            }
+        }
+
+        /// The stamp and the JSON value of each control sample of `frames`, frames of
+        /// [`control`]: its index is entry 0.
+        fn samples(frames: &[Frame]) -> Vec<(i64, serde_json::Value)> {
+            let mut out = Vec::new();
+            for frame in frames {
+                let count = frame.range(0).expect("the index is present").count;
+                assert_eq!(count, 1, "a control frame holds one sample");
+                let stamps = frame.series(0).expect("stamps");
+                let stamp = decode(stamps, Type::Scalar(Scalar::Stamp));
+                let value = decode(frame.series(1).expect("values"), Type::String);
+                out.push(sample(&stamp, &value));
+            }
+            out
+        }
+
+        /// The stamp and the JSON value of one control sample of the raw series
+        /// `stamp` and `value`.
+        fn sample(stamp: &[u8], value: &[u8]) -> (i64, serde_json::Value) {
+            let stamp = i64::from_le_bytes(stamp.try_into().expect("one stamp"));
+            let form = codec::Variable::of(Type::String).expect("variable");
+            let [value] = form.samples(1, value).collect::<Vec<_>>()[..] else {
+                panic!("one value");
+            };
+            (stamp, serde_json::from_slice(value).expect("JSON"))
+        }
+
+        /// The raw series of one sample of `data_type` in `bytes`.
+        fn decode(bytes: &[u8], data_type: Type) -> Vec<u8> {
+            let mut out = Vec::new();
+            codec::decode(data_type, 1, bytes, &mut out).expect("decodes");
+            out
+        }
+
+        /// The stamp and the JSON value of each control sample that the buffer of
+        /// `shard` holds on disk.
+        async fn stored_samples(shard: &Shard) -> Vec<(i64, serde_json::Value)> {
+            let read = shard
+                .buffer
+                .reader()
+                .read(CONTROL, Path::Live, Mark::at(0), usize::MAX)
+                .await
+                .expect("reads");
+            let stored = read.entries.iter().filter(|entry| entry.samples.is_some());
+            stored
+                .map(|entry| {
+                    let series: Vec<_> = stored::read(&entry.bytes).collect();
+                    let [first, second] = &series[..] else {
+                        panic!("two series");
+                    };
+                    let (stamps, values) = if first.data_type == Type::String {
+                        (second, first)
+                    } else {
+                        (first, second)
+                    };
+                    sample(
+                        &decode(stamps.bytes, stamps.data_type),
+                        &decode(values.bytes, Type::String),
+                    )
+                })
+                .collect()
+        }
+
+        fn held(subject: &str, authority: u8) -> serde_json::Value {
+            serde_json::json!({
+                "subject": subject,
+                "via": VIA.to_string(),
+                "authority": authority,
+            })
+        }
+
+        fn held_after(subject: &str, authority: u8, after: i64) -> serde_json::Value {
+            let mut value = held(subject, authority);
+            value["after"] = after.into();
+            value
+        }
+
+        #[test]
+        fn publishes_each_handoff_with_the_newest_stamp_before_it() {
+            run(301, |test| async move {
+                let set = controlled();
+                let mut shard = test.published().await;
+                let reader = complete(&mut shard, CONTROL);
+                let opened = test.now();
+                let a = shard.open_writer(writer("a", 7, &set)).expect("synced");
+                let written = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
+                assert_eq!(shard.write(a, LIVE, written), Ok(&[applied(0, 0, 1)][..]));
+                shard.close_writer(a);
+                let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
+                shard.committed().await.expect("the commit ends");
+
+                assert_eq!(woken(&mut shard), [reader]);
+                let (frames, _) = drain(&mut shard, reader);
+
+                assert_eq!(ranges(&frames, 0), [seq(0, 1), seq(1, 1), seq(2, 1)]);
+                let samples = samples(&frames);
+                let values: Vec<_> = samples.iter().map(|(_, value)| value).collect();
+                let expected =
+                    [held("a", 7), serde_json::json!({}), held_after("b", 1, 10)];
+                assert_eq!(values, expected.iter().collect::<Vec<_>>());
+                let stamps: Vec<_> = samples.iter().map(|&(stamp, _)| stamp).collect();
+                assert_eq!(stamps[0], opened.nanos());
+                assert!(stamps.is_sorted_by(|a, b| a < b), "{stamps:?}");
+                shard.close_writer(b);
+            });
+        }
+
+        #[test]
+        fn keeps_a_sample_with_no_block_waiting_with_its_handoff() {
+            run(302, |test| async move {
+                let set = controlled();
+                let mut shard = test.published().await;
+                let reader = complete(&mut shard, CONTROL);
+                let blocks = test.fill();
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(taken(&mut shard, reader, 0), []);
+                drop(blocks);
+                let written = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
+
+                assert_eq!(shard.write(a, LIVE, written), Ok(&[applied(0, 0, 1)][..]));
+
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                let (frames, _) = drain(&mut shard, reader);
+                assert_eq!(
+                    samples(&frames)[..]
+                        .iter()
+                        .map(|(_, v)| v)
+                        .collect::<Vec<_>>(),
+                    [&held("a", 1)]
+                );
+                shard.close_writer(a);
+            });
+        }
+
+        #[test]
+        fn publishes_nothing_for_an_index_with_no_target() {
+            run(303, |test| async move {
+                let set = controlled();
+                let mut shard = test.published().await;
+                shard.publish(Slot::new(0), None);
+                let reader = complete(&mut shard, CONTROL);
+
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(taken(&mut shard, reader, 0), []);
+                assert_eq!(stored(&shard, CONTROL, Path::Live), 0);
+                shard.close_writer(a);
+            });
+        }
+
+        #[test]
+        fn stops_at_a_shed_of_either_index() {
+            for shed in [Slot::new(0), CONTROL] {
+                run(304, move |test| async move {
+                    let set = controlled();
+                    let mut shard = test.published().await;
+                    shard.shed(shed);
+                    assert!(shard.carry(shed, key(shed)));
+                    let reader = complete(&mut shard, CONTROL);
+
+                    let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+
+                    shard.committed().await.expect("the commit ends");
+                    assert_eq!(taken(&mut shard, reader, 0), [], "{shed:?}");
+                    assert_eq!(stored(&shard, CONTROL, Path::Live), 0);
+                    shard.close_writer(a);
+                });
+            }
+        }
+
+        #[test]
+        fn panics_when_the_control_index_is_not_carried() {
+            check_not_carried(305, |shard| {
+                shard.publish(Slot::new(0), Some(control()));
+            });
+        }
+
+        #[test]
+        fn panics_when_the_index_is_not_carried() {
+            check_not_carried(306, |shard| shard.publish(Slot::new(3), None));
+        }
+
+        #[test]
+        fn panics_when_an_index_is_its_own_control_index() {
+            let message = "the index at Slot(2) cannot be its own control index";
+            check_panics(307, message, |shard| {
+                let own = intern(&[Group {
+                    index: key(Slot::new(2)),
+                    data: &[(key(Slot::new(3)), Type::String)],
+                }]);
+                shard.publish(Slot::new(2), Some(own));
+            });
+        }
+
+        #[test]
+        fn panics_on_a_control_channel_of_another_type() {
+            let message = "the control channel is of type i64, not string";
+            check_panics(308, message, |shard| {
+                shard.publish(Slot::new(0), Some(two_indexes_control()));
+            });
+        }
+
+        /// The index at slot 2 with an `i64` channel at slot 3.
+        fn two_indexes_control() -> Arc<KeySet> {
+            intern(&[Group {
+                index: key(Slot::new(2)),
+                data: &[(key(Slot::new(3)), Type::Scalar(Scalar::I64))],
+            }])
+        }
+
+        /// The handoffs that a power cut at a random time keeps: each subject `s<n>`
+        /// at authority `n` takes control of slot 0 from the one before it.
+        fn check_cut(seed: u64, cut: Span) {
+            let (mut sim, node) = create_node(seed);
+            let config = env::shards::Config {
+                name: DIR.into(),
+                core: None,
+            };
+            let first = node.clone();
+            let _handle = node
+                .shards()
+                .start(config, move |tasks| async move {
+                    let test = Test::new(first, tasks);
+                    let set = controlled();
+                    let mut shard = test.published().await;
+                    for n in 1..=40 {
+                        let subject = format!("s{n}");
+                        shard
+                            .open_writer(writer(&subject, n, &set))
+                            .expect("synced");
+                        test.clock.sleep(Span::from_nanos(3_000_000)).await;
+                    }
+                })
+                .expect("the shard starts");
+            sim.run_for(cut).expect("the run goes on");
+            sim.crash(&node, sim::Crash::Power);
+            sim.run_on(&node, move |node, tasks| async move {
+                let test = Test::new(node, tasks);
+                let shard = test.published().await;
+                let samples = stored_samples(&shard).await;
+                let holder = shard.indexes[shard.place(Slot::new(0))].gate.holder();
+                let kept = holder.map_or(0, |holder| holder.authority.0);
+                let expected: Vec<_> =
+                    (1..=kept).map(|n| held(&format!("s{n}"), n)).collect();
+                let values: Vec<_> = samples.iter().map(|(_, v)| v.clone()).collect();
+                assert_eq!(values, expected, "cut at {cut}");
+                let stamps: Vec<_> = samples.iter().map(|&(stamp, _)| stamp).collect();
+                assert!(stamps.is_sorted_by(|a, b| a < b), "{stamps:?}");
+            })
+            .expect("the run after the cut ends");
+        }
+
+        #[test]
+        fn keeps_a_sample_for_each_handoff_that_a_power_cut_keeps() {
+            for cut in [0, 2_000_000, 15_000_000, 47_000_000, 200_000_000] {
+                check_cut(309, Span::from_nanos(cut));
+            }
+        }
+
+        /// One step of [`check_rule`] on the index at slot 0.
+        #[derive(Clone, Copy, Debug)]
+        enum Step {
+            /// A writer opens, with a lease of `LEASE` or none.
+            Open { authority: u8, leased: bool },
+            /// An open writer closes.
+            Close(proptest::sample::Index),
+            /// An open writer writes one sample at mesh time.
+            Write(proptest::sample::Index),
+            /// `WAIT` passes, and the shard advances.
+            Wait,
+        }
+
+        fn step() -> impl proptest::strategy::Strategy<Value = Step> {
+            use proptest::prelude::*;
+            prop_oneof![
+                2 => (1_u8..4, any::<bool>())
+                    .prop_map(|(authority, leased)| Step::Open { authority, leased }),
+                1 => any::<proptest::sample::Index>().prop_map(Step::Close),
+                3 => any::<proptest::sample::Index>().prop_map(Step::Write),
+                1 => Just(Step::Wait),
+            ]
+        }
+
+        /// Runs `steps`, then checks that the subject of each applied sample at stamp
+        /// `t` is the holder of the last control sample whose `after` is before `t`. A
+        /// holder with no `after` comes before each stamp; `{}` names no holder.
+        fn check_rule(steps: Vec<Step>) {
+            run(310, move |test| async move {
+                let set = controlled();
+                let mut shard = test.published().await;
+                let reader = complete(&mut shard, CONTROL);
+                let mut open: Vec<(writer::Key, String)> = Vec::new();
+                let mut commands = Vec::new();
+                for (n, step) in steps.into_iter().enumerate() {
+                    match step {
+                        Step::Open { authority, leased } => {
+                            let subject = format!("w{n}");
+                            let opened = Writer {
+                                lease: leased.then_some(LEASE),
+                                ..writer(&subject, authority, &set)
+                            };
+                            let key = shard.open_writer(opened).expect("synced");
+                            open.push((key, subject));
+                        }
+                        Step::Close(at) if !open.is_empty() => {
+                            let (key, _) = open.remove(at.index(open.len()));
+                            shard.close_writer(key);
+                        }
+                        Step::Write(at) if !open.is_empty() => {
+                            let (key, subject) = &open[at.index(open.len())];
+                            test.clock.sleep(Span::from_nanos(1000)).await;
+                            let stamp = test.now().nanos();
+                            let written =
+                                frame(&test.pool, &set, &[(0, &[stamp]), (1, &[1])]);
+                            let outcomes = shard.write(*key, LIVE, written);
+                            if let Ok([Outcome::Applied { .. }]) = outcomes {
+                                commands.push((stamp, subject.clone()));
+                            }
+                        }
+                        Step::Close(_) | Step::Write(_) => {}
+                        Step::Wait => {
+                            test.clock.sleep(WAIT).await;
+                            shard.advance();
+                        }
+                    }
+                }
+                shard.committed().await.expect("the commit ends");
+                woken(&mut shard);
+                let (frames, _) = drain(&mut shard, reader);
+                let samples = samples(&frames);
+                for (stamp, subject) in &commands {
+                    let holder = samples.iter().rev().find_map(|(_, value)| {
+                        let subject = value.get("subject")?;
+                        let after = value.get("after").map(serde_json::Value::as_i64);
+                        let before = after.is_none_or(|after| after < Some(*stamp));
+                        before.then_some(subject)
+                    });
+                    let expected = serde_json::Value::from(subject.as_str());
+                    assert_eq!(holder, Some(&expected), "the command at {stamp}");
+                }
+            });
+        }
+
+        proptest::proptest! {
+            #![proptest_config(proptest::prelude::ProptestConfig::with_cases(32))]
+
+            #[test]
+            fn gives_the_writer_of_each_command_by_the_rule(
+                steps in proptest::collection::vec(step(), 1..40),
+            ) {
+                check_rule(steps);
+            }
+        }
+
+        proptest::proptest! {
+            #![proptest_config(proptest::prelude::ProptestConfig::with_cases(16))]
+
+            #[test]
+            fn keeps_a_sample_for_each_handoff_at_any_cut(
+                seed in proptest::prelude::any::<u64>(),
+                cut in 0_i64..150_000_000,
+            ) {
+                check_cut(seed, Span::from_nanos(cut));
+            }
+        }
     }
 }

@@ -1,6 +1,7 @@
 //! The state entries of an index: entries of no samples on its live path, each with
 //! the tag of its kind, where the newest of a kind replaces the ones before it.
 
+use std::iter;
 use std::num::NonZeroU8;
 
 use block::Block;
@@ -27,8 +28,9 @@ pub(crate) struct Target<'a> {
 }
 
 /// Appends the state entry of tag `tag` with `body` in a block of the pool of
-/// `buffer`, or no part for `None`, with `head`, alone. Returns whether the entry needs
-/// no later append: the buffer took it, or a failed commit ended the buffer, so a
+/// `buffer`, or no part for `None`, with `head`, then `with` in the same record, or
+/// alone for `None`. A crash keeps both or neither. Returns whether the entries need
+/// no later append: the buffer took them, or a failed commit ended the buffer, so a
 /// restart reads no later entry. `false` when the pool had no block for the body, or
 /// the ring or the pool had no room.
 ///
@@ -41,6 +43,7 @@ pub(crate) fn append(
     tag: NonZeroU8,
     body: Option<&[u8]>,
     head: Head,
+    with: Option<Entry>,
 ) -> bool {
     let block = body.map(|body| {
         let mut block = buffer.pool().alloc(body.len())?;
@@ -56,11 +59,13 @@ pub(crate) fn append(
             panic!("invariant: a block holds the body of a state entry: {error}")
         }
     };
-    match buffer.append([entry(tag, body, head)]) {
+    match buffer.append(iter::once(entry(tag, body, head)).chain(with)) {
         Ok(()) | Err(buffer::Rejected::Files(_)) => true,
         Err(buffer::Rejected::Full { .. } | buffer::Rejected::Pool(_)) => false,
         Err(buffer::Rejected::Large(limit)) => {
-            panic!("invariant: one entry holds the body of a state entry: {limit}")
+            panic!(
+                "invariant: one record holds a state entry and its companion: {limit}"
+            )
         }
     }
 }

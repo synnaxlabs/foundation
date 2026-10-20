@@ -100,6 +100,32 @@ impl Order {
         }
     }
 
+    /// Accepts one live sample that the home adds at mesh time `now`, stamped `now`,
+    /// or 1 ns past the newest stamp of either path when that is not earlier. No limit
+    /// applies: the limits guard against a writer's clock, not the home's.
+    /// [`Order::advance`] spends it.
+    ///
+    /// # Panics
+    ///
+    /// If the newest stamp is the last stamp, or the live seq would pass `u64::MAX`.
+    pub(crate) fn companion(&self, now: Stamp) -> Accepted {
+        let newest = self.live.stamp.max(self.backfill.stamp);
+        let after = newest.map(|newest| {
+            let nanos = newest.nanos().checked_add(1);
+            Stamp::from_nanos(nanos.expect("invariant: a stamp is before the last"))
+        });
+        let start = self.live.seq;
+        let end = start
+            .checked_add(1)
+            .expect("invariant: a path takes fewer than 2^64 samples");
+        Accepted {
+            path: Path::Live,
+            seq: start..end,
+            last: Some(after.map_or(now, |after| after.max(now))),
+            checked: [self.live.seq, self.backfill.seq],
+        }
+    }
+
     /// Where `path` stands.
     pub(crate) fn tail(&self, path: Path) -> Tail {
         match path {
@@ -393,6 +419,72 @@ mod tests {
         Tail {
             stamp: Some(s(stamp)),
             seq,
+        }
+    }
+
+    mod companion {
+        use super::*;
+
+        /// Spends a companion sample at `now`, and returns its seq and stamp.
+        fn spend(order: &mut Order, now: Stamp) -> (Range<u64>, Option<Stamp>) {
+            let accepted = order.companion(now);
+            let taken = (accepted.seq.clone(), accepted.last);
+            order.advance(accepted);
+            taken
+        }
+
+        #[test]
+        fn takes_mesh_time_and_the_next_live_seq() {
+            let mut order = Order::new(limits(), tail(10, 4), Tail::default());
+
+            assert_eq!(spend(&mut order, now()), (4..5, Some(now())));
+            assert_eq!(order.tail(Path::Live), tail(60, 5));
+        }
+
+        #[test]
+        fn takes_mesh_time_before_the_first_sample() {
+            assert_eq!(spend(&mut order(), now()), (0..1, Some(now())));
+        }
+
+        #[test]
+        fn steps_past_a_newest_stamp_that_is_not_earlier() {
+            let one = Span::from_nanos(1);
+            for newest in [60, 70] {
+                let mut order = Order::new(limits(), tail(newest, 4), Tail::default());
+
+                assert_eq!(spend(&mut order, now()), (4..5, Some(s(newest) + one)));
+            }
+        }
+
+        #[test]
+        fn steps_past_the_newest_backfill_stamp() {
+            let mut order = Order::new(limits(), tail(10, 4), tail(62, 2));
+
+            let taken = spend(&mut order, now());
+
+            assert_eq!(taken, (4..5, Some(s(62) + Span::from_nanos(1))));
+            assert_eq!(order.tail(Path::Backfill), tail(62, 2));
+        }
+
+        #[test]
+        fn is_followed_by_a_later_live_frame() {
+            let mut order = order();
+            spend(&mut order, now());
+            spend(&mut order, now());
+
+            let later = stamps(&[61]);
+            assert_eq!(accept(&mut order, Path::Live, &later, now()), Ok(2..3));
+        }
+
+        #[test]
+        #[should_panic(expected = "invariant: a stamp is before the last")]
+        fn panics_after_the_last_stamp() {
+            let last = Tail {
+                stamp: Some(Stamp::from_nanos(i64::MAX)),
+                seq: 1,
+            };
+            let _: Accepted =
+                Order::new(limits(), last, Tail::default()).companion(now());
         }
     }
 

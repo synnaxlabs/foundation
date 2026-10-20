@@ -118,6 +118,26 @@ impl Index {
         self.order.tail(Path::Live).seq
     }
 
+    /// The newest stamp on the live path, or `None` before its first sample.
+    pub(crate) fn newest(&self) -> Option<Stamp> {
+        self.order.tail(Path::Live).stamp
+    }
+
+    /// The order of one live sample of the shard at mesh time `mesh`, as
+    /// [`Order::companion`] gives it. [`Index::add`] spends it.
+    pub(crate) fn companion(&self, mesh: Stamp) -> order::Accepted {
+        self.order.companion(mesh)
+    }
+
+    /// Spends the seq of `accepted`, a sample with no writer.
+    ///
+    /// # Panics
+    ///
+    /// If either path moved after [`Index::companion`].
+    pub(crate) fn add(&mut self, accepted: order::Accepted) {
+        self.order.advance(accepted);
+    }
+
     /// Spends the seq of `accepted` and renews the writer's control lease.
     ///
     /// # Panics

@@ -14,6 +14,7 @@ mod handoff;
 mod index;
 mod named;
 pub mod order;
+mod publish;
 pub mod reader;
 mod shard;
 mod split;
