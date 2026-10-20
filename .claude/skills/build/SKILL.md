@@ -22,12 +22,20 @@ when its PR merges, `mcp__factory__next` clears it and starts `/build` again.
 2. An open issue labeled `owner:$FACTORY_NAME` comes first: resume it from its last
    state comment. Skip one labeled `blocked` while an issue that it waits on is open or
    a question on it has no answer. When neither holds, remove `blocked` and resume it.
-   With none to resume, take the oldest `ready` issue whose crates no other open issue
-   with an `owner:` label holds: `gh issue list --label ready --search
-   "sort:created-asc"`. On the night lane, take only issues that also have `night`.
+   With none to resume, take the first issue that the free script prints (on the night
+   lane, run it with `sh -s night`): the oldest `ready` issue whose crates no issue with
+   an `owner:` label holds. An owned issue holds its crates while it has an open PR, or
+   while its owner builds it (it is not `blocked`).
+
+   ```sh
+   git show origin/main:.claude/skills/build/free.sh | sh
+   ```
 3. Claim it: `gh issue edit <n> --add-label "owner:$FACTORY_NAME" --remove-label ready`
    (the first time, `gh label create "owner:$FACTORY_NAME"`). If it then has a second
-   `owner:` label, remove yours and take the next one.
+   `owner:` label, remove yours and take the next one. Then give back each other issue
+   labeled `owner:$FACTORY_NAME` that has no open PR: comment its state, remove your
+   `owner:` label, and add `ready` unless it is `blocked`. You hold at most one owned
+   issue with no open PR.
 4. Day lane: when fewer than two `ready` issues remain, file the next ones on the
    milestone path (Rules).
 5. An issue labeled `model:fable`: ask your engineer to switch with `/model` first.
