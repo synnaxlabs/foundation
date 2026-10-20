@@ -696,22 +696,28 @@ fn logged(
     })
 }
 
-/// The class, the `unwritten`, and the `__context__` of the error of `answer` under
-/// `warn`, with a handler of the `foundation` logger that raises.
+/// The class of the error of `answer` under `warn`, with a handler of the `foundation`
+/// logger that raises the builtin `error`, the class of its `__context__`, and the
+/// `unwritten` of the one of the two that has it.
 fn failing(
     places: &[sdk::Place],
     outcomes: &[(usize, Outcome)],
     frame: &[usize],
-) -> (String, Vec<String>, String) {
+    error: &str,
+) -> (String, String, Vec<String>) {
     Python::initialize();
     Python::attach(|py| {
         let globals = PyDict::new(py);
+        let builtins = py.import("builtins").unwrap();
+        globals
+            .set_item("error", builtins.getattr(error).unwrap())
+            .unwrap();
         py.run(
             c"
 import logging
 class Failing(logging.Handler):
     def emit(self, record):
-        raise RuntimeError('the handler failed')
+        raise error('the handler failed')
 handler = Failing()
 ",
             Some(&globals),
@@ -738,7 +744,12 @@ handler = Failing()
         foundation
             .call_method1("removeHandler", (&handler,))
             .unwrap();
-        let unwritten = error
+        let context = error.context(py).unwrap();
+        let listed = [&error, &context]
+            .into_iter()
+            .find(|raised| raised.value(py).hasattr("unwritten").unwrap())
+            .unwrap();
+        let unwritten = listed
             .value(py)
             .getattr("unwritten")
             .unwrap()
@@ -746,8 +757,8 @@ handler = Failing()
             .unwrap();
         (
             error.get_type(py).name().unwrap().to_string(),
+            context.get_type(py).name().unwrap().to_string(),
             unwritten,
-            error.context(py).unwrap().to_string(),
         )
     })
 }
@@ -755,19 +766,18 @@ handler = Failing()
 /// A frame with a refusal and a loss raises `Rejected` with the seqs of the lost group
 /// in `lost` for each loss, and with `warn` also logs the warning of the loss. A frame
 /// with an end and a loss raises `GroupEnded` with `lost`, and one with no loss gives
-/// an empty `lost` and logs nothing. A logging handler that raises leaves `Rejected`
-/// raised, with the error of the handler as its `__context__`.
+/// an empty `lost` and logs nothing. A logging handler that raises an `Exception`
+/// leaves `Rejected` or `GroupEnded` raised, with the error of the handler as its
+/// `__context__`; a `KeyboardInterrupt` goes up, with `Rejected` as its `__context__`.
 #[test]
 fn answer_gives_the_seqs_of_the_lost_groups_in_lost_for_each_loss() {
     let places = grouped();
+    let lost = |seq, count| Outcome::Lost {
+        range: range(seq, count),
+    };
     let refused = [
         (5, Outcome::Refused(Refusal::Full)),
-        (
-            6,
-            Outcome::Lost {
-                range: range(10, 3),
-            },
-        ),
+        (6, lost(10, 3)),
         (7, Outcome::Taken { range: range(0, 3) }),
     ];
     let line = |start, stop| {
@@ -791,15 +801,7 @@ fn answer_gives_the_seqs_of_the_lost_groups_in_lost_for_each_loss() {
             "{loss:?}"
         );
     }
-    let ended = [
-        (4, Outcome::Ended(End::Removed)),
-        (
-            6,
-            Outcome::Lost {
-                range: range(20, 2),
-            },
-        ),
-    ];
+    let ended = [(4, Outcome::Ended(End::Removed)), (6, lost(20, 2))];
     assert_eq!(
         logged(&places, crate::Loss::Warn, &ended, &[0, 2]),
         (
@@ -813,12 +815,25 @@ fn answer_gives_the_seqs_of_the_lost_groups_in_lost_for_each_loss() {
         logged(&places, crate::Loss::Warn, &whole, &[1]),
         ("Rejected".to_owned(), Vec::new(), Vec::new())
     );
+    let cell = || vec!["cell.a".to_owned(), "cell.time".to_owned()];
     assert_eq!(
-        failing(&places, &refused, &[1, 2, 3]),
+        failing(&places, &refused, &[1, 2, 3], "RuntimeError"),
+        ("Rejected".to_owned(), "RuntimeError".to_owned(), cell())
+    );
+    assert_eq!(
+        failing(&places, &ended, &[0, 2], "RuntimeError"),
         (
+            "GroupEnded".to_owned(),
+            "RuntimeError".to_owned(),
+            Vec::new()
+        )
+    );
+    assert_eq!(
+        failing(&places, &refused, &[1, 2, 3], "KeyboardInterrupt"),
+        (
+            "KeyboardInterrupt".to_owned(),
             "Rejected".to_owned(),
-            vec!["cell.a".to_owned(), "cell.time".to_owned()],
-            "RuntimeError: the handler failed".to_owned()
+            cell()
         )
     );
 }
