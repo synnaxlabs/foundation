@@ -370,9 +370,8 @@ async fn session<T>(
     let connected =
         Client::connect(time, span, net, rng, address, security, until).await;
     let connected = connected.map_err(|error| match error {
-        client::Error::Failed(status) => device(Failure::Client {
+        client::Error::Failed(status) => device(Failure::Connect {
             address: address.to_string_lossy().into_owned(),
-            call: Call::Connect,
             status,
             cause: cause(status, secured),
         }),
@@ -392,46 +391,52 @@ async fn session<T>(
 
 /// The likely cause, which ends with its fix, of a connect over `secured`, or in the
 /// mode None when it is `None`, that failed with `status`. `None` when the status names
-/// no cause.
+/// no cause. A server sends the time, URI, and use statuses about the certificate of
+/// the node too, so their causes name both certificates. The connector has no `user`,
+/// so `BadIdentityTokenRejected` names the endpoints of an anonymous user.
 fn cause(status: Status, secured: Option<&Secured<'_>>) -> Option<String> {
     if status == Status::BAD_IDENTITY_TOKEN_REJECTED {
         return Some(unoffered(secured.map(|secured| secured.security.mode)));
     }
     let secured = secured?;
-    let reason = match status {
-        Status::BAD_SECURITY_CHECKS_FAILED => return Some(secured.distrusted()),
-        Status::BAD_CERTIFICATE_UNTRUSTED => {
+    let (certificate, trust) = (&secured.security.certificate, &secured.security.trust);
+    let cause = match status {
+        Status::BAD_SECURITY_CHECKS_FAILED => secured.distrusted(),
+        Status::BAD_CERTIFICATE_UNTRUSTED => format!(
             "the trust holds neither the certificate of the server nor the CA that \
-             issued it"
-        }
-        Status::BAD_CERTIFICATE_TIME_INVALID => {
+             issued it. Check the trust {trust}"
+        ),
+        Status::BAD_CERTIFICATE_TIME_INVALID => format!(
             "the mesh time is outside the validity window of the certificate of the \
-             server"
-        }
-        Status::BAD_CERTIFICATE_ISSUER_TIME_INVALID => {
+             server, or the clock of the server is outside the window of the \
+             certificate of the node {certificate}. Check the trust {trust} and the \
+             clock of the server"
+        ),
+        Status::BAD_CERTIFICATE_ISSUER_TIME_INVALID => format!(
             "the mesh time is outside the validity window of the CA that issued the \
-             certificate of the server"
-        }
-        Status::BAD_CERTIFICATE_URI_INVALID => {
+             certificate of the server, or the clock of the server is outside the \
+             window of the CA that issued the certificate of the node {certificate}. \
+             Check the trust {trust} and the clock of the server"
+        ),
+        Status::BAD_CERTIFICATE_URI_INVALID => format!(
             "the URI of the certificate of the server is not the application URI of \
-             its endpoint"
-        }
-        Status::BAD_CERTIFICATE_USE_NOT_ALLOWED => {
-            "the certificate of the server is the certificate of a CA"
-        }
+             its endpoint, or the server refused the URI of the certificate of the \
+             node {certificate}. Check the trust {trust} and the certificate \
+             {certificate}"
+        ),
+        Status::BAD_CERTIFICATE_USE_NOT_ALLOWED => format!(
+            "the certificate of the server, or the certificate of the node \
+             {certificate}, is the certificate of a CA. Check the trust {trust} and the \
+             certificate {certificate}"
+        ),
         _ => return None,
     };
-    Some(format!(
-        "{reason}. Check the trust {}",
-        secured.security.trust
-    ))
+    Some(cause)
 }
 
 /// The cause of a server that offers no endpoint in `mode`, or in the mode None when it
 /// is `None`, with an anonymous user and a policy of the client.
 fn unoffered(mode: Option<client::Mode>) -> String {
-    const POLICIES: &str = "with the policy Basic256Sha256, Aes128_Sha256_RsaOaep, \
-                            or Aes256_Sha256_RsaPss";
     let (mode, fix) = match mode {
         None => {
             return "the server offers no endpoint in the mode None that lets in an \
@@ -449,9 +454,10 @@ fn unoffered(mode: Option<client::Mode>) -> String {
             "Turn on one of these policies in the mode Sign on the server",
         ),
     };
+    let [first, second, third] = client::POLICIES;
     format!(
-        "the server offers no endpoint in the mode {mode} {POLICIES} that lets in an \
-         anonymous user. {fix}"
+        "the server offers no endpoint in the mode {mode} with the policy {first}, \
+         {second}, or {third} that lets in an anonymous user. {fix}"
     )
 }
 
@@ -753,7 +759,6 @@ fn large_read(reads: &[Read], &Large { index, bytes, most }: &Large) -> Error {
 /// A call to the server that a [`Failure::Client`] names.
 #[derive(Debug)]
 pub(crate) enum Call {
-    Connect,
     Read,
     Check,
     Browse,
@@ -762,13 +767,18 @@ pub(crate) enum Call {
 /// Why a run ended with [`Error::Device`].
 #[derive(Debug)]
 pub(crate) enum Failure {
-    /// `call` to the server at `address` failed with `status`, for `cause`, which ends
-    /// with its fix, when the status names one.
+    /// The connect to the server at `address` failed with `status`, for `cause`, which
+    /// ends with its fix, when the status names one.
+    Connect {
+        address: String,
+        status: Status,
+        cause: Option<String>,
+    },
+    /// `call` to the server at `address` failed with `status`.
     Client {
         address: String,
         call: Call,
         status: Status,
-        cause: Option<String>,
     },
     /// The tags and names before the pages of a browse pass [`crate::browse::BYTES`].
     Names,
@@ -780,23 +790,28 @@ pub(crate) enum Failure {
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Client {
+            Self::Connect {
                 address,
-                call,
                 status,
                 cause,
             } => {
-                let call = match call {
-                    Call::Connect => "the connect to",
-                    Call::Read => "the read from",
-                    Call::Check => "the connectivity check of",
-                    Call::Browse => "the browse of",
-                };
-                write!(f, "{call} {address} failed with {}", status.name())?;
+                write!(f, "the connect to {address} failed with {}", status.name())?;
                 match cause {
                     Some(cause) => write!(f, ": {cause}"),
                     None => Ok(()),
                 }
+            }
+            Self::Client {
+                address,
+                call,
+                status,
+            } => {
+                let call = match call {
+                    Call::Read => "the read from",
+                    Call::Check => "the connectivity check of",
+                    Call::Browse => "the browse of",
+                };
+                write!(f, "{call} {address} failed with {}", status.name())
             }
             Self::Names => write!(
                 f,
@@ -825,6 +840,5 @@ pub(crate) fn failed(address: &CStr, call: Call, status: Status) -> Error {
         address: address.to_string_lossy().into_owned(),
         call,
         status,
-        cause: None,
     })
 }

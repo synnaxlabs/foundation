@@ -262,12 +262,20 @@
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6255562713).
   When the server refuses the connect, the `Error::Device` text "the connect to
   {address} failed with {status}" gains ": {cause}", which ends with its fix, for the
-  statuses of the secure channel: `BadSecurityChecksFailed` names the certificate to
-  install by its source, SHA-1 thumbprint, and subject, when the subject is not empty;
-  each status of the certificate of the server names the source of the trust; and
+  statuses of the secure channel. `BadSecurityChecksFailed` names the certificate to
+  install by its source, SHA-1 thumbprint, and subject, when the subject is not empty.
+  `BadCertificateUntrusted` names the source of the trust: only the check of the
+  client gives it, since the server hides it behind `BadSecurityChecksFailed`. The
+  server also sends `BadCertificateTimeInvalid`, `BadCertificateIssuerTimeInvalid`,
+  `BadCertificateUriInvalid`, and `BadCertificateUseNotAllowed` about the certificate
+  of the node, so the text of each names the certificate of the server and the
+  certificate of the node, with the source of each. The connector has no `user`, so
   `BadIdentityTokenRejected` names the mode and the policies that the server must offer
-  with an anonymous user. With no
-  `certificate`, only `BadIdentityTokenRejected` gains a cause. Lost: a new
-  `Failure::Connect` variant, a second `Display` arm for the same text; and the cause
-  in `client::Error`, which does not know the sources
+  with an anonymous user. A server that offers only `Basic128Rsa15` or `Basic256` gives
+  `BadIdentityTokenRejected` and this text, since open62541 finds no endpoint with a
+  policy of the client. With no `certificate`, only `BadIdentityTokenRejected` gains a
+  cause. The text is the variant `Failure::Connect`, apart from the `Failure::Client`
+  of a read, check, or browse. Lost: the cause in `client::Error`, which does not know
+  the sources; and a text for each side, which needs the client to tell its own check
+  from a refusal of the server, and open62541 gives the same status for both
   (https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6285525305).

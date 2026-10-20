@@ -35,7 +35,7 @@ use crate::client::tests::common::{env, rig};
 use crate::client::{self, GRACE};
 use crate::gate::Gate;
 use crate::secure::{
-    CLIENT, END, HIGH_PEM, LASTING, NAMELESS, OTHER, Policy, SERVER, START,
+    CA_CLIENT, CLIENT, END, HIGH_PEM, LASTING, NAMELESS, OTHER, Policy, SERVER, START,
 };
 use crate::sim::{Served, Variables, serve};
 
@@ -494,6 +494,8 @@ where
 struct Secure {
     /// The wall time of the node at its start.
     wall: Stamp,
+    /// How far the clock of the server is ahead of `wall`.
+    ahead: Span,
     /// The one policy of the server.
     policy: Policy,
     /// The mode of the one endpoint of the server.
@@ -523,6 +525,7 @@ impl Secure {
     fn of(policy: Policy) -> Self {
         Self {
             wall: START + Span::from_nanos(86_400 * Span::SECOND.nanos()),
+            ahead: Span::ZERO,
             policy,
             offered: client::Mode::SignAndEncrypt,
             server: Credentials {
@@ -549,6 +552,7 @@ impl Secure {
         variables: &Variables,
     ) {
         variables.secure(self.server, self.policy, self.offered);
+        variables.set_clock(self.ahead);
         if self.plain {
             return;
         }
@@ -2113,9 +2117,37 @@ fn a_server_certificate_outside_its_window_names_the_trust() {
     };
     secure.credentials[0] = Some(LASTING.certificate);
     secure.server.trust = LASTING.certificate;
-    let cause = "the mesh time is outside the validity window of the certificate of \
-                 the server. Check the trust secret(\"plant.opcua_trust\")";
-    connect_fails(secure, "BadCertificateTimeInvalid", cause);
+    connect_fails(secure, "BadCertificateTimeInvalid", TIME_INVALID);
+}
+
+const TIME_INVALID: &str = "the mesh time is outside the validity window of the \
+                            certificate of the server, or the clock of the server is \
+                            outside the window of the certificate of the node \
+                            secret(\"plant.opcua_certificate\"). Check the trust \
+                            secret(\"plant.opcua_trust\") and the clock of the server";
+
+/// The clock of the server is a day before [`START`], so the server finds [`CLIENT`]
+/// outside its window, and sends the status about it.
+#[test]
+fn a_server_clock_outside_the_window_of_the_node_certificate_names_the_clock() {
+    let secure = Secure {
+        ahead: Span::from_nanos(-2 * 86_400 * Span::SECOND.nanos()),
+        ..Secure::of(Policy::Basic256Sha256)
+    };
+    connect_fails(secure, "BadCertificateTimeInvalid", TIME_INVALID);
+}
+
+/// The server refuses [`CA_CLIENT`], a CA certificate, as the certificate of a client.
+#[test]
+fn a_ca_certificate_of_the_node_names_the_certificate() {
+    let mut secure = Secure::of(Policy::Basic256Sha256);
+    secure.credentials[0] = Some(CA_CLIENT);
+    secure.server.trust = CA_CLIENT;
+    let cause = "the certificate of the server, or the certificate of the node \
+                 secret(\"plant.opcua_certificate\"), is the certificate of a CA. Check \
+                 the trust secret(\"plant.opcua_trust\") and the certificate \
+                 secret(\"plant.opcua_certificate\")";
+    connect_fails(secure, "BadCertificateUseNotAllowed", cause);
 }
 
 /// The [`cause`] of a connect that failed with `status` over a channel on
@@ -2162,34 +2194,52 @@ fn a_failed_security_check_names_the_certificate_to_install() {
 }
 
 #[test]
-fn a_refused_certificate_of_the_server_names_the_trust() {
-    for (status, reason) in [
+fn a_refused_certificate_names_the_trust_and_the_certificate_of_the_node() {
+    let (certificate, trust) = ("env(\"CERTIFICATE\")", "env(\"TRUST\")");
+    for (status, expected) in [
         (
             Status::BAD_CERTIFICATE_UNTRUSTED,
-            "the trust holds neither the certificate of the server nor the CA that \
-             issued it",
+            format!(
+                "the trust holds neither the certificate of the server nor the CA that \
+                 issued it. Check the trust {trust}"
+            ),
         ),
         (
             Status::BAD_CERTIFICATE_TIME_INVALID,
-            "the mesh time is outside the validity window of the certificate of the \
-             server",
+            format!(
+                "the mesh time is outside the validity window of the certificate of the \
+                 server, or the clock of the server is outside the window of the \
+                 certificate of the node {certificate}. Check the trust {trust} and the \
+                 clock of the server"
+            ),
         ),
         (
             Status::BAD_CERTIFICATE_ISSUER_TIME_INVALID,
-            "the mesh time is outside the validity window of the CA that issued the \
-             certificate of the server",
+            format!(
+                "the mesh time is outside the validity window of the CA that issued the \
+                 certificate of the server, or the clock of the server is outside the \
+                 window of the CA that issued the certificate of the node \
+                 {certificate}. Check the trust {trust} and the clock of the server"
+            ),
         ),
         (
             Status::BAD_CERTIFICATE_URI_INVALID,
-            "the URI of the certificate of the server is not the application URI of \
-             its endpoint",
+            format!(
+                "the URI of the certificate of the server is not the application URI of \
+                 its endpoint, or the server refused the URI of the certificate of the \
+                 node {certificate}. Check the trust {trust} and the certificate \
+                 {certificate}"
+            ),
         ),
         (
             Status::BAD_CERTIFICATE_USE_NOT_ALLOWED,
-            "the certificate of the server is the certificate of a CA",
+            format!(
+                "the certificate of the server, or the certificate of the node \
+                 {certificate}, is the certificate of a CA. Check the trust {trust} and \
+                 the certificate {certificate}"
+            ),
         ),
     ] {
-        let expected = format!("{reason}. Check the trust env(\"TRUST\")");
         let found = cause_on(status, CLIENT.certificate);
         assert_eq!(found, Some(expected), "{}", status.name());
     }
