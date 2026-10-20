@@ -19,10 +19,11 @@ use crate::code::Code;
 pub enum Error {
     /// No address reached the peer.
     Unreachable {
-        /// The peer that was dialed.
-        peer: PublicKey,
+        /// The peer that was dialed, or `None` for
+        /// [`Client::dial_any`](crate::Client::dial_any).
+        peer: Option<PublicKey>,
         /// Each address tried, with why it failed.
-        attempts: Vec<(Address, Error)>,
+        attempts: Box<[(Address, Error)]>,
     },
     /// In [`Error::Unreachable`], the cause at an address this node cannot send to:
     /// its port is 0, its IP is unspecified, or this node runs no carrier for its
@@ -95,7 +96,10 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unreachable { peer, attempts } => {
-                write!(f, "no address reached peer {peer}")?;
+                match peer {
+                    Some(peer) => write!(f, "no address reached peer {peer}")?,
+                    None => write!(f, "no address reached a node")?,
+                }
                 attempts.iter().try_for_each(|(address, error)| {
                     write!(f, "; {address:?}: {error}")
                 })
@@ -130,6 +134,8 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+const _: () = assert!(size_of::<Error>() == 56, "an error stays 56 bytes");
+
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
@@ -158,11 +164,12 @@ mod tests {
         fn names_each_failed_address() {
             let at: SocketAddr = "10.0.0.1:7400".parse().expect("a valid address");
             let error = Error::Unreachable {
-                peer: key(),
+                peer: Some(key()),
                 attempts: vec![
                     (Address::Udp(at), Error::TimedOut),
                     (Address::Tcp(at), Error::Authentication { expected: key() }),
-                ],
+                ]
+                .into_boxed_slice(),
             };
             check(
                 &error,
@@ -171,6 +178,20 @@ mod tests {
                      answering; Tcp(10.0.0.1:7400): the peer did not prove key {0}",
                     hex()
                 ),
+            );
+        }
+
+        #[test]
+        fn names_no_peer_for_a_dial_that_took_any_node() {
+            let at: SocketAddr = "10.0.0.1:7400".parse().expect("a valid address");
+            let error = Error::Unreachable {
+                peer: None,
+                attempts: vec![(Address::Udp(at), Error::TimedOut)].into_boxed_slice(),
+            };
+            check(
+                &error,
+                "no address reached a node; Udp(10.0.0.1:7400): the peer stopped \
+                 answering",
             );
         }
 

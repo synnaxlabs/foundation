@@ -85,7 +85,31 @@ impl Client {
         node: PublicKey,
         addresses: &[Address],
     ) -> Result<Session, Error> {
-        let dialed = dial::dial(&self.carrier.handle(), node, addresses).await;
+        let dialed = dial::dial(&self.carrier.handle(), Some(node), addresses).await;
+        dialed.map(Session::new)
+    }
+
+    /// Dials the node at `addresses` and accepts the Ed25519 key of any certificate
+    /// of the template, which [`Session::peer`] then gives. Trust on first use:
+    /// nothing proves which node answered, so the caller pins the key. The address
+    /// order and the stagger are those of [`Client::dial`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::dial`], with no peer in [`Error::Unreachable`]. A certificate that
+    /// the verifier refuses gives [`Error::Broken`], as no key was dialed.
+    ///
+    /// ```
+    /// use std::net::SocketAddr;
+    ///
+    /// use transport::{Address, Client, Error, Peer};
+    ///
+    /// async fn key(c: &Client, at: SocketAddr) -> Result<Peer, Error> {
+    ///     Ok(c.dial_any(&[Address::Udp(at)]).await?.peer())
+    /// }
+    /// ```
+    pub async fn dial_any(&self, addresses: &[Address]) -> Result<Session, Error> {
+        let dialed = dial::dial(&self.carrier.handle(), None, addresses).await;
         dialed.map(Session::new)
     }
 }
@@ -260,6 +284,41 @@ mod tests {
     }
 
     #[test]
+    fn dial_any_takes_the_key_of_the_first_node_that_answers() {
+        let (mut sim, program, node) = nodes(0);
+        serve(&node, 1);
+        let other = sim.node(sim::node::Config::default());
+        impostor(&other);
+        let at = [Address::Udp(address(&node))];
+        let both = [Address::Udp(address(&other)), at[0]];
+        testing::start(&program, move |shard, node| async move {
+            let client = client(&shard);
+            let session = client.dial_any(&at).await.expect("a session");
+            assert_eq!(session.peer(), Peer::Node(SERVER.public()));
+            echo(&shard, &session).await;
+            end(&node, session).await;
+            let session = client.dial_any(&both).await.expect("a session");
+            assert_eq!(session.peer(), Peer::Node(OTHER.public()));
+            end(&node, session).await;
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn dial_any_of_no_address_is_unreachable_with_no_peer() {
+        let (mut sim, program, _) = nodes(0);
+        testing::start(&program, |shard, _| async move {
+            let dialed = client(&shard).dial_any(&[]).await;
+            let unreachable = Error::Unreachable {
+                peer: None,
+                attempts: Box::default(),
+            };
+            assert_eq!(dialed.err(), Some(unreachable));
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
     fn a_client_where_another_key_answers_at_each_address_is_unreachable() {
         let (mut sim, program, _) = nodes(0);
         let others = [(); 2].map(|()| sim.node(sim::node::Config::default()));
@@ -270,8 +329,14 @@ mod tests {
             let peer = SERVER.public();
             let dialed = client.dial(peer, &at).await;
             let cause = || Error::Authentication { expected: peer };
-            let attempts = vec![(at[0], cause()), (at[1], cause())];
-            assert_eq!(dialed.err(), Some(Error::Unreachable { peer, attempts }));
+            let attempts = vec![(at[0], cause()), (at[1], cause())].into_boxed_slice();
+            assert_eq!(
+                dialed.err(),
+                Some(Error::Unreachable {
+                    peer: Some(peer),
+                    attempts
+                })
+            );
         });
         assert_eq!(sim.run(), Ok(()));
     }
@@ -290,8 +355,14 @@ mod tests {
         testing::transport(&node, SERVER, move |transport, _| async move {
             let peer = OTHER.public();
             let dialed = transport.dial(peer, &[at]).await;
-            let attempts = vec![(at, Error::TimedOut)];
-            assert_eq!(dialed.err(), Some(Error::Unreachable { peer, attempts }));
+            let attempts = vec![(at, Error::TimedOut)].into_boxed_slice();
+            assert_eq!(
+                dialed.err(),
+                Some(Error::Unreachable {
+                    peer: Some(peer),
+                    attempts
+                })
+            );
         });
         assert_eq!(sim.run(), Ok(()));
     }

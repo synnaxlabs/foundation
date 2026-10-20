@@ -9131,7 +9131,7 @@ mod tests {
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
             pair.foreign = Some(foreign);
             let (now, peer) = (pair.now(), pair::FOREIGN_KEY.public());
-            let key = pair.client.endpoint.connect(now, peer, pair::FOREIGN);
+            let key = pair.client.endpoint.connect(now, Some(peer), pair::FOREIGN);
             pair.client.key = Some(key);
             pair.run(RUN);
             pair

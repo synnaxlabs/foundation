@@ -56,7 +56,7 @@ impl Link {
         Self(match transport.peer() {
             transport::Peer::Node(_) => Peer::Node(state),
             transport::Peer::Client => {
-                let client = client::Gate::new(state.borrow().node);
+                let client = client::Gate::new(state.borrow().public_key);
                 Peer::Client(Rc::new(Session {
                     state,
                     transport,
