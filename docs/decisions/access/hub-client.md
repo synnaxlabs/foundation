@@ -409,6 +409,9 @@
   BOUNDS). Decided by `laptop.architect` at 2026-10-19T13:14:46Z
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268096380), on the
   revision https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267978917.
+  `End::Refused`: `laptop.architect` at 2026-10-19T14:00:04Z
+  (https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6269021946, answer
+  3).
   `Error::Group` with `next`, a unit `Error::Stamp`, and PR 1c, where `Reply::Stored {
   group, frames }` and `Reply::Ended { group, end }` come and which merges before PR 2,
   are by `laptop.architect` at 2026-10-19T13:54:38Z

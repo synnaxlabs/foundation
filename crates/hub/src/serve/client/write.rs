@@ -71,8 +71,8 @@ pub(super) async fn serve(
 /// Serves the write that `write` starts on a forward from the program's node `via` of
 /// the group at the places of `forward`, as [`serve`] does, after it takes that group,
 /// for the subject of `admission`, which has admitted a hello. Each message at the
-/// wait for the home and between frames is a renewal of the hello that `admission`
-/// admits.
+/// wait for the home, and a hello between frames, renews the hello that `admission`
+/// admitted.
 pub(super) async fn forward(
     state: &Rc<RefCell<State>>,
     admission: &Admission,
