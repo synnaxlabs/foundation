@@ -301,8 +301,7 @@ fn invalid(number: usize) -> Error {
     Error::Refused(Refusal::Invalid { number })
 }
 
-/// The refusal of a trust with a PEM block that does not read after `after`
-/// certificates.
+/// The refusal of a trust with a damaged PEM block after `after` certificates.
 fn damaged(after: usize) -> Error {
     Error::Refused(Refusal::Damaged { after })
 }
