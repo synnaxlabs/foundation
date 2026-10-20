@@ -1034,15 +1034,19 @@
   end, and the constructor of the group gives that status (ruling A). PEM is read by the
   loop of `PEM_read_bio` of aws-lc on a BIO of the full length, which reads each block
   and skips the text outside them. The load takes the `CERTIFICATE`, `X509
-  CERTIFICATE`, and `TRUSTED CERTIFICATE` blocks with no header: the labels that
-  aws-lc reads as `TRUSTED CERTIFICATE`, which the copy states, as aws-lc does not
-  export that rule, and the header through `PEM_get_EVP_CIPHER_INFO` and
-  `PEM_do_header` of aws-lc with a callback that refuses a password, so a block with a
-  header gives `Invalid` (round 1 of review of #3469; `laptop.architect-2`,
-  2026-10-20 02:03 UTC,
-  https://github.com/synnaxlabs/foundation/pull/3469#issuecomment-6281615454). aws-lc
-  reads a header that starts with a NUL byte as none, so that block loads, as in the
-  loads of the policies (round 2 of review of #3469). Then `d2i_X509` reads the bytes
+  CERTIFICATE`, and `TRUSTED CERTIFICATE` blocks with no header: the labels that aws-lc
+  reads as `TRUSTED CERTIFICATE`, which the copy states, as aws-lc does not export that
+  rule (`laptop.architect-2`, 2026-10-20 02:38 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3469#issuecomment-6282051598). Lost:
+  `PEM_bytes_read_bio`, which takes the labels in aws-lc, but gives 0 with no error
+  queued for a header such as `Proc-Type: 3`, so that block was `Damaged`. The load
+  reads the header through `PEM_get_EVP_CIPHER_INFO` and `PEM_do_header` of aws-lc with
+  a callback that refuses a password, so a block with a header gives `Invalid` (round 1
+  of review of #3469; `laptop.architect-2`, 2026-10-20 02:03 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3469#issuecomment-6281615454, and 02:38
+  UTC, above). aws-lc reads a header that starts with a NUL byte as none, so that block
+  loads, as in the loads of the policies (round 2 of review of #3469;
+  `laptop.architect-2`, 02:38 UTC, above). Then `d2i_X509` reads the bytes
   of each block, not the leaf loader of the copy, which drops a block that does not
   start with the exact line `-----BEGIN CERTIFICATE-----` (round 2 of review of
   #3271). `d2i_X509` is the one step of the DER path (#3288 item 4, OK of
