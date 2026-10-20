@@ -100,7 +100,7 @@ impl Settings {
     /// `setup` is a node's. Every connection ID the endpoint issues starts with
     /// `shard`.
     pub(super) fn new(setup: &Setup, shard: u8) -> (Self, Endpoint) {
-        Self::with(setup, shard, transport(setup))
+        Self::with(setup, shard, transport(setup), tls(&setup.role))
     }
 
     /// As [`Settings::new`], with `change` made to the transport parameters, for a
@@ -113,15 +113,22 @@ impl Settings {
     ) -> (Self, Endpoint) {
         let mut transport = transport(setup);
         change(&mut transport);
-        Self::with(setup, shard, transport)
+        Self::with(setup, shard, transport, tls(&setup.role))
     }
 
-    fn with(setup: &Setup, shard: u8, transport: TransportConfig) -> (Self, Endpoint) {
+    /// As [`Settings::new`], with `tls` in place of the TLS of the role.
+    #[cfg(test)]
+    pub(super) fn proving(setup: &Setup, shard: u8, tls: Tls) -> (Self, Endpoint) {
+        Self::with(setup, shard, transport(setup), tls)
+    }
+
+    fn with(
+        setup: &Setup,
+        shard: u8,
+        transport: TransportConfig,
+        tls: Tls,
+    ) -> (Self, Endpoint) {
         let transport = Arc::new(transport);
-        let tls = match &setup.role {
-            Role::Node(private_key) => Tls::new(private_key),
-            Role::Program => Tls::program(),
-        };
         let server = tls.server().map(|tls| Arc::new(server(tls, &transport)));
         // `true`: `env::net` sets don't-fragment, so MTU discovery may run.
         #[expect(clippy::disallowed_methods, reason = "the config sets rng_seed")]
@@ -159,6 +166,13 @@ impl Settings {
             .version(QUIC_V1)
             .initial_dst_cid_provider(Arc::new(move || cid::random(&entropy)));
         client
+    }
+}
+
+fn tls(role: &Role) -> Tls {
+    match role {
+        Role::Node(private_key) => Tls::new(private_key),
+        Role::Program => Tls::program(),
     }
 }
 

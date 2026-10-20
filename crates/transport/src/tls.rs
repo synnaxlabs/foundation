@@ -399,6 +399,16 @@ pub(crate) fn anonymous(
     Arc::new(config)
 }
 
+/// A node's TLS that presents the certificate of `certificate` but signs with
+/// `signer`, so each peer refuses it.
+#[cfg(test)]
+pub(crate) fn borrowing(certificate: &PrivateKey, signer: &PrivateKey) -> Tls {
+    let pkcs8 = PrivatePkcs8KeyDer::from([PKCS8, &signer.0].concat());
+    let key = any_eddsa_type(&pkcs8).expect("the PKCS#8 template holds a key");
+    let certificate = self::certificate(certificate).into();
+    Tls::with(CertifiedKey::new(vec![certificate], key))
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv6Addr};
@@ -487,14 +497,6 @@ mod tests {
 
     fn presented(tls: &Tls) -> CertificateDer<'static> {
         certified(tls).cert[0].clone()
-    }
-
-    /// TLS that presents `certificate`'s certificate but signs with `signer`'s key.
-    fn borrowing(certificate: &Tls, signer: &Tls) -> Tls {
-        Tls::with(CertifiedKey::new(
-            certified(certificate).cert.clone(),
-            Arc::clone(&certified(signer).key),
-        ))
     }
 
     /// TLS that presents `tls`'s certificate twice.
@@ -673,7 +675,7 @@ mod tests {
         fn when_client_names_no_key_it_still_refuses_a_borrowed_or_padded_certificate()
         {
             let (thief, victim) = (PrivateKey([2; 32]), PrivateKey([3; 32]));
-            let borrowed = borrowing(&Tls::new(&victim), &Tls::new(&thief));
+            let borrowed = borrowing(&victim, &thief);
             let peers = handshake(
                 Tls::program().client(None),
                 borrowed.server().expect("a node"),
@@ -736,8 +738,7 @@ mod tests {
                 PrivateKey([3; 32]),
             );
             let peers = handshake(
-                borrowing(&Tls::new(&victim), &Tls::new(&thief))
-                    .client(Some(b.public())),
+                borrowing(&victim, &thief).client(Some(b.public())),
                 Tls::new(&b).server().expect("a node"),
             );
             assert_eq!(peers, Err(CertificateError::BadSignature.into()));
@@ -931,9 +932,7 @@ mod tests {
             );
             let peers = handshake(
                 Tls::new(&a).client(Some(victim.public())),
-                borrowing(&Tls::new(&victim), &Tls::new(&thief))
-                    .server()
-                    .expect("a node"),
+                borrowing(&victim, &thief).server().expect("a node"),
             );
             assert_eq!(peers, Err(CertificateError::BadSignature.into()));
         }
