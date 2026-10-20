@@ -3,9 +3,11 @@
 `FOUNDATION_NODE` is the path of the `foundation` binary that each test starts.
 """
 
+import base64
 import errno
 import gc
 import getpass
+import json
 import os
 import pathlib
 import shutil
@@ -234,9 +236,16 @@ class Node:
             return client
 
     def public_key(self) -> bytes:
-        """The public key that the node wrote to its file `address`."""
-        with open(os.path.join(self.data, "data", "address"), "rb") as file:
-            return file.read()[36:68]
+        """The public key of the node, as `foundation profile --json` prints it."""
+        printed = subprocess.run(
+            [os.environ["FOUNDATION_NODE"], "profile", "--json", self.address],
+            cwd=self.dir.name,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        # The key is the last field of the SSH wire form of an Ed25519 key.
+        return base64.b64decode(json.loads(printed)["public_key"].split()[1])[-32:]
 
     def connect(self, **arguments) -> foundation.Client:
         """`foundation.connect` to this node as its admin, from its data directory,
