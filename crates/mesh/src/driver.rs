@@ -18,7 +18,7 @@ use env::tasks::{self, Tasks};
 use raft::{Admission, Data, Entry, Position, Raft, Ready, Start, Voters};
 use spec::Pointer;
 use spec::tree::Chunks;
-use transport::{Address, Code, Session, Transport};
+use transport::{Code, Session, Transport};
 use types::channel;
 use types::digest::Digest;
 use types::ed25519::{PrivateKey, PublicKey};
@@ -948,28 +948,19 @@ impl Group {
 
     // The public key of member `key` and the addresses of its card, as the group
     // holds them now.
-    fn contact(&self, key: node::Key) -> Option<(PublicKey, Vec<Address>)> {
+    fn contact(&self, key: node::Key) -> Option<peer::Contact> {
         let member = self.state.member(key)?;
         let addresses = member.card.card().addresses.as_slice().to_vec();
         Some((member.public_key(), addresses))
     }
 
-    // The members that the task of the spec in use gets a missing chunk from, in
-    // order: each holder of the change of the newest pointer, then each other voter,
-    // each in key order, without this node.
-    fn peers(&self) -> Vec<peer::Contact> {
+    // Each other voter that has a card, in key order.
+    fn voters(&self) -> Vec<(node::Key, peer::Contact)> {
         let own = self.raft.key();
-        let none = BTreeSet::new();
-        let newest = self.used.newest.as_ref();
-        let holders = newest.map_or(&none, |newest| &newest.holders);
         let voters = self.raft.voters();
-        let others = voters.nodes().filter(|key| !holders.contains(key));
-        holders
-            .iter()
-            .copied()
-            .chain(others)
-            .filter(|&key| key != own)
-            .filter_map(|key| self.contact(key))
+        let others = voters.nodes().filter(|&key| key != own);
+        others
+            .filter_map(|key| Some((key, self.contact(key)?)))
             .collect()
     }
 
@@ -1068,17 +1059,15 @@ impl Group {
     // Applies `change`, and gives the task of the spec in use each pointer that moves.
     fn apply_change(&mut self, change: Change) -> Result<bool, Refused> {
         let listed = match &change {
-            Change::Spec {
-                chunks, holders, ..
-            } => Some((chunks.clone(), holders.clone())),
+            Change::Spec { chunks, .. } => Some(chunks.clone()),
             Change::Home { .. }
             | Change::Join(_)
             | Change::Ticket { .. }
             | Change::Card(_) => None,
         };
         let applied = self.state.apply(change)?;
-        if let Some((listed, holders)) = listed {
-            self.used.committed(self.state.pointer(), listed, holders);
+        if let Some(listed) = listed {
+            self.used.committed(self.state.pointer(), listed);
         }
         Ok(applied)
     }

@@ -95,19 +95,15 @@ impl Mesh {
     }
 
     // Puts `digests` on `to` in calls of at most `CHUNKS` chunks, in order, and gives
-    // why the first call that did not end `Ok` within `DEADLINE`, its dials included,
-    // failed. The card of `to` is read once, at the first call.
+    // why the first call that did not end `Ok` failed. The card of `to` is read once,
+    // at the first call.
     async fn put_on(&self, to: node::Key, digests: &[Digest]) -> Result<(), Miss> {
         let contact = self.group.borrow().contact(to).ok_or(Miss::Unknown)?;
-        for call in digests.chunks(CHUNKS) {
-            let put = on_peer(&self.transport, &contact, async |session| {
-                blob::peer::put(&self.store, session, call).await
-            });
-            match within(&self.clock, DEADLINE, put).await {
-                Some(Ok(put)) => put.map_err(Miss::Put)?,
-                Some(Err(error)) => return Err(Miss::Dial(error)),
-                None => return Err(Miss::Deadline),
-            }
+        for chunks in digests.chunks(CHUNKS) {
+            let put = async |session: &Session| {
+                blob::peer::put(&self.store, session, chunks).await
+            };
+            ask(&self.transport, &self.clock, &contact, put).await?;
         }
         Ok(())
     }
@@ -116,49 +112,96 @@ impl Mesh {
 /// The public key of a member and the addresses of its card.
 pub(super) type Contact = (PublicKey, Vec<Address>);
 
-/// Gets the chunk of `digest` from the first peer of `peers`, in order, that gives it
-/// within [`DEADLINE`], and puts it in `store`. A peer whose get fails, gives no
-/// chunk, or passes the deadline leaves the get to the next peer.
+/// Gets each chunk of `digests` from `peers`, in order, and puts it in `store`. Each
+/// peer gets the chunks still missing in calls of at most [`CHUNKS`], each within
+/// [`DEADLINE`]. A chunk that a peer does not give goes to the next peer, and a call
+/// that fails or passes the deadline gives the rest to the next peer. Returns the key
+/// of the last peer that gave a chunk, or `None` when no peer gave one.
 ///
 /// # Errors
 ///
-/// The error of `store` when it fails or refuses the put of the chunk. No later peer
+/// The error of `store` when it fails or refuses the put of a chunk. No later peer
 /// is asked.
 pub(super) async fn get(
     store: &blob::Store,
     transport: &Transport,
     clock: &Clock,
-    digest: Digest,
-    peers: &[Contact],
-) -> Result<(), blob::Error> {
-    for contact in peers {
-        let get = on_peer(transport, contact, async |session| {
-            blob::peer::get(store, session, &[digest]).await
-        });
-        match within(clock, DEADLINE, get).await {
-            Some(Ok(Ok(misses))) if misses.is_empty() => return Ok(()),
-            Some(Ok(Err(blob::peer::Error::Store(error)))) => return Err(error),
-            Some(_) | None => {}
+    digests: &[Digest],
+    peers: &[(node::Key, Contact)],
+) -> Result<Option<node::Key>, blob::Error> {
+    let mut missing = digests.to_vec();
+    let mut gave = None;
+    for (key, contact) in peers {
+        let mut left = Vec::new();
+        let mut calls = missing.chunks(CHUNKS);
+        for chunks in calls.by_ref() {
+            let get =
+                async |session: &Session| blob::peer::get(store, session, chunks).await;
+            match ask(transport, clock, contact, get).await {
+                Ok(misses) => {
+                    if misses.len() < chunks.len() {
+                        gave = Some(*key);
+                    }
+                    left.extend(misses.iter().map(|miss| miss.digest));
+                }
+                Err(Failed::Call(blob::peer::Error::Store(error))) => {
+                    return Err(error);
+                }
+                Err(_) => {
+                    left.extend(chunks);
+                    break;
+                }
+            }
+        }
+        left.extend(calls.flatten());
+        missing = left;
+        if missing.is_empty() {
+            break;
         }
     }
-    Ok(())
+    Ok(gave)
+}
+
+// Why a call on a peer gave no result.
+enum Failed {
+    Dial(transport::Error),
+    Call(blob::peer::Error),
+    Deadline,
+}
+
+impl From<Failed> for Miss {
+    fn from(failed: Failed) -> Self {
+        match failed {
+            Failed::Dial(error) => Self::Dial(error),
+            Failed::Call(error) => Self::Put(error),
+            Failed::Deadline => Self::Deadline,
+        }
+    }
 }
 
 // Runs `call` on the session of `transport` to the peer of `contact`, which it dials
-// when it has none open. A call that failed on a session that ended dials once more:
-// a session to a process that restarted ends only at its first use.
-async fn on_peer<T>(
+// when it has none open, and fails when `DEADLINE` passes first, its dials included. A
+// call that failed on a session that ended dials once more: a session to a process
+// that restarted ends only at its first use.
+async fn ask<T>(
     transport: &Transport,
+    clock: &Clock,
     (public_key, addresses): &Contact,
     call: impl AsyncFn(&Session) -> Result<T, blob::peer::Error>,
-) -> Result<Result<T, blob::peer::Error>, transport::Error> {
-    let session = transport.dial(*public_key, addresses).await?;
-    match call(&session).await {
-        Err(_) if session.ended().is_some() => {}
-        first => return Ok(first),
-    }
-    let session = transport.dial(*public_key, addresses).await?;
-    Ok(call(&session).await)
+) -> Result<T, Failed> {
+    let redialed = async {
+        let dial = async || transport.dial(*public_key, addresses).await;
+        let session = dial().await.map_err(Failed::Dial)?;
+        match call(&session).await {
+            Err(_) if session.ended().is_some() => {}
+            first => return first.map_err(Failed::Call),
+        }
+        let session = dial().await.map_err(Failed::Dial)?;
+        call(&session).await.map_err(Failed::Call)
+    };
+    within(clock, DEADLINE, redialed)
+        .await
+        .unwrap_or(Err(Failed::Deadline))
 }
 
 /// The output of `future`, or `None` when `span` passes first.

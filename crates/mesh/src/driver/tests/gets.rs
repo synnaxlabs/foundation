@@ -3,6 +3,7 @@
 
 use super::apply::{assert_used, base, create_subjects, pointer};
 use super::*;
+use crate::driver::peer::DEADLINE;
 use crate::used::Cause;
 
 // Voter 3 is down at the apply, so it holds no chunk of the change.
@@ -25,26 +26,68 @@ fn a_voter_down_at_the_apply_uses_the_spec_when_it_comes_back() {
     );
 }
 
-// Voter 3 is down at the apply of a change of 40 subjects, so it lacks each of more
-// than 40 chunks. A get that waited `RETRY` would take more than 40 s. Voter 2 takes
-// three puts at the apply, and voter 3 gets each of the 41 chunks from voter 1, the
-// first holder.
+// Voter 3 is down at the apply of a change of 40 subjects, so it lacks each of its 41
+// listed chunks. Voter 2 takes three puts at the apply, and voter 3 gets the chunks
+// from voter 1, the first voter, in three calls of `CHUNKS`, one stream each.
 #[test]
-fn a_voter_that_lacks_many_chunks_gets_each_at_once() {
-    let mut cluster = Cluster::new(0);
-    cluster.start_voter(1);
-    cluster.start_voter(2);
-    cluster.run(seconds(5));
-    let labels: Vec<String> = (0..40).map(|at| format!("plant.s{at}")).collect();
-    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-    let definitions = create_subjects(&labels, 512);
-    cluster.change(1, base(), &definitions);
-    cluster.run(seconds(10));
+fn a_voter_that_lacks_many_chunks_gets_them_in_calls_of_chunks() {
+    let (mut cluster, definitions) = lacking(0);
     cluster.start_voter(3);
     cluster.run(seconds(10));
     let board = cluster.board();
     assert_used(&board, &[3], pointer(1, &definitions), &definitions);
-    assert_eq!(board.blobs, [(1, 41), (2, 3)].into());
+    assert_eq!(board.blobs, [(1, 3), (2, 3)].into());
+}
+
+// As above, but voter 1 loses power before voter 3 starts. Voter 3 asks voter 1 once,
+// and voter 2 gives each chunk.
+#[test]
+fn a_voter_down_first_costs_the_get_once() {
+    for seed in 0..4 {
+        let (mut cluster, definitions) = lacking(seed);
+        let one = cluster.node(1).clone();
+        cluster.sim.crash(&one, Crash::Power);
+        cluster.start_voter(3);
+        cluster.run(seconds(60));
+        let seen = cluster.board().specs[&3].pointer;
+        assert_eq!(seen, Some(pointer(1, &definitions)), "seed {seed}");
+    }
+}
+
+// Voter 1 holds each blob stream with no answer. A call of `CHUNKS` to it that passes
+// the deadline gives each of the three calls to voter 2, so the get costs the
+// deadline once, not once for each call.
+#[test]
+fn a_silent_first_voter_costs_the_deadline_once_for_all_calls() {
+    let (mut cluster, definitions) = lacking(0);
+    cluster.board.lock().unwrap().silent = [1].into();
+    cluster.start_voter(3);
+    cluster.run(Span::from_nanos(2 * DEADLINE.nanos() - TICK.nanos()));
+    let board = cluster.board();
+    assert_used(&board, &[3], pointer(1, &definitions), &definitions);
+    assert_eq!(board.blobs, [(1, 1), (2, 6)].into());
+}
+
+// Voter 3 is down at two changes. The second lists only the chunks that it adds, so
+// the read of voter 3 finds each chunk of the first one at a time. Voter 2 gives the
+// listed chunks after voter 1 passes the deadline, and each later get starts at
+// voter 2.
+#[test]
+fn a_get_starts_at_the_voter_that_gave_the_last_chunk() {
+    let (mut cluster, first) = lacking(0);
+    let mut definitions = first.clone();
+    definitions.extend(create_subjects(&["plant.z"], 1));
+    cluster.change(1, pointer(1, &first), &definitions);
+    cluster.run(seconds(10));
+    cluster.board.lock().unwrap().silent = [1].into();
+    cluster.start_voter(3);
+    cluster.run(seconds(30));
+    assert_used(
+        &cluster.board(),
+        &[3],
+        pointer(2, &definitions),
+        &definitions,
+    );
 }
 
 // Voter 3 loses the root of the spec in use while it is down.
@@ -169,6 +212,21 @@ fn applied() -> (Cluster, BTreeMap<Name, Definition>) {
         pointer(1, &definitions),
         &definitions,
     );
+    (cluster, definitions)
+}
+
+// A cluster in which voters 1 and 2 use a change of 40 subjects that voter 3, which
+// has not started, lacks, and the definitions of that change.
+fn lacking(seed: u64) -> (Cluster, BTreeMap<Name, Definition>) {
+    let mut cluster = Cluster::new(seed);
+    cluster.start_voter(1);
+    cluster.start_voter(2);
+    cluster.run(seconds(5));
+    let labels: Vec<String> = (0..40).map(|at| format!("plant.s{at}")).collect();
+    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let definitions = create_subjects(&labels, 512);
+    cluster.change(1, base(), &definitions);
+    cluster.run(seconds(10));
     (cluster, definitions)
 }
 
