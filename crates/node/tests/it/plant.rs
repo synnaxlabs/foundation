@@ -25,7 +25,7 @@ pub(crate) fn admin(rig: &Rig) -> (Node, Subject) {
 /// The channels of the tests of writers and readers: the index `plant.time`, and
 /// `plant.a` and `plant.b` of `i64` on it, and the index `cell.time` and `cell.c` of
 /// `i64` on it, homed at the node `edge`.
-const CHANNELS: &str = concat!(
+pub(crate) const CHANNELS: &str = concat!(
     "channel \"plant.time\" { kind = \"index\" }\n",
     "channel \"plant.a\" {\n  data_type = \"i64\"\n  index = \"plant.time\"\n}\n",
     "channel \"plant.b\" {\n  data_type = \"i64\"\n  index = \"plant.time\"\n}\n",

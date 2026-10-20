@@ -94,8 +94,17 @@
   the note in place of a count `polled` at 2026-10-13T23:48:43Z,
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6157622562. Lost: a
   Device error (it never ends); a Config error that asks for `polled = true`; a read of
-  `ServerProfileArray` first. The opcua conformance suite runs the subscribed path,
-  and crate tests run the polled path (`laptop.architect-2`, item 4 of 6279727836,
+  `ServerProfileArray` first. The fallback connects only through the run value of the
+  first connect, with its credentials and mode. No path builds a second run value, and
+  no stage of a run takes the credentials as an argument. No test runs the fallback over
+  a secure channel: a relay cannot change a signed message, and open62541 has one
+  service table for the process, so no hook of one server refuses a subscribe
+  (`laptop.architect-2`, 2026-10-20T12:29:05Z,
+  https://github.com/synnaxlabs/foundation/issues/3539#issuecomment-6290852770, and
+  for the stages of a run, 2026-10-20T12:59:18Z,
+  https://github.com/synnaxlabs/foundation/issues/3539#issuecomment-6291409151). The
+  opcua conformance suite runs the subscribed path, and crate tests run the polled path
+  (`laptop.architect-2`, item 4 of 6279727836,
   approved without its "only" in item 2 of
   https://github.com/synnaxlabs/foundation/pull/3507#issuecomment-6285209512). A ONE
   NODE test runs the polled path only when it needs a sample at each tick (a trace of

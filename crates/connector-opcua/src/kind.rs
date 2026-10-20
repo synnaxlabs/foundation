@@ -251,88 +251,90 @@ async fn run(ctx: Context<Config>) -> Result<(), Error> {
     let security = ctx.config().security.as_ref();
     let secured =
         Secured::read(security, async |source| ctx.secret(source).await).await?;
+    let run = Run { ctx: &ctx, secured };
     if ctx.config().reads.is_empty() {
-        return idle(&ctx, secured.as_ref()).await;
+        return run.idle().await;
     }
     let Some(mut frames) = Frames::open(&ctx).await? else {
         return Ok(());
     };
-    let ran = connect(
-        &ctx,
-        frames.writer.time(),
-        secured.as_ref(),
-        async |client| {
+    let ran = run
+        .connect(frames.writer.time(), async |client| {
             if ctx.config().polled {
                 read(&ctx, client, &mut frames).await.map(|()| None)
             } else {
                 watch::run(&ctx, client, &mut frames).await
             }
-        },
-    )
-    .await?;
+        })
+        .await?;
     match ran.transpose()?.flatten() {
-        Some(status) => fall_back(&ctx, &mut frames, secured.as_ref(), status).await,
+        Some(status) => run.fall_back(&mut frames, status).await,
         None => Ok(()),
     }
 }
 
-/// Notes that the server answered the subscribe with `status`, and polls as [`read`]
-/// does on a new session, so that the client and the server keep nothing of the
-/// subscribe.
-#[cold]
-async fn fall_back(
-    ctx: &Context<Config>,
-    frames: &mut Frames<'_>,
-    secured: Option<&Secured<'_>>,
-    status: Status,
-) -> Result<(), Error> {
-    frames.note.polls = Some(status);
-    frames.note.show(ctx, None);
-    let mesh = frames.writer.time();
-    let ran = connect(ctx, mesh, secured, async |client| {
-        read(ctx, client, frames).await
-    })
-    .await?;
-    ran.unwrap_or(Ok(()))
+/// A run of the kind: its context and the credentials of its secure channel.
+struct Run<'a> {
+    ctx: &'a Context<Config>,
+    secured: Option<Secured<'a>>,
 }
 
-/// Connects, notes [`NO_READ`], and keeps the session until the cancel. A writer
-/// refuses no channel, so this run opens none.
-async fn idle(
-    ctx: &Context<Config>,
-    secured: Option<&Secured<'_>>,
-) -> Result<(), Error> {
-    // The status channels opened, so the node has mesh time and this gives at once.
-    let mesh = ctx.time().await;
-    let ran = connect(ctx, mesh, secured, async |client| {
-        ctx.clear_error();
-        ctx.note(&NO_READ);
-        let idle = client.idle(ctx.cancel().wait()).await;
-        idle.map_err(|status| failed(client.url(), Call::Check, status))
-    })
-    .await?;
-    ran.unwrap_or(Ok(()))
-}
+impl Run<'_> {
+    /// Notes that the server answered the subscribe with `status`, and polls as
+    /// [`read`] does on a new session, so that the client and the server keep nothing
+    /// of the subscribe.
+    #[cold]
+    async fn fall_back(
+        &self,
+        frames: &mut Frames<'_>,
+        status: Status,
+    ) -> Result<(), Error> {
+        frames.note.polls = Some(status);
+        frames.note.show(self.ctx, None);
+        let mesh = frames.writer.time();
+        let ran = self
+            .connect(mesh, async |client| read(self.ctx, client, frames).await)
+            .await?;
+        ran.unwrap_or(Ok(()))
+    }
 
-/// Runs `work` on a session to the server of `ctx` until its cancel, as [`session`]
-/// does, with the mesh time `mesh`, over the channel of `secured`.
-async fn connect<T>(
-    ctx: &Context<Config>,
-    mesh: hub::Time,
-    secured: Option<&Secured<'_>>,
-    work: impl AsyncFnOnce(&mut Client) -> T,
-) -> Result<Option<T>, Error> {
-    session(
-        event::Time::mesh(ctx.clock().clone(), mesh),
-        ctx.span().clone(),
-        ctx.net().clone(),
-        &mut ctx.rng(),
-        &ctx.config().address,
-        secured,
-        ctx.cancel().wait(),
-        work,
-    )
-    .await
+    /// Connects, notes [`NO_READ`], and keeps the session until the cancel. A writer
+    /// refuses no channel, so this run opens none.
+    async fn idle(&self) -> Result<(), Error> {
+        let ctx = self.ctx;
+        // The status channels opened, so the node has mesh time and this gives at once.
+        let mesh = ctx.time().await;
+        let ran = self
+            .connect(mesh, async |client| {
+                ctx.clear_error();
+                ctx.note(&NO_READ);
+                let idle = client.idle(ctx.cancel().wait()).await;
+                idle.map_err(|status| failed(client.url(), Call::Check, status))
+            })
+            .await?;
+        ran.unwrap_or(Ok(()))
+    }
+
+    /// Runs `work` on a session to the server until the cancel, as [`session`] does,
+    /// with the mesh time `mesh`.
+    async fn connect<T>(
+        &self,
+        mesh: hub::Time,
+        work: impl AsyncFnOnce(&mut Client) -> T,
+    ) -> Result<Option<T>, Error> {
+        let ctx = self.ctx;
+        session(
+            event::Time::mesh(ctx.clock().clone(), mesh),
+            ctx.span().clone(),
+            ctx.net().clone(),
+            &mut ctx.rng(),
+            &ctx.config().address,
+            self.secured.as_ref(),
+            ctx.cancel().wait(),
+            work,
+        )
+        .await
+    }
 }
 
 /// The credentials of a secure channel, read from the sources of the config.
@@ -777,7 +779,7 @@ impl Left {
 impl Note {
     /// Sets the note of `ctx` for `mistyped`, when it is not the note of the frame
     /// before: the read at a value of another type, its type, and the sample type of
-    /// its channel, after the note of [`fall_back`] for `polls`. `None` shows only
+    /// its channel, after the note of [`Run::fall_back`] for `polls`. `None` shows only
     /// that note, or none.
     #[inline]
     fn set(

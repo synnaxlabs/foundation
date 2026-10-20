@@ -322,7 +322,7 @@ async fn reader(
     let select = Selector::from_written(written)
         .expect("invariant: a name reads as a pattern, and the names are not empty");
     let reader = session.reader(select, config.mode).await?;
-    let layout = layout(names, reader.places(), reader.index())
+    let layout = layout(names, reader.places())
         .ok_or(program::Error::Refused(Refusal::Unknown))?;
     Ok((reader, layout))
 }
@@ -347,10 +347,12 @@ struct Targets {
 }
 
 /// The layout of a reader of `names` from `entries`, the places of a
-/// `program::Reader`, whose index is entry `index`: place `n` is `names[n]`, then the
-/// index when `names` does not name it. `None` when a name is no entry.
-fn layout(names: &[Name], entries: &[Place], index: usize) -> Option<Layout> {
-    let (each, places, index) = placed(names, entries, index)?;
+/// `program::Reader`: place `n` is `names[n]`, then the index when `names` does not
+/// name it. `None` when a name is no entry.
+fn layout(names: &[Name], entries: &[program::Place]) -> Option<Layout> {
+    let (each, places) = placed(names, entries)?;
+    // Each entry of a reader has the one index.
+    let index = places.first().map_or(0, |place| place.index);
     let mut targets = vec![None; entries.len()];
     let firsts = (each.iter().enumerate())
         .map(|(place, &entry)| *targets[entry].get_or_insert(place))
@@ -374,10 +376,10 @@ fn count(encoded: &types::frame::Frame) -> (u32, usize) {
     (count, samples)
 }
 
-/// Decodes `encoded`, a frame of a reader of `places`, into `frame` at the places of
+/// Decodes `encoded`, a frame of a reader of `entries`, into `frame` at the places of
 /// `targets`, with the `lost` seqs of each entry with a series.
 fn decoded(
-    places: &[Place],
+    entries: &[program::Place],
     targets: &Targets,
     lost: impl Fn(usize) -> Range<u64>,
     encoded: &types::frame::Frame,
@@ -401,7 +403,7 @@ fn decoded(
             continue;
         };
         let series = &mut frame.series[first];
-        let data_type = places[entry].data_type;
+        let data_type = entries[entry].data_type;
         codec::decode(data_type, samples, bytes, &mut series.bytes).map_err(
             |cause| Error::Decode {
                 place: first,

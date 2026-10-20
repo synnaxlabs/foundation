@@ -14,7 +14,8 @@ impl Mesh {
     /// it proposes the card with them, at a version above the held one and above each
     /// version that this node signed before, and returns when an entry that holds it
     /// has committed and this node applied it. It tries again as [`Mesh::set_home`]
-    /// does, and also when a card of a later version applied first.
+    /// does, and also when a card of a later version applied first. A node that joined
+    /// and has not applied its own join yet waits until it has.
     ///
     /// # Errors
     ///
@@ -33,7 +34,11 @@ impl Mesh {
         let mut signed: Option<Signed> = None;
         loop {
             let attempt = self.attempt()?;
-            let held = self.own();
+            let Some(held) = self.own() else {
+                drop(attempt);
+                self.clock.sleep(TICK).await;
+                continue;
+            };
             let card = match signed.take() {
                 Some(card) if card.card().version > held.version => card,
                 _ => match self.cards.sign(&held, &addresses).await {
@@ -61,13 +66,11 @@ impl Mesh {
         }
     }
 
-    // The card of this node in its applied state.
-    fn own(&self) -> Card {
+    // The card of this node in its applied state, or `None` before it applied its
+    // join.
+    fn own(&self) -> Option<Card> {
         let group = self.group.borrow();
-        let own = group.state.member(group.raft.key()).expect(
-            "invariant: this node is a member: the open checks it, and no change \
-             removes a member",
-        );
-        own.card.card().clone()
+        let own = group.state.member(group.raft.key())?;
+        Some(own.card.card().clone())
     }
 }

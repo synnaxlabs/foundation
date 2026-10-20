@@ -629,6 +629,17 @@ class WriterTest(unittest.TestCase):
         self.assertEqual(raised.exception.code, "malformed")
         self.assertIsNone(self.client.open_writer("plant.a").close())
 
+    def test_open_writer_of_two_indexes_raises_stopped_naming_each_index(self) -> None:
+        with self.assertRaises(foundation.Stopped) as raised:
+            self.client.open_writer(["other.a", "plant.a", "plant.b"])
+        self.assertEqual(raised.exception.code, "malformed")
+        self.assertEqual(
+            str(raised.exception),
+            "channels of more than one index (other.time, plant.time): open one "
+            "writer for each index",
+        )
+        self.assertIsNone(self.client.open_writer("plant.a").close())
+
     def test_a_writer_of_a_closed_client_raises(self) -> None:
         writer = self.client.open_writer("plant.a")
         self.client.close()
