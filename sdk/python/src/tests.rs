@@ -546,9 +546,10 @@ fn raised_raises_for_an_end_then_a_refusal() {
             "the node refused the frame of plant.time (order: a stamp is not after the \
              stamp before it); the write of cell.time ended (failed: the home of its \
              group failed); the write of line.time ended (refused: the home of its \
-             group refused the proof of the program); channels plant.a, cell.a, line.a, \
-             plant.time, cell.time, line.time were not written; no channel was; each \
-             later frame of an ended group raises again, and the other groups go on"
+             group refused the proof of the program); channels plant.a, cell.a, \
+             line.a, plant.time, cell.time, line.time were not written; no channel \
+             was; each later frame of an ended group raises again, and the other \
+             groups go on"
                 .to_owned(),
             Some("failed".to_owned()),
             None,
