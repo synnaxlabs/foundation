@@ -217,7 +217,7 @@ const FUNCTION_SYMBOLS: [(&str, &str, &str, Access); 25] = [
 /// [`AWS_LC`] does not admit, by its name without the prefix of [`Crypto`]. A key
 /// admits only the name with the prefix. A test of `connector-opcua` names the function
 /// of each key of [`AWS_LC_INPUTS`] and fails when its reason becomes false.
-const AWS_LC_KEYS: [(&str, &str, &str, Access); 19] = [
+const AWS_LC_KEYS: [(&str, &str, &str, Access); 20] = [
     // Gives the time of a certificate, which is never NULL, so it reads no clock.
     (
         "plugins/crypto/openssl/certificategroup.c",
@@ -237,6 +237,14 @@ const AWS_LC_KEYS: [(&str, &str, &str, Access); 19] = [
         "plugins/crypto/openssl/certificategroup.c",
         "openSSLLoadEachCertificate",
         "ERR_peek_last_error",
+        Access::Call,
+    ),
+    // The BIO of each PEM read, so each read first refuses a piece that the targets
+    // read in two ways.
+    (
+        "plugins/crypto/openssl/securitypolicy_common.c",
+        "UA_OpenSSL_PemBio",
+        "BIO_new_mem_buf",
         Access::Call,
     ),
     // The randomness of aws-lc, which TLS RANDOMNESS admits: the nonces of a channel,
@@ -460,8 +468,8 @@ const SYMBOLS: [&str; 30] = [
 /// an algorithm and not its result. A PEM reader reads no console only with a callback
 /// of [`PASSWORDS`], which [`passwords`] checks.
 #[rustfmt::skip]
-const AWS_LC: [&str; 150] = [
-    "ASN1_INTEGER_cmp", "BIO_free", "BIO_new_mem_buf", "BIO_reset", "BN_bin2bn",
+const AWS_LC: [&str; 145] = [
+    "ASN1_INTEGER_cmp", "BIO_free", "BN_bin2bn",
     "BN_bn2binpad", "BN_free", "BN_new", "BN_set_word", "ECDSA_SIG_free",
     "ECDSA_SIG_get0", "ECDSA_SIG_new", "ECDSA_SIG_set0", "ECDSA_size",
     "EC_GROUP_get_curve_name", "EC_KEY_free", "EC_KEY_get0_group",
@@ -503,9 +511,8 @@ const AWS_LC: [&str; 150] = [
     "X509_get_extension_flags", "X509_get_issuer_name", "X509_get_key_usage",
     "X509_get_notAfter", "X509_get_notBefore", "X509_get_pubkey",
     "X509_get_subject_name", "X509_verify", "d2i_AutoPrivateKey", "d2i_ECDSA_SIG",
-    "d2i_PrivateKey_bio", "d2i_X509", "d2i_X509_CRL", "d2i_X509_CRL_bio",
-    "d2i_X509_REQ_bio", "d2i_X509_bio", "i2d_ECDSA_SIG", "i2d_PrivateKey", "i2d_X509",
-    "i2d_X509_REQ",
+    "d2i_X509", "d2i_X509_CRL", "d2i_X509_REQ", "i2d_ECDSA_SIG", "i2d_PrivateKey",
+    "i2d_X509", "i2d_X509_REQ",
 ];
 
 /// The header of the symbol prefix, which the build script of `connector-opcua` also
@@ -3404,6 +3411,23 @@ End of search list.
                 ),
                 unlisted_crypto(file, "UA_verify", "fixture_RAND_bytes"),
             ]
+        );
+    }
+
+    /// Only the PEM entry makes the BIO of a PEM read.
+    #[test]
+    fn uses_admits_a_memory_bio_only_in_the_pem_entry() {
+        let mut uses = listed(&[]);
+        let group = "plugins/crypto/openssl/certificategroup.c";
+        let found = call("openSSLLoadLeafCertificate", "fixture_BIO_new_mem_buf");
+        assert_eq!(uses.add(group, found, &crypto()), None);
+        assert_eq!(
+            uses.mismatches(),
+            [unlisted_crypto(
+                group,
+                "openSSLLoadLeafCertificate",
+                "BIO_new_mem_buf"
+            )]
         );
     }
 

@@ -11,15 +11,17 @@
 //! what a `Reader` gives other than `Error::ManyIndexes`, and each valid message made
 //! from the input reads back. A `Reader` holds an `Opening`,
 //! so the checks of the read stream are the checks of the run of both.
-//! `write::Replies` takes or refuses each reply as the order of the replies gives, and
-//! a refused reply changes no count.
+//! `write::Replies` takes or refuses each reply as the order of the replies gives, a
+//! refused reply changes no count, and `unstored` gives each group that ended with a
+//! taken frame past its last `Stored`.
 //!
 //! Input: the messages of one stream (`fuzz::messages`). Each decoder reads each
 //! message, an open among them; the body of the first message, when it is a request, a
 //! response, a read, or a write, takes each later message; and a `client::Reader` of
 //! each mode and a `write::Opening` take each message until they give the last place,
-//! and then the end of the stream. A `write::Replies` counts a frame sent for each
-//! message whose first byte is 0, and decodes each other message as a reply.
+//! and then the end of the stream. A `write::Replies` of 256 groups counts a frame sent
+//! for each message whose first byte is 0, with a group for each other byte of it, or
+//! group 0 when it has none, and decodes each other message as a reply.
 
 #![no_main]
 #![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
@@ -44,7 +46,7 @@ use wire::hub::client::{
     BODY_BYTES_MAX, Body, Challenge, Error, First, Mode, OPEN_BYTES_MAX, Open,
     PLACES_MAX, Place, Places, Read, Reader, Request, Response, Signed, place,
 };
-use wire::hub::write::{Outcome, Refusal, Replies, Reply};
+use wire::hub::write::{End, Outcome, Refusal, Replies, Reply};
 
 /// Checks one decoder of kind `kind` on `message`: a decoded message encodes to it,
 /// and a refusal is the one that its first byte gives, or one that `allowed` takes.
@@ -136,7 +138,7 @@ fn encode_run(run: &[Place]) -> Vec<u8> {
 }
 
 /// Checks the decoders of a message with no kind byte, the opens, and of a reply,
-/// whose first byte is one of four kinds: one that decodes must encode to its bytes.
+/// whose first byte is one of five kinds: one that decodes must encode to its bytes.
 fn unkinded(message: &[u8]) {
     if let Ok(open) = Open::decode(message) {
         let mut out = vec![0; open.encoded_len()];
@@ -151,7 +153,7 @@ fn unkinded(message: &[u8]) {
     match (message.first(), Reply::decode(message)) {
         (_, Ok(decoded)) => assert_eq!(reply(&decoded), message, "the reply changed"),
         (None, Err(error)) => assert_eq!(error, hub::Error::Empty),
-        (Some(&kind), Err(error)) if !(1..=4).contains(&kind) => {
+        (Some(&kind), Err(error)) if !(1..=6).contains(&kind) => {
             assert_eq!(error, hub::Error::Kind { kind }, "{message:?}");
         }
         (Some(_), Err(error)) => assert!(
@@ -161,6 +163,7 @@ fn unkinded(message: &[u8]) {
                     | hub::Error::Count { .. }
                     | hub::Error::Range { .. }
                     | hub::Error::Refusal { .. }
+                    | hub::Error::End { .. }
             ),
             "{error:?} is not a refusal of the bytes of {message:?}"
         ),
@@ -465,17 +468,46 @@ fn read(bytes: &[u8]) {
     assert_eq!(body.end(), ended, "the body ended at another length");
 }
 
-/// Drives a `Replies` on `bytes`: a message whose first byte is 0, a kind that no reply
-/// has, counts a frame sent, and each other message must be taken or refused as a model
-/// of the order of the replies gives.
+/// The groups of the write that `replies` drives: one for each byte.
+const GROUPS: usize = 256;
+
+/// The model of the replies of one group.
+#[derive(Clone, Copy, Default)]
+struct Group {
+    /// The last frame whose group was taken.
+    taken: u64,
+    /// The frames that the last `Stored` of the group covers.
+    stored: u64,
+    ended: Option<End>,
+}
+
+/// Drives a `Replies` of `GROUPS` groups on `bytes`: a message whose first byte is 0, a
+/// kind that no reply has, counts a frame sent, whose groups are its other bytes, or
+/// group 0 when it has none. Each other message must be taken or refused as a model of
+/// the order of the replies gives.
 fn replies(bytes: &[u8]) {
-    let mut replies = Replies::new();
-    let (mut sent, mut answered, mut taken, mut stored) = (0_u64, 0, 0, 0);
+    let mut replies = Replies::new(GROUPS);
+    let mut groups: Vec<Vec<u32>> = Vec::new();
+    // The frames whose groups each have an outcome, and the groups of the next frame
+    // that have one.
+    let (mut answered, mut at) = (0_u64, 0);
+    let mut each = [Group::default(); GROUPS];
     for message in fuzz::messages(bytes) {
-        if message.first() == Some(&0) {
-            replies.sent();
-            sent += 1;
+        let sent = u64::try_from(groups.len()).expect("a u64 holds a usize");
+        if let [0, rest @ ..] = message {
+            let frame: Vec<u32> = match rest {
+                [] => vec![0],
+                rest => rest.iter().map(|&group| u32::from(group)).collect(),
+            };
+            replies.sent(frame.iter().copied());
+            groups.push(frame);
         } else {
+            let next =
+                usize::try_from(answered).expect("a usize holds the frames sent");
+            let due = groups.get(next).map_or(0, |groups| groups[at]);
+            let state = |group: u32| {
+                usize::try_from(group).ok().filter(|&group| group < GROUPS)
+            };
             let want = match Reply::decode(message) {
                 Ok(Reply::Outcome { frame, .. }) if frame == 0 || frame > sent => {
                     Err(hub::Error::Unasked { frame, sent })
@@ -486,36 +518,105 @@ fn replies(bytes: &[u8]) {
                         next: answered + 1,
                     })
                 }
-                Ok(reply @ Reply::Outcome { outcome, .. }) => {
-                    answered += 1;
-                    if let Outcome::Taken { .. } = outcome {
-                        taken = answered;
+                Ok(Reply::Outcome { frame, group, .. }) if group != due => {
+                    Err(hub::Error::Group {
+                        frame,
+                        group,
+                        next: due,
+                    })
+                }
+                Ok(
+                    reply @ Reply::Outcome {
+                        frame,
+                        group,
+                        outcome,
+                    },
+                ) => {
+                    let slot = state(group).expect("a byte names the group");
+                    let state = &mut each[slot];
+                    let refused = match (state.ended, outcome) {
+                        (Some(end), Outcome::Ended(given)) if given == end => None,
+                        (Some(_), _) => Some(hub::Error::Ended { group }),
+                        (None, Outcome::Ended(_)) => {
+                            Some(hub::Error::Unended { frame, group })
+                        }
+                        (None, Outcome::Taken { .. }) => {
+                            state.taken = frame;
+                            None
+                        }
+                        (None, _) => None,
+                    };
+                    if refused.is_none() {
+                        at += 1;
+                        if at == groups[next].len() {
+                            answered += 1;
+                            at = 0;
+                        }
                     }
-                    Ok(reply)
+                    refused.map_or(Ok(reply), Err)
                 }
-                Ok(Reply::Stored { frames }) if frames < stored => {
-                    Err(hub::Error::Stored {
-                        frames,
-                        bound: stored,
+                Ok(Reply::Stored { group, .. } | Reply::Ended { group, .. })
+                    if state(group).is_none() =>
+                {
+                    Err(hub::Error::Groups {
+                        group,
+                        count: GROUPS,
                     })
                 }
-                Ok(Reply::Stored { frames }) if frames > answered => {
-                    Err(hub::Error::Stored {
-                        frames,
-                        bound: answered,
-                    })
+                Ok(Reply::Stored { group, .. } | Reply::Ended { group, .. })
+                    if each[state(group).expect("the arm above checks it")]
+                        .ended
+                        .is_some() =>
+                {
+                    Err(hub::Error::Ended { group })
                 }
-                Ok(reply @ Reply::Stored { frames }) => {
-                    stored = frames;
+                Ok(reply @ Reply::Stored { group, frames }) => {
+                    let slot = state(group).expect("an arm above checks it");
+                    let state = &mut each[slot];
+                    if frames < state.stored {
+                        Err(hub::Error::Stored {
+                            group,
+                            frames,
+                            bound: state.stored,
+                        })
+                    } else if frames > answered {
+                        Err(hub::Error::Stored {
+                            group,
+                            frames,
+                            bound: answered,
+                        })
+                    } else {
+                        state.stored = frames;
+                        Ok(reply)
+                    }
+                }
+                Ok(reply @ Reply::Ended { group, end }) => {
+                    let slot = state(group).expect("an arm above checks it");
+                    each[slot].ended = Some(end);
                     Ok(reply)
                 }
                 Err(error) => Err(error),
             };
             assert_eq!(replies.decode(message), want, "{message:?}");
         }
+        let sent = u64::try_from(groups.len()).expect("a u64 holds a usize");
         assert_eq!(replies.answered(), answered == sent, "the outcomes differ");
-        let all = answered == sent && stored >= taken;
+        let all = answered == sent
+            && each
+                .iter()
+                .all(|group| group.ended.is_some() || group.stored >= group.taken);
         assert_eq!(replies.stored(), all, "the stored frames differ");
+        let unstored =
+            each.iter()
+                .zip(0..)
+                .filter_map(|(group, key)| match group.ended {
+                    Some(end) if group.taken > group.stored => Some((key, end)),
+                    _ => None,
+                });
+        assert!(
+            replies.unstored().eq(unstored),
+            "the unstored groups differ"
+        );
     }
 }
 
@@ -660,20 +761,37 @@ fn write_write(input: &mut Unstructured) -> arbitrary::Result<()> {
         count,
     };
     let frame = input.arbitrary()?;
-    let outcome = |outcome| Reply::Outcome { frame, outcome };
-    let sent = match input.int_in_range(0..=10)? {
+    let group = input.arbitrary()?;
+    let outcome = |outcome| Reply::Outcome {
+        frame,
+        group,
+        outcome,
+    };
+    let sent = match input.int_in_range(0..=12)? {
         0 => outcome(Outcome::Taken { range }),
         1 => outcome(Outcome::Lost { range }),
-        2 => Reply::Stored { frames: range.seq },
+        2 => Reply::Stored {
+            group,
+            frames: range.seq,
+        },
         3 => outcome(Outcome::Refused(Refusal::Waiting)),
         4 => outcome(Outcome::Refused(Refusal::Reserved)),
         5 => outcome(Outcome::Refused(Refusal::Expired)),
         6 => outcome(Outcome::Refused(Refusal::Order)),
         7 => outcome(Outcome::Refused(Refusal::Codec)),
         8 => outcome(Outcome::Refused(Refusal::Full)),
+        9 => outcome(Outcome::Ended(End::Removed)),
+        10 => outcome(Outcome::Ended(End::Failed)),
         _ => outcome(Outcome::Refused(Refusal::Large)),
     };
     assert_eq!(Reply::decode(&reply(&sent)), Ok(sent), "the reply changed");
+    let end = if input.arbitrary()? {
+        End::Failed
+    } else {
+        End::Removed
+    };
+    let ended = Reply::Ended { group, end };
+    assert_eq!(Reply::decode(&reply(&ended)), Ok(ended), "the end changed");
     Ok(())
 }
 

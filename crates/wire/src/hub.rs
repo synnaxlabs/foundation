@@ -9,8 +9,9 @@
 //! ends run exactly [`Head::series`] ends, so the receiver counts them to find where a
 //! run ends. The body starts a new message.
 //!
-//! The streams of a program's session are in [`client`], and the frames of its write
-//! stream and their replies in [`write`](mod@write).
+//! The streams of a program's session are in [`client`], the frames of its write
+//! stream and their replies in [`write`](mod@write), and the stream on which its node
+//! carries its write to the home in [`forward`].
 //!
 //! [`Home`] decodes the messages from the reader's node, and [`Reader`] those from the
 //! home. Each checks the order and the runs of its side of the session.
@@ -30,6 +31,7 @@
 //! - [`ends`]: place and end (each `u32`) for each series.
 
 pub mod client;
+pub mod forward;
 mod frames;
 mod gaps;
 mod home;
@@ -44,7 +46,7 @@ pub use frames::{Due, Frames, Step};
 pub use gaps::Gaps;
 pub use home::{FromReader, Home};
 pub use reader::{FromHome, Reader};
-use types::frame::{Form, Path, Range};
+use types::frame::{Path, Range};
 
 use crate::common::{Fields, Length, Run, Writer, body};
 
@@ -519,11 +521,14 @@ pub enum Error {
     },
     /// No message of its kind has this length.
     Length {
-        /// The bytes of the message.
+        /// The bytes of the message, or of the counts after the last end of a message
+        /// of the run of ends.
         len: usize,
     },
     /// An open names no channel.
     Channels,
+    /// A forward names no place.
+    Unplaced,
     /// A head names no series.
     Series,
     /// The range of a head or of a write's reply ends past the highest seq.
@@ -557,6 +562,12 @@ pub enum Error {
         /// The places of the session.
         places: u32,
     },
+    /// A place of a forward is not after the place before it, or not below the
+    /// channels of the open.
+    Place {
+        /// The place.
+        place: u32,
+    },
     /// A head of a reader session is on the backfill path. A session gets only live
     /// frames.
     Backfill,
@@ -568,11 +579,12 @@ pub enum Error {
         /// The seq plus the count of the head before it, or the open position.
         end: u64,
     },
-    /// A message of a run has more keys or ends than remain in the run.
+    /// A message of a run has more keys, ends, counts, or places than remain in the
+    /// run.
     Run {
-        /// The keys or ends of the message.
+        /// The keys, ends, counts, or places of the message.
         items: usize,
-        /// The keys or ends that remain in the run.
+        /// The keys, ends, counts, or places that remain in the run.
         remain: u32,
     },
     /// A message of a body has more bytes than remain in the body.
@@ -605,24 +617,24 @@ pub enum Error {
         /// The code.
         code: u8,
     },
-    /// A write's head holds no sample.
+    /// A write's reply ends a group with a code that no [`write::End`] has.
+    End {
+        /// The code.
+        code: u8,
+    },
+    /// A count of a write's run of counts is 0.
     Samples,
     /// A write's head names no form.
     Form {
         /// The form byte.
         byte: u8,
     },
-    /// A write's head of [`write::Time::Node`] has a count other than 1 or the encoded
-    /// form.
-    Stamp {
-        /// The samples of each series.
-        count: u32,
-        /// The form.
-        form: Form,
-    },
+    /// A write's head of [`write::Time::Node`] has the encoded form.
+    Stamp,
     /// The program finished its write stream inside a frame.
     Cut {
-        /// The bytes of the frame that came: its head, its ends, and its body.
+        /// The bytes of the frame that came: its head, its ends, its counts, and its
+        /// body.
         received: usize,
         /// The bytes of the frame, once its ends are whole.
         len: Option<NonZeroUsize>,
@@ -643,14 +655,47 @@ pub enum Error {
         /// The frame that the next outcome answers.
         next: u64,
     },
-    /// A `Stored` of a write stream covers fewer frames than the last `Stored`, or
-    /// more than got an outcome.
+    /// An outcome of a write stream answers the frame that the next outcome answers,
+    /// and another group than the one that it answers.
+    Group {
+        /// The frame that it answers.
+        frame: u64,
+        /// The group that it answers.
+        group: u32,
+        /// The group that the next outcome answers.
+        next: u32,
+    },
+    /// A `Stored` of a write stream covers fewer frames than the last `Stored` of its
+    /// group, or more than got an outcome.
     Stored {
+        /// The group that it names.
+        group: u32,
         /// The frames that it covers.
         frames: u64,
-        /// The frames that the last `Stored` covers when `frames` is below them, else
-        /// the frames that got an outcome.
+        /// The frames that the last `Stored` of the group covers when `frames` is
+        /// below them, else the frames that got an outcome.
         bound: u64,
+    },
+    /// A reply of a write stream names a group after its `Ended`, other than an
+    /// outcome of the same end: a second `Ended`, a `Stored`, or another outcome.
+    Ended {
+        /// The group that it names.
+        group: u32,
+    },
+    /// An outcome of a write stream ends a group before the `Ended` of the group.
+    Unended {
+        /// The frame that it answers.
+        frame: u64,
+        /// The group that it answers.
+        group: u32,
+    },
+    /// A `Stored` or an `Ended` of a write stream names a group that the write does
+    /// not have.
+    Groups {
+        /// The group that it names.
+        group: u32,
+        /// The groups of the write.
+        count: usize,
     },
 }
 
@@ -676,6 +721,7 @@ impl fmt::Display for Error {
                 "the hub message has {len} bytes, which no message of its kind has"
             ),
             Self::Channels => f.write_str("the hub open names no channel"),
+            Self::Unplaced => f.write_str("the hub forward names no place"),
             Self::Series => f.write_str("the frame head names no series"),
             Self::Range { seq, count } => write!(
                 f,
@@ -700,6 +746,11 @@ impl fmt::Display for Error {
                 f,
                 "the frame head names {series} series, and the session has {places} \
                  places"
+            ),
+            Self::Place { place } => write!(
+                f,
+                "the forward names place {place}, which is not after the place before \
+                 it or not below the channels of the open"
             ),
             Self::Backfill => {
                 f.write_str("the frame head of a reader session is on backfill")
@@ -734,14 +785,16 @@ impl fmt::Display for Error {
             Self::Refusal { code } => {
                 write!(f, "the refused frame has code {code}, which no refusal has")
             }
-            Self::Samples => f.write_str("the frame head holds no sample"),
+            Self::End { code } => {
+                write!(f, "the ended group has code {code}, which no end has")
+            }
+            Self::Samples => f.write_str("the frame holds a group of no sample"),
             Self::Form { byte } => {
                 write!(f, "the frame head names form {byte}, which no frame has")
             }
-            Self::Stamp { count, form } => write!(
-                f,
-                "the frame head that the node stamps has {count} samples in the \
-                 {form:?} form, not 1 in the raw form"
+            Self::Stamp => f.write_str(
+                "the frame head that the node stamps is in the encoded form, not the \
+                 raw form",
             ),
             Self::Cut {
                 received,
@@ -767,15 +820,42 @@ impl fmt::Display for Error {
                 "the outcome answers frame {frame}, not frame {next}, which the next \
                  outcome answers"
             ),
-            Self::Stored { frames, bound } if frames < bound => write!(
+            Self::Group { frame, group, next } => write!(
                 f,
-                "the stored reply covers {frames} frames, fewer than the {bound} of \
-                 the last stored reply"
+                "the outcome answers group {group} of frame {frame}, not group {next}, \
+                 which the next outcome answers"
             ),
-            Self::Stored { frames, bound } => write!(
+            Self::Stored {
+                group,
+                frames,
+                bound,
+            } if frames < bound => write!(
                 f,
-                "the stored reply covers {frames} frames, more than the {bound} that \
-                 got an outcome"
+                "the stored reply of group {group} covers {frames} frames, fewer than \
+                 the {bound} of its last stored reply"
+            ),
+            Self::Stored {
+                group,
+                frames,
+                bound,
+            } => write!(
+                f,
+                "the stored reply of group {group} covers {frames} frames, more than \
+                 the {bound} that got an outcome"
+            ),
+            Self::Ended { group } => write!(
+                f,
+                "the reply names group {group} after the group ended, and is not an \
+                 outcome of its end"
+            ),
+            Self::Unended { frame, group } => write!(
+                f,
+                "the outcome of frame {frame} ends group {group}, which did not end"
+            ),
+            Self::Groups { group, count } => write!(
+                f,
+                "the reply names group {group}, not one of the {count} groups of the \
+                 write"
             ),
         }
     }
@@ -929,7 +1009,7 @@ mod tests {
 
     /// `decode` gives [`Error::Length`] for a message of `kind` with each length in
     /// `lens`.
-    fn check<T: fmt::Debug + PartialEq>(
+    pub(super) fn check<T: fmt::Debug + PartialEq>(
         decode: fn(&[u8]) -> Result<T, Error>,
         kind: u8,
         lens: &[usize],
@@ -942,7 +1022,7 @@ mod tests {
 
     /// `decode` gives [`Error::Kind`] for each kind byte outside `known`, at each
     /// length in `lens`.
-    fn check_kinds<T: fmt::Debug + PartialEq>(
+    pub(super) fn check_kinds<T: fmt::Debug + PartialEq>(
         decode: fn(&[u8]) -> Result<T, Error>,
         known: &[u8],
         lens: &[usize],
@@ -1421,6 +1501,7 @@ mod tests {
                 "the hub message has 4 bytes, which no message of its kind has",
             ),
             (Error::Channels, "the hub open names no channel"),
+            (Error::Unplaced, "the hub forward names no place"),
             (Error::Series, "the frame head names no series"),
             (
                 Error::Range { seq: 7, count: 2 },
@@ -1445,6 +1526,11 @@ mod tests {
                     places: 3,
                 },
                 "the frame head names 4 series, and the session has 3 places",
+            ),
+            (
+                Error::Place { place: 3 },
+                "the forward names place 3, which is not after the place before it or \
+                 not below the channels of the open",
             ),
             (
                 Error::Backfill,

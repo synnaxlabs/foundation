@@ -19,7 +19,7 @@ use types::{
 use wire::hub::{
     Credit, Due, Frames, FromHome, FromReader, Head, Home, Mode, Open, Reader, Reply,
     Step, ends, keys,
-    write::{self, Outcome, Refusal, Time},
+    write::{self, End, Outcome, Refusal, Time},
 };
 
 #[global_allocator]
@@ -94,7 +94,6 @@ fn write_head() {
     let head = write::Head {
         time: Time::Frame(Path::Backfill),
         form: Form::Encoded,
-        count: 1_000,
         series: 3,
     };
     let mut out = [0; write::Head::LEN];
@@ -106,15 +105,29 @@ fn write_replies() {
     for reply in [
         write::Reply::Outcome {
             frame: 1,
+            group: 4,
             outcome: Outcome::Lost {
                 range: Range { seq: 7, count: 3 },
             },
         },
         write::Reply::Outcome {
             frame: 2,
+            group: 0,
             outcome: Outcome::Refused(Refusal::Order),
         },
-        write::Reply::Stored { frames: 9 },
+        write::Reply::Outcome {
+            frame: 3,
+            group: 1,
+            outcome: Outcome::Ended(End::Failed),
+        },
+        write::Reply::Stored {
+            group: 1,
+            frames: 9,
+        },
+        write::Reply::Ended {
+            group: 1,
+            end: End::Removed,
+        },
     ] {
         let mut out = vec![0; reply.encoded_len()];
         let ((), allocations) = ALLOCATOR.count(|| reply.encode(&mut out));
@@ -257,12 +270,12 @@ fn write_frames() {
     write::Head {
         time: Time::Frame(Path::Live),
         form: Form::Raw,
-        count: 2,
         series: 2,
     }
     .encode(&mut head);
     let mut run = [0; 2 * ends::LEN];
     ends::encode([(0, 16), (1, 32)], &mut run);
+    let counts = 2_u32.to_le_bytes();
     let body = [7; 32];
     for round in 0..2 {
         let (steps, allocations) = ALLOCATOR.count(|| {
@@ -271,13 +284,9 @@ fn write_frames() {
             let due = matches!(frames.due(), Ok(write::Due::Draft { .. }));
             (head, ends, due)
         });
-        assert!(
-            matches!(
-                steps,
-                (Ok(write::Step::Head(_)), Ok(write::Step::More), true)
-            ),
-            "the head and ends did not decode: {steps:?}"
-        );
+        let (Ok(write::Step::Head(_)), Ok(write::Step::More), true) = steps else {
+            panic!("the head and ends did not decode: {steps:?}");
+        };
         assert_eq!(
             allocations, 0,
             "the head and ends of write frame {round} allocated"
@@ -288,20 +297,30 @@ fn write_frames() {
         let draft = layout.draft(&pool, form).expect("a block");
         let (step, allocations) = ALLOCATOR.count(|| {
             let step = frames.draft(draft);
+            let counts = frames.decode(&counts);
             let Ok(write::Due::Body(rest)) = frames.due() else {
                 panic!("a body is due");
             };
             rest[..20].copy_from_slice(&body[..20]);
-            (step, frames.received(20), frames.decode(&body[20..]))
+            (
+                step,
+                counts,
+                frames.received(20),
+                frames.decode(&body[20..]),
+            )
         });
-        assert_eq!(allocations, 0, "the draft and body of a write allocated");
+        assert_eq!(
+            allocations, 0,
+            "the draft, counts, and body of a write allocated"
+        );
         let (
             write::Step::More,
+            Ok(write::Step::More),
             Ok(write::Step::More),
             Ok(write::Step::Frame { draft, .. }),
         ) = step
         else {
-            panic!("the body did not give a frame: {step:?}");
+            panic!("the counts and body did not give a frame: {step:?}");
         };
         let frame = draft.freeze(Path::Live);
         assert_eq!(frame.series(1), Some(&body[16..]), "the body round trips");

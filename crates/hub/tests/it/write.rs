@@ -51,23 +51,20 @@ fn place(
     }
 }
 
-/// The head of a frame of `count` samples of each of `series` series on the live
-/// path.
-fn live(count: u32, series: u32) -> Head {
+/// The head of a frame of `series` series on the live path.
+fn live(series: u32) -> Head {
     Head {
         time: Time::Frame(Path::Live),
         form: Form::Raw,
-        count,
         series,
     }
 }
 
-/// The head of a frame of one sample of each of `series` series that the node stamps.
+/// The head of a frame of `series` series that the node stamps.
 fn untimed(series: u32) -> Head {
     Head {
         time: Time::Node,
         form: Form::Raw,
-        count: 1,
         series,
     }
 }
@@ -89,13 +86,13 @@ fn frame(series: &[(u32, &[i64])]) -> (Vec<(u32, u32)>, Vec<u8>) {
 async fn send(stream: &mut Stream, stamps: &[i64], values: &[i64]) {
     let count = u32::try_from(stamps.len()).expect("a count");
     let (ends, body) = frame(&[(0, stamps), (1, values)]);
-    stream.frame(live(count, 2), &ends, &body).await;
+    stream.frame(live(2), &[count], &ends, &body).await;
 }
 
 /// Sends a frame of `value` at place 1 that the node stamps.
 async fn send_untimed(stream: &mut Stream, value: i64) {
     let (ends, body) = frame(&[(0, &[0]), (1, &[value])]);
-    stream.frame(untimed(2), &ends, &body).await;
+    stream.frame(untimed(2), &[1], &ends, &body).await;
 }
 
 /// Finishes `stream`, and gives each reply that the node sent before it finished.
@@ -109,12 +106,13 @@ async fn end(stream: &mut Stream) -> Vec<Reply> {
 }
 
 fn stored(frames: u64) -> Reply {
-    Reply::Stored { frames }
+    Reply::Stored { group: 0, frames }
 }
 
 fn taken(frame: u64, seq: u64, count: u32) -> Reply {
     Reply::Outcome {
         frame,
+        group: 0,
         outcome: Outcome::Taken {
             range: types::frame::Range { seq, count },
         },
@@ -124,6 +122,7 @@ fn taken(frame: u64, seq: u64, count: u32) -> Reply {
 fn refused(frame: u64, refusal: wire::hub::write::Refusal) -> Reply {
     Reply::Outcome {
         frame,
+        group: 0,
         outcome: Outcome::Refused(refusal),
     }
 }
@@ -201,9 +200,9 @@ fn counts_the_frames_of_each_path_in_stored() {
             let (ends, body) = frame(&[(0, &stamps), (1, &stamps)]);
             let backfill = Head {
                 time: Time::Frame(Path::Backfill),
-                ..live(32, 2)
+                ..live(2)
             };
-            stream.frame(backfill, &ends, &body).await;
+            stream.frame(backfill, &[32], &ends, &body).await;
             send(&mut stream, &[101], &[3]).await;
             let replies = [taken(1, 0, 1), taken(2, 0, 32), taken(3, 1, 1)];
             let stored = [stored(1), stored(3)];
@@ -390,7 +389,9 @@ fn stamps_an_untimed_frame_after_a_lost_untimed_frame() {
                 match outcome(&mut stream).await {
                     Outcome::Taken { .. } => {}
                     Outcome::Lost { .. } => break,
-                    refused @ Outcome::Refused(_) => panic!("frame {n}: {refused:?}"),
+                    other @ (Outcome::Refused(_) | Outcome::Ended(_)) => {
+                        panic!("frame {n}: {other:?}")
+                    }
                 }
             }
             send_untimed(&mut stream, 10).await;
@@ -424,7 +425,7 @@ fn spends_no_stamp_on_a_refused_untimed_frame() {
             let mut stream = write(&agent).await;
             send_untimed(&mut stream, 10).await;
             let (ends, body) = frame(&[(0, &[0]), (1, &[20, 20])]);
-            stream.frame(untimed(2), &ends, &body).await;
+            stream.frame(untimed(2), &[1], &ends, &body).await;
             send_untimed(&mut stream, 30).await;
             assert_eq!(stream.reply().await, taken(1, 0, 1));
             assert_eq!(
@@ -461,11 +462,11 @@ fn refuses_a_frame_whose_series_do_not_hold_its_count_as_codec() {
             let codec = |frame| refused(frame, wire::hub::write::Refusal::Codec);
             for (n, stamps) in (1..).zip([&[][..], &[0, 0]]) {
                 let (ends, body) = frame(&[(0, stamps), (1, &[10])]);
-                stream.frame(untimed(2), &ends, &body).await;
+                stream.frame(untimed(2), &[1], &ends, &body).await;
                 assert_eq!(stream.reply().await, codec(n), "{stamps:?}");
             }
             let (ends, body) = frame(&[(0, &[1, 2]), (1, &[10])]);
-            stream.frame(live(1, 2), &ends, &body).await;
+            stream.frame(live(2), &[1], &ends, &body).await;
             assert_eq!(stream.reply().await, codec(3));
             send_untimed(&mut stream, 20).await;
             assert_eq!(stream.reply().await, taken(4, 0, 1));
@@ -497,7 +498,7 @@ fn refuses_a_frame_while_another_writer_holds_control() {
         let waiting = |frame| refused(frame, wire::hub::write::Refusal::Waiting);
         assert_eq!(stream.reply().await, waiting(1));
         let (ends, body) = frame(&[(0, &[]), (1, &[10])]);
-        stream.frame(untimed(2), &ends, &body).await;
+        stream.frame(untimed(2), &[1], &ends, &body).await;
         assert_eq!(stream.reply().await, waiting(2));
         assert_eq!(end(&mut stream).await, []);
         finish(&mut agent).await;
@@ -755,6 +756,7 @@ fn takes_no_second_block_for_the_next_stored() {
         send(&mut stream, &stamps, &stamps).await;
         let lost = Reply::Outcome {
             frame: 3,
+            group: 0,
             outcome: Outcome::Lost {
                 range: types::frame::Range { seq: 2, count: 32 },
             },
@@ -777,7 +779,7 @@ fn holds_no_block_for_a_stored_after_a_refused_frame() {
         agent.admit().await;
         let mut stream = write(&agent).await;
         let (ends, body) = frame(&[(0, &[]), (1, &[10])]);
-        stream.frame(untimed(2), &ends, &body).await;
+        stream.frame(untimed(2), &[1], &ends, &body).await;
         let codec = refused(1, wire::hub::write::Refusal::Codec);
         assert_eq!(stream.reply().await, codec);
         agent.sleep(Span::from_nanos(START.nanos() * 3 / 2)).await;
@@ -800,7 +802,7 @@ fn refuses_a_backfill_frame_that_the_home_finds_no_block_for_as_full() {
     let stamps: Vec<i64> = (1..=32).collect();
     // The blocks of the outcome, of the `Stored`, and of the draft of 32 samples, 560
     // bytes.
-    let len = Reply::Stored { frames: 0 }.encoded_len();
+    let len = stored(0).encoded_len();
     let ready = spare_for_a_while(vec![Outcome::LEN_MAX, len, 560]);
     let home = read_session(439, ready, move |mut agent| async move {
         agent.admit().await;
@@ -812,15 +814,15 @@ fn refuses_a_backfill_frame_that_the_home_finds_no_block_for_as_full() {
         let (ends, body) = frame(&[(0, &stamps), (1, &stamps)]);
         let backfill = Head {
             time: Time::Frame(Path::Backfill),
-            ..live(32, 2)
+            ..live(2)
         };
-        stream.frame(backfill, &ends, &body).await;
+        stream.frame(backfill, &[32], &ends, &body).await;
         assert_eq!(
             stream.reply().await,
             refused(2, wire::hub::write::Refusal::Full)
         );
         agent.sleep(START).await;
-        stream.frame(backfill, &ends, &body).await;
+        stream.frame(backfill, &[32], &ends, &body).await;
         assert_eq!(stream.reply().await, taken(3, 0, 32));
         assert_eq!(end(&mut stream).await, [stored(3)]);
         finish(&mut agent).await;
@@ -864,12 +866,13 @@ fn keeps_the_stored_block_of_a_frame_whose_body_comes_after_a_commit() {
             send(&mut stream, &[1], &[10]).await;
             send(&mut stream, &[2], &[20]).await;
             let mut head = [0; Head::LEN];
-            live(1, 2).encode(&mut head);
+            live(2).encode(&mut head);
             stream.send(&head).await;
             let (ends, body) = frame(&[(0, &[3]), (1, &[30])]);
             let mut out = vec![0; ends.len() * wire::hub::ends::LEN];
             wire::hub::ends::encode(ends.iter().copied(), &mut out);
             stream.send(&out).await;
+            stream.send(&1_u32.to_le_bytes()).await;
             agent.sleep(START).await;
             stream.send(&body).await;
             let replies = end(&mut stream).await;
@@ -1065,7 +1068,7 @@ fn stops_a_write_whose_lease_is_zero_as_malformed() {
     assert_eq!(home.served, [Err(lease), Ok(Got::Ended)]);
 }
 
-/// A write holds 16 bytes for each channel of its open and one for its index in the
+/// A write holds 20 bytes for each channel of its open and one for its index in the
 /// share of its subject until it ends. The open of `value` is 8 bytes, so it fits
 /// where its ends do not.
 #[test]
@@ -1075,14 +1078,14 @@ fn stops_a_write_whose_ends_pass_the_share_as_busy() {
         async |_| {},
         |mut agent| async move {
             agent.admit().await;
-            let held = agent.unfinished(BODY_BYTES_MAX - 31, &[]).await;
+            let held = agent.unfinished(BODY_BYTES_MAX - 39, &[]).await;
             agent.sleep(Span::MILLISECOND).await;
             let mut busy = agent.write(&["value"]).await;
             assert_eq!(busy.recv().await, reset_with(BUSY));
             drop(held);
             agent.sleep(Span::MILLISECOND).await;
             let mut stream = write(&agent).await;
-            let held = agent.unfinished(BODY_BYTES_MAX - 32, &[]).await;
+            let held = agent.unfinished(BODY_BYTES_MAX - 40, &[]).await;
             agent.sleep(Span::MILLISECOND).await;
             send(&mut stream, &[1], &[10]).await;
             assert_eq!(stream.reply().await, taken(1, 0, 1));
@@ -1092,20 +1095,20 @@ fn stops_a_write_whose_ends_pass_the_share_as_busy() {
     );
     let share = serve::Error::Share {
         subject: name(SUBJECT),
-        length: 32,
-        held: BODY_BYTES_MAX - 31,
+        length: 40,
+        held: BODY_BYTES_MAX - 39,
     };
     assert_eq!(home.served[0], Err(share.clone()));
     assert_eq!(
         share.to_string(),
-        "32 bytes of a body or of the ends or names of a write do not fit under the \
-         share of 16777216 bytes of subject ops.agent: its open requests, reads, and \
-         writes hold 16777185 bytes"
+        "40 bytes of a body or of the ends, counts, or names of a write do not fit \
+         under the share of 16777216 bytes of subject ops.agent: its open requests, \
+         reads, and writes hold 16777177 bytes"
     );
 }
 
 /// A write holds its decoded names in the share of its subject, 16 bytes and the
-/// length of each, until it sends its places. The ends of `value` are 32 bytes and its
+/// length of each, until it sends its places. The ends of `value` are 40 bytes and its
 /// names 21, so its ends fit where its names do not.
 #[test]
 fn stops_a_write_whose_names_pass_the_share_as_busy() {
@@ -1114,13 +1117,13 @@ fn stops_a_write_whose_names_pass_the_share_as_busy() {
         async |_| {},
         |mut agent| async move {
             agent.admit().await;
-            let held = agent.unfinished(BODY_BYTES_MAX - 52, &[]).await;
+            let held = agent.unfinished(BODY_BYTES_MAX - 60, &[]).await;
             agent.sleep(Span::MILLISECOND).await;
             let mut busy = agent.write(&["value"]).await;
             assert_eq!(busy.recv().await, reset_with(BUSY));
             drop(held);
             agent.sleep(Span::MILLISECOND).await;
-            let held = agent.unfinished(BODY_BYTES_MAX - 53, &[]).await;
+            let held = agent.unfinished(BODY_BYTES_MAX - 61, &[]).await;
             agent.sleep(Span::MILLISECOND).await;
             let mut stream = write(&agent).await;
             send(&mut stream, &[1], &[10]).await;
@@ -1170,11 +1173,11 @@ fn stops_a_write_whose_frame_breaks_a_rule_as_malformed() {
             let mut over = write(&agent).await;
             let (ends, mut body) = frame(&[(0, &[1]), (1, &[10])]);
             body.extend([0; 8]);
-            over.frame(live(1, 2), &ends, &body).await;
+            over.frame(live(2), &[1], &ends, &body).await;
             assert_eq!(over.recv().await, reset_with(MALFORMED));
             let mut outside = write(&agent).await;
             let (ends, body) = frame(&[(0, &[1]), (2, &[10])]);
-            outside.frame(live(1, 2), &ends, &body).await;
+            outside.frame(live(2), &[1], &ends, &body).await;
             assert_eq!(outside.recv().await, reset_with(MALFORMED));
             finish(&mut agent).await;
         },
@@ -1212,7 +1215,7 @@ fn stops_a_write_that_ends_inside_a_frame_as_malformed() {
             agent.admit().await;
             let mut stream = write(&agent).await;
             let mut head = [0; Head::LEN];
-            live(1, 2).encode(&mut head);
+            live(2).encode(&mut head);
             stream.send(&head).await;
             stream.sender.finish().expect("finishes");
             assert_eq!(stream.recv().await, reset_with(MALFORMED));
@@ -1227,7 +1230,7 @@ fn stops_a_write_that_ends_inside_a_frame_as_malformed() {
     assert_eq!(home.served, [Err(cut.clone()), Ok(Got::Ended)]);
     assert_eq!(
         cut.to_string(),
-        "a hub message is not valid: the stream ended inside a frame: 11 bytes, before \
+        "a hub message is not valid: the stream ended inside a frame: 7 bytes, before \
          the end of its ends"
     );
 }

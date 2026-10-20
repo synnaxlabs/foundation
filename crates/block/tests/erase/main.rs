@@ -8,7 +8,56 @@ use block::{Config, Pool};
 #[global_allocator]
 static ALLOCATOR: counting::Allocator = counting::Allocator::new();
 
-const PLAIN: [u8; 32] = [0x5a; 32];
+/// The bytes that a case puts in a block and the scan looks for. It is one word, so a
+/// drop that leaves any word of a page that a block holds fails a case.
+type Needle = [u8; 8];
+
+/// What a case does with its pool before the pool and its blocks drop.
+#[derive(Clone, Copy, Debug)]
+enum Case {
+    /// The pool drops while it lends a block of 32 bytes and one of `len` bytes. Block
+    /// `at` holds the needle at its end.
+    Lent { len: usize, at: usize },
+    /// The pool drops while it lends a block of `len` bytes that holds copies of the
+    /// needle from end to end.
+    Filled { len: usize },
+    /// The pool carves a block again after a purge.
+    Recarved,
+    /// A block ends where the released span of a larger class starts.
+    Pressed,
+}
+
+impl Case {
+    fn budget(self) -> u64 {
+        match self {
+            Self::Lent { .. } | Self::Filled { .. } | Self::Recarved => 1 << 14,
+            Self::Pressed => 384,
+        }
+    }
+
+    fn run(self, pool: Pool, needle: Needle) {
+        match self {
+            Self::Lent { len, at } => lent(pool, len, at, needle),
+            Self::Filled { len } => filled(pool, len, needle),
+            Self::Recarved => recarved(pool, needle),
+            Self::Pressed => pressed(pool, needle),
+        }
+    }
+}
+
+/// The last case leaves its needle past the first page. With the heap cases first, an
+/// erased case that commits only the first page of a 16 KiB budget meets that memory.
+const CASES: [Case; 7] = [
+    Case::Recarved,
+    Case::Pressed,
+    Case::Lent { len: 32, at: 0 },
+    // Its needle is in a committed page that is not the first of its group of 64.
+    Case::Lent { len: 128, at: 1 },
+    Case::Lent { len: 3000, at: 0 },
+    Case::Lent { len: 3000, at: 1 },
+    // Its block holds the last word of a page.
+    Case::Filled { len: 5000 },
+];
 
 fn main() {
     // Miri stops at the read of a freed byte that the program never wrote (COUNTING
@@ -16,51 +65,45 @@ fn main() {
     if cfg!(miri) {
         return;
     }
-    for (len, at) in [(32, 0), (3000, 1), (3000, 0)] {
-        let held = freed(Pool::heap, 1 << 14, |pool| lent(pool, len, at));
+    // A needle for each call, as an erased pool's memory can reuse memory that an
+    // earlier pool freed with its needle in a page that the erased pool never commits.
+    // The heap cases run first, so that the erased cases meet such memory.
+    let mut needles = (0..=u8::MAX).map(needle);
+    let mut next = || needles.next().expect("a needle for each call");
+    for case in CASES {
+        let held = freed(Pool::heap, case, next());
         assert_eq!(
             held, 1,
-            "a dropped `Pool::heap` frees the bytes ({len}, {at})"
-        );
-        let held = freed(Pool::erased, 1 << 14, |pool| lent(pool, len, at));
-        assert_eq!(
-            held, 0,
-            "a dropped `Pool::erased` erases them ({len}, {at})"
+            "a dropped `Pool::heap` frees the bytes of {case:?}"
         );
     }
-    assert_eq!(
-        freed(Pool::heap, 1 << 14, recarved),
-        1,
-        "`Pool::heap` frees the bytes"
-    );
-    assert_eq!(
-        freed(Pool::erased, 1 << 14, recarved),
-        0,
-        "a dropped `Pool::erased` erases a block that it carved again after a purge"
-    );
-    assert_eq!(
-        freed(Pool::heap, 384, pressed),
-        1,
-        "`Pool::heap` frees the bytes"
-    );
-    assert_eq!(
-        freed(Pool::erased, 384, pressed),
-        0,
-        "a dropped `Pool::erased` erases a block whose end touches a released span"
-    );
+    for case in CASES {
+        let held = freed(Pool::erased, case, next());
+        assert_eq!(
+            held, 0,
+            "a dropped `Pool::erased` erases the bytes of {case:?}"
+        );
+    }
 }
 
-/// Gives the count of freed allocations that hold `PLAIN`, after `case` runs on the
-/// pool that `pool` gives for `budget` and drops it.
-fn freed(pool: fn(Config) -> Pool, budget: u64, case: impl FnOnce(Pool)) -> u64 {
-    let pool = pool(Config::new(budget).expect("the budget fits"));
-    let ((), found) = ALLOCATOR.freed_holding(&PLAIN, || case(pool));
+/// The needle of call `call`. No other call and no fill of one byte gives it.
+fn needle(call: u8) -> Needle {
+    let mut needle = *b"?needle.";
+    needle[0] = call;
+    needle
+}
+
+/// Gives the count of freed allocations that hold `needle`, after `case` runs on the
+/// pool that `pool` gives for the case's budget and drops it.
+fn freed(pool: fn(Config) -> Pool, case: Case, needle: Needle) -> u64 {
+    let pool = pool(Config::new(case.budget()).expect("the budget fits"));
+    let ((), found) = ALLOCATOR.freed_holding(&needle, || case.run(pool, needle));
     found
 }
 
 /// Drops `pool` while it lends a block of 32 bytes and one of `len` bytes, then the
-/// blocks. Block `at` holds `PLAIN` at its end.
-fn lent(pool: Pool, len: usize, at: usize) {
+/// blocks. Block `at` holds `needle` at its end.
+fn lent(pool: Pool, len: usize, at: usize, needle: Needle) {
     let blocks: Vec<_> = [32, len]
         .into_iter()
         .enumerate()
@@ -68,25 +111,38 @@ fn lent(pool: Pool, len: usize, at: usize) {
             let mut block = pool.alloc(len).expect("the budget has room");
             block.fill(0x11);
             if index == at {
-                block[len - PLAIN.len()..].copy_from_slice(&PLAIN);
+                block[len - needle.len()..].copy_from_slice(&needle);
             }
             block.freeze()
         })
         .collect();
     drop(pool);
     assert!(
-        blocks.iter().any(|block| block.ends_with(&PLAIN)),
+        blocks.iter().any(|block| block.ends_with(&needle)),
         "a lent block outlives its pool"
     );
 }
 
-/// Puts `PLAIN` in a block, purges its class, and carves the class again with a block
-/// that ends before `PLAIN`.
-fn recarved(pool: Pool) {
+/// Drops `pool` while it lends a block of `len` bytes that holds copies of `needle`
+/// from end to end, then the block.
+fn filled(pool: Pool, len: usize, needle: Needle) {
+    let mut block = pool.alloc(len).expect("the budget has room");
+    for word in block.chunks_exact_mut(needle.len()) {
+        word.copy_from_slice(&needle);
+    }
+    let block = block.freeze();
+    drop(pool);
+    assert!(block.ends_with(&needle), "a lent block outlives its pool");
+}
+
+/// Puts `needle` at the end of a block, purges its class, and carves the class again
+/// with a block that ends before `needle`.
+fn recarved(pool: Pool, needle: Needle) {
     let mut first = pool.alloc(32).expect("the budget has room");
     first.fill(0x11);
     let mut second = pool.alloc(32).expect("the budget has room");
-    second.copy_from_slice(&PLAIN);
+    second.fill(0x11);
+    second[32 - needle.len()..].copy_from_slice(&needle);
     drop(first);
     drop(second);
     pool.purge();
@@ -96,14 +152,14 @@ fn recarved(pool: Pool) {
 }
 
 /// Carves class 2, then two blocks of class 1, whose second ends at the start of the
-/// released span of class 2 and holds `PLAIN` at its end.
-fn pressed(pool: Pool) {
+/// released span of class 2 and holds `needle` at its end.
+fn pressed(pool: Pool, needle: Needle) {
     drop(pool.alloc(192).expect("the budget has room"));
     let mut first = pool.alloc(128).expect("the budget has room");
     first.fill(0x11);
     let mut second = pool.alloc(128).expect("the budget has room");
     second.fill(0x11);
-    second[128 - PLAIN.len()..].copy_from_slice(&PLAIN);
+    second[128 - needle.len()..].copy_from_slice(&needle);
     drop(pool);
     drop(first);
     drop(second);
