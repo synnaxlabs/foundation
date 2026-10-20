@@ -47,6 +47,8 @@ const SUITE: Suite = Suite {
     progress: "in",
     backoff: Backoff::Restart,
     refused,
+    secrets: None,
+    echo: None,
 };
 
 scenarios::suite!(SUITE);
@@ -113,10 +115,9 @@ async fn simulate(inputs: Serve) {
     let now = move || wall.now().time;
     let mut rng = inputs.node.entropy().rng();
     let (clock, variables) = (inputs.node.clock(), Variables::new(&NODES));
-    let (ticks, changed, until) =
-        (clock.clone(), variables.clone(), inputs.until.clone());
+    let (ticks, changed) = (clock.clone(), variables.clone());
     inputs.tasks.spawn(async move {
-        while !until.cancelled() {
+        loop {
             ticks.sleep(PERIOD).await;
             changed.change(Quality::GOOD);
         }
