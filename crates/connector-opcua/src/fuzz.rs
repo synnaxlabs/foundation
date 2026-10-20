@@ -602,7 +602,7 @@ mod tests {
             ffi::UA_decodeBinary(
                 &raw const input,
                 value.as_mut_ptr().cast(),
-                &ffi::types()[VARIANT],
+                std::ptr::from_ref(&ffi::types()[VARIANT]),
                 &raw mut options,
             )
         };
@@ -610,7 +610,9 @@ mod tests {
         let mut block = arena.blocks.cast::<usize>().cast_const();
         while !block.is_null() {
             // SAFETY: a block starts with `next`, `size`, and `used`.
-            (used, block) = unsafe { (used + *block.add(2), *block as *const usize) };
+            used += unsafe { block.wrapping_add(2).read() };
+            // SAFETY: as above.
+            block = unsafe { block.read() } as *const usize;
         }
         // SAFETY: nothing reads the decoded value after this.
         unsafe { ffi::test::shim_arena_free(&raw mut arena) };
