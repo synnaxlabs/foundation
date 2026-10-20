@@ -22,8 +22,9 @@
   when that one is removed, still with each attribute with a default removed at once,
   and with one `document.unknown-attribute` for a name that the body does not state.
   Each `Unless` and each `When` names at least one attribute, and each name is another
-  attribute of its body. Without the `kind` that picks its form, a block reads as the
-  form whose `kind` has a default. No test reads the text of `value` or of a `Default`.
+  attribute of its body. Each attribute with a `When` is absent in at least one
+  example. Without the `kind` that picks its form, a block reads as the form whose
+  `kind` has a default. No test reads the text of `value` or of a `Default`.
   The first block of an example is of its body, and of a block with more than one form,
   it holds only attributes of its form. Each attribute and block of a body is in at
   least one, or, for the body of a block inside another body, in an example of that
@@ -48,7 +49,8 @@
   those of each kind in `node`, over `kinds()`. Both run
   `document::testing::assert_examples`, behind `sim`, which checks each example, the
   example without each attribute that it does not need, the example without each
-  attribute with a default, and each name of each `Unless` and `When`. The check that
+  attribute with a default, each name of each `Unless` and `When`, and an example
+  without each attribute with a `When`. The check that
   each attribute and block of a body is in an example, and the check of an example
   without an attribute that it needs, stay in each crate until #3349. `foundation docs`
   gives each kind example inside a whole `connector` block, labeled with the name of the
@@ -113,4 +115,13 @@
   Lost: a check that skips each `Optional` attribute, which no longer finds one that the
   check needs; a `secure` block inside the `opcua` body, which changes its decided
   schema. Decided by `laptop.architect-2` (2026-10-20T04:23:29Z:
-  https://github.com/synnaxlabs/foundation/pull/3471#issuecomment-6283332456).
+  https://github.com/synnaxlabs/foundation/pull/3471#issuecomment-6283332456). The
+  Lost without codes, by `laptop.architect-2` at 2026-10-20T04:38:00Z
+  (https://github.com/synnaxlabs/foundation/pull/3505#issuecomment-6283501391). The
+  summary of the body states each other rule that ties an `Optional` attribute, by
+  `laptop.architect-2` at 2026-10-20T04:47:17Z
+  (https://github.com/synnaxlabs/foundation/pull/3505#issuecomment-6283610345), with
+  its `placement` example only in this record, at 2026-10-20T04:57:48Z
+  (https://github.com/synnaxlabs/foundation/pull/3505#issuecomment-6283734442). Each
+  name is another attribute, by `laptop.architect-2` at 2026-10-20T04:54:13Z
+  (https://github.com/synnaxlabs/foundation/pull/3505#issuecomment-6283692312).
