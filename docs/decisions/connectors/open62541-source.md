@@ -1241,3 +1241,10 @@
   same credentials at the connect, so two paths state each refusal; and a log line of
   the cause, which no status carries (`laptop.architect-2`, 2026-10-19 12:04 UTC,
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6266776077).
+  PR 2e of #2934 names the certificate that a server does not trust by its SHA-1
+  thumbprint and its subject, from `UA_CertificateUtils_getThumbprint` and
+  `UA_CertificateUtils_getSubjectName` of the copy, through `shim_certificate_names`.
+  The test of the names that the production code calls takes these two. Lost: a parse
+  of the certificate in Rust, a second parser, and a hash of the DER in Rust, which
+  needs its own PEM read for a PEM certificate
+  (https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6285525305).

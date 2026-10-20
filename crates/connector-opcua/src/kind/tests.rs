@@ -34,7 +34,7 @@ use super::*;
 use crate::client::tests::common::{env, rig};
 use crate::client::{self, GRACE};
 use crate::gate::Gate;
-use crate::secure::{CLIENT, HIGH_PEM, LASTING, OTHER, Policy, SERVER, START};
+use crate::secure::{CLIENT, END, HIGH_PEM, LASTING, OTHER, Policy, SERVER, START};
 use crate::sim::{Served, Variables, serve};
 
 const A: &str = "ns=3;s=SpikeData";
@@ -492,9 +492,16 @@ where
 struct Secure {
     /// The wall time of the node at its start.
     wall: Stamp,
-    /// The one policy of the server, on [`SERVER`], which trusts only [`CLIENT`].
+    /// The one policy of the server.
     policy: Policy,
+    /// The mode of the one endpoint of the server.
+    offered: client::Mode,
+    /// The certificate and key of the server, and the one certificate it trusts.
+    server: Credentials<'static>,
     unencrypted: bool,
+    /// The connector has no `certificate`, `key`, or `trust`, so it connects in the
+    /// mode `None`.
+    plain: bool,
     /// The secrets [`CERTIFICATE`], [`KEY`], and [`TRUST`] of the connector, each
     /// written before the run when it is `Some`.
     credentials: [Option<&'static [u8]>; 3],
@@ -508,13 +515,21 @@ const KEY: &str = "plant.opcua_key";
 const TRUST: &str = "plant.opcua_trust";
 
 impl Secure {
-    /// A channel in `policy` on the credentials of [`CLIENT`], which trusts
-    /// [`SERVER`], a day after [`START`].
+    /// A channel in `policy` and the mode `SignAndEncrypt` on the credentials of
+    /// [`CLIENT`], which trusts [`SERVER`], a day after [`START`], to a server on
+    /// [`SERVER`] that trusts only [`CLIENT`].
     fn of(policy: Policy) -> Self {
         Self {
             wall: START + Span::from_nanos(86_400 * Span::SECOND.nanos()),
             policy,
+            offered: client::Mode::SignAndEncrypt,
+            server: Credentials {
+                certificate: SERVER.certificate,
+                key: SERVER.key,
+                trust: CLIENT.certificate,
+            },
             unencrypted: false,
+            plain: false,
             credentials: [
                 Some(CLIENT.certificate),
                 Some(CLIENT.key),
@@ -531,6 +546,10 @@ impl Secure {
         config: &mut Document,
         variables: &Variables,
     ) {
+        variables.secure(self.server, self.policy, self.offered);
+        if self.plain {
+            return;
+        }
         let mut attributes: Vec<_> = config.attributes.iter().cloned().collect();
         for (key, name) in
             [("certificate", CERTIFICATE), ("key", KEY), ("trust", TRUST)]
@@ -547,17 +566,6 @@ impl Secure {
                 testing::create_secret(&node.files(), &name(text), bytes).await;
             }
         }
-        let served = Credentials {
-            certificate: SERVER.certificate,
-            key: SERVER.key,
-            trust: CLIENT.certificate,
-        };
-        let mode = if self.unencrypted {
-            client::Mode::Sign
-        } else {
-            client::Mode::SignAndEncrypt
-        };
-        variables.secure(served, self.policy, mode);
     }
 }
 
@@ -2023,7 +2031,13 @@ const TRUST_FIX: &str =
 fn reads_over_a_secure_channel_of_each_policy_in_each_mode() {
     for policy in Policy::ALL {
         for unencrypted in [false, true] {
+            let offered = if unencrypted {
+                client::Mode::Sign
+            } else {
+                client::Mode::SignAndEncrypt
+            };
             let outcome = secured(Secure {
+                offered,
                 unencrypted,
                 ..Secure::of(policy)
             });
@@ -2054,18 +2068,194 @@ fn a_run_with_no_read_keeps_its_session_over_a_secure_channel() {
     assert_eq!(outcome.frames, []);
 }
 
-/// A server that trusts only [`CLIENT`] accepts no channel of another certificate on
-/// its key, so the run asks for a secure channel, not one with the mode `None`.
-#[test]
-fn a_server_that_does_not_trust_the_certificate_ends_the_run_with_a_device_error() {
-    let mut secure = Secure::of(Policy::Basic256Sha256);
-    secure.credentials[0] = Some(LASTING.certificate);
+/// The errors of a run over `secure` whose connect fails with `status` for `cause`.
+fn connect_fails(secure: Secure, status: &str, cause: &str) {
     let outcome = secured(secure);
     assert!(outcome.result.is_ok(), "{:?}", outcome.result);
     let connect =
-        "the connect to opc.tcp://10.0.0.1:4840 failed with BadSecurityChecksFailed";
-    assert_eq!(errors(&outcome.statuses), [(DEVICE, connect.to_owned())]);
+        format!("the connect to opc.tcp://10.0.0.1:4840 failed with {status}: {cause}");
+    assert_eq!(errors(&outcome.statuses), [(DEVICE, connect)]);
     assert_eq!(outcome.frames, []);
+}
+
+/// A server that trusts only [`CLIENT`] accepts no channel of another certificate on
+/// its key, so the error names the certificate to install.
+#[test]
+fn a_server_that_does_not_trust_the_certificate_names_the_certificate_to_install() {
+    let mut secure = Secure::of(Policy::Basic256Sha256);
+    secure.credentials[0] = Some(LASTING.certificate);
+    let cause = "the server refused the secure channel; most likely it does not trust \
+                 the certificate of the node. Install the certificate \
+                 secret(\"plant.opcua_certificate\") (SHA-1 thumbprint \
+                 D5D888383DB647F497D3F2D7BC7CC7B41F85A737, subject /CN=client) in the \
+                 trust list of the server";
+    connect_fails(secure, "BadSecurityChecksFailed", cause);
+}
+
+#[test]
+fn a_trust_without_the_certificate_of_the_server_names_the_trust() {
+    let mut secure = Secure::of(Policy::Basic256Sha256);
+    secure.credentials[2] = Some(OTHER.certificate);
+    let cause = "the trust holds neither the certificate of the server nor the CA that \
+                 issued it. Check the trust secret(\"plant.opcua_trust\")";
+    connect_fails(secure, "BadCertificateUntrusted", cause);
+}
+
+/// [`LASTING`] holds the mesh time a day after [`END`], and the certificate of the
+/// server does not.
+#[test]
+fn a_server_certificate_outside_its_window_names_the_trust() {
+    let mut secure = Secure {
+        wall: END + Span::from_nanos(86_400 * Span::SECOND.nanos()),
+        ..Secure::of(Policy::Basic256Sha256)
+    };
+    secure.credentials[0] = Some(LASTING.certificate);
+    secure.server.trust = LASTING.certificate;
+    let cause = "the mesh time is outside the validity window of the certificate of \
+                 the server. Check the trust secret(\"plant.opcua_trust\")";
+    connect_fails(secure, "BadCertificateTimeInvalid", cause);
+}
+
+/// The [`cause`] of a connect that failed with `status` over a channel on
+/// `certificate`, the key of [`CLIENT`], and [`SERVER`] as the trust, whose sources are
+/// variables of the environment.
+fn cause_on(status: Status, certificate: &[u8]) -> Option<String> {
+    let env = |name: &str| secret::Source::Env(name.into());
+    let security = Security {
+        certificate: env("CERTIFICATE"),
+        key: env("KEY"),
+        trust: env("TRUST"),
+        mode: client::Mode::SignAndEncrypt,
+    };
+    let secured = Secured {
+        security: &security,
+        certificate: secret::Value::new(certificate.to_vec()),
+        key: secret::Value::new(CLIENT.key.to_vec()),
+        trust: secret::Value::new(SERVER.certificate.to_vec()),
+    };
+    cause(status, Some(&secured))
+}
+
+/// The certificate to install has its names when it parses, and only its source when
+/// it does not.
+#[test]
+fn a_failed_security_check_names_the_certificate_to_install() {
+    let distrusted = |names: &str| {
+        format!(
+            "the server refused the secure channel; most likely it does not trust the \
+             certificate of the node. Install the certificate \
+             env(\"CERTIFICATE\"){names} in the trust list of the server"
+        )
+    };
+    let names = " (SHA-1 thumbprint 6D839E838DCC3C47E59D1B56282B18B9CB3DE453, subject \
+                 /CN=client)";
+    let status = Status::BAD_SECURITY_CHECKS_FAILED;
+    assert_eq!(
+        cause_on(status, CLIENT.certificate),
+        Some(distrusted(names))
+    );
+    assert_eq!(cause_on(status, b"no certificate"), Some(distrusted("")));
+}
+
+#[test]
+fn a_refused_certificate_of_the_server_names_the_trust() {
+    for (status, reason) in [
+        (
+            Status::BAD_CERTIFICATE_UNTRUSTED,
+            "the trust holds neither the certificate of the server nor the CA that \
+             issued it",
+        ),
+        (
+            Status::BAD_CERTIFICATE_TIME_INVALID,
+            "the mesh time is outside the validity window of the certificate of the \
+             server",
+        ),
+        (
+            Status::BAD_CERTIFICATE_ISSUER_TIME_INVALID,
+            "the mesh time is outside the validity window of the CA that issued the \
+             certificate of the server",
+        ),
+        (
+            Status::BAD_CERTIFICATE_URI_INVALID,
+            "the URI of the certificate of the server is not the application URI of \
+             its endpoint",
+        ),
+        (
+            Status::BAD_CERTIFICATE_USE_NOT_ALLOWED,
+            "the certificate of the server is the certificate of a CA",
+        ),
+    ] {
+        let expected = format!("{reason}. Check the trust env(\"TRUST\")");
+        let found = cause_on(status, CLIENT.certificate);
+        assert_eq!(found, Some(expected), "{}", status.name());
+    }
+}
+
+/// A status that names no cause gives none, and a certificate status gives none with
+/// no channel.
+#[test]
+fn other_statuses_name_no_cause() {
+    for status in [Status::GOOD, Status::BAD_TIMEOUT] {
+        assert_eq!(
+            cause_on(status, CLIENT.certificate),
+            None,
+            "{}",
+            status.name()
+        );
+    }
+    for status in [
+        Status::GOOD,
+        Status::BAD_TIMEOUT,
+        Status::BAD_SECURITY_CHECKS_FAILED,
+        Status::BAD_CERTIFICATE_UNTRUSTED,
+    ] {
+        assert_eq!(cause(status, None), None, "{}", status.name());
+    }
+}
+
+const UNOFFERED: &str = "the server offers no endpoint in the mode";
+const POLICIES: &str =
+    "with the policy Basic256Sha256, Aes128_Sha256_RsaOaep, or Aes256_Sha256_RsaPss";
+
+#[test]
+fn a_server_with_only_sign_endpoints_asks_for_unencrypted() {
+    let secure = Secure {
+        offered: client::Mode::Sign,
+        ..Secure::of(Policy::Basic256Sha256)
+    };
+    let cause = format!(
+        "{UNOFFERED} SignAndEncrypt {POLICIES} that lets in an anonymous user. For a \
+         server with only Sign endpoints, set `unencrypted = true`; else turn on one \
+         of these policies on the server"
+    );
+    connect_fails(secure, "BadIdentityTokenRejected", &cause);
+}
+
+#[test]
+fn a_server_with_no_sign_endpoint_asks_for_one() {
+    let secure = Secure {
+        unencrypted: true,
+        ..Secure::of(Policy::Basic256Sha256)
+    };
+    let cause = format!(
+        "{UNOFFERED} Sign {POLICIES} that lets in an anonymous user. Turn on one of \
+         these policies in the mode Sign on the server"
+    );
+    connect_fails(secure, "BadIdentityTokenRejected", &cause);
+}
+
+/// A connector with no channel attributes asks for the mode `None`, which a secure
+/// server does not offer.
+#[test]
+fn a_secure_server_asks_a_plain_connector_for_credentials() {
+    let secure = Secure {
+        plain: true,
+        ..Secure::of(Policy::Basic256Sha256)
+    };
+    let cause = "the server offers no endpoint in the mode None that lets in an \
+                 anonymous user. For a server with only secure endpoints, give \
+                 `certificate`, `key`, and `trust`";
+    connect_fails(secure, "BadIdentityTokenRejected", cause);
 }
 
 #[test]
@@ -2226,6 +2416,37 @@ fn browses_over_a_secure_channel() {
         .map(|entry| entry.tag.as_str())
         .collect();
     assert_eq!(tags, ["i=2253", "ns=1;s=Plant", A, B, C]);
+}
+
+/// A browse names the certificate to install as a run does.
+#[test]
+fn a_browse_names_the_certificate_that_the_server_does_not_trust() {
+    let found = Arc::new(Mutex::new(None));
+    let slot = Arc::clone(&found);
+    let mut secure = Secure::of(Policy::Basic256Sha256);
+    secure.server.trust = OTHER.certificate;
+    run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
+        let query = browse::Query {
+            start: browse::Path::root(),
+            scope: browse::Scope::Level(None),
+            values: browse::Values::Skipped,
+        };
+        let supervisor = scene.rig.supervisor();
+        let browse = supervisor.browse("opcua", &scene.config, &query).await;
+        *slot.lock().expect("no panic under the lock") = Some(browse.map(|_| ()));
+        Ok(())
+    });
+    let found = found.lock().expect("no panic under the lock").take();
+    let Some(Err(Error::Device(error))) = found else {
+        panic!("a device error: {found:?}");
+    };
+    let text = "the connect to opc.tcp://10.0.0.1:4840 failed with \
+                BadSecurityChecksFailed: the server refused the secure channel; most \
+                likely it does not trust the certificate of the node. Install the \
+                certificate secret(\"plant.opcua_certificate\") (SHA-1 thumbprint \
+                6D839E838DCC3C47E59D1B56282B18B9CB3DE453, subject /CN=client) in the \
+                trust list of the server";
+    assert_eq!(error.to_string(), text);
 }
 
 /// A browse refuses the key of another certificate as a run does.

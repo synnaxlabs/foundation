@@ -321,6 +321,26 @@ impl<'a> Secured<'a> {
         };
         Error::Retry(format!("{source}: {refusal}. {fix}").into())
     }
+
+    /// The cause of a server that refused the secure channel, with the names of the
+    /// certificate to install.
+    fn distrusted(&self) -> String {
+        let names = client::names(self.certificate.expose()).map_or_else(
+            String::new,
+            |names| {
+                format!(
+                    " (SHA-1 thumbprint {}, subject {})",
+                    names.thumbprint, names.subject
+                )
+            },
+        );
+        format!(
+            "the server refused the secure channel; most likely it does not trust the \
+             certificate of the node. Install the certificate {}{names} in the trust \
+             list of the server",
+            self.security.certificate
+        )
+    }
 }
 
 /// Connects to `address` with `time`, `span`, `net`, `rng`, and the credentials of
@@ -349,7 +369,12 @@ async fn session<T>(
     let connected =
         Client::connect(time, span, net, rng, address, security, until).await;
     let connected = connected.map_err(|error| match error {
-        client::Error::Failed(status) => failed(address, Call::Connect, status),
+        client::Error::Failed(status) => device(Failure::Client {
+            address: address.to_string_lossy().into_owned(),
+            call: Call::Connect,
+            status,
+            cause: cause(status, secured),
+        }),
         client::Error::Refused(refusal) => {
             let secured =
                 secured.expect("invariant: a client with no credentials refuses none");
@@ -362,6 +387,71 @@ async fn session<T>(
     let done = work(&mut client).await;
     client.close().await;
     Ok(Some(done))
+}
+
+/// The likely cause, which ends with its fix, of a connect over `secured`, or in the
+/// mode None when it is `None`, that failed with `status`. `None` when the status names
+/// no cause.
+fn cause(status: Status, secured: Option<&Secured<'_>>) -> Option<String> {
+    if status == Status::BAD_IDENTITY_TOKEN_REJECTED {
+        return Some(unoffered(secured.map(|secured| secured.security.mode)));
+    }
+    let secured = secured?;
+    let reason = match status {
+        Status::BAD_SECURITY_CHECKS_FAILED => return Some(secured.distrusted()),
+        Status::BAD_CERTIFICATE_UNTRUSTED => {
+            "the trust holds neither the certificate of the server nor the CA that \
+             issued it"
+        }
+        Status::BAD_CERTIFICATE_TIME_INVALID => {
+            "the mesh time is outside the validity window of the certificate of the \
+             server"
+        }
+        Status::BAD_CERTIFICATE_ISSUER_TIME_INVALID => {
+            "the mesh time is outside the validity window of the CA that issued the \
+             certificate of the server"
+        }
+        Status::BAD_CERTIFICATE_URI_INVALID => {
+            "the URI of the certificate of the server is not the application URI of \
+             its endpoint"
+        }
+        Status::BAD_CERTIFICATE_USE_NOT_ALLOWED => {
+            "the certificate of the server is the certificate of a CA"
+        }
+        _ => return None,
+    };
+    Some(format!(
+        "{reason}. Check the trust {}",
+        secured.security.trust
+    ))
+}
+
+/// The cause of a server that offers no endpoint in `mode`, or in the mode None when it
+/// is `None`, with an anonymous user and a policy of the client.
+fn unoffered(mode: Option<client::Mode>) -> String {
+    const POLICIES: &str = "with the policy Basic256Sha256, Aes128_Sha256_RsaOaep, \
+                            or Aes256_Sha256_RsaPss";
+    let (mode, fix) = match mode {
+        None => {
+            return "the server offers no endpoint in the mode None that lets in an \
+                    anonymous user. For a server with only secure endpoints, give \
+                    `certificate`, `key`, and `trust`"
+                .into();
+        }
+        Some(client::Mode::SignAndEncrypt) => (
+            "SignAndEncrypt",
+            "For a server with only Sign endpoints, set `unencrypted = true`; else \
+             turn on one of these policies on the server",
+        ),
+        Some(client::Mode::Sign) => (
+            "Sign",
+            "Turn on one of these policies in the mode Sign on the server",
+        ),
+    };
+    format!(
+        "the server offers no endpoint in the mode {mode} {POLICIES} that lets in an \
+         anonymous user. {fix}"
+    )
 }
 
 /// Reads each node once per tick until the cancel, and writes the frame of each tick.
@@ -671,11 +761,13 @@ pub(crate) enum Call {
 /// Why a run ended with [`Error::Device`].
 #[derive(Debug)]
 pub(crate) enum Failure {
-    /// `call` to the server at `address` failed with `status`.
+    /// `call` to the server at `address` failed with `status`, for `cause`, which ends
+    /// with its fix, when the status names one.
     Client {
         address: String,
         call: Call,
         status: Status,
+        cause: Option<String>,
     },
     /// The tags and names before the pages of a browse pass [`crate::browse::BYTES`].
     Names,
@@ -691,6 +783,7 @@ impl fmt::Display for Failure {
                 address,
                 call,
                 status,
+                cause,
             } => {
                 let call = match call {
                     Call::Connect => "the connect to",
@@ -698,7 +791,11 @@ impl fmt::Display for Failure {
                     Call::Check => "the connectivity check of",
                     Call::Browse => "the browse of",
                 };
-                write!(f, "{call} {address} failed with {}", status.name())
+                write!(f, "{call} {address} failed with {}", status.name())?;
+                match cause {
+                    Some(cause) => write!(f, ": {cause}"),
+                    None => Ok(()),
+                }
             }
             Self::Names => write!(
                 f,
@@ -727,5 +824,6 @@ pub(crate) fn failed(address: &CStr, call: Call, status: Status) -> Error {
         address: address.to_string_lossy().into_owned(),
         call,
         status,
+        cause: None,
     })
 }

@@ -144,6 +144,38 @@ impl<'a> Credentials<'a> {
     }
 }
 
+/// The names of a certificate in the trust list of an OPC UA server.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Names {
+    /// The SHA-1 thumbprint, in 40 upper-case hex digits.
+    pub(crate) thumbprint: String,
+    /// The subject, in the one-line form of OpenSSL, such as `/CN=line3/O=Plant`.
+    pub(crate) subject: String,
+}
+
+/// The [`Names`] of `certificate`, DER or PEM, or `None` when it does not parse.
+pub(crate) fn names(certificate: &[u8]) -> Option<Names> {
+    let raw = ffi::Bytes::of(certificate);
+    let (mut thumbprint, mut subject) = ([0; 40], ffi::Bytes::default());
+    // SAFETY: `raw` borrows `certificate` for the call, which does not keep it, and
+    // the outputs are places to write.
+    let status = Status(unsafe {
+        ffi::shim_certificate_names(
+            &raw const raw,
+            &raw mut thumbprint,
+            &raw mut subject,
+        )
+    });
+    // SAFETY: the shim wrote `subject`, which holds `length` bytes.
+    let text = unsafe { subject.lossy() };
+    // SAFETY: open62541 allocated `subject`, or it is empty, and nothing else holds it.
+    unsafe { ffi::shim_buffer_free(&raw mut subject) };
+    (status == Status::GOOD).then(|| Names {
+        thumbprint: String::from_utf8_lossy(&thumbprint).into_owned(),
+        subject: text,
+    })
+}
+
 /// Why [`Client::connect`] fails.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Error {

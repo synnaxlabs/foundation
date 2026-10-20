@@ -11,7 +11,9 @@ use aws_lc_sys::{
 use types::time::{Span, Stamp};
 
 use super::{Client, PORT, VALUE, fits, fitting, long, run, serve_on};
-use crate::client::{Credential, Credentials, Error, Large, Mode, Refusal};
+use crate::client::{
+    Credential, Credentials, Error, Large, Mode, Names, Refusal, names,
+};
 use crate::event;
 use crate::ffi::{self, Status};
 use crate::secure::{
@@ -1253,4 +1255,21 @@ fn the_key_pair_is_checked_before_the_window() {
         refused_at(own, SERVER.certificate, END),
         Err(Error::Refused(Refusal::Mismatch))
     );
+}
+
+#[test]
+fn names_give_the_thumbprint_and_subject_of_a_der_or_pem_certificate() {
+    let client = Some(Names {
+        thumbprint: "6D839E838DCC3C47E59D1B56282B18B9CB3DE453".into(),
+        subject: "/CN=client".into(),
+    });
+    assert_eq!(names(CLIENT.certificate), client);
+    assert_eq!(names(CLIENT_PEM.certificate), client);
+    let server = Names {
+        thumbprint: "FC419E65813818DCCA261BFEBFFBED34056E7262".into(),
+        subject: "/CN=server".into(),
+    };
+    assert_eq!(names(SERVER.certificate), Some(server));
+    assert_eq!(names(b"no certificate"), None);
+    assert_eq!(names(b""), None);
 }
