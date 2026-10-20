@@ -214,13 +214,14 @@
   (https://github.com/synnaxlabs/foundation/issues/2718#issuecomment-6246212678).
   Amended (#2718 PR 2): the node serves a write stream at the home of its index. The
   open holds its `length` in the hub's body budget until it decodes. Then the stream
-  holds 16 bytes for each channel of the open and one for its index until the stream
-  ends, and its decoded names, 16 bytes and the length of each, until it sends its
-  places. Ends or names that do not fit stop with `BUSY` before the writer opens (MEMORY
-  BOUNDS). A write whose channels are on more than one index stops with `MALFORMED`
-  before the node waits for a home, so a refused open takes no control at the gate. A
-  frame of `Time::Node` gets mesh time, or 1 ns after the last stamp that the node gave
-  a frame of the stream that the home took or lost, when mesh time is not after it.
+  holds 20 bytes for each place of the open (16 for its ends and 4 for its count), as
+  PR 1b states, until the stream ends, and its decoded names, 16 bytes and the length
+  of each, until it sends its places. Ends or names that do not fit stop with `BUSY`
+  before the writer opens (MEMORY BOUNDS). A write whose channels are on more than one
+  index stops with `MALFORMED` before the node waits for a home, so a refused open
+  takes no control at the gate. A frame of `Time::Node` gets mesh time, or 1 ns after
+  the last stamp that the node gave a frame of the stream that the home took or lost,
+  when mesh time is not after it.
   After each commit, the node sends `Stored { frames }` with the count of frames of the
   stream through the last frame that it took before it called the commit. Refused and
   lost frames count, and frames of both paths count in the one count, so a program drops
@@ -267,9 +268,10 @@
   (https://github.com/synnaxlabs/foundation/issues/2718#issuecomment-6250930232). When
   `sdk` wraps `Writer` (#2177), its write with no draft gives an error, not this panic.
   `Error::Unnamed` refuses a config of no channel, and `Error::Unsent { count, form }` a
-  frame of no sample or a frame of `Time::Node` that is encoded or holds more than one
-  sample; each sends nothing. `Session::writer` gives `Error::Pool` when no block of
-  `Config::pool` holds the head and an end of each place, so a write waits for a block
+  frame of no series or with a group of no sample, or a frame of `Time::Node` that is
+  encoded or holds more than one sample in a group; each sends nothing (PR 1b).
+  `Session::writer` gives `Error::Pool` when no block of `Config::pool` holds the head,
+  an end of each place, and a count of each group, so a write waits for a block
   and never gives `Pool`. A `write` dropped after its sends loses only its outcome; one
   dropped inside its sends ends the writer with a reset of `Code(0)`, and each later
   call gives that error, so no head lands in a cut body. A dropped `stored` loses
@@ -387,3 +389,41 @@
   index is now a fact of each group, not of the stream. Lost: a `Places` with a run of
   the index places, whose length is not fixed and which can pass a message. The format
   is key choice (f), sent to `laptop.monitor` with the plan.
+  PR 1b: a write frame is `Head { time, form, series }`, the run of its ends, a run of
+  counts, and its body. The run of counts holds one `u32` of at least 1 for each group
+  whose index entry is among the ends, in group order. After the head, each message
+  holds whole ends, then whole counts, so the run of counts starts in the message of
+  the last end when that message has room. `Frames` keeps the counts that come before
+  the draft, at most 4 bytes for each place, and sets them into the draft when it
+  comes. A head of `Time::Node` has no run of counts, and each of its groups holds one
+  sample. So the wire holds no count of counts and no node count, and neither can be
+  wrong. A series of a group whose index the ends do not hold gets the layout error
+  `IndexAbsent`. Each outcome holds `group` (`u32`) after `frame`, and the outcomes of a
+  frame come in group order: `Replies::sent` takes the groups of each frame, and an
+  outcome of that frame for another group gives `Error::Group { frame, group, next }`,
+  also for a group that the frame does not hold. `Outcome::Ended(End)` (kind 5,
+  `End::Removed` or `End::Failed`) answers a group whose writer ended. The node makes
+  the draft due at the last end, and sets each count of the run into the draft, so a
+  write stream holds 20 bytes for each place: 16 of ends and 4 of counts (MEMORY
+  BOUNDS). Decided by `laptop.architect` at 2026-10-19T13:14:46Z
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268096380), on the
+  revision https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267978917.
+  `Error::Group` with `next`, a unit `Error::Stamp`, and PR 1c, where `Reply::Stored {
+  group, frames }` and `Reply::Ended { group, end }` come and which merges before PR 2,
+  are by `laptop.architect` at 2026-10-19T13:54:38Z
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268910604). Until
+  PR 1c, `hub` never gives `Outcome::Ended`. Key choice (f), the revised plan
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267978917), went
+  to `laptop.monitor` in a factory message, which has no link.
+  Supersedes the head `{ time, form, count, series }` and the one `Outcome` for each
+  frame of Amended (#2718). Lost: a count of each group in the head, which no message
+  of a small `message_bytes_max` holds for many groups. `wire::hub::write::Lead`
+  encodes the head, the ends, and the counts of one frame, and gives its messages for
+  a `bytes_max`. The run of counts is private to it. Approved by `laptop.architect` at
+  2026-10-19T17:45:52Z
+  (https://github.com/synnaxlabs/foundation/pull/3369#issuecomment-6273514088).
+  Lost: counts in messages of their own (6268096380), because each message costs the
+  node about 270 ns of a frame of 2 samples (`relay` `live 1x2`, box1). Lost: counts in
+  the first message of the body, because that message then comes from two blocks.
+  Decided by `laptop.architect`, 2026-10-19T19:14:38Z
+  (https://github.com/synnaxlabs/foundation/pull/3369#issuecomment-6275215145).

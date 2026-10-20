@@ -12,8 +12,6 @@ use crate::{Held, address, admin};
 /// The node that runs on a data directory, and the key of its first admin.
 #[derive(Clone, Debug)]
 pub struct Local {
-    /// The node's key.
-    pub key: types::node::Key,
     /// The public key that the node's transport proves.
     pub public_key: PublicKey,
     /// Where a program on the node's host dials the node: the address where its port
@@ -83,7 +81,6 @@ pub async fn read(files: &Files) -> Result<Local, Error> {
         (Ok(Ok(address)), Ok(Ok(admin))) => {
             let address = address.ok_or(Error::NotRunning)?;
             Ok(Local {
-                key: address.key,
                 public_key: address.public_key,
                 address: dialed(address.bound),
                 admin,
@@ -238,7 +235,6 @@ mod tests {
         ])
         .expect("the run ends")
         .expect("a node runs");
-        assert_eq!(local.key, types::node::Key::from_u128(7));
         assert_eq!(local.public_key, PrivateKey([7; 32]).public());
         assert_eq!(local.address, SocketAddr::from((Ipv4Addr::LOCALHOST, 7400)));
         assert_eq!(local.admin.map(|admin| admin.0), Some([3; 32]));

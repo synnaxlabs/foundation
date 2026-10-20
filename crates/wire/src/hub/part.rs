@@ -204,13 +204,50 @@ impl<const SKIP: bool> Assembly<SKIP> {
         self.stage = Stage::Run;
     }
 
-    /// Takes the ends of a run message. The draft is due after the `last`.
+    /// Takes the ends of a run message, and gives `each` the set and the place of each
+    /// end, in the same pass. The draft is due after the `last`.
     #[inline]
-    pub(super) fn ends(&mut self, ends: ends::Iter<'_>, last: bool) {
-        self.ends
-            .extend(ends.map(|(place, end)| (to_usize(place), to_usize(end))));
+    pub(super) fn ends(
+        &mut self,
+        ends: ends::Iter<'_>,
+        last: bool,
+        mut each: impl FnMut(&KeySet, usize),
+    ) {
+        let set = &self.set;
+        self.ends.extend(ends.map(|(place, end)| {
+            let place = to_usize(place);
+            each(set, place);
+            (place, to_usize(end))
+        }));
         if last {
             self.stage = Stage::Drafting;
+        }
+    }
+
+    /// Drops the last `ends` ends that [`Assembly::ends`] took, and the draft that they
+    /// made due.
+    pub(super) fn drop_ends(&mut self, ends: usize) {
+        self.ends.truncate(self.ends.len().strict_sub(ends));
+        self.stage = Stage::Run;
+    }
+
+    /// Sets the counts of the ranges of the draft in order, from range `first` on. A
+    /// skipped frame drops them.
+    ///
+    /// # Panics
+    ///
+    /// When neither a draft nor a skip came.
+    pub(super) fn count(
+        &mut self,
+        first: usize,
+        counts: impl IntoIterator<Item = u32>,
+    ) {
+        match &mut self.stage {
+            Stage::Body(draft) => draft.set_counts(first, counts),
+            Stage::Skipped if SKIP => {}
+            stage => {
+                unreachable!("invariant: counts come after a draft, not {stage:?}")
+            }
         }
     }
 

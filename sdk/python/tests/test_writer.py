@@ -128,17 +128,25 @@ def end_group(group: int) -> None:
         pass
 
 
-def strays() -> set:
-    """The processes of the group of this process whose parent is not this process."""
+def children(test: unittest.TestCase, parent: int) -> set:
+    """The children of the process `parent`, once it has one. Fails `test` when it
+    has none after `PATIENCE`."""
+    deadline = time.monotonic() + PATIENCE
+    while True:
+        listed = subprocess.run(["pgrep", "-P", str(parent)], capture_output=True)
+        if listed.returncode == 0:
+            return set(map(int, listed.stdout.split()))
+        test.assertLess(time.monotonic(), deadline)
+        time.sleep(0.01)
+
+
+def in_group(pids: set) -> set:
+    """The processes of `pids` that are in the process group of this process."""
     listed = subprocess.run(
-        ["ps", "-A", "-o", "pid=,ppid=,pgid="], capture_output=True, check=True
+        ["ps", "-A", "-o", "pid=,pgid="], capture_output=True, check=True
     )
     fields = (map(int, line.split()) for line in listed.stdout.splitlines())
-    return {
-        pid
-        for pid, ppid, pgid in fields
-        if pgid == os.getpgrp() and ppid != os.getpid()
-    }
+    return {pid for pid, pgid in fields if pid in pids and pgid == os.getpgrp()}
 
 
 def setUpModule() -> None:
@@ -698,16 +706,19 @@ class WriterTest(unittest.TestCase):
         return given
 
     def test_a_backstop_leaves_no_process_in_the_group_of_this_process(self) -> None:
-        before = strays()
         self.node.pause()
         shell = backstop(self, self.node)
-        deadline = time.monotonic() + PATIENCE
-        while subprocess.run(["pgrep", "-P", str(shell.pid)]).returncode != 0:
-            self.assertLess(time.monotonic(), deadline)
-            time.sleep(0.01)
+        pids = {shell.pid, *children(self, shell.pid)}
         self.node.resume()
         self.doCleanups()
-        self.assertEqual(strays() - before, set())
+        # Its sleep is a process of this group whose parent is not this process, as a
+        # runner that shares its group with the test can start at any time.
+        other = subprocess.Popen(["sh", "-c", "sleep 30; :"])
+        self.addCleanup(other.wait)
+        self.addCleanup(other.kill)
+        self.addCleanup(subprocess.run, ["pkill", "-P", str(other.pid)])
+        children(self, other.pid)
+        self.assertEqual(in_group(pids), set())
 
     def test_other_threads_run_while_a_write_waits(self) -> None:
         with self.client.open_writer("plant.a") as writer:

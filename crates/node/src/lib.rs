@@ -1214,7 +1214,6 @@ impl Serve {
             return;
         };
         let (key, entropy) = (identity.key, endpoint.entropy.clone());
-        let public_key = identity.private_key.public();
         let (clock, net) = (endpoint.clock.clone(), endpoint.net.clone());
         let address = endpoint.address(&identity);
         let addresses = endpoint.addresses.clone();
@@ -1262,7 +1261,7 @@ impl Serve {
                     interner,
                     tasks: tasks.clone(),
                     node: key,
-                    public_key,
+                    public_key: transport.public_key(),
                     time: time.clone(),
                     entropy: entropy.clone(),
                     region,

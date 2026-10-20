@@ -26,6 +26,9 @@ fn fixed() -> env::entropy::Entropy {
     sim.node(sim::node::Config::default()).entropy()
 }
 
+/// `private_key` reads the OS, so only `drawn` takes fixed bytes; the test pins it as
+/// `laptop.architect-2` ruled (2026-10-19T23:47:10Z,
+/// <https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279865842>).
 #[test]
 fn a_private_key_is_the_first_32_bytes_of_the_entropy() {
     let mut bytes = [0; 32];
@@ -36,6 +39,67 @@ fn a_private_key_is_the_first_32_bytes_of_the_entropy() {
 #[test]
 fn each_private_key_is_new() {
     assert_ne!(private_key().0, private_key().0);
+}
+
+/// The node sees the close of an answer at once, not at the end of its idle timeout.
+/// Loopback loses no close, which goes out only once.
+#[test]
+fn answering_closes_its_session_with_code_0_on_the_os() {
+    let server_key = PrivateKey([2; 32]);
+    let proved = server_key.public();
+    let (bound, address) = mpsc::channel();
+    let (sent, ended) = mpsc::channel();
+    let shards = os::shards().expect("shards");
+    let config = env::shards::Config {
+        name: "server".into(),
+        core: None,
+    };
+    let _server = shards
+        .start(config, move |tasks| async move {
+            let pool = block::Config::new(1 << 20).expect("the budget fits");
+            let memory = block::Heap::new(pool.reservation());
+            let clock = os::clock();
+            let config = transport::Config {
+                private_key: server_key,
+                message_bytes_max: NonZeroUsize::new(1 << 16).expect("not zero"),
+                window_bytes: 1 << 20,
+                streams_max: NonZeroU32::new(16).expect("not zero"),
+                idle: Span::from_nanos(60 * Span::SECOND.nanos()),
+                clock: clock.clone(),
+                entropy: os::entropy(),
+                tasks,
+                pool: Rc::new(block::Pool::new(pool, memory)),
+            };
+            let at = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+            let bound_port = transport::Port::bind(&os::net(), at).expect("a port");
+            let transport::Address::Udp(at) = bound_port.addresses()[0] else {
+                unreachable!("a UDP port");
+            };
+            let part = bound_port.split(NonZeroUsize::MIN).pop().expect("one part");
+            let transport =
+                transport::Transport::new(config, part).expect("a transport");
+            bound.send(at).expect("the test keeps the receiver");
+            let session = transport.accept().await.expect("a session");
+            let start = clock.now();
+            let error = session.closed().await;
+            sent.send((error, clock.now() - start))
+                .expect("the test keeps the receiver");
+        })
+        .expect("the server starts");
+    #[expect(clippy::disallowed_methods, reason = "the test waits for the server")]
+    let at = address.recv().expect("the server binds");
+    let node = Node::answering(vec![at]).expect("an answer");
+    assert_eq!(node.public_key, proved);
+    #[expect(clippy::disallowed_methods, reason = "the test waits for the server")]
+    let ended = ended.recv_timeout(Duration::from_secs(5));
+    let (error, waited) = ended.expect("the server saw the end");
+    assert_eq!(
+        error,
+        transport::Error::PeerClosed {
+            code: transport::Code(0)
+        }
+    );
+    assert!(waited < Span::SECOND, "{waited:?}");
 }
 
 #[test]

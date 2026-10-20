@@ -941,7 +941,7 @@ mod tests {
     use types::time::Span;
 
     use super::*;
-    use crate::quic::pair::{self, Pair, Side};
+    use crate::quic::pair::{self, Foreign, Pair, Side};
     use crate::testing;
 
     /// The link delay each way in [`dial`].
@@ -1024,6 +1024,27 @@ mod tests {
                 let error = Error::Authentication { expected };
                 assert_eq!(events(&pair.client), [&closed(&pair.client, error)]);
                 assert!(pair.server.events.is_empty(), "{:?}", pair.server.events);
+            });
+        }
+
+        #[test]
+        fn to_any_key_with_a_certificate_that_the_verifier_refuses_is_broken() {
+            testing::run(1, |shard| {
+                let (thief, victim) = (PrivateKey([2; 32]), PrivateKey([3; 32]));
+                let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                let tls = crate::tls::borrowing(&victim, &thief);
+                pair.foreign = Some(Foreign::proving(shard, tls));
+                let key = pair
+                    .client
+                    .endpoint
+                    .connect(pair.now(), None, pair::FOREIGN);
+                pair.client.key = Some(key);
+                pair.run(Duration::from_secs(1));
+                let reason = "the cryptographic handshake failed: error 51: invalid \
+                              peer certificate: BadSignature";
+                let reason = reason.to_owned();
+                let error = Error::Broken { reason };
+                assert_eq!(events(&pair.client), [&closed(&pair.client, error)]);
             });
         }
 

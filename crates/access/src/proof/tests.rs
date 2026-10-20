@@ -1062,7 +1062,7 @@ fn names_each_refusal_and_its_fix() {
              3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c, but \
              node fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025 \
              carried it",
-            "Name the node that the program connects to as `via`",
+            "Check the public key that the program pins for the node",
         ),
         (
             Error::Expired {

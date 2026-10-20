@@ -415,7 +415,7 @@ jobs:
         run: >-
           cargo xtask test nextest ${{ join(matrix.crates, ' ') }}
           ${{ join(matrix.untested, ' ') }} --all-features
-          -- ${{ join(matrix.tests, ' ') }}
+          --config-file .github/nextest.toml -- ${{ join(matrix.tests, ' ') }}
       - name: Serial tests
         if: "!cancelled() && env.RUST != 'false' && matrix.part == 'serial'"
         run: >-

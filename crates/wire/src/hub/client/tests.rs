@@ -220,11 +220,11 @@ mod signed {
     /// input with a 32-byte `via` decodes.
     #[test]
     fn decodes_the_fuzz_inputs() {
-        let decode = |bytes: &[u8]| {
-            bytes
-                .chunks(1 + usize::from(bytes[0]))
-                .map(|message| Signed::decode(&message[1..]))
-                .collect::<Vec<_>>()
+        let decode = |bytes| -> Vec<_> {
+            crate::common::messages(bytes)
+                .into_iter()
+                .map(Signed::decode)
+                .collect()
         };
         let old = include_bytes!("../../../../../oracles/fuzz/wire_hub_client/hello");
         let refused = || Err(Error::Length { len: 161 });
@@ -242,6 +242,13 @@ mod signed {
             ..signed("ops.ana")
         };
         assert_eq!(decode(new), [Ok(hello.clone()), Ok(hello)]);
+        let small = include_bytes!(
+            "../../../../../oracles/fuzz/wire_hub_client/hello_small_via"
+        );
+        assert_eq!(
+            decode(small),
+            [Err(Error::SmallOrder), Err(Error::SmallOrder)]
+        );
     }
 
     #[test]

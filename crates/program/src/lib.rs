@@ -244,8 +244,9 @@ impl Session {
     /// has no room for the open), [`Error::Transport`], [`Error::Message`] for places
     /// that `wire` refuses or a stream that ends before the last place,
     /// [`Error::Unplaced`] for places that hold no place of a channel of the open, and
-    /// [`Error::Pool`] when no block of [`Config::pool`] holds the open, or the head
-    /// and an end of each place of a frame, which stops the stream.
+    /// [`Error::Pool`] when no block of [`Config::pool`] holds the open, or the head,
+    /// an end of each place, and a count of each group of a frame, which stops the
+    /// stream.
     pub async fn writer(&self, config: write::Config) -> Result<Writer, Error> {
         let shared = &self.0.0;
         let write::Config {
@@ -527,9 +528,9 @@ pub enum Error {
     /// hello stream with no challenge.
     Unanswered,
     /// No block of [`Config::pool`] can hold a message that the session sends, or
-    /// the head and an end of each place of a writer, or no block of
-    /// [`Config::reads`] can hold a frame of a read, or of [`Config::frames`] a draft
-    /// of a writer.
+    /// the head, an end of each place, and a count of each group of a writer, or no
+    /// block of [`Config::reads`] can hold a frame of a read, or of [`Config::frames`]
+    /// a draft of a writer.
     Pool(block::Error),
     /// The open of a read or a write is over `OPEN_BYTES_MAX`. Nothing was sent.
     Open {

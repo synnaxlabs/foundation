@@ -23,6 +23,7 @@ use super::stream::Sender;
 use super::{Endpoint, Event, SERVER_NAME, cid, connection, find, queue};
 use crate::stream::Part;
 use crate::testing::{self, Shard};
+use crate::tls::Tls;
 use crate::{Config, Error};
 
 /// The client's address. The server's is [`SERVER`].
@@ -337,7 +338,8 @@ impl Side {
 }
 
 /// A peer that runs noq-proto with no [`Endpoint`] above it, so a test writes its
-/// streams, its hello too. It speaks the TLS of a node with [`FOREIGN_KEY`].
+/// streams, its hello too. It speaks the TLS of a node with [`FOREIGN_KEY`], or the TLS
+/// of [`Foreign::proving`].
 pub(super) struct Foreign {
     /// The instant at the start of a run.
     epoch: Instant,
@@ -360,8 +362,21 @@ impl Foreign {
         change: impl FnOnce(&mut TransportConfig),
     ) -> Self {
         let config = shard.config(FOREIGN_KEY, Span::SECOND);
-        let (settings, endpoint) =
-            Settings::foreign(&testing::setup(&config), FOREIGN_SHARD, change);
+        let setup = testing::setup(&config);
+        Self::with(&config, Settings::foreign(&setup, FOREIGN_SHARD, change))
+    }
+
+    /// A peer with the transport parameters of a node on `shard`, that proves `tls`.
+    pub(super) fn proving(shard: &Shard, tls: Tls) -> Self {
+        let config = shard.config(FOREIGN_KEY, Span::SECOND);
+        let setup = testing::setup(&config);
+        Self::with(&config, Settings::proving(&setup, FOREIGN_SHARD, tls))
+    }
+
+    fn with(
+        config: &Config,
+        (settings, endpoint): (Settings, noq_proto::Endpoint),
+    ) -> Self {
         Self {
             epoch: config.clock.epoch(),
             settings,

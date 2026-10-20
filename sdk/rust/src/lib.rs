@@ -102,17 +102,18 @@ impl Node {
     }
 
     /// The node that answers first at `addresses`, dialed in this order with a
-    /// stagger, with the public key that it proves. Blocks until a node answers.
-    /// Trust on first use: nothing proves that it is the node the caller means, so the
-    /// caller pins the result and gives it to each later [`Client::connect`]. It sends
-    /// no hello, so it needs no subject.
+    /// stagger, with the public key that it proves. Blocks until a node answers or
+    /// each address fails. Trust on first use: nothing proves that it is the node the
+    /// caller means, so the caller pins the result and gives it to each later
+    /// [`Client::connect`]. It sends no hello, so it needs no subject.
     ///
     /// # Errors
     ///
     /// [`Error::Thread`] when the thread that dials cannot start, [`Error::Bind`] when
     /// the local UDP socket cannot bind, [`Error::Session`] with
     /// [`program::Error::Transport`] when the dial or the handshake fails, and
-    /// [`Error::Panicked`]. No address is unreachable with no attempt.
+    /// [`Error::Panicked`]. With no address, [`Error::Session`] with an `Unreachable`
+    /// of no attempt.
     #[expect(
         clippy::missing_panics_doc,
         clippy::unwrap_in_result,
@@ -142,7 +143,8 @@ impl Node {
 }
 
 /// The public key of the node that answers first at `addresses`, on the drivers of
-/// `os` and `tasks`. Closes the session with code 0 and waits for its end.
+/// `os` and `tasks`. Closes the session with code 0 and waits for its end. The close
+/// goes out once, so the node waits out its idle timeout only when the close is lost.
 async fn answered(
     addresses: &[transport::Address],
     tasks: Tasks,
@@ -226,6 +228,10 @@ pub struct Subject {
 }
 
 /// Gives a new Ed25519 private key, from the randomness of the OS.
+///
+/// # Panics
+///
+/// When the OS gives no randomness.
 #[must_use]
 pub fn private_key() -> PrivateKey {
     drawn(&os::entropy())

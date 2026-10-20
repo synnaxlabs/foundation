@@ -114,9 +114,9 @@ impl Shape {
         8 * usize::try_from(self.samples).expect("few")
     }
 
-    /// The bytes of the head, the ends, and the body of a frame.
+    /// The bytes of the head, the ends, the count, and the body of a frame.
     fn total(&self) -> usize {
-        11 + 8 * self.series + self.series * self.len()
+        7 + 8 * self.series + 4 + self.series * self.len()
     }
 }
 
@@ -211,6 +211,7 @@ async fn answer(session: transport::Session, node: sim::node::Node) {
             }
             let reply = Reply::Outcome {
                 frame: u64::try_from(frame).expect("a frame"),
+                group: 0,
                 outcome: Outcome::Taken {
                     range: Range {
                         seq,
