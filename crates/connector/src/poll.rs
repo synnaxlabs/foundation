@@ -213,10 +213,11 @@ impl Writer {
 
     /// Writes one frame at `stamp` with the value of each channel that `values` gives,
     /// in order, and leaves out each `None`. `stamp` is the last stamp that
-    /// [`Writer::request`] or [`Writer::sample`] gave. It takes each value once,
-    /// before the write. Writes no frame when it keeps none. A group that the home
-    /// refuses as `Backwards` is written again once, after the stamp that the refusal
-    /// gives. A frame for which the pool has no block now loses its samples.
+    /// [`Writer::request`] or [`Writer::sample`] gave, and no other frame was written
+    /// at it. It takes each value once, before the write. Writes no frame when it
+    /// keeps none. A group that the home refuses as `Backwards` is written again once,
+    /// after the stamp that the refusal gives. A frame for which the pool has no block
+    /// now loses its samples.
     ///
     /// # Errors
     ///
@@ -229,7 +230,7 @@ impl Writer {
     /// the sample type of its channel (each value of a channel of no fixed width), or
     /// the home refuses a group as `Backwards` again, or the home refuses a group as
     /// `Backwards` with a stamp under the last stamp that this writer gave, which a
-    /// write at that last stamp never gets.
+    /// write at a `stamp` as above never gets.
     pub fn write(
         &mut self,
         values: impl IntoIterator<Item = Option<Value>>,

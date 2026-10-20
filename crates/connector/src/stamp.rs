@@ -180,7 +180,8 @@ impl Writer {
     ///
     /// When the home refuses a group as `Expired` or `Codec`, or a group written again
     /// as `Backwards`, or the home refuses a group as `Backwards` with a stamp under
-    /// the last stamp that this writer gave, which a write at that last stamp never
+    /// the last stamp that this writer gave, which a write at the last stamp that
+    /// `next`, `request`, or `sample` gave, with no other frame written at it, never
     /// gets. A writer with no lease never gets `Expired`, and `codec` refuses only raw
     /// bytes that are not samples of their type, which no fill writes.
     pub(crate) fn write(

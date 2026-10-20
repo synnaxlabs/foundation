@@ -1,9 +1,13 @@
 - **STAMP (#435)** `connector::stamp::Writer`, crate-private, stamps the frames of one
   writer: the `poll::Writer` of a kind and the status writer of the supervisor each
   hold one, and no other code gives a stamp. A kind writes each frame at the last
-  stamp that its `poll::Writer` gave. `write` takes the stamp as an argument, so the
-  doc holds this rule, not the type (#3596). It keeps the rule in a private value with
-  no hub, so the tests of the rule need no node (`laptop.architect-2`,
+  stamp that `request` or `sample` of its `poll::Writer` gave, and writes one frame at
+  each stamp. `write` takes the stamp as an argument, so the doc holds this rule, not
+  the type (#3596; `laptop.architect-2`, 2026-10-20T13:33:43Z, item 1:
+  https://github.com/synnaxlabs/foundation/pull/3595#issuecomment-6292093472). A
+  second frame at one stamp after a write again gets a refusal under the stamp of the
+  write again, so it panics. `stamp::Writer` keeps the stamp rule in a private value
+  with no hub, so the tests of the rule need no node (`laptop.architect-2`,
   2026-10-20T13:14:36Z:
   https://github.com/synnaxlabs/foundation/issues/2527#issuecomment-6291709126). Lost:
   the rule merged into `stamp::Writer` (each case of the property tests then opens a sim
