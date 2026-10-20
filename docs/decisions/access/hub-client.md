@@ -285,6 +285,7 @@
   impossible. The same ruling moves the `os` bench of the node cost to PR 4 of #2718, in
   place of condition 2 of
   https://github.com/synnaxlabs/foundation/pull/3161#issuecomment-6248331209.
+  Superseded for the `&mut Draft` of `Writer::draft` by "PR 3a" below.
   Amended (#2718 PR 3, round 1): `Writer::draft(form, count, series)` is async. It sets
   the count of group 0, and it waits for a block of a full pool of frames, as a read
   does. It gives `Error::Layout` when the series break a rule of the frame layout:
@@ -296,6 +297,7 @@
   last one or past the outcomes gives `wire::hub::Error::Stored`. Each ends the writer
   with a reset of `MALFORMED`. Decided by `laptop.architect` at 2026-10-18T14:44:41Z
   (https://github.com/synnaxlabs/foundation/pull/3201#issuecomment-6251244519).
+  Superseded for the `count` of `Writer::draft` by "PR 3a" below.
   Amended (#2718 PR 3, round 2): `Writer::draft` gives the error that ended the writer
   before it takes a block. `wire::hub::Error::Stored` holds `frames` and `bound`, the
   last `Stored` when `frames` is below it, else the frames that got an outcome, so
@@ -518,7 +520,11 @@
   and approved on #3558 at 2026-10-20T09:20:44Z
   (https://github.com/synnaxlabs/foundation/pull/3558#issuecomment-6287720622).
   Supersedes the `Writer::index` of
-  https://github.com/synnaxlabs/foundation/issues/3266#issuecomment-6255066811.
+  https://github.com/synnaxlabs/foundation/issues/3266#issuecomment-6255066811. It
+  also supersedes the `count` of `Writer::draft(form, count, series)` of
+  https://github.com/synnaxlabs/foundation/pull/3201#issuecomment-6251244519, and the
+  `&mut Draft` that `Writer::draft` gives in the plan approved at
+  https://github.com/synnaxlabs/foundation/issues/2718#issuecomment-6250729056.
   `draft` gives a `Fill`, which holds a borrow of the writer's draft and fills only its
   series, so no caller can swap two drafts or change a head. Ruled by
   `laptop.architect` at 2026-10-20T09:54:23Z

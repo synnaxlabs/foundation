@@ -32,6 +32,18 @@ pub struct Config {
 
 /// The series of the writer's draft, to fill. The writer keeps the draft and its
 /// head, so a swap of two `Fill` swaps only the borrows.
+///
+/// ```compile_fail,E0308
+/// fn swap(a: &mut program::write::Fill<'_>, b: &mut program::write::Fill<'_>) {
+///     std::mem::swap::<types::frame::Draft>(a, b);
+/// }
+/// ```
+///
+/// ```compile_fail,E0616
+/// fn count(fill: program::write::Fill<'_>) {
+///     fill.0.set_count(0, 0);
+/// }
+/// ```
 #[derive(Debug)]
 pub struct Fill<'a>(&'a mut Draft);
 
