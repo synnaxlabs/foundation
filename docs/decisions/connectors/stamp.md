@@ -16,8 +16,9 @@
   also to a frame for which the pool gave no block (`laptop.architect`,
   2026-10-13T02:15:47Z,
   https://github.com/synnaxlabs/foundation/pull/2518#issuecomment-6136738770). After a
-  refusal as backwards, the frame is written again 1 ns after the stamp that the
-  refusal gives (`laptop.architect-2`, 2026-10-13T01:08:55Z, item 7:
+  refusal as backwards, the refused groups are written again once, with only their
+  series, 1 ns after the latest stamp that the refusals give, and a second refusal
+  panics (`laptop.architect-2`, 2026-10-13T01:08:55Z, item 7:
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6135871024, and
   2026-10-13T02:18:10Z, item 5:
   https://github.com/synnaxlabs/foundation/pull/2518#issuecomment-6136764966).
@@ -25,12 +26,15 @@
   last stamp never gives one. `stamp::Writer`, crate-private, owns the hub's writer
   and the `Stamps` of its frames. Its `write` takes the series of a frame and a fill of
   each data sample. It puts the stamp in each index, gives each group of the frame and
-  whether the home applied it, and writes again only the series of the groups that the
-  home refused as `Backwards`. `connector::poll::Writer` (POLL WRITER) and the status
-  writer each write through it, and neither matches the outcomes itself (the plan,
-  2026-10-20T08:54:50Z:
-  https://github.com/synnaxlabs/foundation/issues/2527#issuecomment-6287263795). The
-  status writer of the supervisor stamps its frames with `Stamps::next`
+  whether the home applied it, and writes the refused groups again. A group for which
+  the pool has no block, or that the home loses or refuses for another cause, is not
+  applied. `Expired` and `Codec` panic: a writer with no lease that writes raw frames
+  never gets them. `connector::poll::Writer` (POLL WRITER) and the status writer each
+  write through it, and neither matches the outcomes itself (`laptop.architect-2`,
+  2026-10-20T09:06:36Z:
+  https://github.com/synnaxlabs/foundation/pull/3556#issuecomment-6287471425, on the
+  plan https://github.com/synnaxlabs/foundation/issues/2527#issuecomment-6287263795).
+  The status writer of the supervisor stamps its frames with `Stamps::next`
   of its one read of mesh time, so one module holds the stamp rule
   (`laptop.architect-2`, 2026-10-13T01:38:13Z, item 2:
   https://github.com/synnaxlabs/foundation/pull/2518#issuecomment-6136191164, approved

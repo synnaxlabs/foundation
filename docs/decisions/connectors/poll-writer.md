@@ -48,15 +48,19 @@
   and the write again. Each gives the bytes of its data samples through a fill and acts
   on the groups that it gives: `poll::Writer` counts their samples applied or lost, and
   `status::Writer` stages its values again for a group that is not applied, and closes
-  on `Removed` or a failed disk (the plan, 2026-10-20T08:54:50Z:
-  https://github.com/synnaxlabs/foundation/issues/2527#issuecomment-6287263795). Lost:
-  `status::Writer` writes through `poll::Writer`, which then takes text values and a
-  second rule for a pool with no block in its hot path; a `stamp::Writer::write` that
-  takes a closure that sends the frame, so that each writer keeps its own draft and its
-  own match of outcomes (the same plan); a copy of the writer in each kind, which the
-  rule of `Backwards` and of pool loss would drift between; a `write` that takes a
-  closure per channel, which reads each value up to three times and makes the kind
-  count `bad` and `uncertain` in another pass
+  on `Removed` or a failed disk (`laptop.architect-2`, 2026-10-20T09:06:36Z:
+  https://github.com/synnaxlabs/foundation/pull/3556#issuecomment-6287471425, on the
+  plan https://github.com/synnaxlabs/foundation/issues/2527#issuecomment-6287263795).
+  Lost: `status::Writer` writes through `poll::Writer`, which then takes text values
+  and a second rule for a pool with no block in its hot path; a `stamp::Writer::write`
+  that takes a closure that sends the frame, so that each writer keeps its own draft and
+  its own match of outcomes; a `write` that takes a filled `Draft` (the write again
+  needs a new stamp in each index, so the caller fills a second draft); the last stamp
+  of the index from the hub at the open (another writer on the same index can still
+  write ahead between two frames, and it changes `hub`) (`laptop.architect-2`, above); a
+  copy of the writer in each kind, which the rule of `Backwards` and of pool loss would
+  drift between; a `write` that takes a closure per channel, which reads each value up
+  to three times and makes the kind count `bad` and `uncertain` in another pass
   (`laptop.architect-2`, 2026-10-16T04:07:48Z:
   https://github.com/synnaxlabs/foundation/pull/2817#issuecomment-6207854657); a bit set
   of the kept channels beside the values, which each caller keeps in step; an error at
