@@ -408,20 +408,23 @@ fn range(seq: u64, count: u32) -> frame::Range {
     frame::Range { seq, count }
 }
 
-/// What `raised` raises for a frame of the items at `frame` of a writer of `places`,
-/// with `outcomes`: its class, its text, and its `code`, `written`, and `unwritten`
+/// The class, the text, and the `code`, `written`, and `unwritten` of an exception,
 /// when it has them.
+type Raised = (
+    String,
+    String,
+    Option<String>,
+    Option<(Vec<String>, Vec<String>)>,
+);
+
+/// What `raised` raises for a frame of the items at `frame` of a writer of `places`,
+/// with `outcomes`.
 fn untaken(
     places: &[sdk::Place],
     loss: crate::Loss,
     outcomes: &[(usize, Outcome)],
     frame: &[usize],
-) -> (
-    String,
-    String,
-    Option<String>,
-    Option<(Vec<String>, Vec<String>)>,
-) {
+) -> Raised {
     Python::initialize();
     Python::attach(|py| {
         let error =
@@ -561,9 +564,11 @@ fn raised_raises_for_an_end_then_a_refusal() {
 /// stream that the node stopped for the same cause, and says that the writer ended.
 #[test]
 fn raised_ends_a_writer_of_one_index_at_the_end_of_its_group() {
-    let places = &grouped()[..];
-    let places = [places[0].clone(), places[4].clone()];
-    let places = places.map(|place| sdk::Place { index: 1, ..place });
+    let grouped = grouped();
+    let places = [0, 4].map(|place| sdk::Place {
+        index: 1,
+        ..grouped[place].clone()
+    });
     let ends = [
         (
             End::Removed,
@@ -644,9 +649,8 @@ fn raised_gives_the_seqs_of_the_lost_groups_only() {
                 .unwrap();
         }
         assert!(seqs.eq(expected).unwrap(), "{seqs}");
-        let ignored =
-            crate::write::raised(py, &places, crate::Loss::Ignore, &outcomes, &[2, 3]);
-        assert!(ignored.is_ok());
+        crate::write::raised(py, &places, crate::Loss::Ignore, &outcomes, &[2, 3])
+            .unwrap();
     });
 }
 

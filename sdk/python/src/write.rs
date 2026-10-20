@@ -531,7 +531,7 @@ pub(crate) fn raised(
             raised
         }
         (None, None) => {
-            let lost = frame.into_iter().filter_map(|place| match outcome(place) {
+            let gone = frame.into_iter().filter_map(|place| match outcome(place) {
                 Outcome::Lost { range } => {
                     let start = u128::from(range.seq);
                     let seqs = start..start + u128::from(range.count);
@@ -539,7 +539,7 @@ pub(crate) fn raised(
                 }
                 _ => None,
             });
-            return loss.act(py, "samples were lost", lost, py.None().bind(py));
+            return loss.act(py, "samples were lost", gone, py.None().bind(py));
         }
     };
     if raised.is_instance_of::<PartialWrite>(py)
