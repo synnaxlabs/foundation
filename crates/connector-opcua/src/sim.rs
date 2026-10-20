@@ -122,14 +122,19 @@ pub(crate) enum Fixed {
     Doubles,
 }
 
-/// What [`Variables::hooks`] gives.
+/// The limits that a server applies when it starts, and the fixed values.
 #[cfg(test)]
-type Limits = (
-    Option<u32>,
-    Option<Span>,
-    Option<(u32, f64)>,
-    Vec<Option<Fixed>>,
-);
+struct Limits {
+    /// The most nodes of a Read, of [`Variables::refuse_reads_past`].
+    most: Option<u32>,
+    /// The longest timeout of a session, of [`Variables::time_out_sessions`].
+    session: Option<Span>,
+    /// The largest queue and the shortest publishing interval in ms, of
+    /// [`Variables::limit_queues`].
+    queues: Option<(u32, f64)>,
+    /// The value of [`Variables::fix`] of each variable.
+    fixed: Vec<Option<Fixed>>,
+}
 
 impl Variables {
     /// The variables at the node ids `nodes`, each with the value 0 and the status
@@ -291,14 +296,16 @@ impl Variables {
         self.state().states
     }
 
-    /// The most nodes of a Read of [`Variables::refuse_reads_past`], the timeout of
-    /// [`Variables::time_out_sessions`], the limits of [`Variables::limit_queues`], and
-    /// the value of [`Variables::fix`] of each variable.
+    /// The limits that a server of these variables applies when it starts.
     #[cfg(test)]
-    fn hooks(&self) -> Limits {
+    fn limits(&self) -> Limits {
         let state = self.state();
-        let fixed = state.variables.iter().map(|v| v.hooks.fixed).collect();
-        (state.most, state.session, state.queues, fixed)
+        Limits {
+            most: state.most,
+            session: state.session,
+            queues: state.queues,
+            fixed: state.variables.iter().map(|v| v.hooks.fixed).collect(),
+        }
     }
 
     /// Calls `change` on the variable of `text`.
@@ -415,20 +422,20 @@ pub async fn serve(
         .map(|variable| variable.node.clone())
         .collect();
     #[cfg(test)]
-    let (most, session, queues, fixed) = variables.hooks();
+    let limits = variables.limits();
     let security = variables.state().security;
     let add = |server: &mut Server| {
         server.cap_references(tree::REFERENCES);
         tree::add(server);
         #[cfg(test)]
         {
-            if let Some(most) = most {
+            if let Some(most) = limits.most {
                 server.refuse_reads_past(most);
             }
-            if let Some(most) = session {
+            if let Some(most) = limits.session {
                 server.set_session_timeout(most);
             }
-            if let Some((most, ms)) = queues {
+            if let Some((most, ms)) = limits.queues {
                 server.set_queues(most);
                 server.set_publishing(ms);
             }
@@ -448,7 +455,7 @@ pub async fn serve(
         }
         for (index, node) in nodes.iter().enumerate() {
             #[cfg(test)]
-            if let Some(fixed) = fixed[index] {
+            if let Some(fixed) = limits.fixed[index] {
                 match fixed {
                     Fixed::String => server.add_string(node),
                     Fixed::Doubles => server.add_doubles(node),
