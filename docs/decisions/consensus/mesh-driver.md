@@ -9,16 +9,19 @@
   (`Raft::admission`: `Error::Removed` for a `PreVote` or a `Vote` at or below the
   commit, or below the term at it (`laptop.architect`, 2026-10-19T18:56:00Z:
   https://github.com/synnaxlabs/foundation/pull/3407#issuecomment-6274855859), of a
-  sender that a committed configuration removed, else `Error::NotVoter`), and each claim
-  holds (`Error::Claim`), the claims being what `Raft::claims` gives, so a link that the
-  node does not read is not checked. So a node with a configuration refuses a leader
-  that is not a voter of that configuration, when a change that the node does not hold
-  made that leader a voter. The node does not get the log from that leader (a known
-  defect, #1096, that #1107 fixes). A leader that stays a voter through the change
-  passes the check, and its chain proves the change (RAFT SURFACE). A node with no
-  configuration takes no request. Only a voter that an operator wiped is such a node
-  (#881), because a node that joins opens with the founding voters from its join answer
-  (decided by the architect, #242, 2026-10-07T04:20:40Z:
+  sender that a committed configuration removed and that is not a member, with no join
+  in the log that this node has not applied (`laptop.architect`, 2026-10-20T02:45:51Z:
+  https://github.com/synnaxlabs/foundation/pull/3411#issuecomment-6282135192), else
+  `Error::NotVoter`), and each claim holds (`Error::Claim`), the claims being what
+  `Raft::claims` gives, so a link that the node does not read is not checked. So a node
+  with a configuration refuses a leader that is not a voter of that configuration, when
+  a change that the node does not hold made that leader a voter. The node does not get
+  the log from that leader (a known defect, #1096, that #1107 fixes). A leader that
+  stays a voter through the change passes the check, and its chain proves the change
+  (RAFT SURFACE). A node with no configuration takes no request. Only a voter that an
+  operator wiped is such a node (#881), because a node that joins opens with the
+  founding voters from its join answer (decided by the architect, #242,
+  2026-10-07T04:20:40Z:
   https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). A claim
   in the proof whose signer has no key at the node, or whose signature does not hold
   under a key from a join that is not applied, is removed before `step`. An append is
@@ -220,7 +223,11 @@
   stops when a write of the log fails, when a committed change has 0 bytes or a kind
   that this build does not know, or when each `Mesh` drops: this build cannot judge such
   an entry, and a newer build can. A group also stops (`Stopped::Removed`, with the
-  voters that answered) when `Raft::removed_by` gives the voters (RAFT VOTERS). An entry
+  voters that answered) when `Raft::removed_by` gives the voters (RAFT VOTERS). Each
+  member is a learner, so no member gets a `removed` answer: a voter that a change
+  removes keeps its group and follows the log. So `Stopped::Removed` needs the leave of
+  #3355 (`laptop.architect`, 2026-10-20T02:17:41Z:
+  https://github.com/synnaxlabs/foundation/pull/3411#issuecomment-6281787838). An entry
   with no change (the first entry of a leader) is not a change of 0 bytes. A committed
   entry of a known kind whose body does not decode is `Refused::Body` on every node, and
   the group goes on, so one voter that proposes bad bytes cannot halt the region. One
@@ -264,6 +271,12 @@
   refuses the `node::Key` of a member (decided by `laptop.architect`,
   2026-10-07T08:33:14Z:
   https://github.com/synnaxlabs/foundation/pull/1277#issuecomment-6034146773). `open`
+  gives `raft` the founding members as learners, and the group gives the members again
+  after each join applies, so a member that is not a voter gets the log
+  (`Raft::set_learners`, RAFT SURFACE). A leader whose apply lags sends to fewer
+  learners for a while, which costs liveness, never safety (the plan of #3140). Decided
+  by `laptop.architect`, the plan, 2026-10-19T13:53:13Z
+  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6268881124). `open`
   starts the tasks that send: one for each member, from the first message for it
   (approved by the architect, 2026-10-07T13:40:50Z:
   https://github.com/synnaxlabs/foundation/pull/1410#issuecomment-6039206881, which
@@ -448,12 +461,12 @@
   https://github.com/synnaxlabs/foundation/pull/2755#issuecomment-6203047812.
   Amended (2026-10-18, #2283): `Mesh::set_addresses` proposes a `Change::Card` of the
   member of this node through `attempt` and `settle`, as `set_home` does. A member that
-  is not a voter gets `Error::NoVote`, as `set_home` gives, because a leader sends
-  entries only to the nodes of its configurations, so such a member applies no entry
-  after its join (`laptop.architect`, 2026-10-18T05:35:52Z:
-  https://github.com/synnaxlabs/foundation/issues/2283#issuecomment-6246157119). The
-  forward rule waits for B2 of #2283 (#3116, which waits on #3140): a member that is
-  not a voter forwards its card, the node that takes a forwarded change takes a
+  is not a voter gets `Error::NoVote`, as `set_home` gives (`laptop.architect`,
+  2026-10-18T05:35:52Z:
+  https://github.com/synnaxlabs/foundation/issues/2283#issuecomment-6246157119). Such
+  a member applies each entry as a learner (#3140), but it forwards no change until
+  B2. The forward rule waits for B2 of #2283 (#3116, which waits on #3140): a member
+  that is not a voter forwards its card, the node that takes a forwarded change takes a
   `Change::Card` from a peer that is not a voter when the card's member has the public
   key that the transport proves for that peer, and each other change from such a peer
   stays `Error::PeerNotVoter`. A member that knows no leader forwards to a voter of its

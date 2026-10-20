@@ -353,6 +353,15 @@
   drives the loop, the housekeeping of open62541 logs the warning "Inactivity for
   Subscription <id>." once each publishing interval times the keep-alive count plus the
   request timeout. This is the stop of the client, not a failed server.
+  open62541 also writes the count: at each Publish answer of
+  `BadTooManyPublishRequests`, it lowers the count by 1 while it is over 1, and at 1 it
+  ends each subscription. `subscribe` sets the count once, and after that open62541
+  alone writes it. The stop is the flag `publishStopped` of the local patch:
+  `shim_client_publish_stop` sets it, and `shim_client_publish_resume` clears it and
+  calls `__Client_Subscriptions_backgroundPublish`. So a server that holds fewer
+  Publish requests refuses only the first, also while a change waits (#3456, #3465;
+  `laptop.architect-2`, 2026-10-20T00:39Z,
+  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6280562003).
   The copy, `shim.c`, and `server.c` allocate through the global allocator of the
   binary. `src/alloc.h` is the `UA_ARCH_HEADER` of both builds: it declares the 4
   functions of `src/alloc.rs` and defines `UA_malloc`, `UA_calloc`, `UA_realloc`, and

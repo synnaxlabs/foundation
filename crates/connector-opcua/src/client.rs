@@ -101,7 +101,7 @@ pub(crate) unsafe fn unconnected(el: *mut ffi::EventLoop) -> NonNull<ffi::Client
     let client = unsafe { ffi::shim_client_new(el, CHUNKS, QUEUED, &raw const WATCH) };
     let client = NonNull::new(client).unwrap_or_else(|| alloc::exhausted());
     // SAFETY: the client lives.
-    unsafe { ffi::shim_client_publishes(client.as_ptr(), 0) };
+    unsafe { ffi::shim_client_publish_stop(client.as_ptr()) };
     client
 }
 

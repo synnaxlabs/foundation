@@ -10,7 +10,7 @@ use connector::kind::Error;
 use env::clock::Clock;
 use types::sample::{self, Scalar, Type};
 
-use super::common::{config, rig};
+use super::common::{config, rig, set_result};
 use super::{RELAY, Relay, relayed, run, serve};
 use crate::browse::{BYTES, Server as Browse};
 use crate::ffi::Status;
@@ -689,7 +689,7 @@ fn a_walk_whose_answers_are_not_bad_finds_their_entries() {
     for status in super::NOT_GOOD {
         let rewrite = move |message: &mut Vec<u8>| {
             if response(message).is_some() {
-                super::set_result(message, status);
+                set_result(message, status);
             }
         };
         let found = walked(nested, rewrite, everything());
@@ -708,9 +708,7 @@ fn faulting(
         let response = message.get(24..28).is_some_and(|got| got == kind);
         if !done && message.starts_with(b"MSG") && response && pick(message) {
             done = true;
-            // The type of the response, then its time and request handle.
-            let status = Status::BAD_INTERNAL_ERROR.0.to_le_bytes();
-            message[40..44].copy_from_slice(&status);
+            set_result(message, Status::BAD_INTERNAL_ERROR);
         }
     }
 }

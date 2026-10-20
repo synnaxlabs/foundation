@@ -41,6 +41,9 @@ fuzz_target!(|input: &[u8]| {
         &front_ends,
         &kinds,
         reach,
+        async |_: &Path| -> Result<types::ed25519::PublicKey, ops::Failure> {
+            panic!("mcp read a key")
+        },
     );
     // No request waits, so one poll ends it.
     let Poll::Ready(status) = pin!(cli).poll(&mut Context::from_waker(Waker::noop()))

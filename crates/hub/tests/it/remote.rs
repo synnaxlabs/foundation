@@ -15,7 +15,7 @@ use env::tasks::Tasks;
 use hub::Hub;
 use hub::reader::{self, Ended, Mode};
 use spec::data_type::DataType;
-use transport::stream::{Receiver, Sender};
+use transport::stream::{Incoming, Receiver, Sender};
 use transport::{Address, Code, Session, Transport};
 use types::frame::key_set::{Group, Interner};
 use types::frame::{self, Form, Path, Range};
@@ -191,14 +191,27 @@ async fn serve_each(hub: Hub, transport: Transport, tasks: Tasks, steps: Arc<Ste
         let link = hub.link(session.clone());
         let streams = tasks.clone();
         tasks.spawn(async move {
-            while let Ok(mut incoming) = session.accept().await {
-                let header = incoming.receiver.recv().await.expect("a header");
-                let header = header.expect("the header comes before the finish");
-                assert_eq!(wire::header::decode(&header), Ok((Protocol::Hub, &[][..])));
+            while let Ok(incoming) = accept_hub(&session).await {
                 let serving = link.serve(incoming);
                 streams.spawn(async move { drop(serving.await) });
             }
         });
+    }
+}
+
+/// The next stream of `session` whose header names the hub protocol, with the header
+/// read. The mesh at [`NODE`] sends `raft` messages on the same session to its learner
+/// [`OTHER`], and this home, which runs no mesh, drops each mesh stream.
+async fn accept_hub(session: &Session) -> Result<Incoming, transport::Error> {
+    loop {
+        let mut incoming = session.accept().await?;
+        let header = incoming.receiver.recv().await?;
+        let header = header.expect("the header comes before the finish");
+        match wire::header::decode(&header) {
+            Ok((Protocol::Hub, [])) => return Ok(incoming),
+            Ok((Protocol::Mesh, [])) => drop(incoming),
+            other => panic!("a stream of the hub or the mesh: {other:?}"),
+        }
     }
 }
 
@@ -813,10 +826,10 @@ fn a_reader_whose_pool_has_no_room_for_its_open_gets_pool() {
 /// once it took the header, the open, and one message of keys.
 async fn fake_accept(transport: &Transport) -> (Session, Sender, Receiver) {
     let session = transport.accept().await.expect("a session");
-    let mut incoming = session.accept().await.expect("a stream");
+    let mut incoming = accept_hub(&session).await.expect("a stream");
     let mut receiver = incoming.receiver;
     let sender = incoming.sender.take().expect("a two-way stream");
-    for _ in 0..3 {
+    for _ in 0..2 {
         receiver
             .recv()
             .await
@@ -1102,8 +1115,7 @@ fn a_reader_whose_stream_the_home_resets_with_a_code_outside_hub_wire_gets_trans
         sim::link::Config::default(),
         |node, _, transport, steps| async move {
             let session = transport.accept().await.expect("a session");
-            let mut incoming = session.accept().await.expect("a stream");
-            incoming.receiver.recv().await.expect("a header");
+            let mut incoming = accept_hub(&session).await.expect("a stream");
             let sender = incoming.sender.take().expect("a two-way stream");
             sender.reset(Code(7));
             until(&node.clock(), &steps.done).await;
@@ -1238,7 +1250,7 @@ fn a_reader_after_the_home_closed_the_held_session_dials_again() {
         sim::link::Config::default(),
         |node, tasks, transport, steps| async move {
             let session = transport.accept().await.expect("a session");
-            session.accept().await.expect("a stream");
+            accept_hub(&session).await.expect("a stream");
             session.close(Code(1));
             let kept = Arc::clone(&steps);
             hub_home(node, tasks, transport, steps, |test| {
@@ -1267,7 +1279,7 @@ fn a_reader_whose_home_closes_the_session_with_code_0_opens_on_the_next() {
         sim::link::Config::default(),
         |node, tasks, transport, steps| async move {
             let session = transport.accept().await.expect("a session");
-            session.accept().await.expect("a stream");
+            accept_hub(&session).await.expect("a stream");
             session.close(Code(0));
             let kept = Arc::clone(&steps);
             hub_home(node, tasks, transport, steps, |test| {
@@ -1290,7 +1302,7 @@ fn a_reader_whose_home_closes_three_sessions_with_code_0_gets_transport() {
         |node, _, transport, steps| async move {
             for _ in 0..3 {
                 let session = transport.accept().await.expect("a session");
-                session.accept().await.expect("a stream");
+                accept_hub(&session).await.expect("a stream");
                 session.close(Code(0));
             }
             until(&node.clock(), &steps.done).await;
@@ -1402,7 +1414,7 @@ fn a_complete_reader_whose_credit_finds_no_room_gets_each_frame() {
             let mut seq = 0;
             // The second reader's keys fill the window of the session until the home
             // takes them.
-            let mut second = session.accept().await.expect("a second stream");
+            let mut second = accept_hub(&session).await.expect("a second stream");
             for _ in 0..FRAMES {
                 send_frame(&mut sender, &mut seq, BODY)
                     .await
@@ -1923,7 +1935,7 @@ fn a_reader_whose_pool_has_no_room_for_a_message_of_keys_stops_the_stream_with_b
         [(REGION_MIN, WINDOW), (MESSAGE_MIN, 2 * MESSAGE_MIN)],
         |node, _, transport, steps| async move {
             let session = transport.accept().await.expect("a session");
-            let mut incoming = session.accept().await.expect("a stream");
+            let mut incoming = accept_hub(&session).await.expect("a stream");
             let mut sender = incoming.sender.take().expect("a two-way stream");
             until(&node.clock(), &steps.full).await;
             let error = loop {
@@ -2179,7 +2191,7 @@ fn a_complete_reader_raises_its_grant_once_a_credit_that_waited_for_room_is_sent
             let mut seq = 0;
             // The second reader's keys fill the window of the session until the home
             // takes them.
-            let mut second = session.accept().await.expect("a second stream");
+            let mut second = accept_hub(&session).await.expect("a second stream");
             for _ in 0..FIRST {
                 send_frame(&mut sender, &mut seq, BODY)
                     .await
@@ -2315,7 +2327,7 @@ fn a_complete_reader_whose_waiting_credit_fails_to_send_sends_no_later_credit() 
         move |node, _, transport, steps| async move {
             let (session, mut sender, receiver) = fake_open(&transport).await;
             let mut seq = 0;
-            let _second = session.accept().await.expect("a second stream");
+            let _second = accept_hub(&session).await.expect("a second stream");
             for _ in 0..FIRST {
                 send_frame(&mut sender, &mut seq, BODY)
                     .await
@@ -2363,7 +2375,7 @@ fn a_complete_reader_ends_at_a_frame_past_the_grant_while_its_credit_waits() {
             let (session, mut sender, mut receiver) = fake_open(&transport).await;
             let mut seq = 0;
             // The home reads neither stream, so the credit never leaves the reader.
-            let _second = session.accept().await.expect("a second stream");
+            let _second = accept_hub(&session).await.expect("a second stream");
             for _ in 0..FIRST {
                 send_frame(&mut sender, &mut seq, BODY)
                     .await
@@ -2416,7 +2428,7 @@ fn a_reader_whose_credit_waits_when_the_home_finishes_sends_no_later_credit() {
         move |node, _, transport, steps| async move {
             let (session, mut sender, mut receiver) = fake_open(&transport).await;
             let mut seq = 0;
-            let mut second = session.accept().await.expect("a second stream");
+            let mut second = accept_hub(&session).await.expect("a second stream");
             for _ in 0..FIRST {
                 send_frame(&mut sender, &mut seq, BODY)
                     .await
@@ -2474,7 +2486,7 @@ fn a_reader_whose_credit_waits_when_the_session_ends_sends_no_later_credit() {
         move |node, _, transport, steps| async move {
             let (session, mut sender, mut receiver) = fake_open(&transport).await;
             let mut seq = 0;
-            let mut second = session.accept().await.expect("a second stream");
+            let mut second = accept_hub(&session).await.expect("a second stream");
             for _ in 0..FIRST {
                 send_frame(&mut sender, &mut seq, BODY)
                     .await
@@ -2548,7 +2560,7 @@ fn a_complete_reader_whose_waiting_credit_fails_to_send_ends_at_a_frame_past_the
         move |node, _, transport, steps| async move {
             let (session, mut sender, receiver) = fake_open(&transport).await;
             let mut seq = 0;
-            let _second = session.accept().await.expect("a second stream");
+            let _second = accept_hub(&session).await.expect("a second stream");
             for _ in 0..FIRST {
                 send_frame(&mut sender, &mut seq, BODY)
                     .await
@@ -2681,7 +2693,7 @@ fn a_complete_reader_whose_pool_has_no_room_for_a_frame_while_a_credit_waits_res
         move |node, _, transport, steps| async move {
             let (session, mut sender, mut receiver) = fake_open(&transport).await;
             let mut seq = 0;
-            let _second = session.accept().await.expect("a second stream");
+            let _second = accept_hub(&session).await.expect("a second stream");
             send_until_stopped(&mut sender, &mut seq, FIRST, BODY).await;
             let block = own_pool().alloc(1).expect("the pool has room");
             let stopped = sender.send(block.freeze()).await.expect_err("stopped");
@@ -2799,7 +2811,7 @@ fn a_credit_that_waits_at_the_end_holds_back_no_other_reader_of_the_session() {
         move |node, _, transport, steps| async move {
             let (session, mut sender, _receiver) = fake_open(&transport).await;
             let mut seq = 0;
-            let second = session.accept().await.expect("a second stream");
+            let second = accept_hub(&session).await.expect("a second stream");
             for _ in 0..FIRST {
                 send_frame(&mut sender, &mut seq, BODY)
                     .await
@@ -2870,7 +2882,7 @@ fn a_credit_that_waits_for_an_idle_caller_holds_back_no_other_reader_of_the_sess
         move |node, _, transport, steps| async move {
             let (session, mut sender, _receiver) = fake_open(&transport).await;
             let mut seq = 0;
-            let second = session.accept().await.expect("a second stream");
+            let second = accept_hub(&session).await.expect("a second stream");
             for _ in 0..FIRST {
                 send_frame(&mut sender, &mut seq, BODY)
                     .await
@@ -2921,8 +2933,8 @@ async fn open_a_third(
         std::future::pending::<()>().await;
     };
     let serve_third = async {
-        let mut third = session.accept().await.expect("a third stream");
-        for _ in 0..3 {
+        let mut third = accept_hub(session).await.expect("a third stream");
+        for _ in 0..2 {
             third
                 .receiver
                 .recv()
@@ -3057,7 +3069,7 @@ fn a_credit_waits_for_no_idle_caller_of_another_open() {
         move |node, _, transport, steps| async move {
             let (session, mut sender, mut receiver) = fake_open(&transport).await;
             let mut seq = 0;
-            let mut second = session.accept().await.expect("a second stream");
+            let mut second = accept_hub(&session).await.expect("a second stream");
             for _ in 0..FRAMES {
                 send_frame(&mut sender, &mut seq, BODY)
                     .await
@@ -3467,9 +3479,9 @@ fn a_reader_panics_on_an_ack_of_a_position_at_zero_before_it_gave_one() {
                 ends::encode([(0, 0), (1, 0)], out);
             })
             .await;
-            let mut incoming = session.accept().await.expect("a stream");
+            let mut incoming = accept_hub(&session).await.expect("a stream");
             let mut second = incoming.sender.take().expect("a two-way stream");
-            for _ in 0..3 {
+            for _ in 0..2 {
                 incoming
                     .receiver
                     .recv()
