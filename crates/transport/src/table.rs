@@ -38,6 +38,8 @@ pub(crate) struct Table {
     ready: VecDeque<Session>,
     /// The wakers of the `accept` calls that wait.
     accepting: Vec<Waker>,
+    /// Why the carrier stopped, which `accept` gives once `ready` is empty.
+    failed: Option<Error>,
 }
 
 /// What a [`Table`] knows of one node.
@@ -124,26 +126,14 @@ pub(crate) async fn dial(
     poll_fn(|cx| attempt.poll(cx)).await
 }
 
-/// Waits for the next session for `accept`: one that a dial made, else one that a
-/// peer opened and that the table does not hold.
+/// Waits for the next session for `accept`: one that a dial made, or one that a peer
+/// opened and that the take task gave to it.
 ///
 /// # Errors
 ///
 /// As [`Transport::accept`](crate::Transport::accept).
 pub(crate) async fn accept(table: &RefCell<Table>) -> Result<Session, Error> {
-    poll_fn(|cx| {
-        let mut table = table.borrow_mut();
-        loop {
-            if let Some(session) = table.poll_ready(cx) {
-                return Poll::Ready(Ok(session));
-            }
-            let session = ready!(table.carrier.poll_accept(cx)).map(Session::new)?;
-            if let Some(session) = table.arrive(session) {
-                return Poll::Ready(Ok(session));
-            }
-        }
-    })
-    .await
+    poll_fn(|cx| table.borrow_mut().poll_ready(cx)).await
 }
 
 impl Table {
@@ -165,6 +155,7 @@ impl Table {
                 limit: 0,
                 ready: VecDeque::new(),
                 accepting: Vec::new(),
+                failed: None,
             })
         });
         let this = Rc::downgrade(&table);
@@ -236,14 +227,22 @@ impl Table {
     }
 
     /// As [`Table::take`], and wakes `cx` when the next session waits in the carrier.
-    /// Ready when the socket broke, which `accept` gives from the carrier.
+    /// Ready when the socket broke, and then `accept` gives the error.
     fn poll_take(&mut self, cx: &Context<'_>) -> Poll<()> {
-        while let Ok(session) = ready!(self.carrier.poll_accept(cx)) {
-            if let Some(session) = self.arrive(Session::new(session)) {
-                self.push(session);
+        loop {
+            match ready!(self.carrier.poll_accept(cx)) {
+                Ok(session) => {
+                    if let Some(session) = self.arrive(Session::new(session)) {
+                        self.push(session);
+                    }
+                }
+                Err(error) => {
+                    self.failed = Some(error);
+                    self.accepting.drain(..).for_each(Waker::wake);
+                    return Poll::Ready(());
+                }
             }
         }
-        Poll::Ready(())
     }
 
     /// Takes `session`, which a peer dialed, and gives it back when it goes to
@@ -363,13 +362,16 @@ impl Table {
         self.nodes.entry(node).or_default()
     }
 
-    /// The next session for `accept`, or `None`, and then `cx` wakes when one comes.
-    fn poll_ready(&mut self, cx: &Context<'_>) -> Option<Session> {
-        let session = self.ready.pop_front();
-        if session.is_none() {
-            wake::register(&mut self.accepting, cx.waker());
+    /// Ready with the next session for `accept`, else with why the carrier stopped.
+    fn poll_ready(&mut self, cx: &Context<'_>) -> Poll<Result<Session, Error>> {
+        if let Some(session) = self.ready.pop_front() {
+            return Poll::Ready(Ok(session));
         }
-        session
+        if let Some(error) = &self.failed {
+            return Poll::Ready(Err(error.clone()));
+        }
+        wake::register(&mut self.accepting, cx.waker());
+        Poll::Pending
     }
 }
 
@@ -818,6 +820,36 @@ mod tests {
             linger(&node).await;
         });
         assert_eq!(sim.run(), Ok(()));
+    }
+
+    // Only the take task reads the carrier's sessions, so it wakes the `accept` that
+    // waits, both for a session and for the error of the socket.
+    #[test]
+    fn an_accept_that_waits_gets_a_peers_session_then_the_error_of_a_broken_socket() {
+        for value in 0..32 {
+            let (mut sim, client, server) = testing::nodes(value);
+            let at = [Address::Udp(testing::address(&server))];
+            testing::transport(&server, SERVER, |transport, node| async move {
+                let session = transport.accept().await.expect("a session");
+                assert_eq!(session.peer(), Peer::Node(CLIENT.public()));
+                let mut accepting = pin!(transport.accept());
+                assert!(testing::poll_once(accepting.as_mut()).await.is_none());
+                node.fail_udp(testing::address(&node));
+                let network = Error::Network {
+                    error: env::net::Error::Io { code: 5 },
+                };
+                assert_eq!(accepting.await.err(), Some(network));
+            });
+            testing::transport(&client, CLIENT, move |transport, _| async move {
+                drop(
+                    transport
+                        .dial(SERVER.public(), &at)
+                        .await
+                        .expect("a session"),
+                );
+            });
+            assert_eq!(sim.run(), Ok(()), "run {value}");
+        }
     }
 
     #[test]
