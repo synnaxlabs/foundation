@@ -34,6 +34,8 @@ impl Mesh {
     ///   applies, or when `raft` refuses the set ([`Raft::propose_voters`]).
     /// - [`Error::Quorum`] when the holders are not a majority of the set once each
     ///   put ended, with each voter whose put failed and why.
+    /// - [`Error::Pool`] from an earlier write of the log that finds no block, until
+    ///   that write ends.
     /// - [`Error::Stopped`], [`Error::Tree`], and [`Error::Blob`] before the proposal.
     ///
     /// The set is in force, and a majority of it may not hold the tree in force:
