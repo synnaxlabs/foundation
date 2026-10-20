@@ -5,10 +5,13 @@
 //! allocates only what its read allocates, and the write of its frame allocates
 //! nothing for a channel of any width, as does a drive of the changes of a
 //! subscription. A Publish answer allocates a fixed count for any count of changes,
-//! and the first drives of a subscription allocate no memory for its changes. The
-//! count covers each thread, so this binary has no test harness.
+//! and the first drives of a subscription allocate no memory for its changes. A read
+//! over a secure channel makes a fixed count of allocations. aws-lc allocates through
+//! the global allocator here, so the count holds its blocks too. The count covers each
+//! thread, so this binary has no test harness.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
+#![expect(unsafe_code, reason = "the routing of aws-lc and its positive control")]
 
 use std::future::poll_fn;
 use std::pin::pin;
@@ -26,6 +29,10 @@ use types::time::Span;
 static ALLOCATOR: counting::Allocator = counting::Allocator::new();
 
 fn main() {
+    // SAFETY: no call of aws-lc ran yet.
+    unsafe { connector_opcua::bench::route_crypto() };
+    a_second_route_of_the_crypto_panics();
+    the_count_holds_the_allocations_of_aws_lc();
     the_count_holds_the_allocations_of_c();
     a_run_allocates_nothing();
     the_drop_frees_the_client();
@@ -33,6 +40,7 @@ fn main() {
     a_failed_decode_stops_the_round_trip();
     a_read_through_the_manager_allocates_a_fixed_count();
     a_read_of_a_client_allocates_a_fixed_count();
+    a_secure_read_allocates_a_fixed_count();
     a_publish_answer_allocates_a_fixed_count();
     the_first_drives_allocate_no_change_buffer();
     a_tick_of_the_kind_allocates_what_its_read_allocates();
@@ -44,6 +52,26 @@ fn sim() -> (Sim, env::clock::Clock, Rng) {
     let mut sim = Sim::new(sim::Config::default());
     let node = sim.node(sim::node::Config::default());
     (sim, node.clock(), node.entropy().rng())
+}
+
+fn a_second_route_of_the_crypto_panics() {
+    // SAFETY: the call panics before aws-lc takes its functions.
+    let panic =
+        std::panic::catch_unwind(|| unsafe { connector_opcua::bench::route_crypto() });
+    let panic = panic.expect_err("a second route panics");
+    let message = "aws-lc already has the functions of another call";
+    assert_eq!(panic.downcast_ref::<&str>(), Some(&message), "the panic");
+}
+
+/// The positive control of aws-lc: a `BIGNUM` is one block, and its free gives it back
+/// through the allocator.
+fn the_count_holds_the_allocations_of_aws_lc() {
+    // SAFETY: `BN_new` takes no argument.
+    let (number, count) = ALLOCATOR.count(|| unsafe { aws_lc_sys::BN_new() });
+    assert!(!number.is_null(), "aws-lc made the number");
+    assert_eq!(count, 1, "a BIGNUM");
+    // SAFETY: `number` is a live `BIGNUM` that nothing else holds.
+    unsafe { aws_lc_sys::BN_free(number) };
 }
 
 /// The positive control: the copy allocates one entry for each timer. The two loops
@@ -158,6 +186,15 @@ fn a_read_through_the_manager_allocates_a_fixed_count() {
 /// The allocations in the polls of reads 2 to 100 of `count` copies of `variable` by
 /// one client. The server runs on its own manager, outside the polls.
 fn client_reads(variable: client::Variable, count: usize) -> Vec<u64> {
+    reads_over(None, variable, count)
+}
+
+/// As [`client_reads`], over a channel in `mode`, or with no security for `None`.
+fn reads_over(
+    mode: Option<client::Mode>,
+    variable: client::Variable,
+    count: usize,
+) -> Vec<u64> {
     let mut sim = Sim::new(sim::Config::default());
     let node = sim.node(sim::node::Config::default());
     let run = move |node: sim::node::Node, _| async move {
@@ -180,8 +217,13 @@ fn client_reads(variable: client::Variable, count: usize) -> Vec<u64> {
             client.close().await;
             counts.split_off(1)
         };
-        let rng = node.entropy().rng();
-        client::Server::scope(node.clock(), node.net(), address, rng, body).await
+        let (clock, net, rng) = (node.clock(), node.net(), node.entropy().rng());
+        match mode {
+            Some(mode) => {
+                client::Server::secure(clock, net, address, rng, mode, body).await
+            }
+            None => client::Server::scope(clock, net, address, rng, body).await,
+        }
     };
     sim.run_on(&node, run).expect("the run ends")
 }
@@ -214,6 +256,16 @@ fn a_read_of_a_client_allocates_a_fixed_count() {
             counts,
             "reads 2 to 100 of {count} of {variable:?}"
         );
+    }
+}
+
+/// A read of one node over each mode allocates a fixed count, the blocks of aws-lc
+/// with them. `Sign` allocates as a read with no security does. `SignAndEncrypt` adds
+/// 4 in open62541 and 4 in aws-lc, which a binary that does not route aws-lc misses.
+fn a_secure_read_allocates_a_fixed_count() {
+    for (mode, each) in [(client::Mode::Sign, 5), (client::Mode::SignAndEncrypt, 13)] {
+        let counts = reads_over(Some(mode), client::Variable::Number, 1);
+        assert_eq!(counts, vec![each; 99], "reads 2 to 100 over {mode:?}");
     }
 }
 

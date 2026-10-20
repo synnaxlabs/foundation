@@ -8,6 +8,8 @@
 
 use std::alloc::{self, Layout};
 use std::ffi::c_void;
+#[cfg(feature = "sim")]
+use std::ffi::{c_char, c_int};
 use std::ptr;
 
 /// The alignment of each block, the `max_align_t` of each target, and the size of the
@@ -171,6 +173,53 @@ unsafe extern "C" fn connector_opcua_free(ptr: *mut c_void) {
     let (block, layout) = unsafe { block(ptr) };
     // SAFETY: `block` is a live block of `layout`, from the global allocator.
     unsafe { alloc::dealloc(block, layout) };
+}
+
+/// Makes aws-lc allocate through the global allocator of the binary, as open62541 does,
+/// so a counting allocator counts the blocks of aws-lc too. aws-lc then does not clear
+/// a block before it frees it.
+///
+/// # Safety
+///
+/// No block of aws-lc is live: call it before the first call of aws-lc in the process.
+/// A free of an older block reads a header that the block does not have.
+///
+/// # Panics
+///
+/// When aws-lc already has the functions of another call of
+/// `CRYPTO_set_mem_functions`.
+#[cfg(feature = "sim")]
+pub unsafe fn route_crypto() {
+    unsafe extern "C" fn crypto_malloc(
+        size: usize,
+        _: *const c_char,
+        _: c_int,
+    ) -> *mut c_void {
+        connector_opcua_malloc(size)
+    }
+    unsafe extern "C" fn crypto_realloc(
+        ptr: *mut c_void,
+        size: usize,
+        _: *const c_char,
+        _: c_int,
+    ) -> *mut c_void {
+        // SAFETY: aws-lc gives NULL or a live pointer of `crypto_malloc`.
+        unsafe { connector_opcua_realloc(ptr, size) }
+    }
+    unsafe extern "C" fn crypto_free(ptr: *mut c_void, _: *const c_char, _: c_int) {
+        // SAFETY: as in `crypto_realloc`.
+        unsafe { connector_opcua_free(ptr) }
+    }
+    // SAFETY: aws-lc keeps the three functions, which live for the process, and the
+    // caller ensures that no block of aws-lc is live.
+    let set = unsafe {
+        aws_lc_sys::CRYPTO_set_mem_functions(
+            Some(crypto_malloc),
+            Some(crypto_realloc),
+            Some(crypto_free),
+        )
+    };
+    assert!(set == 1, "aws-lc already has the functions of another call");
 }
 
 #[cfg(test)]

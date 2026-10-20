@@ -10,6 +10,8 @@ pub mod client;
 pub mod kind;
 pub mod value;
 
+pub use crate::alloc::route_crypto;
+
 use std::cell::Cell;
 use std::ffi::{CStr, CString, c_void};
 use std::future::{Future as _, poll_fn};

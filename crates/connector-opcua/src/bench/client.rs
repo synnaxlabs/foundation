@@ -15,11 +15,14 @@ use types::sample::Scalar;
 use types::time::Span;
 
 use super::PORT;
-use crate::client::Nodes;
+pub use crate::client::Mode;
 use crate::client::browse::Base;
+use crate::client::{Credentials, Nodes};
 use crate::connection;
 use crate::event;
 use crate::node::{Key, Name, Node};
+use crate::secure::{CLIENT, Policy, SERVER, START};
+use crate::server::Secure;
 use crate::unwind::caught;
 use crate::value::Value;
 
@@ -42,6 +45,18 @@ const SAMPLING: Span = Span::from_nanos(100_000_000);
 const NAME: &str = "SpikeData";
 /// The value of each variable.
 const DOUBLE: f64 = 1.5;
+/// The credentials of the server of a [`Server::secure`], which trusts [`CLIENT`].
+const SERVED: Credentials<'_> = Credentials {
+    certificate: SERVER.certificate,
+    key: SERVER.key,
+    trust: CLIENT.certificate,
+};
+/// The credentials of a client of a [`Server::secure`], which trusts [`SERVER`].
+const CLIENT_SIDE: Credentials<'_> = Credentials {
+    certificate: CLIENT.certificate,
+    key: CLIENT.key,
+    trust: SERVER.certificate,
+};
 /// The sessions of a [`Server`].
 const SESSIONS: u16 = 4;
 /// The `MaxNodesPerRead` of a [`Server`]: a read of more nodes takes more requests.
@@ -68,6 +83,26 @@ pub struct Server {
     /// Gives the next value of each client. The loop of a client sets the random
     /// numbers of open62541 on its thread, which the server also draws from.
     rng: RefCell<Rng>,
+    /// The mode of each channel, or `None` for the policy `None`.
+    mode: Option<Mode>,
+}
+
+/// What a [`Server`] serves.
+struct Served {
+    /// The value of each variable other than the counters.
+    double: f64,
+    /// The count of the counters of [`Server::counting`].
+    counters: usize,
+    /// The mode of each channel of [`Server::secure`].
+    mode: Option<Mode>,
+}
+
+impl Served {
+    const PLAIN: Self = Self {
+        double: DOUBLE,
+        counters: 0,
+        mode: None,
+    };
 }
 
 impl Server {
@@ -95,7 +130,30 @@ impl Server {
         rng: Rng,
         body: impl AsyncFnOnce(&Self) -> T,
     ) -> T {
-        Self::serve(clock, net, address, rng, DOUBLE, 0, body).await
+        Self::serve(clock, net, address, rng, Served::PLAIN, body).await
+    }
+
+    /// As [`Server::scope`], with channels only in `mode` under `Basic256Sha256`, on
+    /// test certificates of the crate. The server and each client of
+    /// [`Server::connect`] read a wall time from 2001-01-01, in the window of the
+    /// certificates.
+    ///
+    /// # Panics
+    ///
+    /// As [`Server::scope`].
+    pub async fn secure<T>(
+        clock: Clock,
+        net: Net,
+        address: IpAddr,
+        rng: Rng,
+        mode: Mode,
+        body: impl AsyncFnOnce(&Self) -> T,
+    ) -> T {
+        let served = Served {
+            mode: Some(mode),
+            ..Served::PLAIN
+        };
+        Self::serve(clock, net, address, rng, served, body).await
     }
 
     /// As [`Server::scope`], with `counters` more Double variables for
@@ -113,23 +171,30 @@ impl Server {
         counters: usize,
         body: impl AsyncFnOnce(&Self) -> T,
     ) -> T {
-        Self::serve(clock, net, address, rng, DOUBLE, counters, body).await
+        let served = Served {
+            counters,
+            ..Served::PLAIN
+        };
+        Self::serve(clock, net, address, rng, served, body).await
     }
 
-    /// As [`Server::counting`], with `double` as the value of each variable other than
-    /// the counters.
+    /// Serves `served` as [`Server::scope`] and its siblings do.
     async fn serve<T>(
         clock: Clock,
         net: Net,
         address: IpAddr,
         mut rng: Rng,
-        double: f64,
-        counters: usize,
+        served: Served,
         body: impl AsyncFnOnce(&Self) -> T,
     ) -> T {
+        let Served {
+            double,
+            counters,
+            mode,
+        } = served;
         let local = SocketAddr::new(address, PORT);
         let manager = connection::Manager::listening(
-            event::Time::monotonic(Clock::clone(&clock)),
+            time(&clock, mode),
             Net::clone(&net),
             local,
             u32::from(SESSIONS),
@@ -141,6 +206,7 @@ impl Server {
             net,
             url: CString::new(format!("opc.tcp://{local}")).expect("no NUL"),
             rng: RefCell::new(rng),
+            mode,
         };
         let add = |server: &mut crate::server::Server| {
             server.add_scalar(&VALUE, Value::F64(double));
@@ -157,15 +223,22 @@ impl Server {
             }
         };
         let body = caught(async { body(&this).await });
-        let value =
-            crate::server::Server::serve(manager, SESSIONS, None, add, body).await;
+        let modes = mode.map(|mode| [mode]);
+        let secure = modes.as_ref().map(|modes| Secure {
+            credentials: &SERVED,
+            policies: &[Policy::Basic256Sha256],
+            modes,
+        });
+        let serve = crate::server::Server::serve;
+        let value = serve(manager, SESSIONS, secure.as_ref(), add, body).await;
         let value = value.expect("the listener of a bench does not fail");
         value.unwrap_or_else(|panic| panic::resume_unwind(panic))
     }
 
     /// Connects a client to the server, on its own connection manager, whose reads
     /// each read `count` copies of a [`Variable`], in one request while they number at
-    /// most [`PER_READ`] and fit one message of the session.
+    /// most [`PER_READ`] and fit one message of the session, in the mode of a
+    /// [`Server::secure`].
     ///
     /// # Panics
     ///
@@ -178,7 +251,7 @@ impl Server {
     /// memory.
     pub async fn connect(&self, count: usize) -> Client {
         let rng = &mut Rng::from_seed(self.rng.borrow_mut().next_u64());
-        let time = event::Time::monotonic(Clock::clone(&self.clock));
+        let time = time(&self.clock, self.mode);
         let net = Net::clone(&self.net);
         let connect = crate::client::Client::connect(
             time,
@@ -186,7 +259,7 @@ impl Server {
             net,
             rng,
             &self.url,
-            None,
+            self.mode.map(|mode| (&CLIENT_SIDE, mode)),
             future::pending(),
         );
         let session = match connect.await {
@@ -195,9 +268,7 @@ impl Server {
                 panic!("a connect failed: {status:?}")
             }
             Err(crate::client::Error::Refused(refusal)) => {
-                panic!(
-                    "invariant: a client with no credentials refuses none: {refusal}"
-                )
+                panic!("invariant: the test credentials are valid: {refusal}")
             }
         };
         let nodes = |node: Node| {
@@ -222,6 +293,16 @@ impl std::fmt::Debug for Server {
         f.debug_struct("Server")
             .field("url", &self.url)
             .finish_non_exhaustive()
+    }
+}
+
+/// The time of a loop of a [`Server`] of `mode`: a wall time from [`START`], in the
+/// window of the certificates, when it is secure.
+fn time(clock: &Clock, mode: Option<Mode>) -> event::Time {
+    let clock = Clock::clone(clock);
+    match mode {
+        Some(_) => event::Time::since(clock, START),
+        None => event::Time::monotonic(clock),
     }
 }
 
@@ -363,7 +444,7 @@ mod tests {
     use sim::{Sim, node};
     use types::time::Span;
 
-    use super::{PORT, Server, Variable};
+    use super::{Mode, PORT, Server, Variable};
     use crate::peer::session;
     use crate::unwind::caught;
 
@@ -540,10 +621,29 @@ mod tests {
     fn a_read_of_another_value_panics_with_it() {
         let result = run(async |node| {
             let (clock, net, address) = (node.clock(), node.net(), node.addresses()[0]);
-            Server::serve(clock, net, address, node.entropy().rng(), 2.5, 0, read)
+            let served = super::Served {
+                double: 2.5,
+                ..super::Served::PLAIN
+            };
+            Server::serve(clock, net, address, node.entropy().rng(), served, read)
                 .await;
         });
         assert_eq!(result, panicked("read 2.5"));
+    }
+
+    /// The server offers one endpoint, in its mode, so a client in another mode or
+    /// with no security does not connect.
+    #[test]
+    fn a_client_reads_over_each_mode_of_a_secure_server() {
+        for mode in [Mode::Sign, Mode::SignAndEncrypt] {
+            let result = run(async move |node| {
+                let (clock, net, address) =
+                    (node.clock(), node.net(), node.addresses()[0]);
+                let rng = node.entropy().rng();
+                Server::secure(clock, net, address, rng, mode, read).await;
+            });
+            assert_eq!(result, Ok(()), "{mode:?}");
+        }
     }
 
     #[test]
