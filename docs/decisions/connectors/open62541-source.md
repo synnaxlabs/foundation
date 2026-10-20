@@ -380,9 +380,11 @@
   the exchange only after it fills the block to its end. The exchange,
   `sendSymmetricEncodingCallback` (`ua_securechannel.c:506`), sends the chunk with
   `final` false, and only `UA_MessageContext_finish` (line 581) sets `final`. A send
-  with no exchange (OPN, HEL) fails the encode of a part and frees the buffer through
-  `freeNetworkBuffer` (`ua_securechannel.c` lines 329 and 376,
-  `client/ua_client_connect.c` lines 547 and 560). So the free of a sent buffer
+  with no exchange (OPN, HEL, and the ACK and RHE of a server) fails the encode of a
+  part and frees the buffer through `freeNetworkBuffer` (`ua_securechannel.c` lines 329
+  and 376, `client/ua_client_connect.c` lines 547 and 560, `server/ua_server_binary.c`
+  lines 288, 1021, and 1034). ERR (`ua_securechannel.c:139-155`) sends a block of its
+  exact size, so it holds no byte past `length`. So the free of a sent buffer
   (`shim_send_free`) clears only its `length` (`connector_opcua_free_written`) when byte
   3 is `F`, and the whole block for each other byte. Each other free of a network buffer
   (`cm_free_buffer`) clears the whole block. A chunk that is not final filled its block
@@ -405,7 +407,9 @@
   invariant and the clear by byte 3, 2026-10-20 16:45 UTC,
   https://github.com/synnaxlabs/foundation/pull/3622#issuecomment-6296154748; the check
   of the sent `length`, 2026-10-20 17:11 UTC,
-  https://github.com/synnaxlabs/foundation/pull/3622#issuecomment-6296658333). No
+  https://github.com/synnaxlabs/foundation/pull/3622#issuecomment-6296658333; the sends
+  with no exchange, 2026-10-20 17:26 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3622#issuecomment-6296960457). No
   pointer crosses between the libc allocator and these: the objects of the copy,
   `shim.c`, and `server.c` call no libc function that gives or takes a heap pointer. Our
   change makes `UA_CertificateUtils_getThumbprint` of
