@@ -5,18 +5,14 @@ use std::fmt;
 use std::sync::Arc;
 
 use control::lease::Lease;
-use types::authority::Authority;
 use types::frame::key_set::KeySet;
-use types::name::Name;
 use types::time::Span;
 
 /// What a writer opens with.
 #[derive(Clone, Debug)]
 pub struct Writer {
-    /// The subject that opened the writer.
-    pub subject: Name,
-    /// The writer's authority. The home does not cap it by access yet.
-    pub authority: Authority,
+    /// The writer as the gate ranks it. The home records it when it takes control.
+    pub holder: control::Writer,
     /// The control lease, or `None` for no limit. It runs on each index apart: from
     /// when the writer takes control there, and again from each group applied or
     /// lost there. When it runs out, the writer loses control of that index.

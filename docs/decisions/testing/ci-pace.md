@@ -52,3 +52,43 @@
   `laptop.monitor`:
   https://github.com/synnaxlabs/foundation/pull/3151#issuecomment-6251116435. The person
   approved `ci.yaml` on GitHub at `1697708a8`.
+  Amended (the person, through `laptop.monitor`, recorded in #3418 at
+  2026-10-19T19:46:19Z: "Let's do it ASAP"; the plain test paths and the test targets
+  with no harness, the plan, 2026-10-19T19:54:31Z,
+  https://github.com/synnaxlabs/foundation/issues/3418#issuecomment-6275974482; the
+  job `os`, the third part, and ARM, `laptop.monitor`, recorded at
+  2026-10-19T20:12:18Z,
+  https://github.com/synnaxlabs/foundation/issues/3418#issuecomment-6276305229): the
+  job `check` runs three parts on each OS at the same time: `lint` (Format, Clippy,
+  Layers, Globals, Skips, Oracles), `test` (`cargo xtask test nextest`, Root tests),
+  and `serial` (`cargo xtask test serial`). The job `os` gives the required checks
+  `check`, `macos`, and `windows`, each of which passes when each part of `check` on
+  each OS passed. `cargo xtask test nextest` runs `cargo nextest run` with no retry and
+  no fail-fast. `cargo xtask test serial` runs `cargo test --doc`, and `cargo test` on
+  each `test` or `bench` target that `cargo test` runs and whose root has a `main`, as
+  `cargo xtask skips` reads them, other than in a package that `--exclude` leaves out:
+  nextest runs such a binary to list its tests, and the binary lists none or prints a
+  table that nextest cannot read. The test targets of these took 260 s on Linux, 302 s
+  on macOS, and 183 s on Windows in queue run 39308250221, over the 3 min that
+  `laptop.monitor` gave for a third part. The job `test` of `arm.yaml` runs both parts,
+  one after the other. Each skipped test of the lists of LINUX CI is a full test path
+  that nextest leaves out with `test(=<path>)`: nextest 0.9.146 skips no test with
+  `--exact --skip`. In queue run 39308250221, `check` took 32 min, `macos` 35 min,
+  `windows` 28 min, and the `test` of ARM 22 min, and on Linux `cargo test` ran 173 test
+  binaries and 40 doc-test sets one after another.
+  Amended (`laptop.monitor`, recorded at 2026-10-20T01:31:43Z,
+  https://github.com/synnaxlabs/foundation/issues/3448#issuecomment-6281216123; the
+  jobs `parts` and `test` and their skip, the plan, 2026-10-20T00:42:23Z,
+  https://github.com/synnaxlabs/foundation/issues/3448#issuecomment-6280595198): ARM
+  runs the two parts at the same time. The matrix job `parts` of `arm.yaml` runs `cargo
+  xtask test nextest` and `cargo xtask test serial` on two `ubuntu-24.04-arm` runners,
+  and the job `test`, on `ubuntu-24.04`, gives the required check `test`, which passes
+  when both parts passed. Both skip when the filter found no change of code. Supersedes
+  "The job `test` of `arm.yaml` runs both parts, one after the other." of
+  https://github.com/synnaxlabs/foundation/issues/3418#issuecomment-6276305229, and the
+  name `test` of the ARM job in ARM RUNNER. In run 39335833233 the one job took 21 min.
+  In run 39351739537, `nextest` took 12.7 min (11762 passed, 12 skipped), `serial` 8.2
+  min (79 test targets with no harness, 235 doc tests), and the workflow 13.1 min; in
+  run 39349284591, 13.1, 11.1, and 13.4 min. No part of these three runs found a cache.
+  In run 39353435114, `nextest` restored its cache and took 10.2 min. Each part builds
+  on its own runner, and ARM keeps a cache entry for each part in place of one.

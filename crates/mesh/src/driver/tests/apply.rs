@@ -872,7 +872,7 @@ fn an_apply_of_a_follower_counts_a_follower_that_restarted() {
 
 // The cards of voters 2 and 3 have addresses where no node answers, so the puts
 // wait in their dials. The apply runs in a task of its own, so only the stop wakes
-// it, and the stop falls between two timers of the dials, which tick each 250 ms.
+// it, and the stop falls between two wakes of the dials, which come each second.
 #[test]
 fn an_apply_whose_puts_wait_gives_stopped_as_soon_as_the_group_stops() {
     let entries = solo_stored(|node, tasks| async move {
@@ -898,7 +898,9 @@ fn an_apply_whose_puts_wait_gives_stopped_as_soon_as_the_group_stops() {
 }
 
 // The puts on voters 2 and 3 wait in their dials until the deadline, so the apply
-// waits in the group before its `Quorum`.
+// waits in the group before its `Quorum`. A waker left in the group only takes memory
+// until the next commit, change of leader, or stop. tests/memory
+// `dropped_calls_of_the_spec_hold_no_heap` shows it through `spec`.
 #[test]
 fn an_apply_that_ends_frees_its_waker_in_the_group() {
     solo(|node, tasks| async move {
@@ -957,6 +959,7 @@ fn an_apply_whose_store_fails_a_read_for_a_peer_names_the_error_of_the_store() {
     cluster.node(1).fail_file(&path, Operation::ReadAt);
     cluster.change(1, base(), &definitions);
     cluster.run(seconds(5));
+    let shown = path.display().to_string();
     let cause = files::Error::Io {
         path,
         operation: Operation::ReadAt,
@@ -976,7 +979,7 @@ fn an_apply_whose_store_fails_a_read_for_a_peer_names_the_error_of_the_store() {
         quorum.to_string(),
         format!(
             "1 of 2 voters hold the chunks of the spec change, not a majority; \
-             plant.node2: its put failed: read_at of {BLOB}/{root} failed with OS error 5"
+             plant.node2: its put failed: read_at of {shown} failed with OS error 5"
         )
     );
 }

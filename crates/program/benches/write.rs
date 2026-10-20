@@ -101,6 +101,7 @@ impl Shape {
             key: channel::Key::from_u128(key),
             data_type,
             name: format!("c{key}").parse().expect("a valid name"),
+            index: 0,
         };
         let series = u128::try_from(self.series).expect("few");
         std::iter::once(place(1, Type::Scalar(Scalar::Stamp)))
@@ -113,9 +114,9 @@ impl Shape {
         8 * usize::try_from(self.samples).expect("few")
     }
 
-    /// The bytes of the head, the ends, and the body of a frame.
+    /// The bytes of the head, the ends, the count, and the body of a frame.
     fn total(&self) -> usize {
-        11 + 8 * self.series + self.series * self.len()
+        7 + 8 * self.series + 4 + self.series * self.len()
     }
 }
 
@@ -200,7 +201,7 @@ async fn answer(session: transport::Session, node: sim::node::Node) {
             Write::decode(first).expect("a write").body()
         })
         .await;
-        start(&mut write, &places, 0, places.len()).await;
+        start(&mut write, &places, places.len()).await;
         let mut seq = 0;
         for frame in 1..=(WARMUP + ROUNDS) * FRAMES {
             let mut got = 0;
@@ -210,6 +211,7 @@ async fn answer(session: transport::Session, node: sim::node::Node) {
             }
             let reply = Reply::Outcome {
                 frame: u64::try_from(frame).expect("a frame"),
+                group: 0,
                 outcome: Outcome::Taken {
                     range: Range {
                         seq,

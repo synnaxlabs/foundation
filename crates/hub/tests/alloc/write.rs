@@ -105,13 +105,12 @@ async fn write(
     let head = Head {
         time: Time::Node,
         form: Form::Raw,
-        count: 1,
         series: 2,
     };
     let mut body = [0; 16];
     for n in 0..WARM + COUNTED {
         body[8..].copy_from_slice(&n.to_le_bytes());
-        stream.frame(head, &[(0, 8), (1, 16)], &body).await;
+        stream.frame(head, &[1], &[(0, 8), (1, 16)], &body).await;
         progress.sent.fetch_add(1, Ordering::Relaxed);
         outcome(&mut stream, n).await;
         progress.taken.fetch_add(1, Ordering::Relaxed);
@@ -123,7 +122,7 @@ async fn outcome(stream: &mut Stream, n: i64) {
     loop {
         match stream.reply().await {
             Reply::Stored { .. } => {}
-            Reply::Outcome { frame, outcome } => {
+            Reply::Outcome { frame, outcome, .. } => {
                 let seq = u64::try_from(n).expect("a seq");
                 let taken = wire::hub::write::Outcome::Taken {
                     range: types::frame::Range { seq, count: 1 },

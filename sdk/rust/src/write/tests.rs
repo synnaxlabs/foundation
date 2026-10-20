@@ -2,6 +2,7 @@
 // task of the client's thread, whose `program::Writer` needs a node. The tests of
 // `crates/node/tests/it/sdk.rs` run the task against a node process.
 
+use std::sync::mpsc as std_mpsc;
 use std::thread::{self, JoinHandle};
 
 use types::channel;
@@ -25,11 +26,20 @@ fn spawn<T: Send + 'static>(
     thread::spawn(serve)
 }
 
+/// The next open on `opened`, which is the open of a writer.
+fn received(opened: &mut mpsc::UnboundedReceiver<crate::Open>) -> Open {
+    let Some(crate::Open::Write(open)) = opened.blocking_recv() else {
+        panic!("the open of a writer");
+    };
+    open
+}
+
 fn place(at: u128, scalar: Scalar, name: &str) -> Place {
     Place {
         key: channel::Key::from_u128(at),
         data_type: Type::Scalar(scalar),
         name: name.parse().unwrap(),
+        index: 0,
     }
 }
 
@@ -54,14 +64,14 @@ fn writer(outcome: Outcome) -> (Writer, JoinHandle<Sent>) {
 
 /// A writer of `channels`, served as [`writer`] serves it.
 fn writer_of(channels: &[&str], outcome: Outcome) -> (Writer, JoinHandle<Sent>) {
-    let (opens, mut opened) = mpsc::unbounded_channel::<Open>();
+    let (opens, mut opened) = mpsc::unbounded_channel();
     let served = spawn(move || {
         let Open {
             opened: answer,
             mut calls,
             written,
             ..
-        } = opened.blocking_recv().unwrap();
+        } = received(&mut opened);
         answer.send(Ok((places(), 0, BYTES_MAX))).unwrap();
         let mut sent = Vec::new();
         while let Some(call) = calls.blocking_recv() {
@@ -93,9 +103,9 @@ fn writer_of(channels: &[&str], outcome: Outcome) -> (Writer, JoinHandle<Sent>) 
 
 /// A writer of `channels` whose open gives `places()` with the index at node place 0.
 fn opened(channels: &[&str]) -> Writer {
-    let (opens, mut opened) = mpsc::unbounded_channel::<Open>();
+    let (opens, mut opened) = mpsc::unbounded_channel();
     let served = spawn(move || {
-        let open = opened.blocking_recv().unwrap();
+        let open = received(&mut opened);
         open.opened.send(Ok((places(), 0, BYTES_MAX))).unwrap();
         open
     });
@@ -127,10 +137,10 @@ fn a_writer_moves_between_threads() {
 
 #[test]
 fn an_open_sends_its_config_and_gives_its_channels_in_its_order_then_the_index() {
-    let (opens, mut opened) = mpsc::unbounded_channel::<Open>();
+    let (opens, mut opened) = mpsc::unbounded_channel();
     let lease = Span::from_nanos(5);
     let served = spawn(move || {
-        let open = opened.blocking_recv().unwrap();
+        let open = received(&mut opened);
         open.opened.send(Ok((places(), 0, BYTES_MAX))).unwrap();
         open.config
     });
@@ -141,8 +151,11 @@ fn an_open_sends_its_config_and_gives_its_channels_in_its_order_then_the_index()
     };
     let writer = Writer::open(&opens, &Arc::default(), config.clone()).unwrap();
     let node = places();
-    let ordered = [node[2].clone(), node[1].clone(), node[0].clone()];
-    assert_eq!(writer.places(), ordered);
+    let at = |n: usize| Place {
+        index: 2,
+        ..node[n].clone()
+    };
+    assert_eq!(writer.places(), [at(2), at(1), at(0)]);
     assert_eq!(writer.index(), 2);
     let sent = served.join().unwrap();
     assert_eq!(
@@ -158,7 +171,11 @@ fn an_open_sends_its_config_and_gives_its_channels_in_its_order_then_the_index()
 #[test]
 fn a_writer_that_names_the_index_gives_it_at_its_place() {
     let writer = opened(&["count", "time"]);
-    assert_eq!(writer.places(), [places()[1].clone(), places()[0].clone()]);
+    let at = |n: usize| Place {
+        index: 1,
+        ..places()[n].clone()
+    };
+    assert_eq!(writer.places(), [at(1), at(0)]);
     assert_eq!(writer.index(), 1);
 }
 
@@ -166,15 +183,16 @@ fn a_writer_that_names_the_index_gives_it_at_its_place() {
 fn a_writer_that_names_a_channel_twice_gives_it_at_each_place() {
     let writer = opened(&["time", "count", "time", "count"]);
     let [time, count, _] = places().try_into().unwrap();
+    let (time, count) = (Place { index: 0, ..time }, Place { index: 0, ..count });
     assert_eq!(writer.places(), [time.clone(), count.clone(), time, count]);
     assert_eq!(writer.index(), 0);
 }
 
 #[test]
 fn an_open_gives_the_error_of_the_node() {
-    let (opens, mut opened) = mpsc::unbounded_channel::<Open>();
+    let (opens, mut opened) = mpsc::unbounded_channel();
     let served = spawn(move || {
-        let open = opened.blocking_recv().unwrap();
+        let open = received(&mut opened);
         let refused = Error::Stream(program::Error::Unanswered);
         open.opened.send(Err(refused)).unwrap();
     });
@@ -193,11 +211,11 @@ fn an_open_whose_thread_ended_gives_closed_after_a_close_else_panicked() {
     for (closed, error) in LOST {
         let closed = Arc::new(AtomicBool::new(closed));
         let config = Config::new(vec!["count".parse().unwrap()]);
-        let (opens, opened) = mpsc::unbounded_channel::<Open>();
+        let (opens, opened) = mpsc::unbounded_channel();
         drop(opened);
         let open = Writer::open(&opens, &closed, config.clone()).map(drop);
         assert_eq!(open, Err(error.clone()));
-        let (opens, mut opened) = mpsc::unbounded_channel::<Open>();
+        let (opens, mut opened) = mpsc::unbounded_channel();
         let served = spawn(move || drop(opened.blocking_recv()));
         let open = Writer::open(&opens, &closed, config).map(drop);
         assert_eq!(open, Err(error));
@@ -387,9 +405,9 @@ fn a_write_of_series_over_bytes_max_gives_too_large_and_copies_nothing() {
 
 #[test]
 fn a_write_gives_the_error_of_the_node() {
-    let (opens, mut opened) = mpsc::unbounded_channel::<Open>();
+    let (opens, mut opened) = mpsc::unbounded_channel();
     let served = spawn(move || {
-        let open = opened.blocking_recv().unwrap();
+        let open = received(&mut opened);
         open.opened.send(Ok((places(), 0, BYTES_MAX))).unwrap();
         let mut calls = open.calls;
         let Some(Call::Write { frame, .. }) = calls.blocking_recv() else {
@@ -413,9 +431,9 @@ fn a_write_gives_the_error_of_the_node() {
 #[test]
 fn each_call_whose_task_ended_gives_closed_after_a_close_else_panicked() {
     for (closed, error) in LOST {
-        let (opens, mut opened) = mpsc::unbounded_channel::<Open>();
+        let (opens, mut opened) = mpsc::unbounded_channel();
         let served = spawn(move || {
-            let open = opened.blocking_recv().unwrap();
+            let open = received(&mut opened);
             open.opened.send(Ok((places(), 0, BYTES_MAX))).unwrap();
             let mut calls = open.calls;
             drop(calls.blocking_recv());
@@ -434,12 +452,46 @@ fn each_call_whose_task_ended_gives_closed_after_a_close_else_panicked() {
     }
 }
 
+/// The task drops `written` before `calls`, as at the close of the client, with the
+/// call still in `calls`.
+#[test]
+fn a_call_after_an_answer_that_did_not_come_gives_its_error_again() {
+    for (closed, error) in LOST {
+        let (opens, mut opened) = mpsc::unbounded_channel();
+        let (again, called_again) = std_mpsc::channel::<()>();
+        let served = spawn(move || {
+            let open = received(&mut opened);
+            open.opened.send(Ok((places(), 0, BYTES_MAX))).unwrap();
+            while open.calls.is_empty() {
+                thread::yield_now();
+            }
+            drop(open.written);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "the thread waits for the test"
+            )]
+            called_again.recv().unwrap();
+            drop(open.calls);
+        });
+        let config = Config::new(vec!["count".parse().unwrap()]);
+        let closed = Arc::new(AtomicBool::new(closed));
+        let mut writer = Writer::open(&opens, &closed, config).unwrap();
+        let lost = Err(error.clone());
+        assert_eq!(writer.write(&[(0, Value::I64(1))]), lost);
+        assert_eq!(writer.write(&[(0, Value::I64(1))]), lost);
+        assert_eq!(writer.write_series(1, &[]), lost);
+        assert_eq!(writer.close(), Err(error));
+        again.send(()).unwrap();
+        served.join().unwrap();
+    }
+}
+
 #[test]
 fn a_close_whose_task_ended_before_its_answer_gives_closed_after_a_close() {
     for (closed, error) in LOST {
-        let (opens, mut opened) = mpsc::unbounded_channel::<Open>();
+        let (opens, mut opened) = mpsc::unbounded_channel();
         let served = spawn(move || {
-            let open = opened.blocking_recv().unwrap();
+            let open = received(&mut opened);
             open.opened.send(Ok((places(), 0, BYTES_MAX))).unwrap();
             let mut calls = open.calls;
             drop(calls.blocking_recv());
@@ -457,7 +509,9 @@ fn a_close_whose_task_ended_before_its_answer_gives_closed_after_a_close() {
 fn client(after: impl FnOnce(mpsc::Receiver<Call>) + Send + 'static) -> crate::Client {
     let started = crate::Client::start(|_, outcome, ended, mut opens| async move {
         outcome.send(Ok(())).unwrap();
-        let open = opens.recv().await.unwrap();
+        let crate::Open::Write(open) = opens.recv().await.unwrap() else {
+            panic!("the client opens a writer");
+        };
         open.opened.send(Ok((places(), 0, BYTES_MAX))).unwrap();
         after(open.calls);
         drop(ended.await);

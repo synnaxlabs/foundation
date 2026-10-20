@@ -825,27 +825,106 @@ _Static_assert(sizeof(UA_MessageSecurityMode) == sizeof(int) &&
                    UA_MESSAGESECURITYMODE_SIGNANDENCRYPT == 3,
                "UA_MessageSecurityMode changed");
 
+/* Why `shim_client_secure` refuses the credentials. `Refusal` of `ffi.rs` holds the
+ * same layout and values. */
+typedef enum {
+    SHIM_REFUSAL_NONE,
+    SHIM_REFUSAL_CERTIFICATE,
+    SHIM_REFUSAL_KEY,
+    SHIM_REFUSAL_MISMATCH,
+    SHIM_REFUSAL_URI,
+    SHIM_REFUSAL_TIME,
+    SHIM_REFUSAL_EMPTY,
+    SHIM_REFUSAL_INVALID,
+    SHIM_REFUSAL_TRAILING,
+    SHIM_REFUSAL_LINE
+} shim_refusal_kind;
+
+typedef struct {
+    shim_refusal_kind kind;
+    size_t number;
+} shim_refusal;
+
+_Static_assert(sizeof(shim_refusal_kind) == sizeof(int) &&
+                   offsetof(shim_refusal, number) == sizeof(size_t) &&
+                   sizeof(shim_refusal) == 2 * sizeof(size_t) &&
+                   SHIM_REFUSAL_LINE == 9,
+               "shim_refusal changed");
+
+/* Writes `kind` and `number` to `refusal` and gives `status`. */
+static UA_StatusCode refuse_with(shim_refusal *refusal, shim_refusal_kind kind,
+                                 size_t number, UA_StatusCode status) {
+    *refusal = (shim_refusal){kind, number};
+    return status;
+}
+
+/* Gives the refusal of the policies for `status`. */
+static shim_refusal_kind policy_refusal(UA_StatusCode status) {
+    if(status == UA_STATUSCODE_BADCERTIFICATEINVALID)
+        return SHIM_REFUSAL_CERTIFICATE;
+    if(status == UA_STATUSCODE_BADINVALIDARGUMENT)
+        return SHIM_REFUSAL_KEY;
+    return SHIM_REFUSAL_NONE;
+}
+
 /* Makes `client`, which has not connected, ask for `mode` with the three policies on
  * the certificate and key of `security`, with the application URI of the certificate,
  * and trust only the certificates of `security`. With no policy URI, open62541 takes
  * the endpoint of the highest security level that the server offers in `mode`.
- * Gives `BadCertificateInvalid` when the certificate does not parse or holds no RSA
- * key, `BadInvalidArgument` when the key does not parse, `BadSecurityChecksFailed`
- * when they do not match, `BadCertificateUriInvalid` when the certificate holds no
- * URI, and `BadInternalError` when the trust is empty or a certificate of it does not
- * parse. */
+ * Refuses, in order, a certificate that does not parse or holds no RSA key, a key that
+ * does not parse, a key of another certificate, a time of the loop of `client`
+ * outside the validity window of the certificate, a trust that does not load, and a
+ * certificate with no URI. Writes the refusal to `refusal`, else `SHIM_REFUSAL_NONE`,
+ * and gives a status other than `Good` for a refusal or a failure. A check that fails
+ * on another status, such as out of memory, gives it with no refusal, but where a
+ * check gives one status for out of memory and its cause, it refuses, other than the
+ * time check, which gives `BadCertificateInvalid` when its load of the certificate
+ * fails. */
 UA_StatusCode shim_client_secure(UA_Client *client, UA_MessageSecurityMode mode,
-                                 const shim_security *security) {
+                                 const shim_security *security,
+                                 shim_refusal *refusal) {
+    *refusal = (shim_refusal){SHIM_REFUSAL_NONE, 0};
     UA_ClientConfig *config = UA_Client_getConfig(client);
     UA_StatusCode status = shim_add_policies(&config->securityPolicies,
                                              &config->securityPoliciesSize, security,
                                              config->logging);
-    if(status == UA_STATUSCODE_GOOD)
-        status = UA_CertificateUtils_checkKeyPair(&security->certificate,
-                                                  &security->key);
+    if(status != UA_STATUSCODE_GOOD)
+        return refuse_with(refusal, policy_refusal(status), 0, status);
+    status = UA_CertificateUtils_checkKeyPair(&security->certificate, &security->key);
+    if(status == UA_STATUSCODE_BADSECURITYCHECKSFAILED)
+        return refuse_with(refusal, SHIM_REFUSAL_MISMATCH, 0, status);
+    if(status != UA_STATUSCODE_GOOD)
+        return status;
+    UA_EventLoop *el = config->eventLoop;
+    status = UA_CertificateUtils_checkTime(&security->certificate,
+                                           el->dateTime_now(el));
+    if(status == UA_STATUSCODE_BADCERTIFICATETIMEINVALID)
+        return refuse_with(refusal, SHIM_REFUSAL_TIME, 0, status);
+    if(status != UA_STATUSCODE_GOOD)
+        return status;
+    size_t number = 0;
+    switch(UA_CertificateUtils_checkTrust(&security->trust, &number)) {
+    case UA_TRUSTLOAD_GOOD:
+        break;
+    case UA_TRUSTLOAD_EMPTY:
+        return refuse_with(refusal, SHIM_REFUSAL_EMPTY, 0,
+                           UA_STATUSCODE_BADINTERNALERROR);
+    case UA_TRUSTLOAD_INVALID:
+        return refuse_with(refusal, SHIM_REFUSAL_INVALID, number,
+                           UA_STATUSCODE_BADINTERNALERROR);
+    case UA_TRUSTLOAD_TRAILING:
+        return refuse_with(refusal, SHIM_REFUSAL_TRAILING, number,
+                           UA_STATUSCODE_BADINTERNALERROR);
+    case UA_TRUSTLOAD_LINE:
+        return refuse_with(refusal, SHIM_REFUSAL_LINE, number,
+                           UA_STATUSCODE_BADINTERNALERROR);
+    case UA_TRUSTLOAD_NOMEMORY:
+        return UA_STATUSCODE_BADOUTOFMEMORY;
+    }
     UA_String uri = UA_STRING_NULL;
-    if(status == UA_STATUSCODE_GOOD)
-        status = UA_CertificateUtils_getApplicationUri(&security->certificate, &uri);
+    status = UA_CertificateUtils_getApplicationUri(&security->certificate, &uri);
+    if(status == UA_STATUSCODE_BADCERTIFICATEURIINVALID)
+        return refuse_with(refusal, SHIM_REFUSAL_URI, 0, status);
     if(status != UA_STATUSCODE_GOOD)
         return status;
     config->securityMode = mode;

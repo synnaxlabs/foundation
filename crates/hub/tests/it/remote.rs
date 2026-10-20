@@ -130,7 +130,8 @@ fn remote_sized<H, R>(
         )
         .await;
         let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
-        let mut test = Test::new(node.clone(), tasks, layout, POOL, Some(region)).await;
+        let mut test =
+            Test::new(node.clone(), NODE, tasks, layout, POOL, Some(region)).await;
         test.sync().await;
         test.set_home(TIME, OTHER).await;
         reader(test, Arc::clone(&kept)).await;
@@ -170,7 +171,7 @@ async fn hub_home<W>(
     W: Future<Output = ()>,
 {
     let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
-    let mut test = Test::new(node, tasks.clone(), layout, POOL, None).await;
+    let mut test = Test::new(node, NODE, tasks.clone(), layout, POOL, None).await;
     test.sync().await;
     let test = Rc::new(test);
     tasks.spawn(serve_each(

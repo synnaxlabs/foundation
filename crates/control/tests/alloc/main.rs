@@ -7,6 +7,7 @@
 use control::lease::Lease;
 use control::{Gate, Key, Writer};
 use types::authority::Authority;
+use types::node;
 use types::time::{Monotonic, Span};
 
 #[global_allocator]
@@ -24,6 +25,7 @@ fn main() {
     let writer = |subject: &str| Writer {
         subject: subject.parse().expect("valid name"),
         authority: Authority(100),
+        via: node::Key::from_u128(1),
     };
     let lease = Lease::new(Span::SECOND).expect("positive lease");
     let mut gate = Gate::new();

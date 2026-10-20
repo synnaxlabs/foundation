@@ -148,7 +148,8 @@ async fn home(
     synced: bool,
 ) -> Test {
     let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
-    let mut test = Test::new(node.clone(), tasks.clone(), layout, pool, None).await;
+    let mut test =
+        Test::new(node.clone(), NODE, tasks.clone(), layout, pool, None).await;
     if synced {
         test.sync().await;
     }
@@ -727,9 +728,9 @@ fn stops_a_request_whose_body_is_over_the_room_of_the_hub() {
     );
     assert_eq!(
         over.to_string(),
-        "16777216 bytes of a body or of the ends or names of a write do not fit under \
-         the cap of 33554432 bytes: the open requests, reads, and writes of the hub \
-         hold 16777217 bytes"
+        "16777216 bytes of a body or of the ends, counts, or names of a write do not \
+         fit under the cap of 33554432 bytes: the open requests, reads, and writes of \
+         the hub hold 16777217 bytes"
     );
 }
 
@@ -855,9 +856,9 @@ fn takes_a_request_of_another_subject_while_a_body_trickles() {
     );
     assert_eq!(
         over.to_string(),
-        "1 bytes of a body or of the ends or names of a write do not fit under the \
-         share of 16777216 bytes of subject ops.agent: its open requests, reads, and \
-         writes hold 16777216 bytes"
+        "1 bytes of a body or of the ends, counts, or names of a write do not fit \
+         under the share of 16777216 bytes of subject ops.agent: its open requests, \
+         reads, and writes hold 16777216 bytes"
     );
 }
 
@@ -1435,9 +1436,15 @@ fn reply_holds(end: End) -> (usize, usize, usize) {
         )
         .await;
         let layout = buffer::Layout::new(super::AREA, super::BODY_MAX).expect("a ring");
-        let mut test =
-            super::Test::new(node.clone(), tasks.clone(), layout, POOL, Some(region))
-                .await;
+        let mut test = super::Test::new(
+            node.clone(),
+            NODE,
+            tasks.clone(),
+            layout,
+            POOL,
+            Some(region),
+        )
+        .await;
         test.sync().await;
         test.hub.set_rules(rules());
         let session = transport.accept().await.expect("a session");

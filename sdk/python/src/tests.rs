@@ -22,7 +22,8 @@ report = stream.getvalue()
 
 /// The files of `sdk/python/tests`, each with whether it runs only with the feature
 /// `sim`.
-const FILES: [(&str, bool); 3] = [
+const FILES: [(&str, bool); 4] = [
+    ("test_stubs.py", false),
     ("test_client.py", false),
     ("test_sim.py", true),
     ("test_writer.py", false),
@@ -185,6 +186,12 @@ fn error_raises_the_class_and_text_of_each_variant() {
             "cannot bind the local UDP socket: the peer stopped answering",
         ),
         (
+            sdk::Error::Memory(os::memory::Error::Refused),
+            "MemoryError",
+            "the OS refused memory for the frames of the client's readers; free memory or \
+             raise the commit limit of the system",
+        ),
+        (
             sdk::Error::Session(program::Error::Unanswered),
             "ConnectionError",
             "the node finished a stream with no answer",
@@ -258,7 +265,7 @@ fn error_raises_value_error_for_each_stream_error_that_sent_nothing() {
         (
             sdk::Error::Stream(program::Error::Unnamed),
             "ValueError",
-            "the writer names no channel",
+            "the stream names no channel",
         ),
     ];
     raises(cases);
