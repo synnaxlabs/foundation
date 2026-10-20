@@ -70,8 +70,9 @@ class Stopped(Exception):
     home cannot open the write, `refused` when the access check of the node refuses the
     write, and `busy` when the node has no room for the open. Later: `unknown` when a
     channel was removed, `failed` when the home failed, `refused` when the home refuses
-    the program's proof, `busy` when the home has no room for the outcome of a frame,
-    and `malformed` for a frame that breaks a rule of the wire.
+    the program's proof, such as a renewal of its hello, `busy` when the home has no
+    room for the outcome of a frame, and `malformed` for a frame that breaks a rule of
+    the wire.
     """
 
     code: str
