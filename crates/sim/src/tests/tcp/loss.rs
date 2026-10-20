@@ -1470,6 +1470,115 @@ fn a_lost_ack_goes_again_when_its_try_crosses_a_link_back_with_loss() {
 }
 
 #[test]
+fn a_lost_handshake_ack_after_six_syn_acks_leaves_the_backlog_at_63_s() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let c = sim.node(node::Config::default());
+    sim.link(&b, &a, cut());
+    let listen = tcp::Listen {
+        local: at(&b, 4433),
+        backlog: 0,
+        options: options(),
+    };
+    let mut listener = b.net().listen(&listen).unwrap();
+    let remote = at(&b, 4433);
+    let _first = start(&a, "first", move |node| async move {
+        let _tcp = connect(&node, remote, options()).await;
+        pending::<()>().await;
+    });
+    // The SYN-ACK is lost at 0, 1, 3, 7, and 15 s, and its sixth send at 31 s
+    // arrives. The ACK of the handshake is lost on a link cut from 20 s.
+    sim.run_for(secs(20)).unwrap();
+    sim.link(&b, &a, link::Config::default());
+    sim.link(&a, &b, cut());
+    sim.run_for(secs(44)).unwrap();
+    sim.link(&a, &b, link::Config::default());
+    // A SYN-ACK goes at most 6 times, so the request leaves at 63 s, as Linux.
+    let server = start(&b, "server", move |_| async move {
+        accept(&mut listener).await.peer()
+    });
+    let _second = start(&c, "second", move |node| async move {
+        connect(&node, remote, options()).await.unwrap()
+    });
+    sim.run_for(secs(1)).unwrap();
+    assert_eq!(take(&server), at(&c, 49_152));
+}
+
+#[test]
+fn a_writer_whose_held_byte_goes_and_whose_ack_is_lost_times_out_from_its_send() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    let _server = start(&b, "server", move |_| async move {
+        let _tcp = accept(&mut listener).await;
+        pending::<()>().await;
+    });
+    let remote = at(&b, 4433);
+    let client = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        node.clock().sleep(millis(10)).await;
+        write_all(&mut tcp, &[1]).await.unwrap();
+        let error = read(&mut tcp, 1).await.unwrap_err();
+        (node.clock().now(), error)
+    });
+    sim.run_for(millis(5)).unwrap();
+    sim.link(&a, &b, cut());
+    sim.run_for(secs(500)).unwrap();
+    sim.link(&b, &a, cut());
+    sim.link(&a, &b, link::Config::default());
+    sim.run_for(secs(3_000)).unwrap();
+    let (now, error) = take(&client);
+    assert_eq!(error, Net::TimedOut { remote });
+    assert!(now < after(secs(1_000)), "timed out at {now:?}");
+}
+
+#[test]
+fn a_writer_whose_byte_meets_a_closed_port_after_a_power_cut_times_out_from_its_send() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    let _server = start(&b, "server", move |_| async move {
+        let _tcp = accept(&mut listener).await;
+        pending::<()>().await;
+    });
+    let remote = at(&b, 4433);
+    let client = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        node.clock().sleep(millis(10)).await;
+        write_all(&mut tcp, &[1]).await.unwrap();
+        let error = read(&mut tcp, 1).await.unwrap_err();
+        (node.clock().now(), error)
+    });
+    sim.run_for(millis(5)).unwrap();
+    sim.link(&a, &b, cut());
+    sim.link(&b, &a, cut());
+    sim.run_for(secs(100)).unwrap();
+    sim.crash(&b, Crash::Power);
+    sim.link(&a, &b, link::Config::default());
+    sim.run_for(secs(3_000)).unwrap();
+    // The byte first went at 10.5 ms. Its try at 102.4 s meets the closed port, and
+    // the RST that answers it continues its tries.
+    let (now, error) = take(&client);
+    assert_eq!(error, Net::TimedOut { remote });
+    assert!(now < after(secs(1_000)), "timed out at {now:?}");
+}
+
+#[test]
+fn a_connect_whose_rst_is_lost_reaches_a_listener_that_starts_before_its_next_syn() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    sim.link(&b, &a, cut());
+    let remote = at(&b, 4433);
+    let client = start(&a, "client", move |node| async move {
+        let connected = connect(&node, remote, options()).await.err();
+        (node.clock().now(), connected)
+    });
+    sim.run_for(millis(500)).unwrap();
+    let _listener = listen(&b, 4433);
+    sim.link(&b, &a, link::Config::default());
+    sim.run().unwrap();
+    // The RST, lost at leg 1, goes again 1 s later as the SYN of the client, which
+    // the listener takes.
+    assert_eq!(take(&client), (legs(3) + secs(1), None));
+}
+
+#[test]
 fn a_lost_ack_draws_nothing_on_a_link_back_with_no_loss() {
     let half = link::Config {
         loss: 0.5,

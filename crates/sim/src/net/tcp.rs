@@ -136,6 +136,17 @@ enum Phase {
     Orphan,
 }
 
+/// How the one RST of an end that leaves its pair goes.
+#[derive(Clone, Copy)]
+enum Leave {
+    /// It is lost, as its peer meets the closed port only when a try arrives there.
+    Lost,
+    /// It goes now, with the tries of the lost segment that it replaces.
+    Abort,
+    /// It goes now, as the answer to a segment of these tries.
+    Answer(Tries),
+}
+
 /// How far the FIN of an end has gone.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Fin {
@@ -435,8 +446,9 @@ impl Lanes {
     }
 
     /// Keeps `lost`, an answer with its next try at `at`, in place of a lost answer
-    /// of its stream and direction. When that one has a next try, `lost` takes its
-    /// try and its tries.
+    /// of its stream and direction. When that one has a next try, `lost` takes that
+    /// try, and the tries of the two that began first, as its receiver waits on the
+    /// oldest segment that either answers.
     fn keep(&mut self, at: Option<Monotonic>, mut lost: Segment) {
         let (source, destination) = (lost.source, lost.destination);
         let ahead = self
@@ -447,7 +459,10 @@ impl Lanes {
             Entry::Occupied(mut answer) => {
                 let answer = answer.get_mut();
                 if answer.at.is_some() {
-                    lost.tries = answer.segment.tries;
+                    let older = answer.segment.tries;
+                    if older.since <= lost.tries.since {
+                        lost.tries = older;
+                    }
                 } else {
                     answer.at = at;
                 }
@@ -716,15 +731,9 @@ impl Sockets {
         key
     }
 
-    /// Removes end `key` at true time `now`, as [`Self::unroute`] says with `reset`.
-    fn remove(
-        &mut self,
-        wire: &mut Wire,
-        now: Monotonic,
-        key: u64,
-        reset: bool,
-    ) -> End {
-        let routed = self.unroute(wire, now, key, reset);
+    /// Removes end `key` at true time `now`, as [`Self::unroute`] says with `how`.
+    fn remove(&mut self, wire: &mut Wire, now: Monotonic, key: u64, how: Leave) -> End {
+        let routed = self.unroute(wire, now, key, how);
         let end = (self.ends.remove(&key)).expect("invariant: the end lives");
         assert!(
             routed || end.done(),
@@ -736,13 +745,13 @@ impl Sockets {
     /// Takes the segments to its pair from end `key` at true time `now`, and gives
     /// whether it had them. When it had them, its connect ends, the lost answers to
     /// it drop, and unless its stream closed, it leaves as [`Self::leave`] says with
-    /// `reset`.
+    /// `how`.
     fn unroute(
         &mut self,
         wire: &mut Wire,
         now: Monotonic,
         key: u64,
-        reset: bool,
+        how: Leave,
     ) -> bool {
         let end = &self.ends[&key];
         let (pair, stream) = (end.pair, end.stream);
@@ -756,7 +765,7 @@ impl Sockets {
         }
         self.lanes.answers.remove(&(pair.peer, pair.local, stream));
         if !end.closed() {
-            self.leave(wire, now, pair, stream, reset);
+            self.leave(wire, now, pair, stream, how);
         }
         true
     }
@@ -764,27 +773,30 @@ impl Sockets {
     /// Takes the lost segments of `stream` from end `from`, which leaves its pair
     /// before its stream closed at true time `now`, and sends its peer one RST. It
     /// takes the place of the lost answer or the held SYN-ACK of `from`, with its
-    /// tries, as [`Lanes::leave`] gives. It goes now when `reset`. Else it is lost,
-    /// as the peer meets a closed port when it sends again or sends its next bytes,
-    /// and is kept as [`Self::keep`] says, with the next try of the segment that it
-    /// replaces.
+    /// tries, as [`Lanes::leave`] gives, and goes as `how` says. A lost one is kept
+    /// as [`Self::keep`] says, with the next try of the segment that it replaces, as
+    /// the peer meets a closed port when it sends again or sends its next bytes.
     fn leave(
         &mut self,
         wire: &mut Wire,
         now: Monotonic,
         from: Pair,
         stream: u64,
-        reset: bool,
+        how: Leave,
     ) {
         let lost = self.lanes.leave(from, stream);
-        if reset {
-            let tries = lost.map_or(
+        let tries = match how {
+            Leave::Lost => None,
+            Leave::Abort => Some(lost.as_ref().map_or(
                 Tries {
                     since: now,
                     losses: 0,
                 },
                 |(_, rst)| rst.tries,
-            );
+            )),
+            Leave::Answer(tries) => Some(tries),
+        };
+        if let Some(tries) = tries {
             self.reset(wire, now, from, stream, tries);
         } else if let Some((at, rst)) = lost {
             if self.receiver(&rst).is_some() {
@@ -806,18 +818,16 @@ impl Sockets {
     }
 
     /// Sends the ACK of end `key` at true time `now`, and keeps it as [`Self::keep`]
-    /// says when it is lost.
-    fn ack(&mut self, wire: &mut Wire, now: Monotonic, key: u64) {
+    /// says when it is lost. It answers a segment of `tries`: as the sender of that
+    /// segment sends it again until its ACK arrives, the ACK continues its tries.
+    fn ack(&mut self, wire: &mut Wire, now: Monotonic, key: u64, tries: Tries) {
         let end = &self.ends[&key];
         let ack = Segment {
             source: end.pair.local,
             destination: end.pair.peer,
             stream: end.stream,
             kind: end.ack(),
-            tries: Tries {
-                since: now,
-                losses: 0,
-            },
+            tries,
         };
         if let Err(lost) = self.lanes.transmit(wire, now, ack) {
             self.keep(wire, now, lost);
@@ -864,12 +874,27 @@ impl Sockets {
     }
 
     /// The end that gets lost answer `answer`: the end of its stream at its
-    /// destination, other than one that connects while a listener receives at the
-    /// answer's source, as that listener takes the end's next SYN.
+    /// destination, other than one that sends [`Self::syn`] in its place.
     fn receiver(&self, answer: &Segment) -> Option<&End> {
         let end = &self.ends[&owner(&self.ends, &self.routes, answer)?];
+        self.syn(answer).is_none().then_some(end)
+    }
+
+    /// The SYN, with the tries of lost answer `answer`, of the end of its stream at
+    /// its destination when that end connects while a listener receives at the
+    /// answer's source, as that listener takes the end's next SYN.
+    fn syn(&self, answer: &Segment) -> Option<Segment> {
+        let end = &self.ends[&owner(&self.ends, &self.routes, answer)?];
         let connects = matches!(end.phase, Phase::Connecting(_));
-        (!connects || self.listener(answer.source).is_none()).then_some(end)
+        (connects && self.listener(answer.source).is_some()).then_some(Segment {
+            source: end.pair.local,
+            destination: end.pair.peer,
+            stream: end.stream,
+            kind: Kind::Syn {
+                edge: end.advertised,
+            },
+            tries: answer.tries,
+        })
     }
 }
 
@@ -965,7 +990,7 @@ impl<'a> Tcp<'a> {
     pub(crate) fn unlisten(&mut self, now: Monotonic, listener: u64) -> Option<Waker> {
         let listening = self.sockets.listeners.remove(&listener)?;
         for key in listening.queue {
-            self.sockets.remove(self.wire, now, key, true);
+            self.sockets.remove(self.wire, now, key, Leave::Abort);
         }
         listening.waker
     }
@@ -1000,7 +1025,7 @@ impl<'a> Tcp<'a> {
             .partition(|key| ends[key].phase == Phase::Accepting(listener));
         listening.queue = queued;
         for key in accepting {
-            self.sockets.remove(self.wire, now, key, true);
+            self.sockets.remove(self.wire, now, key, Leave::Abort);
         }
         Some(waker)
     }
@@ -1142,7 +1167,11 @@ impl<'a> Tcp<'a> {
         let receiving = end.broken.is_none() && !end.peer_closed;
         if receiving && edge - end.advertised >= mss.min(recv / 2) {
             end.advertised = edge;
-            self.sockets.ack(self.wire, now, key);
+            let tries = Tries {
+                since: now,
+                losses: 0,
+            };
+            self.sockets.ack(self.wire, now, key, tries);
         }
         (Poll::Ready(Ok(n)), None)
     }
@@ -1208,7 +1237,8 @@ impl<'a> Tcp<'a> {
             end.phase = Phase::Orphan;
             return wakers;
         }
-        self.sockets.remove(self.wire, now, key, open);
+        let how = if open { Leave::Abort } else { Leave::Lost };
+        self.sockets.remove(self.wire, now, key, how);
         wakers
     }
 
@@ -1240,7 +1270,7 @@ impl<'a> Tcp<'a> {
             match end.phase {
                 Phase::Connecting(_) | Phase::Open => {}
                 Phase::Accepting(_) | Phase::Queued(_) | Phase::Orphan => {
-                    self.sockets.remove(self.wire, now, key, false);
+                    self.sockets.remove(self.wire, now, key, Leave::Lost);
                     continue;
                 }
             }
@@ -1338,7 +1368,7 @@ impl<'a> Tcp<'a> {
                 Some(key),
             ) => self.ack(at, key, received, edge, fin),
             (Kind::Data(bytes), Some(key)) => self.data(at, key, bytes, tries),
-            (Kind::Fin, Some(key)) => self.fin(at, key),
+            (Kind::Fin, Some(key)) => self.fin(at, key, tries),
         }
     }
 
@@ -1396,7 +1426,7 @@ impl<'a> Tcp<'a> {
         (end.phase, end.edge) = (Phase::Open, edge);
         self.sockets.connects.remove(&(since, key));
         let waker = self.end(key).writing.take();
-        self.sockets.ack(self.wire, at, key);
+        self.sockets.ack(self.wire, at, key, tries);
         waker.into_iter().collect()
     }
 
@@ -1406,7 +1436,7 @@ impl<'a> Tcp<'a> {
     fn break_off(&mut self, now: Monotonic, key: u64, broken: Broken) -> Vec<Waker> {
         let end = self.end(key);
         if let Phase::Accepting(listener) = end.phase {
-            self.sockets.remove(self.wire, now, key, false);
+            self.sockets.remove(self.wire, now, key, Leave::Lost);
             let listening = (self.sockets.listeners.get_mut(&listener))
                 .expect("invariant: an accepting end has its listener");
             listening.queue.retain(|&queued| queued != key);
@@ -1436,6 +1466,10 @@ impl<'a> Tcp<'a> {
         }
         let mut failed = self.sockets.lanes.retry(self.wire, now);
         for answer in self.sockets.lanes.due(now) {
+            if let Some(syn) = self.sockets.syn(&answer.segment) {
+                self.sockets.lanes.release(self.wire, now, [syn]);
+                continue;
+            }
             let receiver = self.sockets.receiver(&answer.segment);
             let Some((class, waits)) = receiver.map(|end| (end.class(), end.waits()))
             else {
@@ -1497,23 +1531,22 @@ impl<'a> Tcp<'a> {
     ) -> Vec<Waker> {
         let end = self.end(key);
         if end.phase == Phase::Orphan {
-            let (pair, stream) = (end.pair, end.stream);
-            self.sockets.reset(self.wire, at, pair, stream, tries);
-            self.sockets.remove(self.wire, at, key, false);
+            self.sockets
+                .remove(self.wire, at, key, Leave::Answer(tries));
             return Vec::new();
         }
         end.inbox.extend(bytes);
         let waker = end.reading.take();
-        self.sockets.ack(self.wire, at, key);
+        self.sockets.ack(self.wire, at, key, tries);
         waker.into_iter().collect()
     }
 
-    /// Takes the FIN to `key`, a receiver.
-    fn fin(&mut self, at: Monotonic, key: u64) -> Vec<Waker> {
+    /// Takes the FIN of `tries` to `key`, a receiver.
+    fn fin(&mut self, at: Monotonic, key: u64, tries: Tries) -> Vec<Waker> {
         let end = self.end(key);
         end.peer_closed = true;
         let waker = end.reading.take();
-        self.sockets.ack(self.wire, at, key);
+        self.sockets.ack(self.wire, at, key, tries);
         self.reap(at, key);
         waker.into_iter().collect()
     }
@@ -1554,9 +1587,9 @@ impl<'a> Tcp<'a> {
             return;
         }
         if end.phase == Phase::Orphan {
-            self.sockets.remove(self.wire, now, key, false);
+            self.sockets.remove(self.wire, now, key, Leave::Lost);
         } else {
-            self.sockets.unroute(self.wire, now, key, false);
+            self.sockets.unroute(self.wire, now, key, Leave::Lost);
         }
     }
 
@@ -1581,6 +1614,34 @@ mod tests {
             unreachable!("a segment is first");
         };
         (at, segment)
+    }
+
+    #[test]
+    fn bytes_to_an_orphan_get_one_rst() {
+        let mut wire = Wire::new(link::Config::default(), Rng::from_seed(0));
+        let mut sockets = Sockets::default();
+        let [local, peer] = [0, 1].map(|node| SocketAddr::new(addresses(node)[0], 1));
+        let options = tcp::Options {
+            send_buffer_bytes: 1,
+            recv_buffer_bytes: 1,
+            unsent_bytes_max: NonZeroUsize::MIN,
+            delayed: false,
+        };
+        let back = Pair {
+            local: peer,
+            peer: local,
+        };
+        sockets.insert(End::new(Pair { local, peer }, 1, Phase::Orphan, options, 1));
+        let mut writer = End::new(back, 1, Phase::Open, options, 1);
+        writer.sent = 1;
+        sockets.insert(writer);
+        (sockets.lanes).send(&mut wire, Monotonic(0), back, 1, Kind::Data(vec![7]));
+        let (at, bytes) = next(&mut wire);
+        Tcp::new(&mut sockets, &mut wire).arrive(at, bytes);
+        let (_, answer) = next(&mut wire);
+        assert!(matches!(answer.kind, Kind::Rst));
+        assert_eq!(wire.first(), None);
+        assert!(sockets.lanes.answers.is_empty());
     }
 
     #[test]
@@ -1693,7 +1754,7 @@ mod tests {
         let tcp = &mut Tcp::new(&mut sockets, &mut wire);
         tcp.break_off(Monotonic(0), old, Broken::Reset);
         let new = sockets.insert(End::new(pair, 2, Phase::Open, options, 1));
-        sockets.remove(&mut wire, Monotonic(0), old, false);
+        sockets.remove(&mut wire, Monotonic(0), old, Leave::Lost);
         assert_eq!(sockets.routes.get(&pair), Some(&new));
     }
 }
