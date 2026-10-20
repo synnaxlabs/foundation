@@ -8,14 +8,22 @@
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #include <open62541/client_config_default.h>
 #include <open62541/client_highlevel_async.h>
+#include <open62541/client_subscriptions.h>
 #include <open62541/plugin/certificategroup_default.h>
 #include <open62541/plugin/eventloop.h>
 #include <open62541/plugin/securitypolicy_default.h>
 #include <open62541/types.h>
 #include <open62541/util.h>
+#include "client/ua_client_internal.h"
 #include "mp_printf.h"
 #include "timer.h"
 #pragma GCC diagnostic pop
+
+/* `shim_client_publishes` calls `__Client_Subscriptions_backgroundPublish`, which
+ * asserts a client lock that only a build with threads takes. */
+#if UA_MULTITHREADING >= 100
+#error "shim_client_publishes takes no client lock"
+#endif
 
 #include "shim.h"
 
@@ -198,6 +206,9 @@ _Static_assert(UA_DATETIME_UNIX_EPOCH == 116444736000000000LL,
 _Static_assert(
     UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERREAD == 11705,
     "UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERREAD moved");
+_Static_assert(
+    UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXMONITOREDITEMSPERCALL == 11714,
+    "UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXMONITOREDITEMSPERCALL moved");
 _Static_assert(UA_NS0ID_SERVER_SERVERSTATUS_STATE == 2259,
                "UA_NS0ID_SERVER_SERVERSTATUS_STATE moved");
 _Static_assert(UA_SECURECHANNELSTATE_CLOSED == 0 && UA_SECURECHANNELSTATE_OPEN == 11,
@@ -748,11 +759,20 @@ void shim_establish(UA_ConnectionManager *cm, uintptr_t id, void *application,
              message);
 }
 
+/* The callbacks of a subscription and of each of its monitored items. */
+typedef struct {
+    UA_Client_DataChangeNotificationCallback changed;
+    UA_Client_StatusChangeNotificationCallback ended;
+    UA_Client_DeleteSubscriptionCallback deleted;
+} shim_watch;
+
 /* Gives a client on `el` that sends and takes at most `chunks` chunks in a message
  * and queues at most `queued` intermediate chunks of all messages, or NULL when out
- * of memory. A failed copy of the application URI or of the URI of namespace 0 gives
- * a client with that URI empty (#2566). */
-UA_Client *shim_client_new(UA_EventLoop *el, UA_UInt32 chunks, UA_UInt32 queued) {
+ * of memory. Its subscription and monitored items call the callbacks of `watch`. A
+ * failed copy of the application URI or of the URI of namespace 0 gives a client with
+ * that URI empty (#2566). */
+UA_Client *shim_client_new(UA_EventLoop *el, UA_UInt32 chunks, UA_UInt32 queued,
+                           const shim_watch *watch) {
     UA_ClientConfig config;
     memset(&config, 0, sizeof(config));
     config.logging = &loop_of(el)->logger;
@@ -766,9 +786,17 @@ UA_Client *shim_client_new(UA_EventLoop *el, UA_UInt32 chunks, UA_UInt32 queued)
      * against this count, not against the count of the peer. */
     config.localConnectionConfig.localMaxChunkCount = chunks;
     config.localConnectionConfig.localMaxQueuedChunks = queued;
+    config.clientContext = (void *)(uintptr_t)watch;
     /* No custom types: `value::mistyped` finds the type of each decoded value in
      * `UA_TYPES`. */
     return UA_Client_newWithConfig(&config);
+}
+
+/* Sets the count of Publish requests that `client` keeps in flight while it has a
+ * subscription, and sends the ones that it lacks. With 0, it sends no more. */
+void shim_client_publishes(UA_Client *client, UA_UInt16 count) {
+    UA_Client_getConfig(client)->outStandingPublishRequests = count;
+    __Client_Subscriptions_backgroundPublish(client);
 }
 
 typedef UA_StatusCode (*policy_of)(UA_SecurityPolicy *policy,
@@ -837,7 +865,10 @@ typedef enum {
     SHIM_REFUSAL_EMPTY,
     SHIM_REFUSAL_INVALID,
     SHIM_REFUSAL_TRAILING,
-    SHIM_REFUSAL_LINE
+    SHIM_REFUSAL_TRUST_LINE,
+    SHIM_REFUSAL_CERTIFICATE_LINE,
+    SHIM_REFUSAL_KEY_LINE,
+    SHIM_REFUSAL_DAMAGED
 } shim_refusal_kind;
 
 typedef struct {
@@ -848,7 +879,7 @@ typedef struct {
 _Static_assert(sizeof(shim_refusal_kind) == sizeof(int) &&
                    offsetof(shim_refusal, number) == sizeof(size_t) &&
                    sizeof(shim_refusal) == 2 * sizeof(size_t) &&
-                   SHIM_REFUSAL_LINE == 9,
+                   SHIM_REFUSAL_DAMAGED == 12,
                "shim_refusal changed");
 
 /* Writes `kind` and `number` to `refusal` and gives `status`. */
@@ -871,7 +902,8 @@ static shim_refusal_kind policy_refusal(UA_StatusCode status) {
  * the certificate and key of `security`, with the application URI of the certificate,
  * and trust only the certificates of `security`. With no policy URI, open62541 takes
  * the endpoint of the highest security level that the server offers in `mode`.
- * Refuses, in order, a certificate that does not parse or holds no RSA key, a key that
+ * Refuses, in order, a PEM line of the certificate and then of the key that targets
+ * read in two ways, a certificate that does not parse or holds no RSA key, a key that
  * does not parse, a key of another certificate, a time of the loop of `client`
  * outside the validity window of the certificate, a trust that does not load, and a
  * certificate with no URI. Writes the refusal to `refusal`, else `SHIM_REFUSAL_NONE`,
@@ -884,6 +916,14 @@ UA_StatusCode shim_client_secure(UA_Client *client, UA_MessageSecurityMode mode,
                                  const shim_security *security,
                                  shim_refusal *refusal) {
     *refusal = (shim_refusal){SHIM_REFUSAL_NONE, 0};
+    size_t number = UA_CertificateUtils_certificateLine(&security->certificate);
+    if(number > 0)
+        return refuse_with(refusal, SHIM_REFUSAL_CERTIFICATE_LINE, number,
+                           UA_STATUSCODE_BADCERTIFICATEINVALID);
+    number = UA_CertificateUtils_keyLine(&security->key);
+    if(number > 0)
+        return refuse_with(refusal, SHIM_REFUSAL_KEY_LINE, number,
+                           UA_STATUSCODE_BADINVALIDARGUMENT);
     UA_ClientConfig *config = UA_Client_getConfig(client);
     UA_StatusCode status = shim_add_policies(&config->securityPolicies,
                                              &config->securityPoliciesSize, security,
@@ -902,7 +942,6 @@ UA_StatusCode shim_client_secure(UA_Client *client, UA_MessageSecurityMode mode,
         return refuse_with(refusal, SHIM_REFUSAL_TIME, 0, status);
     if(status != UA_STATUSCODE_GOOD)
         return status;
-    size_t number = 0;
     switch(UA_CertificateUtils_checkTrust(&security->trust, &number)) {
     case UA_TRUSTLOAD_GOOD:
         break;
@@ -916,7 +955,10 @@ UA_StatusCode shim_client_secure(UA_Client *client, UA_MessageSecurityMode mode,
         return refuse_with(refusal, SHIM_REFUSAL_TRAILING, number,
                            UA_STATUSCODE_BADINTERNALERROR);
     case UA_TRUSTLOAD_LINE:
-        return refuse_with(refusal, SHIM_REFUSAL_LINE, number,
+        return refuse_with(refusal, SHIM_REFUSAL_TRUST_LINE, number,
+                           UA_STATUSCODE_BADINTERNALERROR);
+    case UA_TRUSTLOAD_DAMAGED:
+        return refuse_with(refusal, SHIM_REFUSAL_DAMAGED, number,
                            UA_STATUSCODE_BADINTERNALERROR);
     case UA_TRUSTLOAD_NOMEMORY:
         return UA_STATUSCODE_BADOUTOFMEMORY;
@@ -1030,36 +1072,6 @@ UA_ReadRequest *shim_read_new(const shim_node *nodes, size_t count) {
 
 void shim_read_free(UA_ReadRequest *request) { UA_ReadRequest_delete(request); }
 
-/* Sends `request`, of the type `request_type`, on `client`, and has `callback` called
- * with `data` and the answer, of the type `answer_type`. Writes the id of the request to
- * `id`. The request times out only after 2^32 - 1 ms (49.7 days), so in practice it
- * ends at its answer or at the close of the channel. */
-static UA_StatusCode send(UA_Client *client, void *request,
-                          const UA_DataType *request_type,
-                          UA_ClientAsyncServiceCallback callback,
-                          const UA_DataType *answer_type, void *data, UA_UInt32 *id) {
-    /* open62541 takes the timeout hint of a request from the config, and makes 0
-     * 2^32 - 1 ms (`src/client/ua_client.c`, lines 460 and 915). The server gets the
-     * hint 0. A send keeps the handle that it gives a request with handle 0. */
-    UA_ClientConfig *config = UA_Client_getConfig(client);
-    UA_UInt32 timeout = config->timeout;
-    config->timeout = 0;
-    ((UA_RequestHeader *)request)->requestHandle = 0;
-    UA_StatusCode status = __UA_Client_AsyncService(client, request, request_type,
-                                                    callback, answer_type, data, id);
-    config->timeout = timeout;
-    return status;
-}
-
-/* Sends `request` on `client` as `send` does, with `callback` for the answer. */
-UA_StatusCode shim_client_read(UA_Client *client, UA_ReadRequest *request,
-                               UA_ClientAsyncReadCallback callback, void *data,
-                               UA_UInt32 *id) {
-    return send(client, request, &UA_TYPES[UA_TYPES_READREQUEST],
-                (UA_ClientAsyncServiceCallback)callback,
-                &UA_TYPES[UA_TYPES_READRESPONSE], data, id);
-}
-
 /* Gives the count of results of `response`, a Read response. */
 size_t shim_read_count(const UA_ReadResponse *response) {
     return response->resultsSize;
@@ -1130,7 +1142,12 @@ static const struct {
     {UA_TYPES_TRANSLATEBROWSEPATHSTONODEIDSREQUEST,
      UA_TYPES_TRANSLATEBROWSEPATHSTONODEIDSRESPONSE},
     {UA_TYPES_READREQUEST, UA_TYPES_READRESPONSE},
+    {UA_TYPES_CREATESUBSCRIPTIONREQUEST, UA_TYPES_CREATESUBSCRIPTIONRESPONSE},
+    {UA_TYPES_CREATEMONITOREDITEMSREQUEST, UA_TYPES_CREATEMONITOREDITEMSRESPONSE},
 };
+
+/* The indices of `SERVICES` that `send` sends by their own calls of open62541. */
+enum { SERVICE_READ = 3, SERVICE_SUBSCRIBE = 4, SERVICE_MONITOR = 5 };
 
 /* `shim_browse_*` read a BrowseNext answer as a Browse answer. */
 _Static_assert(sizeof(UA_BrowseResponse) == sizeof(UA_BrowseNextResponse),
@@ -1149,13 +1166,85 @@ static const UA_DataType *answer_type(size_t service) {
     return &UA_TYPES[SERVICES[service].answer];
 }
 
+/* Sends `request`, a CreateMonitoredItems request, on `client`. Each item calls
+ * `changed` with its client handle in `request` as its context, as open62541 gives the
+ * items handles of its own. */
+static UA_StatusCode monitor(UA_Client *client,
+                             const UA_CreateMonitoredItemsRequest *request,
+                             UA_ClientAsyncServiceCallback callback, void *data,
+                             UA_Client_DataChangeNotificationCallback changed,
+                             UA_UInt32 *id) {
+    size_t count = request->itemsToCreateSize;
+    void **contexts = (void **)UA_malloc(count * sizeof(void *));
+    UA_Client_DataChangeNotificationCallback *callbacks =
+        (UA_Client_DataChangeNotificationCallback *)UA_malloc(count * sizeof(changed));
+    UA_StatusCode status = UA_STATUSCODE_BADOUTOFMEMORY;
+    if(contexts && callbacks) {
+        for(size_t i = 0; i < count; i++) {
+            UA_UInt32 handle = request->itemsToCreate[i].requestedParameters.clientHandle;
+            contexts[i] = (void *)(uintptr_t)handle;
+            callbacks[i] = changed;
+        }
+        status = UA_Client_MonitoredItems_createDataChanges_async(
+            client, *request, contexts, callbacks, NULL,
+            (UA_ClientAsyncCreateMonitoredItemsCallback)callback, data, id);
+    }
+    UA_free(contexts);
+    UA_free(callbacks);
+    return status;
+}
+
+/* Sends `request`, a request of `service`, on `client`, and has `callback` called with
+ * `data` and the answer. A CreateSubscription gives `data` to the subscription and
+ * the callbacks of the client, and a CreateMonitoredItems `changed` to each item.
+ * Writes the id of the request to `id`. The request times out only after 2^32 - 1 ms
+ * (49.7 days), so in practice it ends at its answer or at the close of the channel. */
+static UA_StatusCode send(UA_Client *client, void *request, size_t service,
+                          UA_ClientAsyncServiceCallback callback, void *data,
+                          UA_UInt32 *id) {
+    /* open62541 takes the timeout hint of a request from the config, and makes 0
+     * 2^32 - 1 ms (`src/client/ua_client.c`, lines 460 and 915). The server gets the
+     * hint 0. A send keeps the handle that it gives a request with handle 0. */
+    UA_ClientConfig *config = UA_Client_getConfig(client);
+    const shim_watch *watch = (const shim_watch *)config->clientContext;
+    UA_UInt32 timeout = config->timeout;
+    config->timeout = 0;
+    ((UA_RequestHeader *)request)->requestHandle = 0;
+    UA_StatusCode status;
+    switch(service) {
+    case SERVICE_SUBSCRIBE:
+        status = UA_Client_Subscriptions_create_async(
+            client, *(const UA_CreateSubscriptionRequest *)request, data, watch->ended,
+            watch->deleted, (UA_ClientAsyncCreateSubscriptionCallback)callback, data,
+            id);
+        break;
+    case SERVICE_MONITOR:
+        status = monitor(client, (const UA_CreateMonitoredItemsRequest *)request,
+                         callback, data, watch->changed, id);
+        break;
+    default:
+        status = __UA_Client_AsyncService(client, request, request_type(service),
+                                          callback, answer_type(service), data, id);
+        break;
+    }
+    config->timeout = timeout;
+    return status;
+}
+
+/* Sends `request` on `client` as `send` does, with `callback` for the answer. */
+UA_StatusCode shim_client_read(UA_Client *client, UA_ReadRequest *request,
+                               UA_ClientAsyncReadCallback callback, void *data,
+                               UA_UInt32 *id) {
+    return send(client, request, SERVICE_READ, (UA_ClientAsyncServiceCallback)callback,
+                data, id);
+}
+
 /* Sends `request`, a request of `service`, on `client` as `send` does, with `callback`
  * for the answer. */
 UA_StatusCode shim_client_service(UA_Client *client, void *request, size_t service,
                                   UA_ClientAsyncServiceCallback callback, void *data,
                                   UA_UInt32 *id) {
-    return send(client, request, request_type(service), callback, answer_type(service),
-                data, id);
+    return send(client, request, service, callback, data, id);
 }
 
 /* Gives the request type of `service` when not `answer`, else its answer type, for the
@@ -1193,10 +1282,25 @@ _Static_assert(offsetof(UA_BrowseResponse, resultsSize) ==
 _Static_assert(offsetof(UA_BrowseResponse, resultsSize) ==
                    offsetof(UA_ReadResponse, resultsSize),
                "UA_ReadResponse changed");
+_Static_assert(offsetof(UA_BrowseResponse, resultsSize) ==
+                   offsetof(UA_CreateMonitoredItemsResponse, resultsSize),
+               "UA_CreateMonitoredItemsResponse changed");
 
-/* Gives the count of results of `answer`, an answer of a service of `SERVICES`. */
+/* Gives the count of results of `answer`, an answer of a service of `SERVICES` other
+ * than a CreateSubscription. */
 size_t shim_answer_count(const void *answer) {
     return ((const UA_BrowseResponse *)answer)->resultsSize;
+}
+
+/* Gives the service result of `answer`, an answer of `service`, when it fails the
+ * answer, else Good. A service that `send` sends by the subscription calls of
+ * open62541 fails at each result that is not Good, as open62541 then makes no
+ * subscription or item. Another fails at a Bad result. */
+UA_StatusCode shim_answer_result(const void *answer, size_t service) {
+    UA_StatusCode result = ((const UA_ResponseHeader *)answer)->serviceResult;
+    if(service == SERVICE_SUBSCRIBE || service == SERVICE_MONITOR)
+        return result;
+    return shim_response_result(answer);
 }
 
 /* Frees `request`, a request of `service`. */
@@ -1231,7 +1335,11 @@ _Static_assert(sizeof(UA_TranslateBrowsePathsToNodeIdsResponse) >=
                    sizeof(UA_TranslateBrowsePathsToNodeIdsResponse) >=
                        sizeof(UA_BrowseNextResponse) &&
                    sizeof(UA_TranslateBrowsePathsToNodeIdsResponse) >=
-                       sizeof(UA_ReadResponse),
+                       sizeof(UA_ReadResponse) &&
+                   sizeof(UA_TranslateBrowsePathsToNodeIdsResponse) >=
+                       sizeof(UA_CreateSubscriptionResponse) &&
+                   sizeof(UA_TranslateBrowsePathsToNodeIdsResponse) >=
+                       sizeof(UA_CreateMonitoredItemsResponse),
                "a response of SERVICES grew");
 
 /* The most bytes of each text and byte string of the answers that `shim_item_*`
@@ -1254,17 +1362,22 @@ static void wide_id(UA_ExpandedNodeId *id) {
     id->serverIndex = UINT32_MAX;
 }
 
+/* Sets `result` to a `DataValue` of `value` with each field. */
+static void full_value(UA_DataValue *result, void *value, const UA_DataType *type) {
+    UA_DataValue_init(result);
+    UA_Variant_setScalar(&result->value, value, type);
+    result->hasValue = true;
+    result->hasStatus = true;
+    result->hasSourceTimestamp = true;
+    result->hasServerTimestamp = true;
+    result->hasSourcePicoseconds = true;
+    result->hasServerPicoseconds = true;
+}
+
 /* Gives the bytes of `value` in a `DataValue` with each field. */
 static size_t value_bytes(void *value, const UA_DataType *type) {
     UA_DataValue result;
-    UA_DataValue_init(&result);
-    UA_Variant_setScalar(&result.value, value, type);
-    result.hasValue = true;
-    result.hasStatus = true;
-    result.hasSourceTimestamp = true;
-    result.hasServerTimestamp = true;
-    result.hasSourcePicoseconds = true;
-    result.hasServerPicoseconds = true;
+    full_value(&result, value, type);
     return UA_calcSizeBinary(&result, &UA_TYPES[UA_TYPES_DATAVALUE], NULL);
 }
 
@@ -1323,6 +1436,144 @@ size_t shim_item_reference(void) {
     reference.displayName = (UA_LocalizedText){text(), text()};
     return UA_calcSizeBinary(&reference, &UA_TYPES[UA_TYPES_REFERENCEDESCRIPTION],
                              NULL);
+}
+
+/* A CreateMonitoredItems result with no filter result. */
+size_t shim_item_created(void) {
+    UA_MonitoredItemCreateResult result;
+    UA_MonitoredItemCreateResult_init(&result);
+    return UA_calcSizeBinary(&result, &UA_TYPES[UA_TYPES_MONITOREDITEMCREATERESULT],
+                             NULL);
+}
+
+/* A data change of a Double in a Publish answer. */
+size_t shim_item_change(void) {
+    UA_Double value = 0;
+    UA_MonitoredItemNotification change;
+    change.clientHandle = 0;
+    full_value(&change.value, &value, &UA_TYPES[UA_TYPES_DOUBLE]);
+    return UA_calcSizeBinary(&change, &UA_TYPES[UA_TYPES_MONITOREDITEMNOTIFICATION],
+                             NULL);
+}
+
+/* The most sequence numbers and acknowledgement results of a Publish answer that
+ * `shim_publish_bytes` sizes. The client acknowledges each message in its next
+ * Publish, so few wait. */
+#define ACKS 16
+
+/* Gives the bytes of the body of the message of a Publish answer with one data change
+ * notification of no changes. Each change adds its `shim_item_change`. */
+size_t shim_publish_bytes(void) {
+    UA_DataChangeNotification changes;
+    UA_DataChangeNotification_init(&changes);
+    UA_ExtensionObject data;
+    UA_ExtensionObject_setValue(&data, &changes,
+                                &UA_TYPES[UA_TYPES_DATACHANGENOTIFICATION]);
+    UA_UInt32 numbers[ACKS] = {0};
+    UA_StatusCode results[ACKS] = {0};
+    UA_PublishResponse answer;
+    UA_PublishResponse_init(&answer);
+    answer.availableSequenceNumbers = numbers;
+    answer.availableSequenceNumbersSize = ACKS;
+    answer.results = results;
+    answer.resultsSize = ACKS;
+    answer.notificationMessage.notificationData = &data;
+    answer.notificationMessage.notificationDataSize = 1;
+    const UA_DataType *type = &UA_TYPES[UA_TYPES_PUBLISHRESPONSE];
+    return UA_calcSizeBinary(&type->binaryEncodingId, &UA_TYPES[UA_TYPES_NODEID], NULL) +
+           UA_calcSizeBinary(&answer, type, NULL);
+}
+
+/* Gives a CreateSubscription request at the publishing interval `interval` ms and the
+ * keep-alive count `keep_alive`, with at most `most` notifications in a Publish
+ * answer, or NULL when an allocation fails. */
+UA_CreateSubscriptionRequest *shim_subscribe_new(UA_Double interval,
+                                                 UA_UInt32 keep_alive, UA_UInt32 most) {
+    UA_CreateSubscriptionRequest *request = UA_CreateSubscriptionRequest_new();
+    if(!request)
+        return NULL;
+    *request = UA_CreateSubscriptionRequest_default();
+    request->requestedPublishingInterval = interval;
+    request->requestedMaxKeepAliveCount = keep_alive;
+    request->maxNotificationsPerPublish = most;
+    return request;
+}
+
+/* Gives a CreateMonitoredItems request on the subscription `subscription` of an item
+ * for the Value of each of the `count` nodes at `nodes`, with the client handle
+ * `first + i` for `nodes[i]`, that reports each change of the status or the value with
+ * both timestamps, samples at `sampling` ms, and queues `queue` values, the oldest
+ * dropped first. It copies the names. Gives NULL when an allocation fails. */
+UA_CreateMonitoredItemsRequest *shim_monitor_new(UA_UInt32 subscription,
+                                                 const shim_node *nodes, size_t count,
+                                                 UA_UInt32 first, UA_Double sampling,
+                                                 UA_UInt32 queue) {
+    UA_CreateMonitoredItemsRequest *request = UA_CreateMonitoredItemsRequest_new();
+    if(!request)
+        return NULL;
+    request->subscriptionId = subscription;
+    request->timestampsToReturn = UA_TIMESTAMPSTORETURN_BOTH;
+    request->itemsToCreate = (UA_MonitoredItemCreateRequest *)UA_Array_new(
+        count, &UA_TYPES[UA_TYPES_MONITOREDITEMCREATEREQUEST]);
+    if(!request->itemsToCreate) {
+        UA_CreateMonitoredItemsRequest_delete(request);
+        return NULL;
+    }
+    request->itemsToCreateSize = count;
+    for(size_t i = 0; i < count; i++) {
+        UA_MonitoredItemCreateRequest *item = &request->itemsToCreate[i];
+        item->itemToMonitor.attributeId = UA_ATTRIBUTEID_VALUE;
+        item->monitoringMode = UA_MONITORINGMODE_REPORTING;
+        item->requestedParameters.clientHandle = first + (UA_UInt32)i;
+        item->requestedParameters.samplingInterval = sampling;
+        item->requestedParameters.queueSize = queue;
+        item->requestedParameters.discardOldest = true;
+        UA_NodeId id = shim_node_id(nodes[i]);
+        if(UA_NodeId_copy(&id, &item->itemToMonitor.nodeId) != UA_STATUSCODE_GOOD) {
+            UA_CreateMonitoredItemsRequest_delete(request);
+            return NULL;
+        }
+    }
+    return request;
+}
+
+/* Gives the id of the subscription of `answer`, a Good CreateSubscription answer, and
+ * writes its publishing interval in ms to `interval` and its keep-alive count to
+ * `keep_alive`. */
+UA_UInt32 shim_subscription(const UA_CreateSubscriptionResponse *answer,
+                            UA_Double *interval, UA_UInt32 *keep_alive) {
+    *interval = answer->revisedPublishingInterval;
+    *keep_alive = answer->revisedMaxKeepAliveCount;
+    return answer->subscriptionId;
+}
+
+/* Gives the status of result `index` of `answer`, a CreateMonitoredItems answer with
+ * more results than `index`, and writes its sampling interval in ms to `sampling` and
+ * its queue size to `queue`. */
+UA_StatusCode shim_monitor_result(const UA_CreateMonitoredItemsResponse *answer,
+                                  size_t index, UA_Double *sampling, UA_UInt32 *queue) {
+    const UA_MonitoredItemCreateResult *result = &answer->results[index];
+    *sampling = result->revisedSamplingInterval;
+    *queue = result->revisedQueueSize;
+    return result->statusCode;
+}
+
+/* Gives the status of `change`. */
+UA_StatusCode shim_status_change(const UA_StatusChangeNotification *change) {
+    return change->status;
+}
+
+/* Writes the source timestamp of `value` to `source` and its server timestamp to
+ * `server`, each 0 when absent. Gives whether its status says that the server dropped
+ * values before it, as the queue of its item was full. */
+UA_Boolean shim_value_times(const UA_DataValue *value, UA_DateTime *source,
+                            UA_DateTime *server) {
+    *source = value->hasSourceTimestamp ? value->sourceTimestamp : 0;
+    *server = value->hasServerTimestamp ? value->serverTimestamp : 0;
+    /* The InfoType is bits 10 and 11. */
+    UA_StatusCode mask = 0xC00 | UA_STATUSCODE_INFOBITS_OVERFLOW;
+    UA_StatusCode bits = UA_STATUSCODE_INFOTYPE_DATAVALUE | UA_STATUSCODE_INFOBITS_OVERFLOW;
+    return value->hasStatus && (value->status & mask) == bits;
 }
 
 /* Gives a Browse request of the references of each of the `count` nodes at `nodes`,

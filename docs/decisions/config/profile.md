@@ -54,9 +54,12 @@
   or no line end after the end mark (the bytes, `laptop.architect-2`,
   2026-10-20T02:30:05Z,
   https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6281938918). It
-  refuses some files that OpenSSH reads: a comment that is not UTF-8 (`Comment`),
-  padding of a block or more, options of the `none` KDF, and a NUL in the body
-  (`laptop.director`, 2026-10-20T02:19:48Z,
+  refuses some files that OpenSSH reads: a comment that is not UTF-8 (`Comment`), and,
+  as `Format`, padding of a block or more, options of the `none` KDF, and a NUL in the
+  body (`Format` with "the file is not an OpenSSH private key as `ssh-keygen` writes
+  it": `laptop.architect-2`, 2026-10-20T02:56:10Z,
+  https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6282260036;
+  `laptop.director`, 2026-10-20T02:19:48Z,
   https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6281813278;
   `laptop.architect-2`, 2026-10-20T02:36:54Z, item 2 of
   https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6282027387; the line

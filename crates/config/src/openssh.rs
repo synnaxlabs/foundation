@@ -182,8 +182,9 @@ pub fn line(key: PublicKey) -> String {
 /// other parts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unreadable {
-    /// It is not an OpenSSH private key file, which starts `-----BEGIN OPENSSH PRIVATE
-    /// KEY-----`.
+    /// It is not an OpenSSH private key file as `ssh-keygen` writes it: it does not
+    /// start `-----BEGIN OPENSSH PRIVATE KEY-----`, or it breaks the format in a way
+    /// that OpenSSH reads, as [`private_key`] says.
     Format,
     /// The key is of another algorithm: its name, or `ECDSA` for an ECDSA key.
     Algorithm(&'static str),
@@ -232,7 +233,9 @@ impl Unreadable {
 impl fmt::Display for Unreadable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Format => f.write_str("the file is not an OpenSSH private key"),
+            Self::Format => f.write_str(
+                "the file is not an OpenSSH private key as `ssh-keygen` writes it",
+            ),
             Self::Algorithm(algorithm) => write!(
                 f,
                 "the private key is {algorithm:?}, and a subject takes only \
@@ -254,8 +257,8 @@ impl fmt::Display for Unreadable {
 /// that `ssh-key` 0.6.7 reads, also one with a body of any width or with white space,
 /// any bytes after the end mark, CRLF line ends, or no line end after the end mark. It
 /// refuses some files that OpenSSH reads: a comment that is not UTF-8
-/// ([`Unreadable::Comment`]), padding of a block or more, options of the `none` KDF,
-/// and a NUL in the body. The comment is not kept.
+/// ([`Unreadable::Comment`]), and, as [`Unreadable::Format`], padding of a block or
+/// more, options of the `none` KDF, and a NUL in the body. The comment is not kept.
 ///
 /// # Errors
 ///

@@ -182,6 +182,18 @@ fn decrypt_each_password() {
     assert_eq!(status.name(), "BadSecurityChecksFailed");
 }
 
+/// A byte of 0xA0 after the base64 of a line, which aws-lc drops only where `char` is
+/// signed, fails the decrypt on each target.
+#[test]
+fn a_decrypt_of_a_key_with_a_high_byte_fails() {
+    assert_eq!(decrypt(KEY, b"x").name(), "Good");
+    let mut lines: Vec<&str> = KEY.split_inclusive('\n').collect();
+    let second = lines[1].trim_end().to_owned() + "\u{A0}\n";
+    lines[1] = &second;
+    let status = decrypt(&lines.concat(), b"x");
+    assert_eq!(status.name(), "BadSecurityChecksFailed");
+}
+
 /// A password that does not fit in the buffer of aws-lc gives an error, and no read or
 /// write past the buffer, which would end the child process.
 #[test]

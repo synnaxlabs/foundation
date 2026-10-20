@@ -100,13 +100,19 @@
   status, as the OPC Foundation reference client does. Only a Bad service result of such
   an answer is an error (`laptop.architect-2`, 2026-10-19T00:31:17Z,
   https://github.com/synnaxlabs/foundation/pull/3268#issuecomment-6257117078). A
+  `CreateSubscription` or `CreateMonitoredItems` answer whose service result is not
+  Good, such as Uncertain or `GoodCallAgain`, gives that status: `subscribe` fails at a
+  `CreateSubscription` answer, and each item of a `CreateMonitoredItems` call gets it,
+  as open62541 then makes no subscription or item (`laptop.architect-2`,
+  2026-10-19T22:10:04Z,
+  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6278478978). A
   CreateSession, ActivateSession, or GetEndpoints answer of the connect that open62541
   makes still ends the connect, with `BadDecodingError`, at a code that is neither Good
-  nor Bad, and a FindServers answer of such a code keeps the given URL (#3317). A close by the client, also at the timeout
-  of the connect, gives the reads in flight `BadConnectionClosed`. A close or reset of
-  the stream by the server
-  still gives them `BadSecureChannelClosed`, and the connect `BadConnectionClosed`
-  (`laptop.architect-2`, 2026-10-18T20:52:27Z,
+  nor Bad, and a FindServers answer of such a code keeps the given URL (#3317). A close
+  by the client, also at the timeout of the connect, gives the reads in flight
+  `BadConnectionClosed`. A close or reset of the stream by the server still gives them
+  `BadSecureChannelClosed`, and the connect `BadConnectionClosed` (`laptop.architect-2`,
+  2026-10-18T20:52:27Z,
   https://github.com/synnaxlabs/foundation/issues/2592#issuecomment-6255008245, and
   2026-10-18T21:11:02Z,
   https://github.com/synnaxlabs/foundation/issues/2592#issuecomment-6255192139).
@@ -164,3 +170,59 @@
   (`READS * (CHUNKS - 1)`), so the two cannot drift. Then pick READS by memory: 9 keeps
   the cap at 63 chunks (about 4 MiB a channel), as you want for the Pi. Keep 16 (112
   chunks, 7 MiB) only if the read bench of the connector shows 9 is slower."
+  The Publish requests of a subscription count in this bound. open62541 keeps
+  `PUBLISHES` (2) of them in flight, so once a client subscribes, its reads and services
+  stop at `READS - PUBLISHES` (7) in flight for the life of the client, and the answers
+  in flight stay at `READS`. A client that does not subscribe keeps 9. Two Publish
+  requests keep one at the server while the round trip is under two publishing
+  intervals. Past that, the queue of each item must hold the values that it samples in
+  half a round trip, or the server drops the oldest. Each Publish answer fits one
+  message: the client asks for at most as many notifications as fit, each sized with a
+  status, both timestamps, and both picoseconds fields, after an empty answer with room
+  for 16 acknowledgement results and 16 available sequence numbers. The client
+  acknowledges each message in its next Publish, so few wait (`laptop.architect-2`,
+  2026-10-19T20:16:27Z,
+  https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6276383918). Lost:
+  each Publish answer sized to one chunk, with 9 reads and any count of Publishes, as
+  the rule of the person then rests on a size estimate with the slack of one chunk, and
+  a Publish answer of two chunks with 9 reads of 8 chunks passes the bound. Lost: a
+  queue cap of `(READS + PUBLISHES) * (CHUNKS - 1)` (77 chunks, about 5 MiB a channel,
+  past the memory picked for the Pi). Each change stays in the client until `changes`
+  gives it, with no drop. While a change waits, the client sends no Publish request, so
+  at most the answers of the `PUBLISHES` requests in flight wait in it, as section 4 of
+  https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6157348272 sizes the
+  buffer, and later values wait in the queues of the server, the oldest dropped
+  (`laptop.architect-2`, 2026-10-19T22:48:51Z,
+  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6279061464). A
+  change that waits past the revised lifetime of the subscription ends it: the server
+  deletes it, and `changes` ends as its doc states, after it gives the waiting changes.
+  The change buffers grow as needed in PR 4b of #2622, and the reserve of `PUBLISHES`
+  answers at `subscribe` comes in PR 4c with its counting test, which merges before PR 5
+  (`laptop.architect-2`, 2026-10-19T21:52:11Z,
+  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6278199669).
+  `subscribe(nodes, sampling)` asks for a publishing interval of the longer of
+  `sampling` and 100 ms, at most 1 min, a keep-alive count of max(1, floor(1 min /
+  interval)), and a queue of each item that holds the samples of two revised publishing
+  intervals. When the revised interval is not positive, or times the larger of 1 and the
+  revised keep-alive count is over 5 min, half of the 10 min timeout of a Publish
+  request in open62541, `subscribe` fails with `BadOutOfRange` and sends no Publish
+  request: the client sends Publish requests only after this check. At
+  `BadNoSubscription` in a Publish answer, the patched open62541 deletes each local
+  subscription, so `changes` ends with `BadNoSubscription` and no Publish request goes
+  out again; the release only logs it and sends again at once
+  (`laptop.architect-2`, 2026-10-19T22:06:54Z,
+  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6278430237). At
+  `BadTooManyPublishRequests` with 1 Publish request kept, the patched open62541 also
+  deletes each local subscription, so `changes` ends with `BadNoSubscription`; the
+  release calls a delete service from within the answer, which runs the event loop of
+  the client with no end. While a change waits, the count is 0, so such an answer
+  changes nothing, and the resume sets `PUBLISHES` again (#3456) (`laptop.architect-2`,
+  2026-10-20T00:06:45Z,
+  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6280116432). The
+  `subscribe` rule caps the publishing interval of item 1 of
+  https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6157348272 at 1 min,
+  and adds the keep-alive count. Lost: no check, as a server that revises the keep-alive
+  up can hold a Publish request past its timeout and break the bound of `READS`. Lost: a
+  `ModifySubscription` at a long keep-alive, as a server that raises the count does it
+  again. Lost: a patch of the 10 min `timeoutHint` of a Publish request, as the
+  requested keep-alive keeps the server under it.
