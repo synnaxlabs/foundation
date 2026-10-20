@@ -152,6 +152,8 @@ class Node:
         line = self.process.stdout.readline()
         if not line:
             self.process.wait(PATIENCE)
+            self.watcher.kill()
+            self.watcher.communicate()
             raise AssertionError(
                 f"the node exited with {self.process.returncode}:\n"
                 + self.process.stderr.read().decode()
