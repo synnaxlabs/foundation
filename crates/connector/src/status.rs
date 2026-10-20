@@ -853,7 +853,7 @@ impl Frame {
         let text = match self.positions[entry] {
             ERROR => &self.error,
             NOTE => &self.note,
-            at if at < ERROR => {
+            at @ ..ERROR => {
                 let backoff =
                     next.map_or(Span::ZERO, |next| (next - stamp).max(Span::ZERO));
                 let supervisor = [
