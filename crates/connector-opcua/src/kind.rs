@@ -325,15 +325,16 @@ impl<'a> Secured<'a> {
     /// The cause of a server that refused the secure channel, with the names of the
     /// certificate to install.
     fn distrusted(&self) -> String {
-        let names = client::names(self.certificate.expose()).map_or_else(
-            String::new,
-            |names| {
-                format!(
-                    " (SHA-1 thumbprint {}, subject {})",
-                    names.thumbprint, names.subject
-                )
-            },
-        );
+        let names = match client::names(self.certificate.expose()) {
+            None => String::new(),
+            Some(names) if names.subject.is_empty() => {
+                format!(" (SHA-1 thumbprint {})", names.thumbprint)
+            }
+            Some(names) => format!(
+                " (SHA-1 thumbprint {}, subject {})",
+                names.thumbprint, names.subject
+            ),
+        };
         format!(
             "the server refused the secure channel; most likely it does not trust the \
              certificate of the node. Install the certificate {}{names} in the trust \

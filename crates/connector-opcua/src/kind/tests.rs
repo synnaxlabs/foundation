@@ -34,7 +34,9 @@ use super::*;
 use crate::client::tests::common::{env, rig};
 use crate::client::{self, GRACE};
 use crate::gate::Gate;
-use crate::secure::{CLIENT, END, HIGH_PEM, LASTING, OTHER, Policy, SERVER, START};
+use crate::secure::{
+    CLIENT, END, HIGH_PEM, LASTING, NAMELESS, OTHER, Policy, SERVER, START,
+};
 use crate::sim::{Served, Variables, serve};
 
 const A: &str = "ns=3;s=SpikeData";
@@ -2136,8 +2138,8 @@ fn cause_on(status: Status, certificate: &[u8]) -> Option<String> {
     cause(status, Some(&secured))
 }
 
-/// The certificate to install has its names when it parses, and only its source when
-/// it does not.
+/// The certificate to install has its names when it parses, no subject when its
+/// subject is empty, and only its source when it does not parse.
 #[test]
 fn a_failed_security_check_names_the_certificate_to_install() {
     let distrusted = |names: &str| {
@@ -2155,6 +2157,8 @@ fn a_failed_security_check_names_the_certificate_to_install() {
         Some(distrusted(names))
     );
     assert_eq!(cause_on(status, b"no certificate"), Some(distrusted("")));
+    let nameless = " (SHA-1 thumbprint DDF83009BCDA4C82FF4E1091B8D318DC52B9BD3F)";
+    assert_eq!(cause_on(status, NAMELESS), Some(distrusted(nameless)));
 }
 
 #[test]

@@ -149,12 +149,13 @@ impl<'a> Credentials<'a> {
 pub(crate) struct Names {
     /// The SHA-1 thumbprint, in 40 upper-case hex digits.
     pub(crate) thumbprint: String,
-    /// The subject, in the one-line form of OpenSSL, such as `/CN=line3/O=Plant`.
+    /// The subject, in the one-line form of OpenSSL, such as `/CN=line3/O=Plant`, or
+    /// empty for an empty subject.
     pub(crate) subject: String,
 }
 
-/// The [`Names`] of `certificate`, DER or PEM, or `None` when it does not parse, its
-/// subject is empty, or memory runs out.
+/// The [`Names`] of `certificate`, DER or PEM, or `None` when it does not parse or
+/// memory runs out.
 pub(crate) fn names(certificate: &[u8]) -> Option<Names> {
     let raw = ffi::Bytes::of(certificate);
     let (mut thumbprint, mut subject) = ([0; 40], ffi::Bytes::default());

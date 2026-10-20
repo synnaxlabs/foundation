@@ -1270,7 +1270,11 @@ fn names_give_the_thumbprint_and_subject_of_a_der_or_pem_certificate() {
         subject: "/CN=server".into(),
     };
     assert_eq!(names(SERVER.certificate), Some(server));
-    assert_eq!(names(NAMELESS), None);
+    let nameless = Names {
+        thumbprint: "DDF83009BCDA4C82FF4E1091B8D318DC52B9BD3F".into(),
+        subject: String::new(),
+    };
+    assert_eq!(names(NAMELESS), Some(nameless));
     assert_eq!(names(b"no certificate"), None);
     assert_eq!(names(b""), None);
 }

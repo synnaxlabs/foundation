@@ -263,9 +263,10 @@
   When the server refuses the connect, the `Error::Device` text "the connect to
   {address} failed with {status}" gains ": {cause}", which ends with its fix, for the
   statuses of the secure channel: `BadSecurityChecksFailed` names the certificate to
-  install by its source, SHA-1 thumbprint, and subject; each status of the certificate
-  of the server names the source of the trust; and `BadIdentityTokenRejected` names the
-  mode and the policies that the server must offer with an anonymous user. With no
+  install by its source, SHA-1 thumbprint, and subject, when the subject is not empty;
+  each status of the certificate of the server names the source of the trust; and
+  `BadIdentityTokenRejected` names the mode and the policies that the server must offer
+  with an anonymous user. With no
   `certificate`, only `BadIdentityTokenRejected` gains a cause. Lost: a new
   `Failure::Connect` variant, a second `Display` arm for the same text; and the cause
   in `client::Error`, which does not know the sources

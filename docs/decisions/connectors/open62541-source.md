@@ -1248,9 +1248,12 @@
   thumbprint and its subject, from `UA_CertificateUtils_getThumbprint` and
   `UA_CertificateUtils_getSubjectName` of the copy, through `shim_certificate_names`.
   The test of the names that the production code calls takes these two, as item 1 of
-  the ruling above states. `getSubjectName` gives `Good` and an empty subject when its
-  copy runs out of memory, so the shim gives `BadOutOfMemory` for an empty subject, and
-  the text names only the source (`laptop.architect-2`, condition 2,
+  the ruling above states. `getSubjectName` gives `Good` and a NULL subject when its
+  copy runs out of memory, so the shim gives `BadOutOfMemory` for a NULL subject, and
+  the text names only the source. An empty subject is legal X.509: the copy gives the
+  sentinel, and the text gives the thumbprint with no subject (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6285815315, which
+  corrects condition 2 of
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6285738820).
   Lost: a parse of the certificate in Rust, a second parser, and a hash of the DER in
   Rust, which needs its own PEM read for a PEM certificate

@@ -1005,7 +1005,7 @@ UA_StatusCode shim_client_secure(UA_Client *client, UA_MessageSecurityMode mode,
 /* Writes the SHA-1 thumbprint of `certificate`, DER or PEM, to `thumbprint` as 40
  * upper-case hex digits, and its subject in the one-line form of OpenSSL to `subject`,
  * which the caller frees with `shim_buffer_free`. Gives a status other than `Good` when
- * the certificate does not parse, or the subject is empty. */
+ * the certificate does not parse, or memory runs out. */
 UA_StatusCode shim_certificate_names(const UA_ByteString *certificate,
                                      UA_Byte thumbprint[40], UA_String *subject) {
     /* The two functions take a mutable certificate and change nothing. */
@@ -1016,8 +1016,9 @@ UA_StatusCode shim_certificate_names(const UA_ByteString *certificate,
     if(status != UA_STATUSCODE_GOOD)
         return status;
     status = UA_CertificateUtils_getSubjectName(&held, subject);
-    /* The copy gives `Good` and an empty subject when its copy runs out of memory. */
-    if(status == UA_STATUSCODE_GOOD && subject->length == 0)
+    /* The copy gives `Good` and a NULL subject when its copy runs out of memory, and
+     * the sentinel for an empty subject. */
+    if(status == UA_STATUSCODE_GOOD && subject->data == NULL)
         return UA_STATUSCODE_BADOUTOFMEMORY;
     return status;
 }
