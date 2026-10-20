@@ -41,9 +41,9 @@
      does the same: a frame that the node took may not be on disk. So the code alone
      does not tell a refusal at `close` from the end of the group; the text does.
      When an `sdk` writer can hold more than one group, this map comes back to
-     `laptop.architect-2`. A `Pool` error of a reader raises `ConnectionError` (item 2
-     of SDK PYTHON READER). Each other `Stream` or `Session` error raises
-     `ConnectionError`.
+     `laptop.architect-2`. A `Pool` error of the stream of a reader, after its open,
+     raises `ConnectionError` (item 2 of SDK PYTHON READER). Each other `Stream` or
+     `Session` error raises `ConnectionError`.
   2. `sdk-python` takes `program` as a normal dependency and matches
      `program::Error::Refused` itself. Lost: a re-export of `program::Error` and
      `program::Refusal` from `sdk`, two public items that no Rust caller names yet. The
