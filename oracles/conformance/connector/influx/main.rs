@@ -133,7 +133,8 @@ async fn simulate(inputs: Serve) {
     served.await.expect("the listener holds");
 }
 
-/// `config` with its token read from [`TOKEN`], whose value is `marker`.
+/// `config` with its token read from [`TOKEN`], whose value is `marker`. The `ca`
+/// waits on #3612: the check refuses it with an `http` address.
 fn marked(config: Document, marker: &str) -> scenarios::inputs::Marked {
     let token = scenarios::inputs::secret(TOKEN);
     let secrets = vec![(name(TOKEN), marker.as_bytes().to_vec())];

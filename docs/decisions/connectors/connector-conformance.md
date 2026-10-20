@@ -145,7 +145,8 @@
      check gets only the name of each secret, so they get no check. A kind with no
      secret passes with no check. `opcua` is not yet in scenario 7: a certificate needs
      a secure endpoint of the simulator, which needs a new public surface of
-     `connector_opcua::sim` (#3610). The status hides each secret value that a run read
+     `connector_opcua::sim` (#3610). `influx` marks only its `token`: its `ca` needs an
+     `https` simulator (#3612). The status hides each secret value that a run read
      (ruling of `laptop.architect-2` on #2849 item 4, 2026-10-16T17:54:49Z:
      https://github.com/synnaxlabs/foundation/issues/2849#issuecomment-6221505945).
      Scenario 7 runs 20.1 s of plant time for `influx` with no echo simulator (box1, at
