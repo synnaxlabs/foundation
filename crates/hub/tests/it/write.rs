@@ -26,8 +26,8 @@ use super::link::{as_agent, serve_session_after};
 use super::read::{finish, read_session};
 use super::serve::decoded;
 use super::{
-    AREA, BODY_MAX, I64, NODE, POOL, RING, STAMP, TIME, TIME_B, Test, channels, region,
-    without,
+    AREA, BODY_MAX, COMMIT, I64, NODE, POOL, RING, STAMP, TIME, TIME_B, Test, channels,
+    region, without,
 };
 use crate::agent::{AGENT, Agent, SUBJECT, Stream, name, reset_with};
 use crate::net::{HOME, own_pool, transport};
@@ -967,6 +967,40 @@ fn ends_control_when_the_program_finishes_the_stream() {
         });
     };
     let home = read_session(426, ready, |mut agent| async move {
+        agent.admit().await;
+        let mut stream = write(&agent).await;
+        send(&mut stream, &[1], &[10]).await;
+        assert_eq!(end(&mut stream).await, [taken(1, 0, 1), stored(1)]);
+        finish(&mut agent).await;
+    });
+    assert_eq!(home.served, [Ok(Got::Ended), Ok(Got::Ended)]);
+}
+
+/// Control ends when the program finishes its stream, before the wait for the commit
+/// of its last frame: a writer of lower authority writes while that commit is due.
+#[test]
+fn ends_control_at_the_finish_before_the_commit_of_the_last_frame() {
+    let ready = async |test: &Test| {
+        let mut reader = test.reader(&["value"], hub::reader::Mode::Latest).await;
+        let config = writer::Config {
+            authority: Authority(0),
+            ..super::config("b", &["value"])
+        };
+        let mut writer = test.hub.writer(config).await.expect("opens");
+        let draft = super::draft(&writer, &[(1, &[2]), (2, &[20])]);
+        let clock = test.clock.clone();
+        test.tasks.spawn(async move {
+            use hub::home::Outcome::Applied;
+            reader.next().await.expect("a frame");
+            clock.sleep(Span::from_nanos(COMMIT.nanos() / 2)).await;
+            let written = writer.write(super::LIVE, draft).expect("writes");
+            assert!(
+                matches!(written, [Applied { range, .. }] if range.seq == 1),
+                "{written:?}"
+            );
+        });
+    };
+    let home = read_session(437, ready, |mut agent| async move {
         agent.admit().await;
         let mut stream = write(&agent).await;
         send(&mut stream, &[1], &[10]).await;
