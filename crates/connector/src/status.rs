@@ -22,7 +22,7 @@ use spec::definition::Definition;
 use types::authority::Authority;
 use types::frame;
 use types::name::Name;
-use types::sample::{Scalar, Type};
+use types::sample::{Scalar, Type, Value};
 use types::time::{Monotonic, Span, Stamp};
 
 use hub::home;
@@ -841,7 +841,7 @@ impl Session {
 impl Frame {
     /// Fills `bytes`, the sample of `entry` in a frame at `stamp`, with the last value
     /// of its status channel, with `next` the time of the next try by the hub's clock,
-    /// while one waits. Puts nothing in the index.
+    /// while one waits, and `stamp` in the index.
     fn fill(
         &self,
         values: &Values,
@@ -851,7 +851,10 @@ impl Frame {
         bytes: &mut [u8],
     ) {
         let text = match self.positions[entry] {
-            0 => return,
+            0 => {
+                Value::Stamp(stamp).write(bytes);
+                return;
+            }
             ERROR => &self.error,
             NOTE => &self.note,
             at @ ..ERROR => {

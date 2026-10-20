@@ -260,12 +260,13 @@ impl Writer {
             }
             &kept.shape
         };
-        let fill = |_, entry, bytes: &mut [u8]| {
+        let fill = |stamp, entry, bytes: &mut [u8]| {
             let Fill {
                 channel, scalar, ..
             } = fills[entry];
-            if let Some(channel) = channel {
-                value(values, channel, scalar).write(bytes);
+            match channel {
+                Some(channel) => value(values, channel, scalar).write(bytes),
+                None => Value::Stamp(stamp).write(bytes),
             }
         };
         let groups = stamped.write(stamp, &shape.series, fill)?;

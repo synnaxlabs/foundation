@@ -387,7 +387,8 @@ type Fills = Vec<(Stamp, usize)>;
 type Wrote = Result<Vec<(u32, bool)>, stamp::Error>;
 
 /// Writes a frame of each entry at the next stamp with `writer`, with a fill that puts
-/// 7 in each entry, an index too, and gives the result, the stamp, and each fill.
+/// the stamp in each index and 7 in each other entry, and gives the result, the stamp,
+/// and each fill.
 fn write(writer: &mut stamp::Writer) -> (Wrote, Stamp, Fills) {
     write_series(writer, &series(writer))
 }
@@ -398,11 +399,20 @@ fn write_series(
     series: &[(usize, usize)],
 ) -> (Wrote, Stamp, Fills) {
     let stamp = writer.next(writer.hub().now());
+    let set = writer.hub().set();
+    let index: Vec<_> = (0..set.entries().len())
+        .map(|i| set.index(i) == i)
+        .collect();
     let mut fills = Fills::new();
     let wrote = writer.write(stamp, series, |stamp, entry, bytes| {
         fills.push((stamp, entry));
+        let value = if index[entry] {
+            stamp.nanos().cast_unsigned()
+        } else {
+            7
+        };
         let len = bytes.len();
-        bytes.copy_from_slice(&7_u64.to_le_bytes()[..len]);
+        bytes.copy_from_slice(&value.to_le_bytes()[..len]);
     });
     (wrote.map(<[_]>::to_vec), stamp, fills)
 }

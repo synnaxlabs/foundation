@@ -5,7 +5,6 @@ use std::iter;
 use hub::home::{Outcome, Refusal, order};
 use hub::writer::Failure;
 use types::frame::{self, Form, Label, Path};
-use types::sample::Value;
 use types::time::{Interval, Span, Stamp};
 
 mod fit;
@@ -185,10 +184,9 @@ impl Writer {
     /// Writes one frame of `series`, as [`hub::writer::Writer::draft`] takes them, at
     /// `stamp` on the live path. Each series holds one sample. `fill` gets each entry,
     /// an index too, with the stamp of the frame and the bytes of its sample, and puts
-    /// its value. Then `write` puts the stamp of the frame in each index, over what
-    /// `fill` put there. The groups that the home refuses as `Backwards` are written
-    /// again once, with only their series, 1 ns after the latest stamp that the
-    /// refusals give, so `fill` can get an entry twice.
+    /// its value: the stamp in an index. The groups that the home refuses as
+    /// `Backwards` are written again once, with only their series, 1 ns after the
+    /// latest stamp that the refusals give, so `fill` can get an entry twice.
     ///
     /// Returns each present group in order, and whether the home applied it, at the
     /// first write or at the write again. A group that the home lost or refused, and
@@ -292,13 +290,6 @@ fn send(
     }
     draft.set_counts(0, iter::repeat(1));
     groups.extend(draft.ranges().map(|(group, _)| (group, false)));
-    for &(group, _) in &*groups {
-        let index = set.groups()[to_usize(group)];
-        let Some(bytes) = draft.series_mut(index) else {
-            panic!("invariant: the index of group {group}, present, is in the frame");
-        };
-        Value::Stamp(stamp).write(bytes);
-    }
     let outcomes = hub
         .write(Label::Path(Path::Live), draft)
         .map_err(Error::Write)?;
@@ -339,11 +330,6 @@ fn backwards_again(before: Stamp, last: Stamp) -> ! {
         "invariant: a frame stamped after {before}, the last stamp of its index, is not \
          backwards, but the home gives {last} as last"
     )
-}
-
-/// `group` as a position.
-fn to_usize(group: u32) -> usize {
-    usize::try_from(group).expect("invariant: a usize holds a group")
 }
 
 /// The floor of the mean of `a` and `b`, with no overflow.
