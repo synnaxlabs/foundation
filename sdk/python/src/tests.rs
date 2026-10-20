@@ -22,7 +22,8 @@ report = stream.getvalue()
 
 /// The files of `sdk/python/tests`, each with whether it runs only with the feature
 /// `sim`.
-const FILES: [(&str, bool); 3] = [
+const FILES: [(&str, bool); 4] = [
+    ("test_stubs.py", false),
     ("test_client.py", false),
     ("test_sim.py", true),
     ("test_writer.py", false),
