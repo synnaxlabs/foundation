@@ -8,15 +8,15 @@
 
 use std::path::Path;
 
-use env::files::{self, Files, Mode};
+use env::files::{Files, Mode};
 
+use crate::change;
 use crate::error::Error;
 use crate::file::{self, Blocks};
 use crate::region::Request;
 
 /// The name of the join file in a mesh directory.
 const FILE: &str = "join";
-const NEW: &str = "join.new";
 const VERSION: u16 = 1;
 
 /// The request in the join file of `dir`, or `None` when `dir` or the file is not
@@ -35,20 +35,14 @@ pub(crate) async fn read(
     mode: Mode,
 ) -> Result<Option<Request>, Error> {
     let path = dir.join(FILE);
-    let opened = match files.open(&path, mode).await {
-        Ok(opened) => opened,
-        Err(files::Error::NotFound { .. }) => return Ok(None),
-        Err(error) => return Err(Error::Files(error)),
+    let read = file::read(files, &path, blocks, mode, VERSION, change::BYTES_MAX);
+    let Some(framed) = read.await? else {
+        return Ok(None);
     };
-    let bytes = blocks.read(&opened).await;
-    opened.close().await;
-    let bytes = bytes?;
-    let request = match file::unframe(&bytes) {
-        Some((VERSION, mut body)) => {
-            Request::decode(&mut body).filter(|_| body.is_empty())
-        }
-        _ => None,
-    };
+    let request = framed.and_then(|framed| {
+        let mut body = framed.body();
+        Request::decode(&mut body).filter(|_| body.is_empty())
+    });
     request.map(Some).ok_or(Error::JoinFile { path })
 }
 
@@ -67,9 +61,6 @@ pub(crate) async fn write(
 ) -> Result<(), Error> {
     let mut body = Vec::new();
     request.encode(&mut body);
-    files.create_dir(dir).await.map_err(Error::Files)?;
-    let parent = dir.parent().unwrap_or(Path::new(""));
-    files.sync_dir(parent).await.map_err(Error::Files)?;
-    file::replace(files, dir, [FILE, NEW], blocks, VERSION, &body).await?;
-    files.sync_dir(dir).await.map_err(Error::Files)
+    file::make_dir(files, dir).await.map_err(Error::Files)?;
+    Ok(file::replace(files, dir, FILE, blocks, VERSION, &body).await?)
 }

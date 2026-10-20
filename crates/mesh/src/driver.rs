@@ -1324,10 +1324,7 @@ async fn open_log(
     dir: &Path,
     pool: Rc<Pool>,
 ) -> Result<(Log, log::Stored), log::Error> {
-    files.create_dir(dir).await?;
-    files
-        .sync_dir(dir.parent().unwrap_or(Path::new("")))
-        .await?;
+    crate::file::make_dir(files, dir).await?;
     Log::open(files.clone(), dir.join(LOG), pool).await
 }
 

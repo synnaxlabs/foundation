@@ -46,6 +46,62 @@ pub(crate) fn unframe(bytes: &[u8]) -> Option<(u16, &[u8])> {
     (*claimed == check(rest)).then(|| (u16::from_le_bytes(*format), body))
 }
 
+/// The bytes of a file that [`read`] found whole: the check and the format, then the
+/// body.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Framed {
+    bytes: Vec<u8>,
+    start: usize,
+}
+
+impl Framed {
+    /// The body of the file.
+    pub(crate) fn body(&self) -> &[u8] {
+        self.bytes
+            .get(self.start..)
+            .expect("invariant: the body starts inside the file")
+    }
+}
+
+/// The file `path`, or `None` when it or its directory is not there. It is
+/// `Some(None)` when the file holds a body of more than `most` bytes, which it does not
+/// read, or when its check fails or its format is not `format`. A `mode` of
+/// `Mode::Write` first waits for each call on the file that a dropped [`replace`] left
+/// to run; a read open does not.
+pub(crate) async fn read(
+    files: &Files,
+    path: &Path,
+    blocks: &Blocks,
+    mode: Mode,
+    format: u16,
+    most: usize,
+) -> Result<Option<Option<Framed>>, Failed> {
+    let opened = match files.open(path, mode).await {
+        Ok(opened) => opened,
+        Err(files::Error::NotFound { .. }) => return Ok(None),
+        Err(error) => return Err(Failed::Files(error)),
+    };
+    if opened.len() > wide(CHECK.saturating_add(2).saturating_add(most)) {
+        opened.close().await;
+        return Ok(Some(None));
+    }
+    let bytes = blocks.read(&opened).await;
+    opened.close().await;
+    let bytes = bytes?;
+    let start = match unframe(&bytes) {
+        Some((found, body)) if found == format => (bytes.len().checked_sub(body.len()))
+            .expect("invariant: the body is a tail of the file"),
+        _ => return Ok(Some(None)),
+    };
+    Ok(Some(Some(Framed { bytes, start })))
+}
+
+/// Makes `dir`, durable in its parent.
+pub(crate) async fn make_dir(files: &Files, dir: &Path) -> Result<(), files::Error> {
+    files.create_dir(dir).await?;
+    files.sync_dir(dir.parent().unwrap_or(Path::new(""))).await
+}
+
 /// A pool whose largest block is one sector or more, and the reads and writes of a
 /// file in its blocks.
 #[derive(Clone, Debug)]
@@ -115,19 +171,19 @@ impl Blocks {
 }
 
 /// Writes `body` in its frame of `format` as the file `name` of `dir`, in place of the
-/// file there. It removes `name` and `new`, writes `new`, and renames it to `name`,
-/// which makes its bytes durable. So a crash leaves the old file, the new one, or
-/// none. The caller syncs `dir`.
+/// file there, and syncs `dir`. It removes `name` and `name.new`, writes `name.new`,
+/// and renames it to `name`, which makes its bytes durable. So a crash leaves the old
+/// file, the new one, or none.
 pub(crate) async fn replace(
     files: &Files,
     dir: &Path,
-    [name, new]: [&str; 2],
+    name: &str,
     blocks: &Blocks,
     format: u16,
     body: &[u8],
 ) -> Result<(), Failed> {
     let bytes = frame(format, body);
-    let (path, new) = (dir.join(name), dir.join(new));
+    let (path, new) = (dir.join(name), dir.join(format!("{name}.new")));
     // `File::rename` refuses an existing target, so the old file goes first.
     files.remove(&path).await.map_err(Failed::Files)?;
     files.remove(&new).await.map_err(Failed::Files)?;
@@ -139,7 +195,7 @@ pub(crate) async fn replace(
     blocks.write(&opened, 0, &mut &bytes[..]).await?;
     opened.rename(&path).await.map_err(Failed::Files)?;
     opened.close().await;
-    Ok(())
+    files.sync_dir(dir).await.map_err(Failed::Files)
 }
 
 /// `len` as a file offset.
