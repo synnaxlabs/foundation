@@ -196,9 +196,9 @@ impl Writer {
     /// lost group leaves the writer open. A removed channel or a failed commit of a
     /// group gives [`Outcome::Ended`], also for each later frame of the group. A call
     /// dropped after it sent its frame loses only its outcomes; a call dropped while it
-    /// sends ends the writer. A call takes the draft
-    /// at its first poll, so after each result the writer holds no draft: the next
-    /// write needs a new call of [`Writer::draft`].
+    /// sends ends the writer. A call takes the draft at its first poll, so after each
+    /// result the writer holds no draft: the next write needs a new call of
+    /// [`Writer::draft`].
     ///
     /// # Errors
     ///
