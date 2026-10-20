@@ -1054,6 +1054,13 @@ class ProfileTest(unittest.TestCase):
             f"{self.profile}, or pass subject=",
         )
 
+    def test_another_error_of_the_login_name_is_raised_as_it_is(self) -> None:
+        broken = RuntimeError("the password database is broken")
+        with unittest.mock.patch("getpass.getuser", side_effect=broken):
+            with self.assertRaises(RuntimeError) as raised:
+                foundation.connect(self.node.address, public_key=self.node.public_key())
+        self.assertIs(raised.exception, broken)
+
     def test_an_empty_profile_variable_counts_as_unset(self) -> None:
         with unittest.mock.patch.dict(os.environ, {"FOUNDATION_PROFILE": ""}):
             self.trusted("alice", os.path.join(self.dir, "alice.key"))
