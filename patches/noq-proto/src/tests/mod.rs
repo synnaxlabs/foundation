@@ -1634,6 +1634,25 @@ fn close_from_migrated_address() {
     assert_eq!(path.remote(), client_addr);
 }
 
+/// A closed server sends its close again for a packet on the path of the connection,
+/// but not for one from a new address of the client, as a closed connection migrates no
+/// path.
+#[test]
+fn closed_server_sends_no_close_to_a_migrated_client() {
+    let _guard = subscribe();
+    let mut pair = ConnPair::default();
+    pair.drive();
+
+    pair.close(Server, 0, b"bye");
+    pair.drive_server();
+    pair.client.inbound.clear();
+    pair.routes.as_basic_mut().passive_migration(Client);
+    pair.ping(Client);
+    pair.drive();
+
+    assert_eq!(pair.stats(Server).frame_tx.connection_close, 1);
+}
+
 #[test]
 fn server_hs_retransmit() {
     let _guard = subscribe();
