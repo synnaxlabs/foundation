@@ -1315,8 +1315,8 @@ mod corpus {
 
     /// The inputs `write_replies_stored` and `write_replies_order_stored`, where each
     /// `Stored` names its group, reach each arm that the inputs with groups reached
-    /// before, and a kind that no reply has, a group that the write refused, and a group
-    /// that the write does not have.
+    /// before, and a kind that no reply has, a group that the write refused, and a
+    /// group that the write does not have.
     #[test]
     fn decodes_each_reply_input_of_the_fuzz_target_with_stored_groups() {
         let unasked = |frame| Err(Error::Unasked { frame, sent: 0 });

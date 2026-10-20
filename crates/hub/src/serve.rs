@@ -299,10 +299,10 @@ impl From<transport::Error> for Error {
     }
 }
 
-/// Gives the serve that `serve` makes in a box, behind a trait object, so that its frame
-/// path has a poll of its own. Out of line, so that its future, which is built on the
-/// stack before it moves into the box, adds nothing to the stack frame of each poll of
-/// the caller.
+/// Gives the serve that `serve` makes in a box, behind a trait object, so that its
+/// frame path has a poll of its own. Out of line, so that its future, which is built on
+/// the stack before it moves into the box, adds nothing to the stack frame of each poll
+/// of the caller.
 #[inline(never)]
 fn boxed<'a, F>(
     serve: impl FnOnce() -> F,
