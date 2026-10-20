@@ -352,9 +352,9 @@ fn decode_a_copied_write_frame(bencher: Bencher<'_, '_>, series: u32) {
 fn decode_write(bencher: Bencher<'_, '_>, series: u32, in_place: bool) {
     let channels = (1..=u128::from(series)).map(|key| {
         let data = if key == 1 { Scalar::Stamp } else { Scalar::I64 };
-        (channel::Key::from_u128(key), Type::Scalar(data))
+        (channel::Key::from_u128(key), Type::Scalar(data), 0)
     });
-    let set = KeySet::ordered(channels, 0).expect("no key repeats");
+    let set = KeySet::ordered(channels).expect("no key repeats");
     let mut frames = write::Frames::new(Arc::new(set));
     let bytes = (u64::from(series) * 8 + (1 << 20)).next_power_of_two();
     let config = block::Config::new(bytes).expect("the budget fits");

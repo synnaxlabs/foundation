@@ -18,8 +18,8 @@ fn create_set_of(places: u32) -> Arc<KeySet> {
         3 => Type::Scalar(Scalar::F64),
         _ => Type::Scalar(Scalar::I64),
     };
-    let channels = (1..=places).map(|n| (key(u128::from(n)), data(n)));
-    Arc::new(KeySet::ordered(channels, 0).expect("no key repeats"))
+    let channels = (1..=places).map(|n| (key(u128::from(n)), data(n), 0));
+    Arc::new(KeySet::ordered(channels).expect("no key repeats"))
 }
 
 fn create_pool() -> block::Pool {

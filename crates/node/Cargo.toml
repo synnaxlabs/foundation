@@ -52,6 +52,7 @@ codec = { path = "../codec" }
 connector = { path = "../connector", features = ["sim"] }
 connector-influx = { path = "../connector-influx", features = ["sim"] }
 connector-opcua = { path = "../connector-opcua", features = ["sim"] }
+control = { path = "../control" }
 counting = { path = "../counting" }
 crc32c = { workspace = true }
 divan = { workspace = true }

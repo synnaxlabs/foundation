@@ -864,7 +864,8 @@ typedef enum {
     SHIM_REFUSAL_TIME,
     SHIM_REFUSAL_EMPTY,
     SHIM_REFUSAL_INVALID,
-    SHIM_REFUSAL_TRAILING
+    SHIM_REFUSAL_TRAILING,
+    SHIM_REFUSAL_LINE
 } shim_refusal_kind;
 
 typedef struct {
@@ -875,7 +876,7 @@ typedef struct {
 _Static_assert(sizeof(shim_refusal_kind) == sizeof(int) &&
                    offsetof(shim_refusal, number) == sizeof(size_t) &&
                    sizeof(shim_refusal) == 2 * sizeof(size_t) &&
-                   SHIM_REFUSAL_TRAILING == 8,
+                   SHIM_REFUSAL_LINE == 9,
                "shim_refusal changed");
 
 /* Writes `kind` and `number` to `refusal` and gives `status`. */
@@ -941,6 +942,9 @@ UA_StatusCode shim_client_secure(UA_Client *client, UA_MessageSecurityMode mode,
                            UA_STATUSCODE_BADINTERNALERROR);
     case UA_TRUSTLOAD_TRAILING:
         return refuse_with(refusal, SHIM_REFUSAL_TRAILING, number,
+                           UA_STATUSCODE_BADINTERNALERROR);
+    case UA_TRUSTLOAD_LINE:
+        return refuse_with(refusal, SHIM_REFUSAL_LINE, number,
                            UA_STATUSCODE_BADINTERNALERROR);
     case UA_TRUSTLOAD_NOMEMORY:
         return UA_STATUSCODE_BADOUTOFMEMORY;

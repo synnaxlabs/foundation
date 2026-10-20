@@ -57,6 +57,10 @@ exclude_re = [
   # `sends_from_one_run_on_one_connection_ask_for_one_move` and
   # `a_send_from_a_run_with_no_value_moves_on_only_its_connection` kill the mutant.
   'crates/connector-opcua/src/connection\.rs:.*replace \+ with \* in State::move_on$',
+  # On Linux the kernel gives a `[::]:0` bind a port that no IPv4 socket holds, so a
+  # probe that gives no port or port 0 shows only on macOS, where
+  # `port_0_on_any_v6_skips_the_held_ipv4_ports` kills the mutants.
+  'crates/os/src/net/udp\.rs:.*replace free_v4_port -> Option<u16> with (None|Some\(0\))$',
   # The fields of a UUIDv7 share no bit, so `^` gives the same bits as `|`.
   'crates/types/src/uuid\.rs:.*replace \| with \^ in v7$',
   # Class 4 is 320 bytes on either side of the branch: `ALIGN * 5` and
@@ -259,9 +263,13 @@ exclude_re = [
   # `Replies::decode` gives a `Stored` error only with `bound` below or above
   # `frames`, never equal to it.
   'crates/wire/src/hub\.rs:.*replace < with <= in <impl fmt::Display for Error>::fmt$',
-  # The task side of a writer of `sdk` needs a node, and the mutants of `sdk` run only
-  # its own tests. With either mutant, no writer opens, and each writer test of
-  # `crates/node/tests/it/sdk.rs` fails in the wait of `planted`.
+  # The task side of a stream of `sdk` needs a node, and the mutants of `sdk` run only
+  # its own tests. With this mutant no stream opens, and each test of
+  # `crates/node/tests/it/sdk.rs` that opens a writer, and each of
+  # `crates/node/tests/it/sdk/read.rs`, fails.
   'sdk/rust/src/lib\.rs:.*replace served with \(\)$',
-  'sdk/rust/src/write\.rs:.*replace (serve|served) with \(\)$',
+  # No reader opens, and each test of `crates/node/tests/it/sdk/read.rs` fails.
+  'sdk/rust/src/read\.rs:.*replace served with \(\)$',
+  # No writer opens, and each test of `crates/node/tests/it/sdk.rs` that writes fails.
+  'sdk/rust/src/write\.rs:.*replace served with \(\)$',
 ]

@@ -1086,6 +1086,43 @@
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6256452096). An issuer
   entry keeps the load of the release (`laptop.architect-2`, 2026-10-18 22:07 UTC,
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255744593, item 2).
+  aws-lc reads PEM in the pieces of `BIO_gets`, at most 253 bytes each, and drops the
+  bytes of 0x20 or less as a `char` at the end of each, so where `char` is signed it
+  also drops 0x80 to 0xFF. One trust file gives the same trust on each CPU target
+  (`laptop.monitor`, kind (f), 2026-10-19 17:04 UTC,
+  https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6272707868). Before
+  aws-lc reads it, the load refuses a trust with a piece of a PEM block that holds a
+  byte of 0x80 to 0xFF after its last byte of 0x21 to 0x7F, or anywhere in a piece that
+  has none. A block runs from a piece that starts `-----BEGIN ` and whose kept bytes
+  hold no NUL and end in `-----`, through the next piece whose kept bytes start
+  `-----END ` (`laptop.architect-2`, 2026-10-19 18:24 UTC,
+  https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6274242216; for the
+  NUL test, https://github.com/synnaxlabs/foundation/pull/3423#issuecomment-6278366654).
+  So a `BEGIN` or `END` line of a block with such a byte after its dashes makes the load
+  refuse the trust. A `BEGIN` line with a byte of 0x21 to 0x7F after such a byte is read
+  alike on each target, and the check passes it: when it ends in `-----`, it starts a
+  block of another label, whose label holds that byte
+  (https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6278209789); else
+  it is text, and its block drops (`laptop.monitor`, message 8b694c3c, recorded
+  2026-10-19 21:36 UTC,
+  https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6277920980, which
+  supersedes the first item of
+  https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6272707868 for such
+  a line). Such an `END` line fails in aws-lc on each target as
+  `client::Refusal::Invalid`, unless it names the label of a block that such a `BEGIN`
+  line starts; that block drops
+  (https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6278296455;
+  `laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/pull/3423#issuecomment-6278381176). Text
+  outside the blocks keeps any bytes. The check is in C, at the start of the PEM branch
+  of `openSSLLoadEachCertificate`, so both loads of a trust pass it. The client gives
+  `client::Refusal::Line { number }`, the line from 1 counted by `\n`, since the check
+  runs before aws-lc counts certificates. PR 2d of #2934, the caller that reads the
+  trust file, puts its path before that text (`laptop.architect-2`, 2026-10-19 18:24
+  UTC, https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6274242216).
+  Lost: a check in Rust in `Client::connect`, which copies the DER rule; a check in the
+  kind, which other callers skip; and aws-lc patched to compare as unsigned, which gives
+  no refusal and no line.
   The validity check of the own certificate and the map of each refusal in `kind.rs`
   move to PR 2b (`laptop.architect-2`, 2026-10-18 21:37 UTC,
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255457069, items 1

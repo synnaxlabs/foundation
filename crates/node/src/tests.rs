@@ -1849,9 +1849,11 @@ mod home {
             let now = mesh_now(&clock, &host.clock()).await;
             let key = home
                 .open_writer(writer::Writer {
-                    subject: "a".parse().expect("a name"),
-                    authority: Authority(1),
-                    via: types::node::Key::from_u128(1),
+                    holder: control::Writer {
+                        subject: "a".parse().expect("a name"),
+                        authority: Authority(1),
+                        via: types::node::Key::from_u128(1),
+                    },
                     lease: None,
                     set: Arc::clone(&set),
                 })
@@ -4979,14 +4981,14 @@ pub(crate) mod port {
             assert_eq!(sim.run(), Ok(()));
             let limit = ::mesh::Error::Limit {
                 bytes_max: 1472,
-                bytes_min: 50_355,
+                bytes_min: 51_379,
             };
             let refused = node.join().unwrap_err();
             assert_eq!(refused, Error::Mesh(limit));
             assert_eq!(
                 refused.to_string(),
                 "the node's mesh did not open: this node takes messages of at most 1472 \
-                 bytes, below the 50355 bytes of an append of the largest record"
+                 bytes, below the 51379 bytes of an append of the largest record"
             );
         }
 

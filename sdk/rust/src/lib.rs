@@ -4,7 +4,7 @@ use std::fmt;
 use std::future::poll_fn;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::pin::Pin;
+use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -18,7 +18,10 @@ use types::ed25519::{PrivateKey, PublicKey};
 use types::name::Name;
 use types::sample::{Scalar, Type};
 
+pub mod read;
 pub mod write;
+
+pub use program::Place;
 
 /// The budget of the pool of the transport and the session. Its largest block holds a
 /// datagram.
@@ -27,10 +30,18 @@ const POOL: block::Config = match block::Config::new(1 << 21) {
     Err(_) => panic!("invariant: the budget fits"),
 };
 
-/// The budget of the pool of the frames of the session's reads and writes. Its largest
-/// block, 57,344 bytes, bounds the bytes of one frame of
-/// [`write::Writer::write_series`].
+/// The budget of the pool of the drafts of the session's writers. Its largest block,
+/// 57,344 bytes, bounds the bytes of one frame of [`write::Writer::write_series`].
 const FRAMES: block::Config = match block::Config::new(64 << 10) {
+    Ok(config) => config,
+    Err(_) => panic!("invariant: the budget fits"),
+};
+
+/// The budget of the pool of the frames of the session's readers. Its largest block,
+/// 7,340,032 bytes, bounds the encoded bytes of one frame of [`read::Reader::next`].
+/// It reserves about 504 MiB of address space, with no memory and no commit charge
+/// until a frame comes.
+const READS: block::Config = match block::Config::new(8 << 20) {
     Ok(config) => config,
     Err(_) => panic!("invariant: the budget fits"),
 };
@@ -159,7 +170,7 @@ pub struct Subject {
 #[derive(Debug)]
 pub struct Client {
     thread: Mutex<Thread>,
-    requests: tokio::sync::mpsc::UnboundedSender<write::Open>,
+    requests: tokio::sync::mpsc::UnboundedSender<Open>,
     /// Set at the close or drop of the client, before its thread ends.
     closed: Arc<AtomicBool>,
 }
@@ -197,8 +208,10 @@ impl Client {
     ///
     /// [`Error::Thread`] when the client's thread or its runtime cannot start,
     /// [`Error::Bind`] when the local UDP socket cannot bind, [`Error::Session`]
-    /// when the dial, the handshake, or the hello fails, and [`Error::Panicked`]. A
-    /// `node` with no address is unreachable with no attempt.
+    /// when the dial, the handshake, or the hello fails, [`Error::Memory`] when the OS
+    /// refuses the address space or the first page of the pool of the frames of the
+    /// readers, and [`Error::Panicked`]. A `node` with no address is unreachable
+    /// with no attempt.
     pub fn connect(node: &Node, subject: Subject) -> Result<Self, Error> {
         let node = node.clone();
         Self::start(move |tasks, outcome, ended, requests| {
@@ -275,6 +288,29 @@ impl Client {
         write::Writer::open(&self.requests, &self.closed, config)
     }
 
+    /// Opens a reader on `config.channels` at the client's node, and blocks until the
+    /// node opened it. The node must be the home of their index. Each reader holds a
+    /// stream of the session, and the node bounds the streams of a session (64 by
+    /// default, one of them the hello): past that bound, the open waits until another
+    /// stream of the session ends, such as at the drop of a reader. A frame of more
+    /// than 7,340,032 bytes, encoded, ends the reader with
+    /// `Stream(Pool(TooLarge { .. }))`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Closed`] when the client's session ended at a close or a drop, and
+    /// [`Error::Panicked`] when the client's thread panicked. [`Error::Session`] with
+    /// the error that ended the session when it failed. Else [`Error::Stream`] with
+    /// each error of `program::Session::reader`, such as `Refused(Refusal::NotHome)`
+    /// when the node is not the home of their index, and `Refused(Refusal::Malformed)`
+    /// for channels of more than one index, each a `program::Refusal`. Also
+    /// `Refused(Refusal::Unknown)` for a name of no channel: the node gives it when no
+    /// name is of a channel, and the client when only some are. `Unnamed` when
+    /// `config.channels` is empty, with nothing sent.
+    pub fn open_reader(&self, config: read::Config) -> Result<read::Reader, Error> {
+        read::Reader::open(&self.requests, &self.closed, config)
+    }
+
     /// Closes the session, and blocks until the close goes out, the transport drains
     /// each close (such as that of a dial that lost the stagger to another address,
     /// up to 3 s), and the client's thread ends.
@@ -307,8 +343,8 @@ impl Thread {
 }
 
 /// Why [`Node::local`] gave no node, [`Client::connect`] gave no client, a call of a
-/// client or of a [`write::Writer`] failed, or the session ended before
-/// [`Client::close`].
+/// client, of a [`write::Writer`], or of a [`read::Reader`] failed, or the session
+/// ended before [`Client::close`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// A thread of the client or of [`Node::local`], or its runtime, cannot start.
@@ -318,20 +354,23 @@ pub enum Error {
     },
     /// The local UDP socket cannot bind.
     Bind(transport::Error),
+    /// The OS gave no address space for the pool of the frames of the client's
+    /// readers, or no memory for its first page.
+    Memory(os::memory::Error),
     /// The session failed before the node admitted the hello, or ended before the
     /// close.
     Session(program::Error),
-    /// The node refused the open of a stream, or a call of a writer failed. The
-    /// session goes on. After `Layout`, `Unsent`, and `Pool`, nothing was sent and the
-    /// writer goes on. Each other error ended the writer, and each later call of the
-    /// writer gives it again.
+    /// The node refused the open of a stream, or a call of a writer or a reader
+    /// failed. The session goes on. After `Layout`, `Unsent`, and `Pool` of a writer,
+    /// nothing was sent and the writer goes on. Each other error of a writer, and each
+    /// error of a reader, ended it, and each later call of it gives it again.
     Stream(program::Error),
     /// The data directory of [`Node::local`] names no node to reach, as the cause says.
     Local(sector::local::Error),
     /// The client's thread panicked, and the panic hook of the process got its
     /// message. Only a build where panics unwind gives it: with `panic = "abort"`, the
-    /// panic ends the process. Each call of a writer of the client gives it after the
-    /// panic, until the client closes or drops.
+    /// panic ends the process. Each call of a writer or a reader of the client gives it
+    /// after the panic, until the client closes or drops.
     Panicked,
     /// A value of a write is not of the type of its place. The write sent nothing.
     Value {
@@ -344,6 +383,13 @@ pub enum Error {
     },
     /// The client's session ended at [`Client::close`] or a drop of the client.
     Closed,
+    /// A series of a read does not decode. The reader ended.
+    Decode {
+        /// The place of the series.
+        place: usize,
+        /// Why it does not decode.
+        cause: codec::Error,
+    },
 }
 
 impl fmt::Display for Error {
@@ -353,6 +399,17 @@ impl fmt::Display for Error {
                 write!(f, "cannot start the client thread: {reason}")
             }
             Self::Bind(error) => write!(f, "cannot bind the local UDP socket: {error}"),
+            Self::Memory(os::memory::Error::Reserve { len, code }) => write!(
+                f,
+                "the client cannot reserve {len} bytes of address space for the frames \
+                 of its readers: {}; raise the address-space limit of the process",
+                std::io::Error::from_raw_os_error(*code)
+            ),
+            Self::Memory(os::memory::Error::Refused) => write!(
+                f,
+                "the OS refused memory for the frames of the client's readers; free \
+                 memory or raise the commit limit of the system"
+            ),
             Self::Session(error) | Self::Stream(error) => write!(f, "{error}"),
             Self::Local(error) => write!(f, "{error}"),
             Self::Panicked => write!(f, "the client thread panicked"),
@@ -365,6 +422,9 @@ impl fmt::Display for Error {
                 write!(f, "place {place} holds {data_type}, not {scalar}")
             }
             Self::Closed => write!(f, "the client is closed"),
+            Self::Decode { place, cause } => {
+                write!(f, "the series of place {place} does not decode: {cause}")
+            }
         }
     }
 }
@@ -372,7 +432,110 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// The requests of the calls of a client, which its thread serves.
-type Requests = tokio::sync::mpsc::UnboundedReceiver<write::Open>;
+type Requests = tokio::sync::mpsc::UnboundedReceiver<Open>;
+
+/// The open of a stream, which the client's thread serves in a task of its own.
+#[derive(Debug)]
+enum Open {
+    Write(write::Open),
+    Read(read::Open),
+}
+
+/// Blocks for the answer of the client's thread, or the error of [`lost`] when the
+/// thread dropped its sender.
+fn wait<T>(answers: &mpsc::Receiver<T>, closed: &AtomicBool) -> Result<T, Error> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a call of a stream blocks its caller, which may run a Tokio runtime"
+    )]
+    let answer = answers.recv();
+    answer.map_err(|_ended| lost(closed))
+}
+
+/// The error of a call whose task ended: [`Error::Closed`] when the client closed or
+/// dropped (`closed`), else [`Error::Panicked`], as only a panic ends the task first.
+fn lost(closed: &AtomicBool) -> Error {
+    if closed.load(Ordering::Acquire) {
+        Error::Closed
+    } else {
+        Error::Panicked
+    }
+}
+
+/// Sends `call` to the task of a stream.
+///
+/// # Errors
+///
+/// The error of [`lost`] when the task ended.
+///
+/// # Panics
+///
+/// When `calls` is full: each call takes its answer before the next, and no call
+/// follows a lost answer.
+fn send<T>(
+    calls: &tokio::sync::mpsc::Sender<T>,
+    call: T,
+    closed: &AtomicBool,
+) -> Result<(), Error> {
+    use tokio::sync::mpsc::error::TrySendError;
+    calls.try_send(call).map_err(|error| match error {
+        TrySendError::Closed(_) => lost(closed),
+        TrySendError::Full(_) => {
+            unreachable!("invariant: each call takes its answer before the next")
+        }
+    })
+}
+
+/// Runs `served`, the task of a stream, until it ends or `closed` changes. The sender
+/// of `closed` drops at the close of the client, so each stream drops before the
+/// session closes.
+async fn serve(served: impl Future<Output = ()>, mut closed: watch::Receiver<()>) {
+    let mut served = pin!(served);
+    let mut changed = pin!(closed.changed());
+    poll_fn(|cx| {
+        if changed.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(());
+        }
+        served.as_mut().poll(cx)
+    })
+    .await;
+}
+
+/// [`Error::Session`] when `session` ended, else [`Error::Stream`] with `error`.
+fn failed(session: &program::Session, error: program::Error) -> Error {
+    match session.ended() {
+        Some(cause) => Error::Session(cause),
+        None => Error::Stream(error),
+    }
+}
+
+/// The places of a stream of `names` in `entries`, the places of the node, whose index
+/// is entry `index`: place `n` is `names[n]`, then the index when `names` does not name
+/// it. Each place names the place of the index as its index. Gives the entry of each
+/// place, the places, and the place of the index, or `None` when a name is no entry.
+fn placed(
+    names: &[Name],
+    entries: &[Place],
+    index: usize,
+) -> Option<(Vec<usize>, Vec<Place>, usize)> {
+    let mut each = names
+        .iter()
+        .map(|name| entries.iter().position(|entry| entry.name == *name))
+        .collect::<Option<Vec<_>>>()?;
+    let at = each
+        .iter()
+        .position(|&entry| entry == index)
+        .unwrap_or_else(|| {
+            each.push(index);
+            each.len() - 1
+        });
+    let place = |&entry: &usize| Place {
+        index: at,
+        ..entries[entry].clone()
+    };
+    let places = each.iter().map(place).collect();
+    Some((each, places, at))
+}
 
 /// The main function of the client's thread: connects, sends the outcome, and holds
 /// the session and serves each of `requests` until `ended` completes. It then ends
@@ -422,8 +585,16 @@ async fn served(
     })
     .await
     {
-        let serve = write::serve(session.clone(), bytes_max, open, closed.clone());
-        tasks.spawn(serve);
+        let (session, closed) = (session.clone(), closed.clone());
+        match open {
+            Open::Write(open) => {
+                let served = write::served(session, bytes_max, open);
+                tasks.spawn(serve(served, closed));
+            }
+            Open::Read(open) => {
+                tasks.spawn(serve(read::served(session, open), closed));
+            }
+        }
     }
 }
 
@@ -438,6 +609,7 @@ async fn connect(
     let entropy = os::entropy();
     let pool = Rc::new(block::Pool::heap(POOL));
     let frames = Rc::new(block::Pool::heap(FRAMES));
+    let reads = reads().map_err(Error::Memory)?;
     let transport = transport::Client::new(transport::client::Config {
         net: os::net(),
         clock: clock.clone(),
@@ -461,9 +633,20 @@ async fn connect(
         tasks,
         pool,
         frames: Rc::clone(&frames),
+        reads: Rc::new(reads),
     };
     let session = program::Session::connect(&transport, config).await;
     Ok((session.map_err(Error::Session)?, frames.largest()))
+}
+
+/// The pool of the frames of the readers of a session. It gives back the pages of the
+/// sizes that it no longer uses when another size needs them, so on Linux it keeps at
+/// most [`READS`] in memory, and up to two partial pages more of each size. On macOS,
+/// the pages of the free blocks of a size in use stay in memory until the OS needs
+/// them.
+fn reads() -> Result<block::Pool, os::memory::Error> {
+    let memory = os::memory::Memory::new(READS.reservation())?;
+    Ok(block::Pool::new(READS, memory))
 }
 
 #[cfg(test)]

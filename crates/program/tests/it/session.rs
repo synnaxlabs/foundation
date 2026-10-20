@@ -861,13 +861,14 @@ fn renews_the_hello_on_time_while_held_frames_fill_their_pool() {
                 key: types::channel::Key::from_u128(at),
                 data_type,
                 name: name(channel),
+                index: 1,
             };
             let places = [
                 place(10, i64, "a"),
                 place(1, stamp, "time"),
                 place(11, i64, "b"),
             ];
-            let mut read = crate::hand::opened(&session, &places, 1).await;
+            let mut read = crate::hand::opened(&session, &places).await;
             for seq in 0..SENT {
                 let range = types::frame::Range { seq, count: 1 };
                 crate::hand::send_frame(&mut read, range, &[(1, 8)], &[0; 8], &[8])

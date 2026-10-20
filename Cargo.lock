@@ -1010,6 +1010,7 @@ dependencies = [
  "buffer",
  "clock",
  "codec",
+ "control",
  "counting",
  "env",
  "home",
@@ -1258,6 +1259,7 @@ dependencies = [
  "connector-influx",
  "connector-modbus",
  "connector-opcua",
+ "control",
  "counting",
  "crc32c",
  "divan",
@@ -1990,6 +1992,7 @@ name = "sdk"
 version = "0.0.0"
 dependencies = [
  "block",
+ "codec",
  "env",
  "os",
  "program",
@@ -2006,6 +2009,7 @@ name = "sdk-python"
 version = "0.0.0"
 dependencies = [
  "numpy",
+ "os",
  "program",
  "pyo3",
  "sdk",

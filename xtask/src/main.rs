@@ -21,6 +21,7 @@ mod sanitizers;
 mod select;
 mod sim;
 mod skips;
+mod test;
 mod workflow;
 
 use std::collections::BTreeSet;
@@ -47,6 +48,15 @@ fn main() -> ExitCode {
             .map_err(|e| vec![e])
             .and_then(|shard| miri::run(root, shard)),
         ["sanitizers"] => sanitizers::run(root),
+        ["test", part, ref rest @ ..] => test::Part::parse(part)
+            .map_err(|e| vec![e])
+            .and_then(|part| {
+                let (flags, skipped) = match rest.iter().position(|arg| *arg == "--") {
+                    Some(end) => (&rest[..end], &rest[end + 1..]),
+                    None => (rest, &[][..]),
+                };
+                test::run(root, cargo().get_program(), part, flags, skipped)
+            }),
         ["fuzz"] => fuzz::run(root, fuzz::SECONDS),
         ["fuzz", seconds] => fuzz::seconds(seconds)
             .map_err(|e| vec![e])
@@ -67,6 +77,7 @@ fn main() -> ExitCode {
                 "usage: cargo xtask <layers|globals|oracles|skips>\n       \
                  cargo xtask <loom|shuttle|sanitizers>\n       \
                  cargo xtask miri [<index>/<count>]\n       \
+                 cargo xtask test <nextest|serial> [flag...] [-- test...]\n       \
                  cargo xtask fuzz [seconds]\n       \
                  cargo xtask open62541 [tag]\n       \
                  cargo xtask review <pr> <head sha>\n       \
@@ -751,13 +762,43 @@ mod tests {
         // expression, and none of the names of its entries. A step that its `if` skips
         // on an OS passes there.
         let check = check_job();
-        let step = "        if: \"!cancelled() && env.RUST != 'false'\"";
+        let step = |part| {
+            format!(
+                "        if: \"!cancelled() && env.RUST != 'false' && matrix.part == \
+                 '{part}'\""
+            )
+        };
+        let (lint, test) = (step("lint"), step("test"));
         assert_eq!(
             ifs_and_names(&check, &["Clippy", "Test"]),
             (
-                vec!["    if: \"!cancelled()\"", step, step],
+                vec!["    if: \"!cancelled()\"", &lint, &test],
                 vec!["check", "macos", "windows"]
             )
+        );
+        // The checks of `os` hold the required names, and pass only when each part of
+        // `check` passed.
+        assert_eq!(
+            os_job("os"),
+            [
+                "    needs: check",
+                "    if: \"!cancelled()\"",
+                "    name: ${{ matrix.name }}",
+                "    strategy:",
+                "      matrix:",
+                "        name: [check, macos, windows]",
+                "    runs-on: ubuntu-24.04",
+                "    steps:",
+                "      - name: The result of the parts",
+                "        env:",
+                "          RESULT: ${{ needs.check.result }}",
+                "        run: |",
+                "          [ \"$RESULT\" = success ] ||",
+                concat!(
+                    "            { echo \"::error::A part of check ended",
+                    " in $RESULT.\"; exit 1; }",
+                ),
+            ]
         );
         let features = os_job("features");
         assert_eq!(
@@ -769,6 +810,145 @@ mod tests {
                 ],
                 vec!["features", "features-macos", "features-windows"]
             )
+        );
+    }
+
+    /// The lines of the step `name` of `job`, from its name to the next step.
+    fn step<'a>(job: &'a [String], name: &str) -> Vec<&'a str> {
+        let head = format!("      - name: {name}");
+        (job.iter().map(String::as_str))
+            .skip_while(|line| *line != head)
+            .enumerate()
+            .take_while(|(i, line)| *i == 0 || !line.starts_with("      - "))
+            .map(|(_, line)| line)
+            .collect()
+    }
+
+    #[test]
+    fn each_step_of_check_runs_in_its_part() {
+        // A step whose `if` names no value of `part` skips on each OS, and passes.
+        let check = check_job();
+        let mut steps: Vec<(&str, Option<&str>)> = Vec::new();
+        for line in check
+            .iter()
+            .skip_while(|line| *line != "    steps:")
+            .skip(1)
+        {
+            let line = line.as_str();
+            if line.starts_with("      - ") {
+                steps.push(("run", None));
+            }
+            let Some((name, part)) = steps.last_mut() else {
+                continue;
+            };
+            let key = line.trim_start_matches([' ', '-']);
+            if *name == "run" {
+                if let Some(found) = key.strip_prefix("name: ") {
+                    *name = found;
+                } else if let Some(found) = key.strip_prefix("uses: ") {
+                    *name = found;
+                }
+            }
+            if let Some((_, rest)) = line.split_once("matrix.part == '") {
+                *part = rest.split_once('\'').map(|(found, _)| found);
+            }
+        }
+        let (lint, test, serial) = (Some("lint"), Some("test"), Some("serial"));
+        assert_eq!(
+            steps,
+            [
+                ("actions/checkout@v4", None),
+                ("Swatinem/rust-cache@v2", None),
+                ("taiki-e/install-action@v2", test),
+                ("actions/setup-python@v5", None),
+                ("run", None),
+                ("Format", lint),
+                ("Clippy", lint),
+                ("Layers", lint),
+                ("Globals", lint),
+                ("Skips", lint),
+                ("Oracles", lint),
+                ("Test", test),
+                ("Serial tests", serial),
+                ("Root tests", test),
+            ]
+        );
+    }
+
+    #[test]
+    fn each_os_runs_both_parts_of_the_tests_and_fails_when_one_fails() {
+        let check = check_job();
+        assert!(
+            check
+                .iter()
+                .any(|line| line == "        part: [lint, test, serial]")
+        );
+        assert_eq!(
+            step(&check, "Test"),
+            [
+                "      - name: Test",
+                concat!(
+                    "        if: \"!cancelled() && env.RUST != 'false'",
+                    " && matrix.part == 'test'\"",
+                ),
+                "        run: >-",
+                "          cargo xtask test nextest ${{ join(matrix.crates, ' ') }}",
+                "          ${{ join(matrix.untested, ' ') }} --all-features",
+                concat!(
+                    "          --config-file .github/nextest.toml",
+                    " -- ${{ join(matrix.tests, ' ') }}",
+                ),
+            ]
+        );
+        assert_eq!(
+            step(&check, "Serial tests"),
+            [
+                "      - name: Serial tests",
+                concat!(
+                    "        if: \"!cancelled() && env.RUST != 'false'",
+                    " && matrix.part == 'serial'\"",
+                ),
+                "        run: >-",
+                "          cargo xtask test serial ${{ join(matrix.crates, ' ') }}",
+                "          ${{ join(matrix.untested, ' ') }} --all-features",
+            ]
+        );
+        let arm =
+            std::fs::read_to_string(fixture().join("../../.github/workflows/arm.yaml"))
+                .unwrap();
+        let arm: Vec<String> =
+            yaml_lines(&arm).into_iter().map(str::to_owned).collect();
+        assert_eq!(
+            step(&arm, "Test"),
+            [
+                "      - name: Test",
+                "        run: |",
+                "          failed=0",
+                "          cargo xtask test nextest || failed=1",
+                "          cargo xtask test serial || failed=1",
+                "          exit \"$failed\"",
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_runs_the_tests_of_program_one_at_a_time() {
+        let config =
+            std::fs::read_to_string(fixture().join("../../.github/nextest.toml"))
+                .unwrap();
+        let config: Vec<&str> = (config.lines())
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect();
+        assert_eq!(
+            config,
+            [
+                "[test-groups]",
+                "program = { max-threads = 1 }",
+                "[[profile.default.overrides]]",
+                "platform = \"cfg(windows)\"",
+                "filter = \"package(program) & kind(test)\"",
+                "test-group = \"program\"",
+            ]
         );
     }
 

@@ -68,9 +68,11 @@ impl Woken {
         }
         let writer = shard
             .open_writer(home::writer::Writer {
-                subject: "a".parse().expect("a valid name"),
-                authority: Authority(1),
-                via: types::node::Key::from_u128(1),
+                holder: control::Writer {
+                    subject: "a".parse().expect("a valid name"),
+                    authority: Authority(1),
+                    via: types::node::Key::from_u128(1),
+                },
                 lease: None,
                 set: Arc::clone(&set),
             })
