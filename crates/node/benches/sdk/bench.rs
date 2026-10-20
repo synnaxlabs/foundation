@@ -2,11 +2,12 @@
 
 use std::hint::black_box;
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use env::tasks::{Group, Tasks};
 use program::write::{Config, Outcome, Time};
 use sdk::Client;
+use sdk::write::Series;
 use types::authority::Authority;
 use types::frame::Form;
 use types::name::{Name, Selector};
@@ -37,6 +38,9 @@ enum Timed {
     Write,
     /// A write of one value of each of two indexes.
     Two,
+    /// A write of series of two indexes: 2 samples of one and 1 of the other, with the
+    /// stamps of the caller.
+    Series,
     /// A write, then the read of its frame.
     Read,
     /// A write, then the read of its frame by a reader that names a channel twice.
@@ -60,6 +64,7 @@ pub(crate) fn run() {
     let program = program_line(false);
     let sdk = sdk_line(calls, Timed::Write);
     let two = sdk_line(calls, Timed::Two);
+    let series = sdk_line(calls, Timed::Series);
     let program_read = program_line(true);
     let sdk_read = sdk_line(calls, Timed::Read);
     let twice = sdk_line(calls, Timed::Twice);
@@ -74,6 +79,7 @@ pub(crate) fn run() {
         ("leg to caller", legs.1),
         ("sdk", sdk),
         ("sdk two indexes", two),
+        ("sdk series", series),
         ("program", program),
         ("sdk read", sdk_read),
         ("program read", program_read),
@@ -104,7 +110,8 @@ fn alone<T>(line: impl FnOnce(&sdk::Node, sdk::Subject) -> T) -> T {
 /// The spans of each of `rounds` rounds of `calls` writes of 2 values through an
 /// `sdk::Writer` at `node`, timed as `timed`, with the read of each frame through a
 /// reader of the same channels and client when `timed` reads. The values of
-/// [`Timed::Two`] are of `plant.a` and `cell.c`, of two indexes.
+/// [`Timed::Two`] and the series of [`Timed::Series`] are of `plant.a` and `cell.c`,
+/// of two indexes.
 fn spans(
     node: &sdk::Node,
     subject: sdk::Subject,
@@ -114,14 +121,15 @@ fn spans(
 ) -> Vec<Vec<Duration>> {
     let client = Client::connect(node, subject).expect("the client connects");
     let channels = match timed {
-        Timed::Two => ["plant.a", "cell.c"]
+        Timed::Two | Timed::Series => ["plant.a", "cell.c"]
             .map(|name| name.parse().expect("a name"))
             .into(),
         _ => names(),
     };
     let config = sdk::write::Config::new(channels);
     let mut writer = client.open_writer(config).expect("the writer opens");
-    let mut reader = (!matches!(timed, Timed::Write | Timed::Two)).then(|| {
+    let read = !matches!(timed, Timed::Write | Timed::Two | Timed::Series);
+    let mut reader = read.then(|| {
         let mut channels = names();
         if timed == Timed::Twice {
             channels.push(channels[0].clone());
@@ -134,10 +142,20 @@ fn spans(
     });
     let places = reader.as_ref().map_or(0, |reader| reader.places().len());
     let values = [(0, Value::I64(1)), (1, Value::I64(2))];
+    let since = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("after 1970");
+    let mut stamp = i64::try_from(since.as_nanos()).expect("a stamp of i64");
     let sdk = rounded(rounds, calls, || {
+        stamp += 2;
+        let bytes = stamped(stamp);
         spin(GAP);
         let mut start = Instant::now();
-        let written = writer.write(&values);
+        let written = if timed == Timed::Series {
+            writer.write_series(&series(&bytes))
+        } else {
+            writer.write(&values)
+        };
         // Before the read: no frame comes for a write that is not taken.
         assert!(
             written.as_ref().is_ok_and(|outcomes| {
@@ -289,6 +307,40 @@ async fn write(writer: &mut program::Writer, layout: &[(usize, u32, usize)]) {
         matches!(written, Ok(&[(_, Outcome::Taken { .. })])),
         "{written:?}"
     );
+}
+
+/// The bytes of [`Timed::Series`] at `stamp`, each of 16: 2 samples of `plant.a`, 1 of
+/// `cell.c`, and the stamps of each.
+fn stamped(stamp: i64) -> [[u8; 16]; 4] {
+    let pair = |a: i64, b: i64| {
+        let mut both = [0; 16];
+        both[..8].copy_from_slice(&a.to_le_bytes());
+        both[8..].copy_from_slice(&b.to_le_bytes());
+        both
+    };
+    [
+        pair(1, 2),
+        pair(3, 0),
+        pair(stamp, stamp + 1),
+        pair(stamp, 0),
+    ]
+}
+
+/// The series of [`Timed::Series`] in `bytes` of [`stamped`]: of 2 samples at the
+/// places of `plant`, and of 1 at those of `cell`.
+fn series(bytes: &[[u8; 16]; 4]) -> [Series<'_>; 4] {
+    let [plant, cell, plant_time, cell_time] = bytes;
+    [
+        (0, 2, &plant[..]),
+        (1, 1, &cell[..8]),
+        (2, 2, plant_time),
+        (3, 1, &cell_time[..8]),
+    ]
+    .map(|(place, count, bytes)| Series {
+        place,
+        count,
+        bytes,
+    })
 }
 
 /// The channels that each writer writes.

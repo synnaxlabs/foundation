@@ -11,6 +11,9 @@
 //! - `leg to caller`: from the task's `try_send` on a `std` `sync_channel` of 1 to the
 //!   return of the caller's `recv`, as `served` sends each outcome to `wait`.
 //! - `sdk`: `sdk::Writer::write` of 2 values with the node's stamp.
+//! - `sdk two indexes`: `sdk` with a value of each of two indexes.
+//! - `sdk series`: `sdk::Writer::write_series` of two indexes, 2 samples of one and 1
+//!   of the other, with the stamps of the caller.
 //! - `program`: `program::Writer::draft` and `write` of the same frame, on an `os`
 //!   shard of its own, as `served` writes it.
 //! - `sdk read`: an `sdk` write, then `sdk::Reader::next` of its frame, with a latest
