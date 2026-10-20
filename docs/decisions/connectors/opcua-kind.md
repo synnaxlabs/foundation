@@ -238,10 +238,11 @@
   the credential that the refusal names, and a fix for that credential. The supervisor
   restarts the run with backoff, and each run reads the sources again, so a replaced
   file, or a certificate whose validity window opens later, heals with no change of the
-  spec, as INFLUX KIND does for a bad `ca`. This replaces key choice 7 of the plan
+  spec, as INFLUX KIND does for a bad `ca`. Supersedes key choice 7 of the plan
   (https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6230820716), in
   which a bad own certificate or key ended the run with `Error::Config` until a change
-  of the spec (the person, through `laptop.monitor`, 2026-10-20T02:25Z:
+  of the spec (the person, through `laptop.monitor`, factory message d9b64c65 at about
+  2026-10-20T02:25Z, as `box1.builder-3` recorded it at 2026-10-20T02:27:30Z:
   https://github.com/synnaxlabs/foundation/pull/3471#issuecomment-6281907935). `session`
   keeps one invariant `expect`: a connect with no credentials gives no refusal. Its type
   cannot say so: `Client::connect` takes the credentials as an `Option`, with one error
