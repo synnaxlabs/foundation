@@ -823,13 +823,14 @@ MonitoredItems_create_async_handler(UA_Client *client, void *data,
         if(!mon)
             continue;
 
-        /* Delete MonitoredItem if the creation failed */
-        UA_MonitoredItemCreateResult *item = &response->results[i];
+        /* Delete MonitoredItem if the creation failed. A failed service has no
+         * results, so the index waits for the check. */
         if(response->responseHeader.serviceResult != UA_STATUSCODE_GOOD ||
-           item->statusCode != UA_STATUSCODE_GOOD) {
+           response->results[i].statusCode != UA_STATUSCODE_GOOD) {
             MonitoredItem_delete(client, sub, mon);
             continue;
         }
+        UA_MonitoredItemCreateResult *item = &response->results[i];
 
         /* Update the MonitoredItem with the server's response  */
         MonitoredItem_createFinish(client, sub, mon, item);
@@ -1643,11 +1644,17 @@ __Client_Subscriptions_processPublishResponse(UA_Client *client, UA_PublishReque
                            "PublishResponse: Too many PublishRequest, reduce "
                            "outStandingPublishRequests to %" PRId16,
                            client->config.outStandingPublishRequests);
-        } else {
+        } else if(client->config.outStandingPublishRequests == 1) {
             UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
                          "PublishResponse: Too many PublishRequests when "
                          "outStandingPublishRequests = 1");
-            UA_Client_Subscriptions_deleteSingle(client, response->subscriptionId);
+            /* A service call from within an answer runs the event loop with
+             * no end, so remove each local subscription, as at
+             * BadNoSubscription. A count of 0 is a stop of the caller: the
+             * refused request went out before it. */
+            UA_Client_Subscription *sub, *next;
+            LIST_FOREACH_SAFE(sub, &client->subscriptions, listEntry, next)
+                __Client_Subscription_deleteInternal(client, sub);
         }
         return;
 
