@@ -564,7 +564,7 @@ mod tests {
             ticket: public(1),
             card: unchecked(&card),
             admission: ticket(1).admission(&card),
-            status: (0..count).map(|i| name(&format!("s{i}"))).collect(),
+            status: crate::common::names((0..count).map(|i| name(&format!("s{i}")))),
         }
     }
 

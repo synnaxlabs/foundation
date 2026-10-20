@@ -194,8 +194,10 @@ state on `main`.
   its use after them, so a join refusal names a key or a name of the region only to a
   peer with a good admission (MEMBER RECORD). A status holds at most 64 entries, so
   decode refuses more, and checks no signature. So a forged card or a body that does not
-  decode in a committed entry is a refused change, not a stopped group. The proposing
-  voter and the join answer are not built (#336). A ticket holder that learns a node key
+  decode in a committed entry is a refused change, not a stopped group. A node that
+  joins (`join::ask`) takes the founding of the first voter of its ticket that admits
+  it. Its transport proves the public key that the ticket gives that voter, so only a
+  voter that lies can give a false founding. A ticket holder that learns a node key
   out of band can take it with its own join, when that join gets to the leader first.
   The real join is refused. A join that apply refuses still binds its node key, so a
   voter that lies can deny a node key that it learns, with no ticket. The node joins
@@ -561,6 +563,7 @@ seconds on each PR, and `fuzz.yaml` runs each target for 600 seconds each night.
 | `env_host` | `env::net::host::Host::from_str` and `env::net::host::uri` | A host from either reads back from its text, and a name has no uppercase letter |
 | `mesh_change` | `mesh::change::Change::decode`, and `Card::decode` and `Status::decode` through a `Join`, by `mesh::testing::round_trip_change` | Encodes to the same bytes |
 | `mesh_message` | The decode of a mesh message, with its `raft` proof, chain, and entries, and the `region::Request` and `Refusal` of a join answer, by `mesh::testing::round_trip_message` | Encodes to the same bytes |
+| `mesh_founding` | `mesh::region::Founding::decode`, with `mesh::Member::decode` in it, which the join answer carries, and which the file `founding` of the mesh directory holds in its frame, by `mesh::testing::round_trip_founding` | Encodes to the same bytes |
 | `mesh_entries` | The decode of `raft` entries one after another, as a mesh log record body and an append hold them, by `mesh::testing::round_trip_entries` | Encode to the same bytes |
 | `mesh_log` | The decode of one mesh log record by `mesh::testing::round_trip_log_record`: the header, its version, and the hard state and entries of the body, after `seal_log_record` writes the length and both checks | Encodes to the same bytes |
 | `mesh_log_dir` | `mesh::log::sequence` and `mesh::log::scan` on the files of a log directory, by `mesh::testing::scan_log_dir`, after `seal_log_dir` writes the checks of each record | An open of the files that an open leaves reads the same hard state and entries, and the files are a fixed point after two opens |
@@ -603,12 +606,10 @@ seconds on each PR, and `fuzz.yaml` runs each target for 600 seconds each night.
 
 No target yet, because the decoder is private, not built, not reached from a file, or
 not reached from the corpus: `transport::message` (#2139), the QUIC hello
-(`transport::quic::hello::Hello::decode`), the file `founding` of the mesh directory
-(`mesh::region::Founding::decode`, with `mesh::Member::decode` in it, #2311), the file
-`card` of the mesh directory (`mesh::driver::version::read`, #2311), the join
-answer (`mesh::Member::decode` from a peer, #336 adds its target),
-each connector's protocol parser, the `node_id`
-text of the `opcua` kind
+(`transport::quic::hello::Hello::decode`), the check and version of the file `founding`
+of the mesh directory (`mesh::driver::founding::read`, #2311), the file `card` of the
+mesh directory (`mesh::driver::version::read`, #2311), each connector's protocol
+parser, the `node_id` text of the `opcua` kind
 (`connector_opcua::node`, #2523), its `address`, which `UA_parseEndpointUrl` of
 open62541 reads (`connector_opcua::Kind::parse`, #2523), the readers of the answers of
 a browse and a describe, which the browse of the kind calls (`node_of`, `unit_of`,

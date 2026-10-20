@@ -495,20 +495,17 @@ pub(crate) struct Request {
     /// The ticket's signature over the card.
     pub(crate) admission: [u8; 64],
     /// The names of the node's status channels, under the node's name.
-    pub(crate) status: BTreeSet<Name>,
+    pub(crate) status: status::Names,
 }
 
 impl Request {
     /// Adds the byte form: the ticket's public key, the card, the admission, then the
-    /// count of status names and each name in rising order.
+    /// status names (`Names::encode`).
     pub(crate) fn encode(&self, out: &mut Vec<u8>) {
         put_public_key(self.ticket, out);
         self.card.encode(out);
         out.extend(self.admission);
-        put_count(self.status.len(), out);
-        for name in &self.status {
-            put_name(name, out);
-        }
+        self.status.encode(out);
     }
 
     /// Takes what [`Request::encode`] gives. `None` when the count of status names is
@@ -517,20 +514,12 @@ impl Request {
         let ticket = take_public_key(bytes)?;
         let card = card::Unchecked::decode(bytes)?;
         let admission = take(bytes)?;
-        let mut count = *bytes;
-        if take_count(&mut count)? > u64::from(status::MAX) {
-            return None;
-        }
-        let mut names = BTreeSet::new();
-        take_rising(bytes, take_name, |name, _| {
-            names.insert(name);
-            Some(())
-        })?;
+        let status = status::Names::decode(bytes)?;
         Some(Self {
             ticket,
             card,
             admission,
-            status: names,
+            status,
         })
     }
 }
@@ -2209,7 +2198,9 @@ mod tests {
             ticket: public(2),
             card: unchecked(&card),
             admission: ticket(2).admission(&card),
-            status: (0..count).map(|i| name(&format!("plant.c.s{i}"))).collect(),
+            status: crate::common::names(
+                (0..count).map(|i| name(&format!("plant.c.s{i}"))),
+            ),
         }
     }
 
@@ -2258,7 +2249,10 @@ mod tests {
             Request::decode(&mut bytes.as_slice())
         };
         assert_eq!(read(request(64)), Some(request(64)));
-        assert_eq!(read(request(65)), None);
+        let names: Vec<_> = (0..65).map(|i| format!("plant.c.s{i:02}")).collect();
+        let names: Vec<_> = names.iter().map(String::as_str).collect();
+        assert!(Request::decode(&mut request_with(&names[..64]).as_slice()).is_some());
+        assert_eq!(Request::decode(&mut request_with(&names).as_slice()), None);
     }
 
     proptest! {
