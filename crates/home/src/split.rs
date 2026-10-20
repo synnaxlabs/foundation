@@ -1708,7 +1708,9 @@ mod tests {
 
             drain(&mut split);
             for (&group, samples) in write.iter().filter(|(_, s)| s.count > 0) {
-                let len = stored::len(&set, split.lens(group));
+                let lens = split.lens(group);
+                let layout = types::frame::Layout::new(&set, lens).expect("a frame");
+                let len = stored::len(&layout, lens.len());
                 let frame = split.frame(&pool, group).expect("room");
                 let frame = frame.freeze(Path::Live);
                 let stamp = Stamp::from_nanos(0);

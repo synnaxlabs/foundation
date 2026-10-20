@@ -1192,8 +1192,10 @@ fn too_large(
             continue;
         }
         let lens = split.lens(*group);
-        let len = stored::len(set, lens);
-        if len > buffer.block_max() || block_len(set, lens) > largest {
+        let layout = frame::Layout::new(set, lens);
+        let layout = layout.expect("invariant: the series of a group make a frame");
+        let len = stored::len(&layout, lens.len());
+        if len > buffer.block_max() || layout.block_len() > largest {
             return true;
         }
         count += 1;
