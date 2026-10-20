@@ -489,15 +489,20 @@ pub(crate) fn answer(
         _ => None,
     });
     let split = || {
-        let (mut written, mut unwritten) = (Vec::new(), Vec::new());
+        let (mut written, mut unwritten, mut missed) =
+            (Vec::new(), Vec::new(), Vec::new());
         for &place in &frame {
             let name = places[place].name.as_str();
             match outcome(place) {
                 Outcome::Taken { .. } => written.push(name),
-                _ => unwritten.push(name),
+                Outcome::Refused(_) => {
+                    unwritten.push(name);
+                    missed.push(name);
+                }
+                Outcome::Lost { .. } | Outcome::Ended(_) => missed.push(name),
             }
         }
-        let text = causes(places, outcomes, &written, &unwritten);
+        let text = causes(places, outcomes, &written, &missed);
         (written, unwritten, text)
     };
     let listed = |raised: PyErr, written: Vec<&str>, unwritten: Vec<&str>| {
@@ -587,13 +592,13 @@ fn channels(
 }
 
 /// The cause of each group of `outcomes` that the node did not take, by the name of its
-/// index, then the channels of the frame that it did not write, `unwritten`, and those
+/// index, then the channels of the frame that it did not write, `missed`, and those
 /// that it wrote, `written`.
 fn causes(
     places: &[Place],
     outcomes: &[(usize, Outcome)],
     written: &[&str],
-    unwritten: &[&str],
+    missed: &[&str],
 ) -> String {
     let mut causes = Vec::new();
     for &(index, outcome) in outcomes {
@@ -621,7 +626,7 @@ fn causes(
     format!(
         "{}; channels {} were not written; {written}",
         causes.join("; "),
-        unwritten.join(", ")
+        missed.join(", ")
     )
 }
 

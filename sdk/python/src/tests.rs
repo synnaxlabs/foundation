@@ -429,8 +429,9 @@ fn names(names: &[&str]) -> Vec<String> {
     names.iter().map(|&name| name.to_owned()).collect()
 }
 
-/// A frame with an end, a refusal, and a loss raises `GroupEnded` for the end, and its
-/// text names the cause of each group that the node did not take.
+/// A frame with an end, a refusal, and a loss raises `GroupEnded` for the end, with the
+/// refused group alone in `unwritten`, and its text names the cause of each group that
+/// the node did not take.
 #[test]
 fn answer_names_the_cause_of_each_group_that_the_node_did_not_take() {
     let outcomes = [
@@ -460,14 +461,7 @@ fn answer_names_the_cause_of_each_group_that_the_node_did_not_take() {
             Some("unknown".to_owned()),
             Some((
                 names(&["other.a", "other.time"]),
-                names(&[
-                    "plant.a",
-                    "cell.a",
-                    "line.a",
-                    "plant.time",
-                    "cell.time",
-                    "line.time"
-                ])
+                names(&["cell.a", "cell.time"])
             )),
             Some(names(&["plant.a", "plant.time"])),
         )
@@ -480,8 +474,9 @@ fn answer_names_the_cause_of_each_group_that_the_node_did_not_take() {
 
 /// With no end, a refusal raises `Rejected` with the code of the first refused group,
 /// and an end with no group taken raises `GroupEnded` with the code of the first end.
-/// Its `ended` holds each channel of the writer in an ended group, also one that is
-/// not in the frame, and not those of a refused group of `unwritten`.
+/// `unwritten` holds the refused groups only, never a lost or an ended one. `ended`
+/// holds each channel of the writer in an ended group, also one that is not in the
+/// frame, and not those of a refused group.
 #[test]
 fn answer_raises_for_an_end_then_a_refusal() {
     let refused = [
@@ -507,14 +502,7 @@ fn answer_raises_for_an_end_then_a_refusal() {
             Some("waiting".to_owned()),
             Some((
                 Vec::new(),
-                names(&[
-                    "cell.a",
-                    "line.a",
-                    "other.a",
-                    "cell.time",
-                    "line.time",
-                    "other.time"
-                ])
+                names(&["cell.a", "line.a", "cell.time", "line.time"])
             )),
             None,
         )
@@ -536,18 +524,15 @@ fn answer_raises_for_an_end_then_a_refusal() {
              later frame of an ended group raises again, and the other groups go on"
                 .to_owned(),
             Some("failed".to_owned()),
-            Some((
-                Vec::new(),
-                names(&["plant.a", "line.a", "plant.time", "cell.time", "line.time"])
-            )),
+            Some((Vec::new(), names(&["plant.a", "plant.time"]))),
             Some(names(&["cell.a", "line.a", "cell.time", "line.time"])),
         )
     );
 }
 
 /// The end of the group of a writer of one index raises `GroupEnded` with the code of
-/// a stream that the node stopped for the same cause, and each channel of the writer
-/// in `ended`.
+/// a stream that the node stopped for the same cause, each channel of the writer in
+/// `ended`, and none in `unwritten`.
 #[test]
 fn answer_raises_group_ended_for_the_end_of_the_group_of_a_writer_of_one_index() {
     let grouped = grouped();
@@ -580,7 +565,7 @@ fn answer_raises_group_ended_for_the_end_of_the_group_of_a_writer_of_one_index()
                      an ended group raises again, and the other groups go on"
                 ),
                 Some(code.to_owned()),
-                Some((Vec::new(), names(&["plant.a", "plant.time"]))),
+                Some((Vec::new(), Vec::new())),
                 Some(names(&["plant.a", "plant.time"])),
             )
         );

@@ -329,7 +329,7 @@ class WriterTest(unittest.TestCase):
             self.assertIsInstance(raised.exception, foundation.Stopped)
             self.assertEqual(raised.exception.code, "unknown")
             self.assertEqual(raised.exception.written, ("plant.a", "plant.time"))
-            self.assertEqual(raised.exception.unwritten, ("other.a", "other.time"))
+            self.assertEqual(raised.exception.unwritten, ())
             self.assertEqual(raised.exception.ended, ("other.a", "other.time"))
             self.assertEqual(
                 str(raised.exception),
@@ -342,7 +342,7 @@ class WriterTest(unittest.TestCase):
                 alone.write(2.5)
             self.assertEqual(raised.exception.code, "unknown")
             self.assertEqual(raised.exception.written, ())
-            self.assertEqual(raised.exception.unwritten, ("other.a", "other.time"))
+            self.assertEqual(raised.exception.unwritten, ())
             self.assertEqual(raised.exception.ended, ("other.a", "other.time"))
             self.assertEqual(
                 str(raised.exception),

@@ -107,11 +107,12 @@ class Stopped(Exception):
 class Rejected(Exception):
     """The node refused the frame of the group of one or more indexes, and took none of
     their samples. `code` is why, for the first refused group in place order: `waiting`,
-    `reserved`, `expired`, `order`, `codec`, `full`, or `large`. `written` and
-    `unwritten` are the names of the channels of the frame in the groups that the node
-    took and did not take, in place order. Its text names the cause of each group that
-    the node did not take. The writer goes on. To write the frame again, write only the
-    channels of `unwritten`: the node took those of `written`.
+    `reserved`, `expired`, `order`, `codec`, `full`, or `large`. `written` is the names
+    of the channels of the frame in the groups that the node took, and `unwritten` those
+    in the groups that it refused, each in place order. A lost group is in neither: the
+    node spent its stamps, so it cannot be written again. Its text names the cause of
+    each group that the node did not take. The writer goes on. To write the frame again,
+    write only the channels of `unwritten`.
     """
 
     code: str
@@ -123,10 +124,11 @@ class GroupEnded(Stopped):
     first group that ended, as `Stopped` gives it. `ended` is the names of the channels
     of the writer in each group that ended, the index included, and `written` and
     `unwritten` those of the channels of the frame in the groups that the node took and
-    did not take, each in place order. Its text names the cause of each group that the
-    node did not take. The writer goes on: each later frame that holds a channel of
-    `ended` raises it again, so a writer of one index writes nothing more. To write the
-    frame again, write only the channels of `unwritten` that are not in `ended`.
+    refused, each in place order. A lost group is in no list: the node spent its stamps.
+    Its text names the cause of each group that the node did not take. The writer goes
+    on: each later frame that holds a channel of `ended` raises it again, so a writer of
+    one index writes nothing more. To write the frame again, write only the channels of
+    `unwritten`.
     """
 
     ended: tuple[str, ...]
