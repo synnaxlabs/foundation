@@ -47,7 +47,7 @@
   `Stored`. A step that fails on a session that ended dials once more and goes on from
   its chunk, as a session to a peer that restarted ends only at its first use. A session
   that stored a chunk earns one more redial, and a session that ends with no chunk
-  stored ends the put after one redial. No listed chunk dials no voter
+  stored ends the put after one redial. With no listed chunk, the node dials no voter
   (`laptop.architect`, 2026-10-20T10:05:20Z:
   https://github.com/synnaxlabs/foundation/issues/3405#issuecomment-6288473151, on the
   plan https://github.com/synnaxlabs/foundation/issues/3405#issuecomment-6288441342,
