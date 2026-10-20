@@ -66,7 +66,7 @@ where
         let region =
             open(&node, &tasks, Rc::new(transport), Vec::new(), channels()).await;
         let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
-        main(Test::new(node, tasks, layout, POOL, Some(region)).await).await;
+        main(Test::new(node, NODE, tasks, layout, POOL, Some(region)).await).await;
     })
     .expect("the run ends");
 }

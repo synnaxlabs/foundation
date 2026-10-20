@@ -268,9 +268,10 @@
   (https://github.com/synnaxlabs/foundation/issues/2718#issuecomment-6250930232). When
   `sdk` wraps `Writer` (#2177), its write with no draft gives an error, not this panic.
   `Error::Unnamed` refuses a config of no channel, and `Error::Unsent { count, form }` a
-  frame of no sample or a frame of `Time::Node` that is encoded or holds more than one
-  sample; each sends nothing. `Session::writer` gives `Error::Pool` when no block of
-  `Config::pool` holds the head and an end of each place, so a write waits for a block
+  frame of no series or with a group of no sample, or a frame of `Time::Node` that is
+  encoded or holds more than one sample in a group; each sends nothing (PR 1b).
+  `Session::writer` gives `Error::Pool` when no block of `Config::pool` holds the head,
+  an end of each place, and a count of each group, so a write waits for a block
   and never gives `Pool`. A `write` dropped after its sends loses only its outcome; one
   dropped inside its sends ends the writer with a reset of `Code(0)`, and each later
   call gives that error, so no head lands in a cut body. A dropped `stored` loses

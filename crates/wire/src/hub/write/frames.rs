@@ -308,7 +308,10 @@ impl Frames {
     /// it. A head of [`Time::Node`] has none, and each of its ranges holds 1.
     fn drafted(&mut self) -> Step {
         match self.head.expect("invariant: a draft has a head").time {
-            Time::Frame(_) => self.assembly.count(0, self.early.drain(..)),
+            Time::Frame(_) => {
+                self.assembly.count(0, self.early.iter().copied());
+                self.early.clear();
+            }
             Time::Node => self.assembly.count(0, std::iter::repeat(1)),
         }
         self.counted()
