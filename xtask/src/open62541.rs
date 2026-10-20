@@ -3609,7 +3609,6 @@ End of search list.
             "fflush" => "fflush(stdout);".to_owned(),
             "fgets" => "{ char b[8]; (void)fgets(b, 8, stdin); }".to_owned(),
             "fwrite" => "fwrite(\"x\", 1, 1, stdout);".to_owned(),
-            "sprintf" => "{ char b[16]; sprintf(b, \"%d\", n); }".to_owned(),
             "stderr" | "stdin" | "stdout" => {
                 format!("{{ FILE *volatile f = {symbol}; (void)f; }}")
             }
