@@ -1626,7 +1626,8 @@ impl Raft {
 // Gives `message`, when it carries a proof, the newest links of `log` below its term
 // that fit with no entry, and clones no other but the first that does not fit. Then
 // drops the last entries of an append until it fits, down to one with no proof and to
-// none with a proof. An append with a proof keeps its entries only when each link fits.
+// none with a proof. An append with a proof keeps its entries only when the whole
+// chain fits with no entry.
 fn fit(fits: fn(&Message) -> bool, log: &Log, message: &mut Message) {
     if message.proof.is_some() {
         let mut entries = Vec::new();

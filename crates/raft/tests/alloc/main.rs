@@ -1,7 +1,7 @@
 //! A chain of links of one term costs one copy of the trusted configuration, not
-//! one per link, and a leader's heartbeat clones only the links that fit. This binary
-//! has no test harness: the count covers each thread, and a harness allocates on its
-//! own thread at any time.
+//! one per link, and a leader's heartbeat clones only the links that fit and one
+//! more. This binary has no test harness: the count covers each thread, and a harness
+//! allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -38,13 +38,22 @@ fn main() {
     let (mut shorter, mut longer) = (leader(300), leader(600));
     let tick = |raft: &mut Raft| {
         raft.tick(0);
-        drop(raft.ready());
+        raft.ready()
     };
-    let ((), with_shorter) = ALLOCATOR.count(|| tick(&mut shorter));
-    let ((), with_longer) = ALLOCATOR.count(|| tick(&mut longer));
+    let (sent_shorter, with_shorter) = ALLOCATOR.count(|| tick(&mut shorter));
+    let (sent_longer, with_longer) = ALLOCATOR.count(|| tick(&mut longer));
+    for sent in [sent_shorter, sent_longer] {
+        let sent = sent.messages.iter();
+        let chains = sent.map(|message| (message.proof.is_some(), message.chain.len()));
+        assert_eq!(
+            chains.collect::<Vec<_>>(),
+            [(true, 200); 2],
+            "each heartbeat has a proof and 200 links"
+        );
+    }
     assert_eq!(
         with_shorter, with_longer,
-        "a heartbeat clones only the links that fit"
+        "a heartbeat clones only the links that fit and one more"
     );
 }
 
