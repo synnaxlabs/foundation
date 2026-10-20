@@ -46,7 +46,7 @@
   `poll::Writer` and `status::Writer` each write through `stamp::Writer::write`
   (STAMP), which owns the draft, the stamp of each index, the class of each outcome,
   and the write again. Each gives the bytes of its samples through a fill that gets
-  each entry and the stamp of the frame, and writes that stamp in each index, and acts
+  each entry and the stamp of the frame and writes that stamp in each index. Each acts
   on the groups that it gives: `poll::Writer` counts their samples applied or lost,
   and `status::Writer` stages its values again for a group that is not applied, and
   closes on `Removed` or a failed disk (`laptop.architect-2`, 2026-10-20T09:06:36Z:

@@ -55,7 +55,7 @@
   ns on `write 256 f64 0`, and a `write` that puts the stamp in each index through
   `Draft::series_mut` after the fill, +172 ns, each the median of 3 runs on a quiet
   host (https://github.com/synnaxlabs/foundation/pull/3556#issuecomment-6289186365):
-  the fill already tells an index in its one load.
+  the fill already finds each index in its one load.
   The status writer of the supervisor stamps its frames with `Stamps::next`
   of its one read of mesh time, so one module holds the stamp rule
   (`laptop.architect-2`, 2026-10-13T01:38:13Z, item 2:
