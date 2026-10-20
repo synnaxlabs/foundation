@@ -36,13 +36,13 @@ pub(super) async fn serve(
         }
     });
     let state = &session.state;
-    let Some((reader, live, index, places, layout)) =
+    let Some((reader, live, places, layout)) =
         here(state, open, mode, program.as_mut()).await?
     else {
         sender.finish()?;
         return Ok(());
     };
-    start(state, sender, index, places, live).await?;
+    start(state, sender, places, live).await?;
     relay(state, reader, layout, program, sender).await
 }
 
@@ -94,27 +94,29 @@ async fn open(
 }
 
 /// Opens the reader of `open` at this node, the home of its index, and gives it with
-/// its open position, the place of its index, its places, and their layout, or `None`
-/// when `program` finishes first. Holds the reservation of `open` until the open
-/// decodes after the wait for the home. Places over [`PLACES_MAX`] give
-/// [`Error::Places`], also when the home is another node, and this node then
-/// carries no index and gives no slot.
+/// its open position, its places, and their layout, or `None` when `program` finishes
+/// first. Holds the reservation of `open` until the open decodes after the wait for
+/// the home. Places over [`PLACES_MAX`] give [`Error::Places`], also when the home is
+/// another node, and this node then carries no index and gives no slot.
 async fn here<F>(
     state: &Rc<RefCell<State>>,
     open: Held,
     mode: reader::Mode,
     program: Pin<&mut F>,
-) -> Result<Option<(Reader, u64, usize, Vec<Place>, Layout)>, Error>
+) -> Result<Option<(Reader, u64, Vec<Place>, Layout)>, Error>
 where
     F: Future<Output = Result<(), Error>>,
 {
     let refused = |error| Error::Reader(Box::new(error));
-    let place = |&(name, channel): &(&Name, &Channel)| Place {
-        key: channel.key(),
-        data_type: channel.sample(),
-        name: name.clone(),
+    let places = |found: &[(&Name, &Channel)], index| {
+        let place = |&(name, channel): &(&Name, &Channel)| Place {
+            key: channel.key(),
+            data_type: channel.sample(),
+            name: name.clone(),
+            index,
+        };
+        found.iter().map(place).collect()
     };
-    let places = |found: &[(&Name, &Channel)]| found.iter().map(place).collect();
     let found = unless(program, reader::find(state, || open.select(), places)).await;
     drop(open);
     let Some(found) = found? else {
@@ -132,20 +134,17 @@ where
     let channels = here.carry(&mut state.borrow_mut());
     let layout = Layout::new(channels.slots.clone(), channels.index);
     let (reader, live) = Reader::here(state, channels, mode);
-    Ok(Some((reader, live, places.index, places.items, layout)))
+    Ok(Some((reader, live, places.items, layout)))
 }
 
-/// Sends `places`, whose index is place `index`, and `Opened` with `live`, the open
-/// position, and
-/// drops the places.
+/// Sends `places` and `Opened` with `live`, the open position, and drops the places.
 async fn start(
     state: &RefCell<State>,
     sender: &mut Sender,
-    index: usize,
     places: Vec<Place>,
     live: u64,
 ) -> Result<(), Error> {
-    super::places(state, sender, index, &places).await?;
+    super::places(state, sender, &places).await?;
     sender
         .send(reply(state, wire::hub::Reply::Opened { live })?)
         .await?;

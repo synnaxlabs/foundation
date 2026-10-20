@@ -1849,9 +1849,11 @@ mod home {
             let now = mesh_now(&clock, &host.clock()).await;
             let key = home
                 .open_writer(writer::Writer {
-                    subject: "a".parse().expect("a name"),
-                    authority: Authority(1),
-                    via: types::node::Key::from_u128(1),
+                    holder: control::Writer {
+                        subject: "a".parse().expect("a name"),
+                        authority: Authority(1),
+                        via: types::node::Key::from_u128(1),
+                    },
                     lease: None,
                     set: Arc::clone(&set),
                 })

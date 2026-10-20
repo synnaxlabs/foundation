@@ -272,22 +272,26 @@ impl Writer {
     /// stamp of the frame, in nanoseconds since the UNIX epoch; with none, the node
     /// stamps the frame. A value is a `bool` or a `numpy.bool_` for `bool`, an `int`
     /// (or an object with `__index__`) for an integer type and for `timestamp` and
-    /// `duration` (nanoseconds), a `float` or an `int` for `f32` and `f64`, and a
-    /// `uuid.UUID` for `uuid`. The call reads `values` after it waits for a call of
-    /// another thread that sends. A change of `values` after that read is not in the
-    /// frame. Other Python threads run while it waits.
+    /// `duration` (nanoseconds), a `float` (or an object with `__float__` or
+    /// `__index__`, such as an `int`) for `f32` and `f64`, and a `uuid.UUID` for
+    /// `uuid`. The call reads `values` after it waits for a call of another thread that
+    /// sends. A change of `values` after that read is not in the frame. Other Python
+    /// threads run while it waits.
     ///
     /// Raises `TypeError` for a value that is not of its place's type, a place of a
     /// type that is not a scalar, a key that is not a name or a place, or one value
     /// with no key for a writer of more places; `OverflowError` for a number outside
-    /// its type; `KeyError` for a name of no place; and `ValueError` for no value, a
-    /// place past the places, or two values of one channel. With each of these, nothing
-    /// was sent and the writer goes on. Raises `Rejected` when the node refused the
-    /// frame, and `DataLost` for a lost frame with `on_loss="raise"`; the writer goes
-    /// on after both. Raises `Stopped` when the node stopped the stream, and
-    /// `ConnectionError` when the session failed, after which each call raises it
-    /// again; `RuntimeError` after a close or in a forked process; and
-    /// `PanicException` when the client's thread panicked.
+    /// its type; `KeyError` for a name of no place; `ValueError` for no value, a place
+    /// past the places, or two values of one channel; and each error other than
+    /// `TypeError` and `OverflowError` that the `__float__` or `__index__` of a value
+    /// raised. Each `TypeError` of the conversion of a value is the `__cause__` of the
+    /// `TypeError` that names its place. With each of these, nothing was sent and the
+    /// writer goes on. Raises `Rejected` when the node refused the frame, and
+    /// `DataLost` for a lost frame with `on_loss="raise"`; the writer goes on after
+    /// both. Raises `Stopped` when the node stopped the stream, and `ConnectionError`
+    /// when the session failed, after which each call raises it again; `RuntimeError`
+    /// after a close or in a forked process; and `PanicException` when the client's
+    /// thread panicked.
     fn write(&self, py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<()> {
         #[cfg(feature = "sim")]
         let began = crate::sim::Part::start();
@@ -502,7 +506,7 @@ fn value(place: &Place, object: &Bound<'_, PyAny>) -> PyResult<Value> {
                 Err(e) if e.is_instance_of::<PyOverflowError>(object.py()) => {
                     return Err(outside(place, object, "its range"));
                 }
-                Err(_) => return Err(wrong(place, object)?),
+                Err(e) => return Err(failed(place, object, e)?),
             };
             if scalar == Scalar::F64 {
                 Value::F64(float)
@@ -535,10 +539,22 @@ where
     let wide = match object.extract::<i128>() {
         Ok(wide) => wide,
         Err(e) if e.is_instance_of::<PyOverflowError>(object.py()) => i128::MAX,
-        Err(_) => return Err(wrong(place, object)?),
+        Err(e) => return Err(failed(place, object, e)?),
     };
     T::try_from(wide)
         .map_err(|_outside| outside(place, object, &format!("{min} to {max}")))
+}
+
+/// The error of `object`, whose conversion for `place` raised `e`: the `TypeError` of a
+/// value of another type, with `e` as its cause, when `e` is a `TypeError`, or else `e`.
+fn failed(place: &Place, object: &Bound<'_, PyAny>, e: PyErr) -> PyResult<PyErr> {
+    let py = object.py();
+    if e.is_instance_of::<PyTypeError>(py) {
+        let error = wrong(place, object)?;
+        error.set_cause(py, Some(e));
+        return Ok(error);
+    }
+    Ok(e)
 }
 
 /// The `TypeError` of `object`, a value of another type, for `place`.
@@ -767,6 +783,7 @@ mod tests {
             key: channel::Key::from_u128(1),
             data_type: Type::Scalar(scalar),
             name: "plant.a".parse().unwrap(),
+            index: 0,
         }
     }
 

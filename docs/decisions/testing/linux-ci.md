@@ -1,6 +1,8 @@
 - **LINUX CI (2026-10-05, rewritten 2026-10-17)** Each PR runs Clippy and the tests of
-  the workspace on Linux (x86-64), macOS (arm64), and Windows (x86-64), in the required
-  checks `check`, `macos`, and `windows`: the matrix of the job `check` in `ci.yaml`.
+  the workspace on Linux (x86-64), macOS (arm64), and Windows (x86-64), in the matrix
+  of the job `check` in `ci.yaml`. Each of the required checks `check`, `macos`, and
+  `windows`, of the job `os`, passes only when each part of `check` on each OS passed
+  (CI PACE, #3418).
   Each PR also checks each feature of each crate alone on the three OSes, in the
   required checks `features`, `features-macos`, and `features-windows`: the matrix of
   the job `features`, which leaves out the crates that the entry of its OS in `check`

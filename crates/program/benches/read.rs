@@ -97,6 +97,7 @@ impl Shape {
             key: channel::Key::from_u128(key),
             data_type,
             name: format!("c{key}").parse().expect("a valid name"),
+            index: 0,
         };
         let data = match self {
             Self::Narrow | Self::Gap => 2..=64,
@@ -202,7 +203,7 @@ async fn send(
     taken: Arc<AtomicUsize>,
 ) {
     for (line, (_, shape)) in LINES.into_iter().enumerate() {
-        let mut read = opened(&session, &shape.places(), 0).await;
+        let mut read = opened(&session, &shape.places()).await;
         let run = shape.run();
         let body = vec![0; usize::try_from(run[run.len() - 1].1).expect("fits")];
         let mut seq = 0;

@@ -244,13 +244,10 @@ fn frames() {
 /// Each input of each frame of a program's write at the node, the first frame included.
 /// The draft comes from the caller's pool outside the count.
 fn write_frames() {
-    let set = KeySet::ordered(
-        [
-            (channel::Key::from_u128(1), Type::Scalar(Scalar::Stamp)),
-            (channel::Key::from_u128(2), Type::Scalar(Scalar::I64)),
-        ],
-        0,
-    )
+    let set = KeySet::ordered([
+        (channel::Key::from_u128(1), Type::Scalar(Scalar::Stamp), 0),
+        (channel::Key::from_u128(2), Type::Scalar(Scalar::I64), 0),
+    ])
     .expect("no key repeats");
     let config = block::Config::new(1 << 16).expect("the budget fits");
     let memory = block::Heap::new(config.reservation());
@@ -419,12 +416,13 @@ fn place_messages() {
             key: channel::Key::from_u128(key),
             data_type: data_type.parse().expect("a sample type"),
             name: "a".parse().expect("a name"),
+            index: 0,
         });
-    let mut out = [0; 70];
+    let mut out = [0; 82];
     let mut lens = [0; 3];
     let ((), allocations) = ALLOCATOR.count(|| {
         let mut rest = &mut out[..];
-        for (message, len) in place::messages(&places, 28).zip(&mut lens) {
+        for (message, len) in place::messages(&places, 32).zip(&mut lens) {
             *len = message.encoded_len();
             let (into, after) = rest.split_at_mut(*len);
             message.encode(into);
@@ -432,10 +430,10 @@ fn place_messages() {
         }
     });
     assert_eq!(allocations, 8, "the place messages allocated another count");
-    assert_eq!(lens, [28, 21, 21], "each place is a message");
+    assert_eq!(lens, [32, 25, 25], "each place is a message");
     let mut reader = Reader::new(Mode::Complete);
     let mut first = [0; Places::LEN];
-    Places { count: 3, index: 0 }.encode(&mut first);
+    Places { count: 3 }.encode(&mut first);
     reader.decode(Some(&first)).expect("the places decode");
     let mut rest = &out[..];
     let mut start = None;

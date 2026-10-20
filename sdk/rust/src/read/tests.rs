@@ -32,12 +32,14 @@ fn received(opened: &mut mpsc::UnboundedReceiver<crate::Open>) -> Open {
     open
 }
 
-/// The place of the channel of key `at`, of `scalar` samples, named `name`.
+/// The place of the channel of key `at`, of `scalar` samples, named `name`, whose
+/// index is place 0.
 fn place(at: u128, scalar: Scalar, name: &str) -> Place {
     Place {
         key: channel::Key::from_u128(at),
         data_type: Type::Scalar(scalar),
         name: name.parse().unwrap(),
+        index: 0,
     }
 }
 
@@ -473,6 +475,10 @@ fn a_layout_puts_each_name_at_its_place_then_the_index_unless_a_name_names_it() 
     let b = place(3, Scalar::I64, "plant.b");
     let plant = place(1, Scalar::Stamp, "plant.time");
     let entries = [a.clone(), b.clone(), plant.clone()];
+    let at = |place: &Place| Place {
+        index: 2,
+        ..place.clone()
+    };
     let targets = |index, entries: &[Option<usize>], firsts: &[usize]| Targets {
         index,
         entries: entries.to_vec(),
@@ -482,14 +488,14 @@ fn a_layout_puts_each_name_at_its_place_then_the_index_unless_a_name_names_it() 
         (
             &["plant.b", "plant.a"],
             Some(Layout {
-                places: vec![b.clone(), a.clone(), plant.clone()],
+                places: vec![at(&b), at(&a), at(&plant)],
                 targets: targets(2, &[Some(1), Some(0), Some(2)], &[0, 1, 2]),
             }),
         ),
         (
             &["plant.a", "plant.a"],
             Some(Layout {
-                places: vec![a.clone(), a.clone(), plant.clone()],
+                places: vec![at(&a), at(&a), at(&plant)],
                 targets: targets(2, &[Some(0), None, Some(2)], &[0, 0, 2]),
             }),
         ),
