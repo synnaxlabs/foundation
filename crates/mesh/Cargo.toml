@@ -15,6 +15,7 @@ clock = { path = "../clock" }
 env = { path = "../env" }
 raft = { path = "../raft" }
 spec = { path = "../spec" }
+tracing.workspace = true
 transport = { path = "../transport" }
 types = { path = "../types" }
 wire = { path = "../wire" }

@@ -2063,6 +2063,8 @@ mod tests {
         ids: Vec<u8>,
         nodes: Vec<sim::node::Node>,
         board: Arc<Mutex<Board>>,
+        /// The log of each voter that has one, from its start.
+        logs: BTreeMap<u8, tracing::Dispatch>,
     }
 
     impl Cluster {
@@ -2079,6 +2081,7 @@ mod tests {
                 ids: ids.to_vec(),
                 sim,
                 board: Arc::default(),
+                logs: BTreeMap::new(),
             }
         }
 
@@ -2100,7 +2103,13 @@ mod tests {
             let main = move |tasks| async move {
                 voter(own, tasks, id, &ids, board).await;
             };
-            drop(self.node(id).shards().start(config, main).unwrap());
+            let log = self
+                .logs
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(tracing::Dispatch::none);
+            let shards = self.node(id).shards().logged(log);
+            drop(shards.start(config, main).unwrap());
         }
 
         fn node(&self, id: u8) -> &sim::node::Node {

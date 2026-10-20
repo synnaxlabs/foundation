@@ -7,10 +7,15 @@ use spec::tree::{self, Chunks};
 use types::digest::Digest;
 use types::ed25519::PublicKey;
 use types::node;
+use types::time::{Monotonic, Span};
 
 use super::used::RETRY;
 use super::{Group, Mesh, check_voters, fetched};
 use crate::error::Error;
+
+/// The least span between two warnings of a put that runs again after the joint
+/// entry.
+const WARN: Span = Span::MINUTE;
 
 impl Mesh {
     /// Proposes `voters` as the next set of voters, and returns once this node applied
@@ -19,7 +24,9 @@ impl Mesh {
     /// VOTERS), whose entry binds the card key of each voter that it adds. The call
     /// puts the tree on the set before the proposal, and again after the joint entry
     /// applies when the pointer moved in between, for as long as it takes a majority
-    /// of the set to hold it.
+    /// of the set to hold it. It logs a warning at the first of those puts that
+    /// fails, and at most once a minute after, which names each voter whose put
+    /// failed.
     ///
     /// # Errors
     ///
@@ -104,13 +111,26 @@ impl Mesh {
 
     // Puts the tree of the pointer in force on each other voter of `set`, each
     // `RETRY`, until a majority of each half holds it. Ends on `Stopped`, `Blob`, or
-    // `Tree(Corrupt)`.
+    // `Tree(Corrupt)`. Warns at the first put that fails, then at most each `WARN`.
     pub(super) async fn spread_in_force(&self, set: &Voters) -> Result<(), Error> {
+        // No warning goes before this time.
+        let mut quiet: Option<Monotonic> = None;
         loop {
-            match self.spread_tree(set, self.pointer().root).await {
+            let error = match self.spread_tree(set, self.pointer().root).await {
                 Ok(()) => return Ok(()),
-                Err(Error::Quorum { .. } | Error::Tree(tree::Error::Missing(_))) => {}
+                Err(
+                    error @ (Error::Quorum { .. }
+                    | Error::Tree(tree::Error::Missing(_))),
+                ) => error,
                 Err(error) => return Err(error),
+            };
+            let now = self.clock.now();
+            if quiet.is_none_or(|until| now >= until) {
+                tracing::warn!(
+                    "the new voters are in force, and the put of the spec tree in \
+                     force on them runs again: {error}"
+                );
+                quiet = now.checked_add(WARN);
             }
             self.clock.sleep(RETRY).await;
             self.group.borrow().running()?;

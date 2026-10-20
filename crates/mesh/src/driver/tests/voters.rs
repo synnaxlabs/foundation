@@ -1,6 +1,10 @@
 //! Tests of the put of the tree in force on the new voters of a change of voters, on a
 //! cluster of three nodes.
 
+use tracing::field::{Field, Visit};
+use tracing::span::{Attributes, Id, Record};
+use tracing::{Event, Metadata, Subscriber};
+
 use super::apply::{assert_used, base, create_largest, create_subjects, late, pointer};
 use super::unapplied::changes;
 use super::*;
@@ -25,6 +29,55 @@ fn outcomes(board: &Board) -> Vec<(u8, Result<(), Error>)> {
         .iter()
         .map(|(id, outcome)| (*id, outcome.as_ref().map(|_| ()).map_err(Clone::clone)))
         .collect()
+}
+
+/// The level and the message of each event of `mesh` that a node logs, in order.
+/// Clones share them.
+#[derive(Clone, Default)]
+struct Log(Arc<Mutex<Vec<String>>>);
+
+impl Log {
+    fn lines(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl Subscriber for Log {
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        metadata.target().starts_with("mesh::")
+    }
+
+    fn new_span(&self, _: &Attributes<'_>) -> Id {
+        Id::from_u64(1)
+    }
+
+    fn record(&self, _: &Id, _: &Record<'_>) {}
+
+    fn record_follows_from(&self, _: &Id, _: &Id) {}
+
+    fn event(&self, event: &Event<'_>) {
+        let mut message = Message(String::new());
+        event.record(&mut message);
+        let level = event.metadata().level();
+        self.0
+            .lock()
+            .unwrap()
+            .push(format!("{level} {}", message.0));
+    }
+
+    fn enter(&self, _: &Id) {}
+
+    fn exit(&self, _: &Id) {}
+}
+
+struct Message(String);
+
+impl Visit for Message {
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        if field.name() == "message" {
+            self.0 = format!("{value:?}");
+        }
+    }
 }
 
 // The learners got the tree through their spec task, so the put is one call on each.
@@ -79,11 +132,14 @@ fn a_change_of_voters_whose_puts_fail_gives_quorum_and_proposes_nothing() {
 // takes about 17 s. 5 s into it, voter 1 applies a second change, whose one holder
 // is voter 1. At 12 s the learners stop answering new blob streams, so the put of the
 // tree of the second change, after the joint entry, gets no `Stored`, and the call
-// tries again each second. At 50 s they answer again, and the call ends.
+// tries again each second. Voter 1 warns at the first failed put, and not again within
+// a minute. At 50 s the learners answer again, and the call ends.
 #[test]
 fn a_pointer_that_moves_before_the_joint_entry_is_put_until_a_majority_holds_it() {
     let mut cluster = Cluster::new(0);
     cluster.board.lock().unwrap().learners = [2, 3].into();
+    let log = Log::default();
+    cluster.logs.insert(1, tracing::Dispatch::new(log.clone()));
     cluster.delay(Span::from_nanos(300 * Span::MILLISECOND.nanos()));
     cluster.start();
     cluster.run(seconds(10));
@@ -109,6 +165,16 @@ fn a_pointer_that_moves_before_the_joint_entry_is_put_until_a_majority_holds_it(
         assert_eq!(board.configured, []);
         board.silent = BTreeSet::new();
     }
+    let quorum = Error::Quorum {
+        held: 1,
+        voters: 3,
+        missed: vec![late(2), late(3)],
+    };
+    let warning = format!(
+        "WARN the new voters are in force, and the put of the spec tree in force on \
+         them runs again: {quorum}"
+    );
+    assert_eq!(log.lines(), [warning]);
     cluster.run(seconds(20));
     let board = cluster.board();
     assert_eq!(outcomes(&board), [(1, Ok(()))]);
