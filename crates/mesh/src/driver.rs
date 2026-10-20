@@ -53,6 +53,7 @@ mod propose;
 mod send;
 mod stream;
 mod turn;
+mod voters;
 
 pub(crate) use peer::{DEADLINE, within};
 pub(crate) mod used;
@@ -457,40 +458,6 @@ impl Mesh {
             }
             _ => self.propose_data(data).await,
         }
-    }
-
-    /// Proposes `voters` as the next set of voters, and returns once the entry is on
-    /// disk here. `raft` moves to the set through a joint configuration (RAFT
-    /// VOTERS), whose entry binds the card key of each voter that it adds.
-    ///
-    /// # Errors
-    ///
-    /// - [`Error::Voters`] when the set holds more voters than one set can hold.
-    /// - [`Error::Stopped`] when the group stopped, or stops before the write ends.
-    /// - [`Error::NotMember`] when a node of the set is not a member in the applied
-    ///   state of this node.
-    /// - [`Error::Raft`] when `raft` refuses the set ([`Raft::propose_voters`]), or
-    ///   with [`raft::Error::NotLeader`] when a new leader replaces the entry before
-    ///   a write holds it.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "a later PR of #336 is the first user")
-    )]
-    pub(crate) async fn propose_voters(
-        &self,
-        voters: BTreeSet<node::Key>,
-    ) -> Result<Position, Error> {
-        check_voters(voters.len())?;
-        self.proposed(|group| {
-            let keyed = voters.iter().map(|&key| match group.state.member(key) {
-                Some(member) => Ok((key, member.public_key())),
-                None => Err(Error::NotMember(key)),
-            });
-            Ok(group
-                .raft
-                .propose_voters(keyed.collect::<Result<_, _>>()?)?)
-        })
-        .await
     }
 
     // Proposes `data` as it is, which need not be a change.
@@ -1544,6 +1511,9 @@ mod tests {
         moved: Vec<(u8, Result<(), Error>, card::Card)>,
         /// The voters that each node proposes next.
         configurations: BTreeMap<u8, BTreeSet<u8>>,
+        /// Each call of `propose_voters` that returned, in order: its node, and what
+        /// the call gave.
+        configured: Vec<(u8, Result<Position, Error>)>,
         /// The spec change that each node proposes next.
         applies: BTreeMap<u8, Proposal>,
         /// The base and the definitions that each node gives `Mesh::apply` next.
@@ -2004,7 +1974,8 @@ mod tests {
                 continue;
             };
             let voters = voters.into_iter().map(key).collect();
-            mesh.propose_voters(voters).await.unwrap();
+            let configured = mesh.propose_voters(voters).await;
+            board.lock().unwrap().configured.push((id, configured));
         }
     }
 
@@ -2870,6 +2841,19 @@ mod tests {
         poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await
     }
 
+    /// Whether `future` is still pending after `span` on `clock`. It drops `future`.
+    async fn pending_for<F: Future>(future: F, clock: &Clock, span: Span) -> bool {
+        let mut future = pin!(future);
+        let mut sleep = pin!(clock.sleep(span));
+        poll_fn(|cx| {
+            if future.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(false);
+            }
+            sleep.as_mut().poll(cx).map(|()| true)
+        })
+        .await
+    }
+
     /// Polls each call one time.
     async fn poll_each<F: Future>(calls: &mut [Pin<Box<F>>]) -> Vec<Poll<F::Output>> {
         poll_fn(|cx| {
@@ -3141,6 +3125,7 @@ mod tests {
     mod send;
     mod serve;
     mod version;
+    mod voters;
 
     /// The entries in the log of `node`, which had a power cut.
     fn stored(sim: &mut Sim, node: &sim::node::Node) -> Vec<Entry> {
@@ -6656,7 +6641,8 @@ mod tests {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &[1, 2], &[1]).await.unwrap();
                 lead(&mesh, &node.clock(), home_to(1)).await;
-                mesh.propose_voters([key(1), key(2)].into()).await.unwrap();
+                let proposed = mesh.propose_voters([key(1), key(2)].into());
+                assert!(pending_for(proposed, &node.clock(), seconds(1)).await);
                 drop(mesh);
                 node.clock().sleep(TICK).await;
                 let again = open(&node, &tasks, 1, &[1, 2], &[1]).await.unwrap();
@@ -6707,13 +6693,19 @@ mod tests {
         fn refuses_a_node_that_is_not_a_member() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &[1, 2], &[1]).await.unwrap();
-                let at = lead(&mesh, &node.clock(), home_to(1)).await;
+                lead(&mesh, &node.clock(), home_to(1)).await;
                 let refused = mesh.propose_voters([key(1), key(3)].into()).await;
                 assert_eq!(refused, Err(Error::NotMember(key(3))));
                 let text = format!("node {} is not a member of the region", key(3));
                 assert_eq!(refused.unwrap_err().to_string(), text);
-                let proposed = mesh.propose_voters([key(1), key(2)].into()).await;
-                assert_eq!(proposed, Ok(after(at, 1)));
+                // Node 2 never answers, so the joint entry does not commit.
+                let proposed = mesh.propose_voters([key(1), key(2)].into());
+                assert!(pending_for(proposed, &node.clock(), seconds(1)).await);
+                let joint = Voters {
+                    incoming: [key(1), key(2)].into(),
+                    outgoing: [key(1)].into(),
+                };
+                assert_eq!(mesh.group.borrow().raft.voters(), &joint);
             });
         }
 
@@ -6721,9 +6713,9 @@ mod tests {
         fn binds_the_card_key_of_each_member_that_it_adds() {
             let entries = solo_stored(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &[1, 2, 3], &[1]).await.unwrap();
-                let at = lead(&mesh, &node.clock(), home_to(1)).await;
-                let voters = [key(1), key(2), key(3)].into();
-                assert_eq!(mesh.propose_voters(voters).await, Ok(after(at, 1)));
+                lead(&mesh, &node.clock(), home_to(1)).await;
+                let proposed = mesh.propose_voters([key(1), key(2), key(3)].into());
+                assert!(pending_for(proposed, &node.clock(), seconds(1)).await);
             });
             let joint = entries.iter().find_map(|entry| match &entry.data {
                 Data::Voters(change) => Some(&change.public_keys),
@@ -6740,11 +6732,8 @@ mod tests {
                 write(&mesh, changes(&[join_change(3)])).await;
                 let refused = mesh.propose_voters([key(2), key(3)].into()).await;
                 assert_eq!(refused, Err(Error::NotMember(key(3))));
-                let follower = raft::Error::NotLeader {
-                    leader: Some(key(2)),
-                };
                 let proposed = mesh.propose_voters([key(2)].into()).await;
-                assert_eq!(proposed, Err(Error::Raft(follower)));
+                assert_eq!(proposed, Err(Error::NoVote));
             });
         }
 
@@ -6753,7 +6742,7 @@ mod tests {
             solo(|node, tasks| async move {
                 let members: Vec<u8> = (1..=127).collect();
                 let mesh = open(&node, &tasks, 1, &members, &[1]).await.unwrap();
-                let at = lead(&mesh, &node.clock(), home_to(1)).await;
+                lead(&mesh, &node.clock(), home_to(1)).await;
                 let refused = mesh.propose_voters((1..=128).map(key).collect()).await;
                 let voters = Error::Voters {
                     voters: 128,
@@ -6763,8 +6752,11 @@ mod tests {
                 let text = "the set holds 128 voters, more than the 127 that one set can \
                             hold";
                 assert_eq!(refused.unwrap_err().to_string(), text);
-                let most = mesh.propose_voters((1..=127).map(key).collect()).await;
-                assert_eq!(most, Ok(after(at, 1)));
+                let most = mesh.propose_voters((1..=127).map(key).collect());
+                assert!(pending_for(most, &node.clock(), seconds(1)).await);
+                let voters = mesh.group.borrow().raft.voters().clone();
+                assert_eq!(voters.incoming.len(), 127);
+                assert_eq!(voters.outgoing, [key(1)].into());
             });
         }
     }

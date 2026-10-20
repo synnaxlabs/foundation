@@ -8,6 +8,7 @@ use raft::Position;
 use spec::Pointer;
 use spec::definition::Definition;
 use types::channel;
+use types::digest::Digest;
 use types::ed25519::PublicKey;
 use types::name::Name;
 use types::node;
@@ -105,6 +106,10 @@ pub enum Error {
     /// A spec has problems, in the order that [`spec::region::check`] gives them. Fix
     /// each problem as [`spec::region::Problem::fix`] says.
     Problems(Vec<spec::region::Problem>),
+    /// This node's store lacks a chunk of the tree of the spec in use, or holds one
+    /// that does not fit in a tree, so it cannot put the tree on the new voters. The
+    /// task of the spec in use gets the chunk from a holder: call again later.
+    Lacking(Digest),
     /// The voters that hold the listed chunks of a spec change are not a majority of
     /// one half of the voters, so the pointer did not move. A holder is the proposer
     /// when it is a voter, or a voter whose put of those chunks from the proposer
@@ -256,6 +261,10 @@ impl fmt::Display for Error {
                  change can list"
             ),
             Self::Problems(problems) => write_problems(f, problems),
+            Self::Lacking(digest) => write!(
+                f,
+                "this node's store cannot give chunk {digest} of the spec in use"
+            ),
             Self::Quorum {
                 held,
                 voters,

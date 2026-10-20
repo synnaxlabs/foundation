@@ -28,7 +28,7 @@ impl Cluster {
     }
 
     /// As [`Cluster::apply`], with `holders` and `homes`.
-    fn apply_held(
+    pub(super) fn apply_held(
         &self,
         node: u8,
         base: Pointer,
@@ -59,7 +59,7 @@ impl Cluster {
     }
 
     /// Sets a one-way delay of `delay` on each link between two voters.
-    fn delay(&mut self, delay: Span) {
+    pub(super) fn delay(&mut self, delay: Span) {
         let config = link::Config {
             delay,
             ..link::Config::default()
@@ -72,7 +72,7 @@ impl Cluster {
     }
 
     /// Node `node` proposes `voters` at its next tick.
-    fn configure(&self, node: u8, voters: BTreeSet<u8>) {
+    pub(super) fn configure(&self, node: u8, voters: BTreeSet<u8>) {
         let mut board = self.board.lock().unwrap();
         board.configurations.insert(node, voters);
     }
@@ -1086,7 +1086,7 @@ pub(super) fn create_largest(count: usize) -> BTreeMap<Name, Definition> {
 }
 
 // Voter `id`, a step of whose put passed the deadline.
-fn late(id: u8) -> Missed {
+pub(super) fn late(id: u8) -> Missed {
     Missed {
         node: key(id),
         name: Some(name(&format!("plant.node{id}"))),

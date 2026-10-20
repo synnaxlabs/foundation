@@ -52,7 +52,17 @@
   the last `Voters` entry at or before it, or the founding voters. So a `Voters` entry
   between the propose and the commit cannot leave the pointer at chunks that no majority
   holds. The record lists only the chunks that the base tree lacks, so the rule also
-  needs the chunks of the base on a majority after a change of voters (#1231). Every
+  needs the chunks of the base on a majority after a change of voters (#1231). So
+  `propose_voters` puts the tree of the pointer in force on the new set before its
+  joint entry, and after the entry applies puts the tree of a pointer that moved,
+  each `RETRY` of the spec in use until a majority of the set holds it. No failed put
+  after the joint entry fails the call: the set is in force. Simple version: `raft`
+  leaves the joint phase on its own, so between that leave and the end of the second
+  put only a majority of the old voters can hold the chunks of a `Spec` entry that
+  came between the read of the pointer and the joint entry. Trigger: before a removed
+  voter can leave the region, the design of the leave of a node closes the window
+  (#3400; the put before a `Remove`, item 1 of the ruling on #3355). Lost: a hook in
+  `raft` that holds the leave. Every
   member applies a change whose base is the pointer, and refuses one whose base is not
   (`Refused::Stale`), so after a change from one base moves the pointer, each later
   change from that base gives `Stale`. The state machine never reads chunks and never
@@ -132,4 +142,10 @@
   2026-10-09T00:57:47Z,
   https://github.com/synnaxlabs/foundation/pull/2035#issuecomment-6072065332). Lost: a
   return of `base` with no entry, which no compare checks against the region; a count of
-  changes in the return, which can differ at the apply.
+  changes in the return, which can differ at the apply. The put of the tree by
+  `propose_voters`, the retry after the joint entry, and the simple version of the
+  window with its trigger: `laptop.architect`, 2026-10-19T17:02:16Z
+  (https://github.com/synnaxlabs/foundation/issues/1231#issuecomment-6272668202), and
+  the put before a `Remove`, 2026-10-19T23:28:13Z
+  (https://github.com/synnaxlabs/foundation/issues/3355#issuecomment-6279615451); the
+  deferral (kind 8) sent to `laptop.monitor`, 2026-10-19 (#3400).
