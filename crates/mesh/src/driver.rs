@@ -54,7 +54,7 @@ mod send;
 mod stream;
 mod turn;
 
-pub(crate) use peer::CHUNKS;
+pub(crate) use peer::{CHUNKS, DEADLINE, within};
 pub(crate) mod used;
 mod version;
 
@@ -63,7 +63,7 @@ const TICK: Span = Span::from_nanos(100 * Span::MILLISECOND.nanos());
 const ELECTION_TICKS: u32 = 10;
 
 /// The header that goes first on each stream that this node opens.
-fn header(pool: &Pool) -> Result<Block, block::Error> {
+pub(crate) fn header(pool: &Pool) -> Result<Block, block::Error> {
     pool.copy(&wire::header::encode(Protocol::Mesh))
 }
 const HEARTBEAT_TICKS: u32 = 1;
@@ -3092,6 +3092,7 @@ mod tests {
     }
 
     mod apply;
+    mod ask;
     mod cards;
     mod contested;
     mod founding;

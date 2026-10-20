@@ -16,7 +16,7 @@ use super::{Call, Mesh};
 use crate::error::{Error, Miss, Missed};
 
 /// How long one get or put of chunks on a peer may take, its dial included.
-pub(super) const DEADLINE: Span = Span::from_nanos(10 * Span::SECOND.nanos());
+pub(crate) const DEADLINE: Span = Span::from_nanos(10 * Span::SECOND.nanos());
 
 /// The most chunks that one put on a peer carries, so that a call of the largest
 /// chunks ends within [`DEADLINE`] over links of 100 ms.
@@ -127,7 +127,7 @@ impl Mesh {
 }
 
 /// The output of `future`, or `None` when `span` passes first.
-pub(super) async fn within<F: Future>(
+pub(crate) async fn within<F: Future>(
     clock: &Clock,
     span: Span,
     future: F,

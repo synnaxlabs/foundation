@@ -15,7 +15,7 @@ use mesh::card::{self, Card};
 use mesh::region::Founding;
 use mesh::status::Status;
 use mesh::{
-    Config, Error, Member, Mesh, Stopped, Watch, change, claim, log, region, used,
+    Config, Error, Member, Mesh, Stopped, Watch, change, claim, join, log, region, used,
 };
 use raft::{Position, Term};
 use sim::Sim;
@@ -68,6 +68,8 @@ fn assert_gives_the_spec<'a, F: Future<Output = Result<used::Spec, Stopped>>>(
     _: fn(&'a Mesh) -> F,
 ) {
 }
+
+fn assert_asks<F: Future<Output = Result<Founding, Error>>>(_: fn(join::Config) -> F) {}
 
 fn assert_error<E: std::error::Error>(_: &E) {}
 
@@ -514,10 +516,42 @@ fn error_has_one_case_for_each_cause_that_a_public_call_gives() {
         | Error::Founding { .. }
         | Error::Unjoinable { .. }
         | Error::Unfounded { .. }
+        | Error::Unjoined { .. }
         | Error::CardFile { .. }
         | Error::Soon => {}
     };
     let _: fn(&Error) = cases;
+}
+
+// The pattern and the match name each field and each case, so a new one does not
+// compile here.
+#[test]
+fn ask_takes_the_parts_of_a_join_and_names_each_miss() {
+    assert_asks(join::ask);
+    let parts = |config: join::Config| {
+        let join::Config {
+            ticket,
+            card,
+            status,
+            clock,
+            pool,
+            transport,
+        } = config;
+        drop((ticket, card, status, clock, pool, transport));
+    };
+    let _: fn(join::Config) = parts;
+    let cases = |miss: &join::Miss| match miss {
+        join::Miss::Stream(_)
+        | join::Miss::Deadline
+        | join::Miss::Malformed
+        | join::Miss::Uncommitted
+        | join::Miss::Unsynced
+        | join::Miss::NoVote
+        | join::Miss::Stopped
+        | join::Miss::Contested
+        | join::Miss::Refused(_) => {}
+    };
+    let _: fn(&join::Miss) = cases;
 }
 
 #[test]
