@@ -29,8 +29,9 @@
   device time, so a drive of k device times costs O(k × channels): 4.1 ms for 1000
   nodes with a device time for each change (AWS c7i.8xlarge). A sparse write of the
   moved channels makes it O(k)
-  (https://github.com/synnaxlabs/foundation/issues/3468) (`laptop.architect-2`, item
-  5 of https://github.com/synnaxlabs/foundation/pull/3507#issuecomment-6284120720).
+  (https://github.com/synnaxlabs/foundation/issues/3468) (`laptop.architect-2`,
+  2026-10-20T05:29:37Z, item 5 of
+  https://github.com/synnaxlabs/foundation/pull/3507#issuecomment-6284120720).
   The queue of each item holds the samples of the larger of two publishing intervals
   that the server gives and two round trips of the first `CurrentTime` read. Past a
   round trip of two intervals, one Publish answer can come a round trip after the one
@@ -63,7 +64,9 @@
   CreateMonitoredItems call alone is past one message of the server ends the run with
   `kind::Error::Config` and `opcua.large-watch`, as `opcua.large-read` does for a
   Read, unless an answer of the subscribe is `BadServiceUnsupported` or
-  `BadNotImplemented`, which makes the kind poll, as below.
+  `BadNotImplemented`, which makes the kind poll, as below (`laptop.architect-2`,
+  2026-10-20T06:08:01Z,
+  https://github.com/synnaxlabs/foundation/pull/3507#issuecomment-6284605117).
   When CreateSubscription or CreateMonitoredItems answers `BadServiceUnsupported` or
   `BadNotImplemented`, as a server of the Nano Embedded Device profile can (OPC UA
   Part 7), the kind closes that session and polls on a new session for the rest of
