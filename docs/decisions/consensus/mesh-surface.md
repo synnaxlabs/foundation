@@ -259,4 +259,8 @@
   agrees on (BQ11a), and a token cannot be revoked. Plan:
   https://github.com/synnaxlabs/foundation/issues/1157#issuecomment-6293270267.
   Approved by `laptop.architect` (2026-10-20T14:33:01Z:
-  https://github.com/synnaxlabs/foundation/issues/1157#issuecomment-6293328111).
+  https://github.com/synnaxlabs/foundation/issues/1157#issuecomment-6293328111;
+  2026-10-20T15:36:02Z:
+  https://github.com/synnaxlabs/foundation/pull/3611#issuecomment-6294701855;
+  2026-10-20T16:06:59Z:
+  https://github.com/synnaxlabs/foundation/pull/3611#issuecomment-6295368878).

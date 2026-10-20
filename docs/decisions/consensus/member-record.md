@@ -420,11 +420,15 @@
   padded or standard Base64, a cut or a byte past the end, no voter, more than 254
   voters (each voter of both halves of a joint configuration), two voters with one
   key, and a voter key that is not a valid public key. A read keeps the order of the
-  voters, since a joining node asks them in that order. `Ticket::new` panics on the
-  voters that a read refuses. The text is a secret: it is never in region state,
+  voters, because a joining node asks them in that order. `Ticket::new` panics on
+  the voters that a read refuses. The text is a secret: it is never in region state,
   and Foundation never writes it to a file. Lost: a byte form in `mesh` and the text
   in `ops`, so that two crates know the version of one format; and a `Display` of
   `Ticket`, so that no format of a struct prints the secret. Plan:
   https://github.com/synnaxlabs/foundation/issues/1157#issuecomment-6293270267.
   Approved by `laptop.architect` (2026-10-20T14:33:01Z:
-  https://github.com/synnaxlabs/foundation/issues/1157#issuecomment-6293328111).
+  https://github.com/synnaxlabs/foundation/issues/1157#issuecomment-6293328111;
+  2026-10-20T15:36:02Z:
+  https://github.com/synnaxlabs/foundation/pull/3611#issuecomment-6294701855;
+  2026-10-20T16:06:59Z:
+  https://github.com/synnaxlabs/foundation/pull/3611#issuecomment-6295368878).
