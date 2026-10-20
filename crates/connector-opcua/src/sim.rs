@@ -126,6 +126,8 @@ struct Limits {
     session: Option<Span>,
     /// The limits of [`Variables::limit_queues`].
     queues: Option<Queues>,
+    /// The most items of a subscription, of [`Variables::limit_items`].
+    items: Option<u32>,
 }
 
 #[cfg(test)]
@@ -141,6 +143,9 @@ impl Limits {
         if let Some(queues) = self.queues {
             server.set_queues(queues.most);
             server.set_publishing(queues.publishing);
+        }
+        if let Some(most) = self.items {
+            server.set_items(most);
         }
     }
 }
@@ -320,6 +325,13 @@ impl Variables {
             most,
             publishing: ms,
         });
+    }
+
+    /// Makes a server that starts later refuse each monitored item past `most` in one
+    /// subscription with `BadTooManyMonitoredItems`.
+    #[cfg(test)]
+    pub(crate) fn limit_items(&self, most: u32) {
+        self.state().limits.items = Some(most);
     }
 
     /// Makes a server offer only `policy` in `mode`, and no endpoint in `None`, on the

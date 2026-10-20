@@ -1573,13 +1573,13 @@ UA_CreateSubscriptionRequest *shim_subscribe_new(UA_Double interval,
 
 /* Gives a CreateMonitoredItems request on the subscription `subscription` of an item
  * for the Value of each of the `count` nodes at `nodes`, with the client handle
- * `first + i` for `nodes[i]`, that reports each change of the status or the value with
+ * `handles[i]` for `nodes[i]`, that reports each change of the status or the value with
  * both timestamps, samples at `sampling` ms, and queues `queue` values, the oldest
  * dropped first. It copies the names. Gives NULL when an allocation fails. */
 UA_CreateMonitoredItemsRequest *shim_monitor_new(UA_UInt32 subscription,
                                                  const shim_node *nodes, size_t count,
-                                                 UA_UInt32 first, UA_Double sampling,
-                                                 UA_UInt32 queue) {
+                                                 const UA_UInt32 *handles,
+                                                 UA_Double sampling, UA_UInt32 queue) {
     UA_CreateMonitoredItemsRequest *request = UA_CreateMonitoredItemsRequest_new();
     if(!request)
         return NULL;
@@ -1596,7 +1596,7 @@ UA_CreateMonitoredItemsRequest *shim_monitor_new(UA_UInt32 subscription,
         UA_MonitoredItemCreateRequest *item = &request->itemsToCreate[i];
         item->itemToMonitor.attributeId = UA_ATTRIBUTEID_VALUE;
         item->monitoringMode = UA_MONITORINGMODE_REPORTING;
-        item->requestedParameters.clientHandle = first + (UA_UInt32)i;
+        item->requestedParameters.clientHandle = handles[i];
         item->requestedParameters.samplingInterval = sampling;
         item->requestedParameters.queueSize = queue;
         item->requestedParameters.discardOldest = true;

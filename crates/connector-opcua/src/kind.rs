@@ -289,7 +289,7 @@ impl Run<'_> {
         frames: &mut Frames<'_>,
         status: Status,
     ) -> Result<(), Error> {
-        frames.note.polls = Some(status);
+        frames.note.lead = Some(Lead::Polls(status));
         frames.note.show(self.ctx, None);
         let mesh = frames.writer.time();
         let ran = self
@@ -713,11 +713,19 @@ struct Left {
 
 /// The note of a run.
 struct Note {
-    /// The answer to the subscribe for which the run polls, which the note names
-    /// first.
-    polls: Option<Status>,
+    /// What the note names first.
+    lead: Option<Lead>,
     /// The read and the type that the note names, or `None` when it names none.
     noted: Option<(usize, value::Type)>,
+}
+
+/// What a note names first.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Lead {
+    /// The run polls, as the server answered the subscribe with this status.
+    Polls(Status),
+    /// The server does not watch the node of this read, with this status.
+    Unwatched(usize, Status),
 }
 
 impl<'a> Frames<'a> {
@@ -755,7 +763,7 @@ impl<'a> Frames<'a> {
                 mistyped: ctx.count("mistyped"),
             },
             note: Note {
-                polls: None,
+                lead: None,
                 noted: None,
             },
         }))
@@ -815,6 +823,18 @@ impl<'a> Frames<'a> {
         written
     }
 
+    /// Names `first` in the note before a node of another type: the first read whose
+    /// node the server does not watch, and its status, or `None` for none.
+    fn unwatched(&mut self, first: Option<(usize, Status)>) {
+        let lead = first.map(|(at, status)| Lead::Unwatched(at, status));
+        if lead != self.note.lead {
+            self.note.lead = lead;
+            let mistyped =
+                (self.note.noted).map(|(at, value)| (at, value, self.types[at]));
+            self.note.show(self.ctx, mistyped);
+        }
+    }
+
     /// Clears the note when it names a read whose last value is not Good, by
     /// `faulted` of each read, as a frame with that value does.
     fn faulted(&mut self, faulted: &[bool]) {
@@ -837,8 +857,7 @@ impl Left {
 impl Note {
     /// Sets the note of `ctx` for `mistyped`, when it is not the note of the frame
     /// before: the read at a value of another type, its type, and the sample type of
-    /// its channel, after the note of [`Run::fall_back`] for `polls`. `None` shows only
-    /// that note, or none.
+    /// its channel, after its [`Lead`]. `None` shows only the lead, or none.
     #[inline]
     fn set(
         &mut self,
@@ -857,18 +876,23 @@ impl Note {
         mistyped: Option<(usize, value::Type, Scalar)>,
     ) {
         self.noted = mistyped.map(|(at, value, _)| (at, value));
-        let polls = self.polls.map(|status| {
-            format!("polls: the server has no subscriptions ({status:?})")
+        let lead = self.lead.map(|lead| match lead {
+            Lead::Polls(status) => {
+                format!("polls: the server has no subscriptions ({status:?})")
+            }
+            Lead::Unwatched(at, status) => {
+                unwatched(&ctx.config().reads[at], status).to_string()
+            }
         });
-        let polls = polls.as_deref().unwrap_or_default();
+        let lead = lead.as_deref().unwrap_or_default();
         let Some((at, value, sample)) = mistyped else {
-            ctx.note(&polls);
+            ctx.note(&lead);
             return;
         };
         let read = &ctx.config().reads[at];
-        let gap = if polls.is_empty() { "" } else { "; " };
+        let gap = if lead.is_empty() { "" } else { "; " };
         ctx.note(&format_args!(
-            "{polls}{gap}leaves out the values of the node `{}` of the channel `{}`: \
+            "{lead}{gap}leaves out the values of the node `{}` of the channel `{}`: \
              they are of type {value}, and the channel has samples of type {}",
             read.node,
             read.channel,
@@ -1046,6 +1070,16 @@ impl std::error::Error for Failure {}
 
 pub(crate) fn device(failure: Failure) -> Error {
     Error::Device(Box::new(failure))
+}
+
+/// The [`Failure`] of the node of `read`, which the server does not watch, with
+/// `status`.
+fn unwatched(read: &Read, status: Status) -> Failure {
+    Failure::Unwatched {
+        node: read.node.to_string(),
+        channel: read.channel.to_string(),
+        status,
+    }
 }
 
 /// The [`Error::Device`] of `call` to the server at `address` that failed with

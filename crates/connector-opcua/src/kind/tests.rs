@@ -2468,18 +2468,111 @@ fn notes_a_mistyped_node_after_the_fallback() {
     assert_eq!(notes(&outcome.statuses).last(), Some(&note));
 }
 
-/// A node that the server does not have ends each run with a device error that names
-/// it, and writes nothing.
+/// The note of a node that the server does not watch.
+const MISSING: &str = "the server does not watch the node `ns=3;s=Missing` of the \
+                       channel `plant.b`: BadNodeIdUnknown";
+
+/// A node that the server does not have is left out and noted, and counts as `bad`
+/// at the subscribe and at each try after a read of the current time, at 10 s and
+/// 20 s. The other nodes are written, and the run has no error.
 #[test]
-fn fails_on_a_node_that_the_server_does_not_watch() {
+fn leaves_out_a_node_that_the_server_does_not_watch() {
     let mut setup = Setup::three();
     setup.reads[1].1 = "ns=3;s=Missing".into();
-    let outcome = watch(setup, |scene| async move { scene.supervise(ms(350)).await });
+    let outcome = watch(setup, |scene| async move {
+        scene.after(ms(1_050), |scene| async move {
+            scene.variables.change(Quality::GOOD);
+        });
+        scene.supervise(ms(25_050)).await
+    });
     assert!(outcome.result.is_ok(), "{:?}", outcome.result);
-    let unwatched = "the server does not watch the node `ns=3;s=Missing` of the \
-                     channel `plant.b`: BadNodeIdUnknown";
-    assert_eq!(errors(&outcome.statuses), [(2, unwatched.into())]);
+    assert_eq!(errors(&outcome.statuses), []);
+    assert_eq!(keys(&outcome.frames), [vec![1, 2, 4], vec![1, 2, 4]]);
+    assert_eq!(notes(&outcome.statuses), [MISSING]);
+    assert_eq!(last(&outcome.statuses, BAD), 3);
+}
+
+/// A node that the server refuses at the subscribe and has at 5 s is watched at the
+/// try after the read of the current time at 10 s: its first value is written then,
+/// and its note goes.
+#[test]
+fn watches_a_node_at_a_later_try() {
+    let outcome = watch(Setup::three(), |scene| async move {
+        scene
+            .variables
+            .set_quality(B, Quality(Status::BAD_NODE_ID_UNKNOWN.0));
+        scene.after(ms(5_000), |scene| async move {
+            scene.variables.set_quality(B, Quality::GOOD);
+        });
+        scene.supervise(ms(12_050)).await
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    assert_eq!(errors(&outcome.statuses), []);
+    assert_eq!(keys(&outcome.frames), [vec![1, 2, 4], vec![1, 3]]);
+    let note = "the server does not watch the node `ns=3;i=7` of the channel \
+                `plant.b`: BadNodeIdUnknown";
+    let shown: Vec<_> = texts(&outcome.statuses, NOTE).map(String::as_str).collect();
+    assert_eq!(shown.first(), Some(&""));
+    assert_eq!(shown.last(), Some(&""));
+    assert_eq!(notes(&outcome.statuses), [note]);
+    assert_eq!(last(&outcome.statuses, BAD), 1);
+}
+
+/// A server with room for two items of a subscription refuses the third node with
+/// `BadTooManyMonitoredItems`, which ends each run with a device error that names it.
+#[test]
+fn fails_on_a_server_with_no_room_for_an_item() {
+    let outcome = watch(Setup::three(), |scene| async move {
+        scene.variables.limit_items(2);
+        scene.supervise(ms(350)).await
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    let full = "the server does not watch the node `ns=2;s=Dip` of the channel \
+                `plant.c`: BadTooManyMonitoredItems";
+    assert_eq!(errors(&outcome.statuses), [(2, full.into())]);
     assert_eq!(outcome.frames.len(), 0);
+}
+
+/// A server with room for two items that refuses a node at the subscribe and has it
+/// later refuses it at the try with `BadTooManyMonitoredItems`, which ends the run.
+#[test]
+fn fails_on_a_server_with_no_room_at_a_later_try() {
+    let outcome = watch(Setup::three(), |scene| async move {
+        scene.variables.limit_items(2);
+        scene
+            .variables
+            .set_quality(B, Quality(Status::BAD_NODE_ID_UNKNOWN.0));
+        scene.after(ms(5_000), |scene| async move {
+            scene.variables.set_quality(B, Quality::GOOD);
+        });
+        scene.supervise(ms(10_350)).await
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    let full = "the server does not watch the node `ns=3;i=7` of the channel \
+                `plant.b`: BadTooManyMonitoredItems";
+    assert_eq!(errors(&outcome.statuses), [(2, full.into())]);
+    assert_eq!(keys(&outcome.frames), [vec![1, 2, 4]]);
+}
+
+/// The note of a node that the server does not watch comes before the note of a
+/// node of another type.
+#[test]
+fn notes_a_node_that_the_server_does_not_watch_before_a_node_of_another_type() {
+    use crate::value::Value as V;
+    let mut setup = Setup::three();
+    setup.reads[1].1 = "ns=3;s=Missing".into();
+    setup.reads[2].1 = B.into();
+    let outcome = watch(setup, |scene| async move {
+        scene.variables.set(B, V::I32(7));
+        scene.supervise(ms(1_050)).await
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    assert_eq!(errors(&outcome.statuses), []);
+    let mistyped = "leaves out the values of the node `ns=3;i=7` of the channel \
+                    `plant.c`: they are of type Int32, and the channel has samples of \
+                    type f64";
+    let both = format!("{MISSING}; {mistyped}");
+    assert_eq!(notes(&outcome.statuses), [both]);
 }
 
 /// The binary encoding of a `CreateSubscription` answer, a `NodeId` of 4 bytes.

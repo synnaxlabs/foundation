@@ -412,6 +412,8 @@ pub(crate) struct Client {
     token: usize,
     /// The `MaxNodesPerRead` of the server, the most nodes of one Read request.
     per_read: Option<NonZeroUsize>,
+    /// The subscription of [`Client::subscribe`], once the server makes it.
+    subscription: Option<subscription::Subscription>,
     /// Tells the [`Nodes`] that this client checked from those of another.
     key: Rc<()>,
     /// The supertype of each data type that the client browsed, or `None` when it has
@@ -616,6 +618,7 @@ impl Client {
             takes: 0,
             token: 0,
             per_read: None,
+            subscription: None,
             key: Rc::default(),
             supertypes: BTreeMap::new(),
             bounds: None,

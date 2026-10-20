@@ -1127,3 +1127,61 @@ fn a_publish_answer_that_fails_to_decode_ends_the_changes() {
     assert_eq!(got.1, Err("BadDecodingError"));
     assert_eq!(got.2, Err("BadDecodingError"));
 }
+
+/// What [`watched`] gives: the items of the subscribe and of the watch, the reserved
+/// block after each, and the index and value of each change of the first second.
+type Watched = (
+    Result<Revised, Status>,
+    Result<Vec<Result<Sampled, Status>>, Status>,
+    [(usize, usize); 2],
+    Vec<(usize, Result<Value, Fault>)>,
+);
+
+/// Subscribes a client to the nodes 0, 1, and 2 of [`numbered`] on a server that has
+/// only 0 and 2, then adds 1 and watches it.
+fn watched() -> Watched {
+    run(0, async |node| {
+        serve(&node, 4, async |mut peer| {
+            peer.server.set_publishing(10.0);
+            for index in [0, 2] {
+                peer.server
+                    .add_scalar(&numbered(index), Value::F64(f64::from(index)));
+            }
+            let nodes: Vec<Node> = (0..3).map(numbered).collect();
+            let mut client = peer.connected().await;
+            let revised = client.subscribe(&nodes, SAMPLING, Span::ZERO).await;
+            let subscribed = blocks(&client);
+            peer.server.add_scalar(&numbered(1), Value::F64(1.0));
+            let items = client.watch(&nodes, &[1]).await;
+            let grown = blocks(&client);
+            let mut changes = Vec::new();
+            let mut wait = pin!(peer.clock.sleep(ms(1000)));
+            loop {
+                let got = client.changes(wait.as_mut()).await.expect("no end");
+                if got.is_empty() {
+                    break;
+                }
+                changes.extend(got.iter().map(|change| (change.index, change.value)));
+            }
+            client.close().await;
+            (revised, items, [subscribed, grown], changes)
+        })
+        .await
+    })
+    .0
+}
+
+/// A watch makes an item on the subscription for a node that the subscribe could
+/// not watch. Its change gives the index of the node in the list of the subscribe,
+/// and the reserve grows by its queue of 4 values: 104 bytes a change and 1 KiB.
+#[test]
+fn a_watch_makes_an_item_whose_changes_give_the_index_of_its_node() {
+    let (revised, items, blocks, mut changes) = watched();
+    let mut subscribed = made(3);
+    subscribed.items[1] = Err(Status::BAD_NODE_ID_UNKNOWN);
+    assert_eq!(revised, Ok(subscribed));
+    assert_eq!(items, Ok(made(1).items));
+    assert_eq!(blocks, [(1, 1024 + 8 * 104), (1, 1024 + 12 * 104)]);
+    changes.sort_by_key(|&(index, _)| index);
+    assert_eq!(changes, numbers(3));
+}

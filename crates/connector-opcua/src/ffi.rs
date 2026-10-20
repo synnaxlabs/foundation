@@ -112,6 +112,7 @@ impl Status {
     pub(crate) const BAD_CONTINUATION_POINT_INVALID: Self = Self(0x804A_0000);
     pub(crate) const BAD_NO_CONTINUATION_POINTS: Self = Self(0x804B_0000);
     pub(crate) const BAD_NO_SUBSCRIPTION: Self = Self(0x8079_0000);
+    pub(crate) const BAD_TOO_MANY_MONITORED_ITEMS: Self = Self(0x80DB_0000);
     pub(crate) const BAD_USER_ACCESS_DENIED: Self = Self(0x801F_0000);
     #[cfg(test)]
     pub(crate) const BAD_TYPE_MISMATCH: Self = Self(0x8074_0000);
@@ -968,7 +969,7 @@ unsafe extern "C" {
         subscription: u32,
         nodes: *const Node<'_>,
         count: usize,
-        first: u32,
+        handles: *const u32,
         sampling: f64,
         queue: u32,
     ) -> *mut c_void;

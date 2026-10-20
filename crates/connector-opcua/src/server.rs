@@ -572,6 +572,14 @@ impl Server {
         unsafe { ffi::test::shim_server_holds(self.raw(), most) };
     }
 
+    /// Refuses each monitored item past `most` in one subscription, 0 for none, with
+    /// `BadTooManyMonitoredItems`.
+    #[cfg(test)]
+    pub(crate) fn set_items(&self, most: u32) {
+        // SAFETY: the server lives.
+        unsafe { ffi::test::shim_server_items(self.raw(), most) };
+    }
+
     /// Sets the largest queue of a monitored item that the server grants.
     #[cfg(test)]
     pub(crate) fn set_queues(&self, most: u32) {

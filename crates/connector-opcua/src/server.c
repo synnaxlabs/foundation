@@ -193,6 +193,11 @@ UA_UInt32 shim_server_held(UA_Server *server) {
     return (UA_UInt32)most;
 }
 
+/* Sets the most monitored items of one subscription of `server`, 0 for none. */
+void shim_server_items(UA_Server *server, UA_UInt32 most) {
+    UA_Server_getConfig(server)->maxMonitoredItemsPerSubscription = most;
+}
+
 /* Sets the largest queue of a monitored item that `server` grants. */
 void shim_server_queues(UA_Server *server, UA_UInt32 most) {
     UA_Server_getConfig(server)->queueSizeLimits.max = most;

@@ -4,6 +4,7 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::future;
 use std::mem;
+use std::num::NonZeroUsize;
 use std::pin::pin;
 use std::rc::Rc;
 use std::task::Poll;
@@ -52,6 +53,21 @@ pub(crate) struct Sampled {
     pub(crate) sampling: Span,
     /// The size of the queue.
     pub(crate) queue: u32,
+}
+
+/// The subscription of a client, to which [`Client::watch`] adds items.
+pub(super) struct Subscription {
+    id: u32,
+    /// The sampling interval of each item, in ms.
+    sampling: f64,
+    /// The queue that each item asks for.
+    queue: u32,
+    /// The `MaxMonitoredItemsPerCall` of the server.
+    per_call: Option<NonZeroUsize>,
+    /// The most changes of a Publish answer that fits the client.
+    most: usize,
+    /// The sum of the queues that the server gave its items, each at least 1.
+    queued: usize,
 }
 
 /// The shortest publishing interval of a subscription.
@@ -200,22 +216,85 @@ impl Client {
         // SAFETY: the client lives.
         unsafe { ffi::shim_client_publish_resume(self.raw.as_ptr()) };
         let sampling = ms(sampling);
-        let queue = queue(interval.max(ms(round_trip)), sampling);
-        let build =
-            |nodes: &[ffi::Node<'_>]| Request::monitor(id, nodes, 0, sampling, queue);
-        let sizes = self.sizes(build, Item::Created.bytes());
-        let split = self.split(nodes.len(), per_call, &sizes, |index| {
-            id_bytes(&nodes[index])
+        self.subscription = Some(Subscription {
+            id,
+            sampling,
+            queue: queue(interval.max(ms(round_trip)), sampling),
+            per_call,
+            most,
+            queued: 0,
         });
-        let mut items = vec![Err(Status::BAD_REQUEST_TOO_LARGE); nodes.len()];
+        let indexes: Vec<usize> = (0..nodes.len()).collect();
+        let (items, large) = self.create(nodes, &indexes).await?;
+        Ok(Revised {
+            interval: span(interval),
+            items,
+            large,
+        })
+    }
+
+    /// Creates a monitored item on the subscription of [`Client::subscribe`] for the
+    /// node at each index of `indexes` in `nodes`, the list of the subscribe, as the
+    /// subscribe makes its items: with the same sampling and queue, and changes that
+    /// give the index of the node. It sends them in `CreateMonitoredItems` calls as the
+    /// subscribe does, and reserves the memory of the changes of their queues. Gives
+    /// the item, or the status of its create result, for each index in order.
+    ///
+    /// # Errors
+    ///
+    /// As the `CreateMonitoredItems` calls of [`Client::subscribe`].
+    ///
+    /// # Panics
+    ///
+    /// When no [`Client::subscribe`] made a subscription before it, or an index is
+    /// not in `nodes`.
+    ///
+    /// # Aborts
+    ///
+    /// As [`Client::subscribe`].
+    pub(crate) async fn watch(
+        &mut self,
+        nodes: &[Node],
+        indexes: &[usize],
+    ) -> Result<Vec<Result<Sampled, Status>>, Status> {
+        Ok(self.create(nodes, indexes).await?.0)
+    }
+
+    /// Creates the items of [`Client::watch`], and gives each node whose call alone is
+    /// past one message as a [`Large`] at its place in `indexes`.
+    async fn create(
+        &mut self,
+        nodes: &[Node],
+        indexes: &[usize],
+    ) -> Result<(Vec<Result<Sampled, Status>>, Vec<Large>), Status> {
+        let &Subscription {
+            id,
+            sampling,
+            queue,
+            per_call,
+            ..
+        } = (self.subscription.as_ref())
+            .expect("invariant: a watch comes after a subscribe");
+        let build = |nodes: &[ffi::Node<'_>]| {
+            Request::monitor(id, nodes, &[0][..nodes.len()], sampling, queue)
+        };
+        let sizes = self.sizes(build, Item::Created.bytes());
+        let split = self.split(indexes.len(), per_call, &sizes, |at| {
+            id_bytes(&nodes[indexes[at]])
+        });
+        let mut items = vec![Err(Status::BAD_REQUEST_TOO_LARGE); indexes.len()];
         for range in split.ranges {
+            let chosen = &indexes[range.clone()];
             let raw: Vec<ffi::Node<'_>> =
-                nodes[range.clone()].iter().map(Into::into).collect();
-            let first = u32::try_from(range.start)
-                .expect("invariant: a call holds fewer than 2^32 items");
-            let answer = self
-                .exchange(&Request::monitor(id, &raw, first, sampling, queue))
-                .await?;
+                chosen.iter().map(|&index| (&nodes[index]).into()).collect();
+            let handles: Vec<u32> = (chosen.iter())
+                .map(|&index| {
+                    u32::try_from(index)
+                        .expect("invariant: a list holds fewer than 2^32 nodes")
+                })
+                .collect();
+            let request = Request::monitor(id, &raw, &handles, sampling, queue);
+            let answer = self.exchange(&request).await?;
             let result = answer.result();
             for (offset, item) in items[range].iter_mut().enumerate() {
                 *item = result.and_then(|()| answer.created(offset)).map(
@@ -229,18 +308,17 @@ impl Client {
         let queued = (items.iter().flatten())
             .map(|item| usize::try_from(item.queue.max(1)).unwrap_or(usize::MAX))
             .fold(0, usize::saturating_add);
-        let each = most.min(queued);
+        let subscription = (self.subscription.as_mut())
+            .expect("invariant: a watch comes after a subscribe");
+        subscription.queued = subscription.queued.saturating_add(queued);
+        let each = subscription.most.min(subscription.queued);
         (self.calls.changes).reserve(&mut self.changes, each);
         // SAFETY: the client lives, and decodes no answer between drives.
         let status = unsafe { ffi::shim_client_reserve(self.raw.as_ptr(), each) };
         if Status(status) != Status::GOOD {
             alloc::exhausted();
         }
-        Ok(Revised {
-            interval: span(interval),
-            items,
-            large: split.large,
-        })
+        Ok((items, split.large))
     }
 
     /// Drives the client as [`Client::idle`] does until a change or the end of the
