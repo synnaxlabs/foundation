@@ -25,8 +25,8 @@ enum Front {
 fn plan_and_apply(lab: &mut Lab, node: Node, front: Front) -> Vec<String> {
     match front {
         Front::Cli => {
-            let changes = lab.plan(node, &site());
-            lab.apply(node, &site());
+            let (plan, changes) = lab.cli_plan(node, &site());
+            lab.cli_apply(node, &plan);
             changes
         }
         Front::Mcp => {

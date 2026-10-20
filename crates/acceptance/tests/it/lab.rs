@@ -5,6 +5,7 @@
 mod influx;
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::future::poll_fn;
 use std::io::IoSliceMut;
 use std::net::SocketAddr;
@@ -32,6 +33,9 @@ const PORT: u16 = 7000;
 
 /// The private key of the subject `admin`, the first admin of each mesh.
 const ADMIN: PrivateKey = PrivateKey([0; 32]);
+
+/// The folder on each host that the lab gives the command line.
+const FILES: &str = "/lab";
 
 /// The address of the port of the node on `host`.
 fn listen(host: &sim::node::Node) -> SocketAddr {
@@ -223,9 +227,8 @@ impl Lab {
         }
     }
 
-    /// Adds a node named `name` on a new simulated host, makes the folder `/lab` of
-    /// the front ends there, and writes the node's key there. It starts at the next
-    /// [`Lab::run`].
+    /// Adds a node named `name` on a new simulated host, and writes the node's key
+    /// there. It starts at the next [`Lab::run`].
     ///
     /// # Panics
     ///
@@ -241,7 +244,6 @@ impl Lab {
             .expect("lab failure: at most 255 nodes");
         let now = self.members.first().map(|first| first.host.clock().now());
         let host = self.sim.node(self.truth.host(now));
-        host.make_dir(Path::new("/lab"));
         let (key, private_key) = (
             types::node::Key::from_u128(u128::from(byte)),
             PrivateKey([byte; 32]),
@@ -314,9 +316,9 @@ impl Lab {
     }
 
     /// Sets the disk budget of `node` to `bytes`.
-    #[expect(clippy::todo, reason = "waits on #1157")]
+    #[expect(clippy::todo, reason = "waits on #342, #2074")]
     pub(crate) fn limit(&mut self, _node: Node, _bytes: u64) {
-        todo!("waits on #1157")
+        todo!("waits on #342, #2074")
     }
 
     /// The disk budget that holds `span` of one `f64` channel at `rate` samples per
@@ -328,8 +330,9 @@ impl Lab {
 
     /// Makes `nodes` the members of one mesh, without a ticket: they found the root
     /// region, each as a voter, with the first admin `admin`, at the first
-    /// [`Lab::run`]. Writes the key of `admin` to the file `admin.key` of each node,
-    /// as a founder holds it, so the front ends reach each one.
+    /// [`Lab::run`]. Writes the key of `admin` to the file `admin.key` of the first
+    /// node only, as the node that founds a region holds it, so the command line
+    /// reaches that node.
     ///
     /// # Panics
     ///
@@ -357,19 +360,17 @@ impl Lab {
             !self.ran,
             "lab failure: `mesh` after the first run or a task"
         );
-        for &node in nodes {
-            let admin = sector::admin::encode(&ADMIN);
-            let written = self.sim.run_on(
-                &self.members[node.0].host,
-                move |host, _| async move {
-                    let path = Path::new(sector::admin::FILE);
-                    sector::publish(&host.files(), path, &admin).await
-                },
-            );
-            written
-                .expect("lab failure: the run ends")
-                .expect("lab failure: the admin key of a new host");
-        }
+        let admin = sector::admin::encode(&ADMIN);
+        let written = self.sim.run_on(
+            &self.members[nodes[0].0].host,
+            move |host, _| async move {
+                let path = Path::new(sector::admin::FILE);
+                sector::publish(&host.files(), path, &admin).await
+            },
+        );
+        written
+            .expect("lab failure: the run ends")
+            .expect("lab failure: the admin key of a new host");
         let members: Vec<mesh::Member> = nodes
             .iter()
             .map(|&node| {
@@ -759,22 +760,43 @@ impl Lab {
         done
     }
 
+    /// Writes `hcl` to `/lab/lab.hcl` on the host of `node`, runs `foundation plan
+    /// --json` there, and returns the path of the plan and the names of the changed
+    /// definitions, sorted.
+    ///
+    /// # Panics
+    ///
+    /// When the write of the file fails, and as [`Lab::cli`] says.
+    pub(crate) fn cli_plan(&mut self, node: Node, hcl: &str) -> (String, Vec<String>) {
+        let (file, plan) = self.write_hcl(node, hcl);
+        let args = ["plan", &file, "--out", &plan, "--json"];
+        let output = self.cli(node, &args, &[]);
+        let output = serde_json::from_slice(&output).expect("lab failure: a JSON plan");
+        (plan, changes(&output))
+    }
+
+    /// Runs `foundation apply --json` on `node` with the plan at `plan` on its host,
+    /// as [`Lab::cli_plan`] gives it.
+    ///
+    /// # Panics
+    ///
+    /// As [`Lab::cli`] says.
+    pub(crate) fn cli_apply(&mut self, node: Node, plan: &str) {
+        self.cli(node, &["apply", plan, "--json"], &[]);
+    }
+
     /// Writes `hcl` to `/lab/lab.hcl` on the host of `node`, runs the MCP `plan` tool
     /// there, and returns the path of the plan and the names of the changed
     /// definitions, sorted.
     ///
     /// # Panics
     ///
-    /// As [`Lab::mcp`] says.
+    /// When the write of the file fails, and as [`Lab::mcp`] says.
     pub(crate) fn mcp_plan(&mut self, node: Node, hcl: &str) -> (String, Vec<String>) {
-        let paths = self.members[node.0].host.paths();
-        let file = Path::new("/lab/lab.hcl");
-        let written = paths.write(file, hcl.as_bytes());
-        written.expect("lab failure: the write of /lab/lab.hcl");
-        let plan = "/lab/lab.plan";
+        let (file, plan) = self.write_hcl(node, hcl);
         let arguments = serde_json::json!({ "files": [file], "out": plan });
         let output = self.mcp(node, "plan", &arguments);
-        (plan.to_owned(), changes(&output))
+        (plan, changes(&output))
     }
 
     /// Runs the MCP `apply` tool on `node` with the plan at `plan` on its host, as
@@ -787,46 +809,106 @@ impl Lab {
         self.mcp(node, "apply", &serde_json::json!({ "plan": plan }));
     }
 
-    /// Calls the MCP tool `tool` with `arguments` through `foundation mcp` on the host
-    /// of `node`, with the folder `/lab`, as the first admin, once the node takes
-    /// sessions. Gives the structured content of the result.
+    /// Writes `hcl` to `lab.hcl` in [`FILES`] on the host of `node`, and gives its
+    /// path and the path of its plan.
+    fn write_hcl(&self, node: Node, hcl: &str) -> (String, String) {
+        let file = format!("{FILES}/lab.hcl");
+        let written = self
+            .host(node)
+            .paths()
+            .write(Path::new(&file), hcl.as_bytes());
+        written.unwrap_or_else(|error| {
+            panic!("lab failure: the write of {file}: {error:?}")
+        });
+        (file, format!("{FILES}/lab.plan"))
+    }
+
+    /// The host of `node`, with the folder [`FILES`] made.
+    fn host(&self, node: Node) -> sim::node::Node {
+        let host = self.members[node.0].host.clone();
+        host.make_dir(Path::new(FILES));
+        host
+    }
+
+    /// Calls the MCP tool `tool` with `arguments` through `foundation mcp` on `node`,
+    /// with the folder [`FILES`], after the handshake of an agent. Gives the
+    /// structured content of the result.
     ///
     /// # Panics
     ///
-    /// When the call gives an error, or does not end in 60 s of simulated time.
+    /// When the reply is an error or the result an error, and as [`Lab::cli`]
+    /// says.
     fn mcp(
         &mut self,
         node: Node,
         tool: &str,
         arguments: &serde_json::Value,
     ) -> serde_json::Value {
+        let messages = [
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": { "name": "lab", "version": "0" },
+                },
+            }),
+            serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": { "name": tool, "arguments": arguments },
+            }),
+        ];
+        // `reach` ignores `--data`, which names an empty folder of the host (#3647).
+        let args = ["mcp", "--files", FILES, "--data", "/data"];
+        let output = self.cli(node, &args, &messages.map(|m| format!("{m}\n")));
+        let last = output.trim_ascii_end().rsplit(|&byte| byte == b'\n').next();
+        let reply: serde_json::Value = serde_json::from_slice(last.unwrap_or_default())
+            .expect("lab failure: a JSON reply");
+        let result = &reply["result"];
+        if let Some(content) = result.get("structuredContent") {
+            return content.clone();
+        }
+        let text = result["content"][0]["text"].as_str();
+        let error = text.map_or_else(|| reply["error"].to_string(), str::to_owned);
+        panic!("lab failure: the MCP tool {tool} gave {error}");
+    }
+
+    /// Runs `foundation` with `args` on the host of `node`, as the first admin, once
+    /// the node takes sessions, with `input` as the lines of its standard input.
+    /// Gives its standard output.
+    ///
+    /// # Panics
+    ///
+    /// When it does not exit with 0 in 60 s of simulated time, or when it cannot
+    /// reach the node or a request to the node fails. The last two panic in the shard
+    /// `cli`, and the simulation gives that panic to the test.
+    fn cli(&mut self, node: Node, args: &[&str], input: &[String]) -> Vec<u8> {
         self.operate(node, |_| async {});
-        self.ran = true;
-        let host = self.members[node.0].host.clone();
-        let message = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": { "name": tool, "arguments": arguments },
-        });
+        let host = self.host(node);
+        let line = format!("foundation {}", args.join(" "));
+        let args: Vec<OsString> =
+            ["foundation"].iter().chain(args).map(Into::into).collect();
+        let mut lines: Vec<ops::Line> = input
+            .iter()
+            .rev()
+            .map(|line| ops::Line::Bytes(line.clone().into()))
+            .collect();
+        lines.insert(0, ops::Line::End);
         let out = Arc::new(Mutex::new(None));
         let slot = Arc::clone(&out);
         let config = env::shards::Config {
-            name: "mcp".into(),
+            name: "cli".into(),
             core: None,
         };
-        let shards = host.shards();
-        let start = shards.start(config, move |tasks| async move {
-            let mut lines = vec![
-                ops::Line::End,
-                ops::Line::Bytes(format!("{message}\n").into()),
-            ];
+        let start = host.shards().start(config, move |tasks| async move {
             let (mut output, mut errors) = (Vec::new(), Vec::new());
-            // The node's disk is apart from the host's paths: `reach` ignores
-            // `--data`, which names an empty folder there.
             let run = ops::cli(
-                ["foundation", "mcp", "--files", "/lab", "--data", "/data"]
-                    .map(Into::into),
+                args,
                 async || Ok(lines.pop().unwrap_or(ops::Line::End)),
                 &mut output,
                 &mut errors,
@@ -849,29 +931,21 @@ impl Lab {
                         Ok(reply.unwrap_or_else(|error| panic!("lab failure: {error}")))
                     })
                 },
-                async |_: &Path| unreachable!("`mcp` reads no public key"),
+                async |_: &Path| unreachable!("the lab reads no public key"),
             )
             .await;
             *slot.lock().unwrap() = Some((run, output, errors));
         });
         drop(start.unwrap());
         let done = self.until_set(&out, Duration::from_millis(100), 600);
-        let (run, output, errors) = done
-            .unwrap_or_else(|| panic!("lab failure: the MCP tool {tool} took 60 s"));
+        let (run, output, errors) =
+            done.unwrap_or_else(|| panic!("lab failure: `{line}` took 60 s"));
         let errors = String::from_utf8_lossy(&errors);
         assert!(
             matches!(run, ops::Run::Exit(0)),
-            "lab failure: {run:?}: {errors}"
+            "lab failure: `{line}` gave {run:?}: {errors}"
         );
-        let reply: serde_json::Value =
-            serde_json::from_slice(&output).expect("lab failure: a JSON reply");
-        let result = &reply["result"];
-        if let Some(content) = result.get("structuredContent") {
-            return content.clone();
-        }
-        let text = result["content"][0]["text"].as_str();
-        let error = text.map_or_else(|| reply["error"].to_string(), str::to_owned);
-        panic!("lab failure: the MCP tool {tool} gave {error}");
+        output
     }
 
     /// Attaches a simulated device to `node` at `address`.
@@ -2094,31 +2168,95 @@ placement "site" {
 "#;
 
 #[test]
-fn an_mcp_apply_at_one_member_changes_the_spec_of_the_mesh() {
+fn an_mcp_apply_at_the_founder_changes_the_spec_of_the_mesh() {
     let mut lab = Lab::new(1);
     let (a, b) = (lab.start("a"), lab.start("b"));
     lab.mesh(&[a, b]);
-    let (plan, changes) = lab.mcp_plan(b, SITE);
+    let (plan, changes) = lab.mcp_plan(a, SITE);
     assert_eq!(plan, "/lab/lab.plan");
     assert_eq!(changes, ["site", "site.temp", "site.time"]);
-    lab.mcp_apply(b, &plan);
+    lab.mcp_apply(a, &plan);
     assert_eq!(lab.mcp_plan(a, SITE).1, Vec::<String>::new(), "a");
-    assert_eq!(lab.mcp_plan(b, SITE).1, Vec::<String>::new(), "b");
+    assert_eq!(lab.plan(b, SITE), Vec::<String>::new(), "b");
+    assert_eq!(lab.home(b, "site.time"), Some(a));
     lab.stop();
 }
 
 #[test]
-#[should_panic(
-    expected = "lab failure: the MCP tool apply gave {\"errors\":[{\"code\":\
-                           \"ops.read\",\"fix\":\"Fix the cause in the message, then \
-                           run the command again\",\"message\":\"no file is at \
-                           /lab/none.plan\",\"notes\":[]}]}"
-)]
+fn a_cli_apply_at_the_founder_changes_the_spec_of_the_mesh() {
+    let mut lab = Lab::new(1);
+    let (a, b) = (lab.start("a"), lab.start("b"));
+    lab.mesh(&[a, b]);
+    let (plan, changes) = lab.cli_plan(a, SITE);
+    assert_eq!(plan, "/lab/lab.plan");
+    assert_eq!(changes, ["site", "site.temp", "site.time"]);
+    lab.cli_apply(a, &plan);
+    assert_eq!(lab.cli_plan(a, SITE).1, Vec::<String>::new(), "a");
+    assert_eq!(lab.plan(b, SITE), Vec::<String>::new(), "b");
+    lab.stop();
+}
+
+#[test]
+#[should_panic(expected = "lab failure: the MCP tool apply gave \
+                {\"errors\":[{\"code\":\"ops.read\",\"fix\":\"Fix the cause in the message, then \
+                run the command again\",\"message\":\"no file is at /lab/none.plan\",\
+                \"notes\":[]}]}")]
 fn an_mcp_tool_error_panics() {
     let mut lab = Lab::new(1);
     let a = lab.start("a");
     lab.mesh(&[a]);
     lab.mcp_apply(a, "/lab/none.plan");
+}
+
+#[test]
+#[should_panic(
+    expected = "lab failure: the MCP tool plan gave {\"errors\":[{\"code\":\"hcl.syntax\",\
+                \"fix\":\"Write it here, or correct the text here or before it\",\"message\":\
+                \"the file needs a key or `}` here\",\"notes\":[],\"place\":{\"column\":10,\
+                \"file\":\"/lab/lab.hcl\",\"line\":1}}]}"
+)]
+fn an_mcp_plan_of_hcl_with_an_error_panics() {
+    let mut lab = Lab::new(1);
+    let a = lab.start("a");
+    lab.mesh(&[a]);
+    lab.mcp_plan(a, "channel {");
+}
+
+#[test]
+#[should_panic(
+    expected = "lab failure: the MCP tool none gave {\"code\":-32602,\"data\":{\"errors\":\
+                [{\"code\":\"ops.unknown-operation\",\"fix\":\"Use a name from `tools/list`\",\
+                \"message\":\"no operation is named `none`\",\"notes\":[]}]},\"message\":\
+                \"no operation is named `none`\"}"
+)]
+fn an_mcp_error_reply_panics() {
+    let mut lab = Lab::new(1);
+    let a = lab.start("a");
+    lab.mesh(&[a]);
+    lab.mcp(a, "none", &serde_json::json!({}));
+}
+
+#[test]
+#[should_panic(
+    expected = "lab failure: `foundation apply /lab/none.plan --json` gave Exit(2): \
+                {\"errors\":[{\"code\":\"ops.read\",\"fix\":\"Fix the cause in the message, then \
+                run the command again\",\"message\":\"no file is at /lab/none.plan\",\
+                \"notes\":[]}]}"
+)]
+fn a_cli_apply_of_no_plan_panics() {
+    let mut lab = Lab::new(1);
+    let a = lab.start("a");
+    lab.mesh(&[a]);
+    lab.cli_apply(a, "/lab/none.plan");
+}
+
+#[test]
+#[should_panic(expected = "thread cli panicked: lab failure: Key;")]
+fn the_command_line_at_a_member_with_no_admin_key_panics() {
+    let mut lab = Lab::new(1);
+    let (a, b) = (lab.start("a"), lab.start("b"));
+    lab.mesh(&[a, b]);
+    lab.mcp_plan(b, SITE);
 }
 
 #[test]
