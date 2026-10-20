@@ -114,12 +114,12 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
 ///
 /// Raises `TypeError` for an argument of a wrong type, `ValueError` for an argument
 /// that does not parse, a `private_key` with no `subject`, a profile with a problem, no
-/// login name or one that is not a subject name, or a profile or key file that is not
-/// UTF-8 or not the OpenSSH file of an Ed25519 key with no passphrase, `RuntimeError`
-/// when a thread of the client or of the read of `data` cannot start, `OSError` when
-/// the local UDP socket cannot bind, the profile or a key file cannot be read or
-/// written, or the profile names a key file that is not there, `MemoryError` when the
-/// OS refuses the memory of the pool of the frames of the client's readers,
+/// login name or one that is not a subject name, a profile that is not UTF-8, or a key
+/// file that is not the OpenSSH file of an Ed25519 key with no passphrase,
+/// `RuntimeError` when a thread of the client or of the read of `data` cannot start,
+/// `OSError` when the local UDP socket cannot bind, the profile or a key file cannot be
+/// read or written, or the profile names a key file that is not there, `MemoryError`
+/// when the OS refuses the memory of the pool of the frames of the client's readers,
 /// `ConnectionError` when no source gives the address, or with `strict` the public key,
 /// the data directory cannot be read, the client cannot reach the node, the node proves
 /// another key than its source gives, or the node refuses the subject, and
@@ -149,29 +149,27 @@ fn connect(
     let data = data.map(parse_data).transpose()?;
     let data = data.unwrap_or_else(|| PathBuf::from("foundation-data"));
     let given = arguments.public_key.is_some() && arguments.subject.is_some();
-    let (held, other) = match arguments.address {
+    let (local, other) = match arguments.address {
         Some(_) if given => (Given::default(), None),
-        address => Given::held(local(py, &data)?, address),
+        address => Given::held(self::local(py, &data)?, address),
     };
-    let Some(address) = arguments.address.or(held.address) else {
+    let Some(address) = arguments.address.or(local.address) else {
         return Err(PyConnectionError::new_err(format!(
             "no node runs in {}: pass the address of the node, or data= with the \
              --data of foundation start",
             data.display()
         )));
     };
-    let profile = if given {
-        Profile::unread(py)?
-    } else {
-        Profile::read(py)?
-    };
-    let profiled = Given::profiled(&profile, address);
+    let profile = Profile::host(py)?;
+    let held = if given { None } else { Some(profile.read()?) };
+    let profiled = Given::profiled(held.as_ref(), address);
     let Given {
         public_key,
         subject,
         ..
-    } = Given::first([arguments, profiled, held]);
-    if public_key.is_none() && strict.unwrap_or(profile.held.strict) {
+    } = Given::first([arguments, profiled, local]);
+    let strict = strict.unwrap_or(held.is_some_and(|held| held.strict));
+    if public_key.is_none() && strict {
         let held = other.map_or_else(String::new, |other| {
             format!("; {} holds the node at {other}", data.display())
         });
@@ -258,9 +256,11 @@ impl Given {
         }
     }
 
-    /// What `profile` gives for the node at `address`.
-    fn profiled(profile: &Profile, address: SocketAddr) -> Self {
-        let held = &profile.held;
+    /// What the profile `held` gives for the node at `address`, when it was read.
+    fn profiled(held: Option<&config::profile::Profile>, address: SocketAddr) -> Self {
+        let Some(held) = held else {
+            return Self::default();
+        };
         Self {
             address: None,
             public_key: held.nodes.get(&address).copied().map(Key::Pinned),

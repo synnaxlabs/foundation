@@ -15,18 +15,16 @@ use pyo3::prelude::*;
 use types::ed25519::{PrivateKey, PublicKey};
 use types::name::Name;
 
-/// The profile of the host, and the file that holds it.
+/// The file of the profile of the host.
 pub(crate) struct Profile {
-    /// The file: the one that `FOUNDATION_PROFILE` names, else
-    /// `~/.foundation/profile.hcl`. An empty `FOUNDATION_PROFILE` counts as unset.
+    /// The file that `FOUNDATION_PROFILE` names, else `~/.foundation/profile.hcl`. An
+    /// empty `FOUNDATION_PROFILE` counts as unset.
     pub(crate) path: PathBuf,
-    /// What the file holds, or an empty profile when it is not there or not read.
-    pub(crate) held: config::profile::Profile,
 }
 
 impl Profile {
-    /// The profile of the host, with nothing of its file read.
-    pub(crate) fn unread(py: Python<'_>) -> PyResult<Self> {
+    /// The file of the profile of the host. Reads nothing of it.
+    pub(crate) fn host(py: Python<'_>) -> PyResult<Self> {
         let environ = py.import("os")?.getattr("environ")?;
         let named: Option<PathBuf> = environ
             .call_method1("get", ("FOUNDATION_PROFILE",))?
@@ -35,18 +33,15 @@ impl Profile {
             Some(path) => path,
             None => home(py)?.join("profile.hcl"),
         };
-        let held = config::profile::Profile::default();
-        Ok(Self { path, held })
+        Ok(Self { path })
     }
 
-    /// Reads the profile of the host. Raises `ValueError` for a profile with a problem,
-    /// with each problem by line, or that is not UTF-8, and `OSError` when the file
-    /// cannot be read.
-    pub(crate) fn read(py: Python<'_>) -> PyResult<Self> {
-        let mut profile = Self::unread(py)?;
-        let text = text(&profile.path)?.unwrap_or_default();
-        profile.held = decoded(&profile.path, &text)?;
-        Ok(profile)
+    /// What the file holds, or an empty profile when it is not there. Raises
+    /// `ValueError` for a profile with a problem, with each problem by line, or that is
+    /// not UTF-8, and `OSError` when the file cannot be read.
+    pub(crate) fn read(&self) -> PyResult<config::profile::Profile> {
+        let text = text(&self.path)?.unwrap_or_default();
+        decoded(&self.path, &text)
     }
 
     /// Pins `public_key` as the key of the node at `address` in the file, unless a
@@ -64,12 +59,14 @@ impl Profile {
     ) -> PyResult<PublicKey> {
         let os =
             |e: io::Error| PyOSError::new_err(format!("{}: {e}", self.path.display()));
-        private_directory(directory(&self.path)).map_err(os)?;
         let path = match fs::canonicalize(&self.path) {
             Ok(path) => path,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => self.path.clone(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                linked(&self.path).map_err(os)?
+            }
             Err(e) => return Err(os(e)),
         };
+        private_directory(directory(&path)).map_err(os)?;
         let lock = private_file(
             OpenOptions::new().write(true).create(true),
             &sibling(&path, "lock"),
@@ -107,8 +104,8 @@ impl Profile {
 
     /// The private key of `subject` in the key file `named`, else in
     /// `~/.foundation/<subject>.key`, which [`made`] makes when it is not there. A
-    /// `named` path that starts with `~` is expanded as the shell does, and a relative
-    /// one is in the directory of the profile. Raises `ValueError` as [`made`] does,
+    /// `named` path that starts with `~/` is in the home directory, and a relative one
+    /// is in the directory of the profile. Raises `ValueError` as [`made`] does,
     /// and `OSError` when a file cannot be read or written, or `named` is not there.
     pub(crate) fn private_key(
         &self,
@@ -139,20 +136,25 @@ fn home(py: Python<'_>) -> PyResult<PathBuf> {
     expanded(py, Path::new("~/.foundation"))
 }
 
-/// `path` with a leading `~` or `~user` expanded to the home directory.
+/// `path` in the home directory when it starts with `~/`, else `path` as written.
 fn expanded(py: Python<'_>, path: &Path) -> PyResult<PathBuf> {
-    py.import("os.path")?
-        .call_method1("expanduser", (path,))?
-        .extract()
+    let Some(within) = path.to_str().and_then(|path| path.strip_prefix("~/")) else {
+        return Ok(path.to_owned());
+    };
+    let home: PathBuf = py
+        .import("os.path")?
+        .call_method1("expanduser", ("~",))?
+        .extract()?;
+    Ok(home.join(within.trim_start_matches('/')))
 }
 
 /// The private key of `subject` in the OpenSSH file `path`. When there is no file,
 /// makes a new key and writes it there with mode 0600, as `ssh-keygen -t ed25519 -N
 /// ""` writes it, and makes each missing directory with mode 0700. The file is on the
 /// disk before it returns. Two programs that make it at once get one key. Raises
-/// `ValueError` when the file is not UTF-8 or not the key file of an Ed25519 key with
-/// no passphrase, with `fix` for a key with a passphrase, and `OSError` when it
-/// cannot be read or written.
+/// `ValueError` when the file is not the key file of an Ed25519 key with no
+/// passphrase, with `fix` for a key with a passphrase, and `OSError` when it cannot be
+/// read or written.
 fn made(subject: &Name, path: &Path, fix: &str) -> PyResult<PrivateKey> {
     if let Some(key) = key(path, fix)? {
         return Ok(key);
@@ -180,9 +182,12 @@ fn made(subject: &Name, path: &Path, fix: &str) -> PyResult<PrivateKey> {
     match linked {
         Ok(()) => synced(directory(path)).map_err(os).map(|()| made),
         // Another program made the file first, or `path` is a link to no file.
-        Err(e) => key(path, fix)?.ok_or_else(|| {
-            PyOSError::new_err(format!("{}: {e}, and it names no file", path.display()))
-        }),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => key(path, fix)?
+            .ok_or_else(|| {
+                let at = path.display();
+                PyOSError::new_err(format!("{at}: {e}, and it names no file"))
+            }),
+        Err(e) => Err(os(e)),
     }
 }
 
@@ -273,6 +278,22 @@ fn private_directory(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
     builder.create(path)
+}
+
+/// The file that `path` names after each link, also a last link to no file.
+/// [`fs::canonicalize`] refuses the last, so a caller tries it first: it also refuses
+/// a loop of links.
+fn linked(path: &Path) -> io::Result<PathBuf> {
+    let mut path = path.to_owned();
+    loop {
+        match fs::symlink_metadata(&path) {
+            Ok(file) if file.file_type().is_symlink() => {
+                path = directory(&path).join(fs::read_link(&path)?);
+            }
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => return Ok(path),
+        }
+    }
 }
 
 /// The directory of the file `path`.

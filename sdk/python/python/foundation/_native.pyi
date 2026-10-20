@@ -58,12 +58,12 @@ def connect(
 
     Raises `TypeError` for an argument of a wrong type, `ValueError` for an argument
     that does not parse, a `private_key` with no `subject`, a profile with a problem, no
-    login name or one that is not a subject name, or a profile or key file that is not
-    UTF-8 or not the OpenSSH file of an Ed25519 key with no passphrase, `RuntimeError`
-    when a thread of the client or of the read of `data` cannot start, `OSError` when
-    the local UDP socket cannot bind, the profile or a key file cannot be read or
-    written, or the profile names a key file that is not there, `MemoryError` when the
-    OS refuses the memory of the pool of the frames of the client's readers,
+    login name or one that is not a subject name, a profile that is not UTF-8, or a key
+    file that is not the OpenSSH file of an Ed25519 key with no passphrase,
+    `RuntimeError` when a thread of the client or of the read of `data` cannot start,
+    `OSError` when the local UDP socket cannot bind, the profile or a key file cannot be
+    read or written, or the profile names a key file that is not there, `MemoryError`
+    when the OS refuses the memory of the pool of the frames of the client's readers,
     `ConnectionError` when no source gives the address, or with `strict` the public key,
     the data directory cannot be read, the client cannot reach the node, the node proves
     another key than its source gives, or the node refuses the subject, and

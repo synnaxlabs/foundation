@@ -368,10 +368,7 @@ fn a_pin_keeps_the_key_that_another_program_pinned_after_the_read() {
     let [first, second] = [1, 2].map(|byte| PrivateKey([byte; 32]).public());
     Python::initialize();
     Python::attach(|_| {
-        let profile = Profile {
-            path: path.clone(),
-            held: config::profile::Profile::default(),
-        };
+        let profile = Profile { path: path.clone() };
         fs::create_dir_all(&dir).unwrap();
         let text = format!(
             "node \"{at}\" {{\n  public_key = \"{}\"\n}}\n",
@@ -385,7 +382,8 @@ fn a_pin_keeps_the_key_that_another_program_pinned_after_the_read() {
 }
 
 /// Pins in `<path>.lock` only after a rival program lets go of it, and keeps the key
-/// that the rival pinned.
+/// that the rival pinned. A pin that takes no lock fails it only when the pin reads
+/// the file in the 200 ms before the rival writes it.
 #[test]
 #[expect(
     clippy::disallowed_methods,
@@ -404,10 +402,7 @@ fn a_pin_waits_for_the_lock_of_a_rival() {
         .open(dir.join("profile.hcl.lock"))
         .unwrap();
     rival.lock().unwrap();
-    let profile = Profile {
-        path: path.clone(),
-        held: config::profile::Profile::default(),
-    };
+    let profile = Profile { path: path.clone() };
     let pinning = thread::spawn(move || profile.pin(at, second).map_err(drop));
     thread::sleep(Duration::from_millis(200));
     assert!(!pinning.is_finished());
@@ -436,10 +431,7 @@ fn a_pin_keeps_a_linked_profile_a_link() {
     std::os::unix::fs::symlink(&target, &path).unwrap();
     let at: SocketAddr = "10.0.0.5:7400".parse().unwrap();
     let key = PrivateKey([3; 32]).public();
-    let profile = Profile {
-        path: path.clone(),
-        held: config::profile::Profile::default(),
-    };
+    let profile = Profile { path: path.clone() };
     assert_eq!(profile.pin(at, key).map_err(drop), Ok(key));
     assert!(fs::symlink_metadata(&path).unwrap().is_symlink());
     assert_eq!(
@@ -460,6 +452,62 @@ fn a_pin_keeps_a_linked_profile_a_link() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+/// Writes the file that a profile links to when that file is not there yet, and keeps
+/// the link.
+#[cfg(unix)]
+#[test]
+fn a_pin_of_a_profile_that_links_to_no_file_keeps_the_link() {
+    let dir = env::temp_dir().join(format!("foundation-dangle-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("dotfiles.hcl");
+    let path = dir.join("profile.hcl");
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+    let at: SocketAddr = "10.0.0.5:7400".parse().unwrap();
+    let key = PrivateKey([3; 32]).public();
+    let profile = Profile { path: path.clone() };
+    assert_eq!(profile.pin(at, key).map_err(drop), Ok(key));
+    let linked = fs::symlink_metadata(&path).unwrap().is_symlink();
+    let written = fs::read_to_string(&target).ok();
+    fs::remove_dir_all(&dir).unwrap();
+    assert!(linked, "the profile is no longer a link");
+    assert_eq!(
+        written,
+        Some(format!(
+            "node \"{at}\" {{\n  public_key = \"{}\"\n}}\n",
+            config::openssh::line(key)
+        ))
+    );
+}
+
+/// Only Unix: the user that runs the tests cannot read `/root`, so a path that
+/// expands `~root` fails. A `private_key` of `~root/k.key` is in the directory of the
+/// profile.
+#[cfg(unix)]
+#[test]
+fn a_private_key_of_a_tilde_and_a_user_is_in_the_directory_of_the_profile() {
+    let dir = env::temp_dir().join(format!("foundation-tilde-{}", std::process::id()));
+    fs::create_dir_all(dir.join("~root")).unwrap();
+    let key = PrivateKey([5; 32]);
+    fs::write(
+        dir.join("~root/k.key"),
+        config::openssh::key_file(&key, "k"),
+    )
+    .unwrap();
+    let profile = Profile {
+        path: dir.join("profile.hcl"),
+    };
+    Python::initialize();
+    let read = Python::attach(|py| {
+        let subject: types::name::Name = "alice".parse().unwrap();
+        profile
+            .private_key(py, &subject, Some(Path::new("~root/k.key")))
+            .map(|key| key.0)
+            .map_err(|e| e.value(py).to_string())
+    });
+    fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(read, Ok(key.0));
+}
+
 /// Raises `OSError` for a profile that is a link to itself, and takes no lock.
 #[cfg(unix)]
 #[test]
@@ -469,10 +517,7 @@ fn a_pin_of_a_profile_that_links_to_itself_raises() {
     let path = dir.join("profile.hcl");
     std::os::unix::fs::symlink(&path, &path).unwrap();
     let looped = fs::canonicalize(&path).unwrap_err();
-    let profile = Profile {
-        path: path.clone(),
-        held: config::profile::Profile::default(),
-    };
+    let profile = Profile { path: path.clone() };
     let at: SocketAddr = "10.0.0.5:7400".parse().unwrap();
     Python::initialize();
     Python::attach(|py| {

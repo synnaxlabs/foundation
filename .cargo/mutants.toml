@@ -272,4 +272,7 @@ exclude_re = [
   'sdk/rust/src/read\.rs:.*replace served with \(\)$',
   # No writer opens, and each test of `crates/node/tests/it/sdk.rs` that writes fails.
   'sdk/rust/src/write\.rs:.*replace served with \(\)$',
+  # Once the temporary file exists in the directory of `path`, a test can make
+  # `hard_link` fail only with `AlreadyExists`.
+  'sdk/python/src/profile\.rs:.*replace match guard e\.kind\(\) == io::ErrorKind::AlreadyExists with true in made$',
 ]
