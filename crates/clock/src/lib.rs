@@ -1,5 +1,9 @@
 //! Runs time source adapters and the peer exchange, feeds `estimate`, serves mesh time
 //! as an interval, and gives the OS wall time and mesh time of each log line.
+//!
+//! ```
+//! panic!("for one run, only the serial part of ARM fails");
+//! ```
 
 mod cell;
 pub mod log;
