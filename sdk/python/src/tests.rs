@@ -440,6 +440,7 @@ fn a_pin_writes_a_profile_of_a_bare_name_in_the_working_directory() {
     );
 }
 
+/// Only Unix: the test takes the read right of the directory with a Unix mode.
 /// Raises the error of the sync of the directory of a pin that cannot read its
 /// directory: the pin is on the disk only once the entry of its file is.
 #[cfg(unix)]
@@ -466,6 +467,7 @@ fn a_pin_raises_the_error_of_the_sync_of_its_directory() {
     assert_eq!(error, denied);
 }
 
+/// Only Unix: the test makes a link with `std::os::unix::fs::symlink`.
 /// Writes the file that a linked profile names, with mode 0600, and keeps the link.
 #[cfg(unix)]
 #[test]
@@ -501,6 +503,7 @@ fn a_pin_keeps_a_linked_profile_a_link() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+/// Only Unix: the test makes a link with `std::os::unix::fs::symlink`.
 /// Writes the file that a profile links to when that file is not there yet, and keeps
 /// the link.
 #[cfg(unix)]
@@ -598,6 +601,7 @@ fn a_private_key_of_a_linked_profile_is_next_to_the_link() {
     assert_eq!(read, Ok(mine.0));
 }
 
+/// Only Unix: the test makes a link with `std::os::unix::fs::symlink`.
 /// Raises `OSError` for a profile that is a link to itself, and takes no lock.
 #[cfg(unix)]
 #[test]

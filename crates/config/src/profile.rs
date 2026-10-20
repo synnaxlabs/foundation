@@ -51,8 +51,9 @@ const BODY: Body = Body {
             value: "the path of an OpenSSH Ed25519 private key file",
             presence: Presence::Optional,
             summary: "The key file of `subject`, which it needs. A relative path is \
-                      relative to the directory of the profile, and a path that \
-                      starts with `~/` to the home directory. Without it, \
+                      in the directory of the profile's path, also when the profile \
+                      is a link, and a path that starts with `~/` is in the home \
+                      directory. Without it, \
                       `~/.foundation/<subject>.key`, made when it is not there.",
         },
         schema::Attribute {
@@ -102,9 +103,9 @@ pub struct Profile {
     /// The subject that a program acts as, if the profile names one.
     pub subject: Option<Name>,
     /// The key file of `subject` as the profile writes it, if it names one. A relative
-    /// path is relative to the directory of the profile, and a path that starts with
-    /// `~/` to the home directory; the program joins it. When it is `Some`, so is
-    /// `subject`.
+    /// path is in the directory of the profile's path, also when the profile is a link,
+    /// and a path that starts with `~/` is in the home directory; the program joins it.
+    /// When it is `Some`, so is `subject`.
     pub private_key: Option<PathBuf>,
     /// Whether a node that no source pins is refused, not trusted on first use.
     pub strict: bool,

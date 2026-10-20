@@ -15,8 +15,9 @@
   }
   ```
 
-  A relative `private_key` path is relative to the directory of the profile, and a path
-  that starts with `~/` to the home directory; each other path is as written.
+  A relative `private_key` path is in the directory of the profile's path, also when the
+  profile is a link, and a path that starts with `~/` is in the home directory; each
+  other path is as written.
   `sdk-python` joins it (`laptop.architect-2`, 2026-10-20T01:11:29Z, item 3 of
   https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6280967938).
   `config::profile::decode(&Document)` gives `config::profile::Profile`: the subject,
