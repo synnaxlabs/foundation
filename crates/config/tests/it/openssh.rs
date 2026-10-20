@@ -125,13 +125,15 @@ fn refuses_a_key_of_an_unknown_algorithm_as_no_key_file() {
     );
 }
 
-/// OpenSSH reads a key file with CRLF line ends, as an editor on Windows saves it,
-/// with blank lines at the end, and with no line end after the last line.
+/// A key file with CRLF line ends, as an editor on Windows saves it, with blank lines
+/// or other text after the end mark, or with no line end after the end mark reads as
+/// its key. OpenSSH 9.6p1 reads the second and third, and refuses the first and last.
 #[test]
-fn reads_a_key_file_with_each_line_end_that_openssh_reads() {
+fn reads_a_key_file_with_each_line_end_and_text_after_the_end_mark() {
     let crlf = KEYGEN.replace('\n', "\r\n");
     let blank = format!("{KEYGEN}\n\r\n");
-    for text in [crlf.as_str(), &blank, KEYGEN.trim_end()] {
+    let after = format!("{KEYGEN}any text\n");
+    for text in [crlf.as_str(), &blank, &after, KEYGEN.trim_end()] {
         let key = openssh::private_key(text).unwrap();
         assert_eq!(openssh::line(key.public()), KEYGEN_PUB, "{text:?}");
     }

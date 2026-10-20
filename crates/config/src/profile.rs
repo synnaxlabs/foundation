@@ -28,6 +28,10 @@ const NODE_KEY: Holder = Holder {
     algorithm_fix: PRINTED,
 };
 
+/// The fix of a pasted private key: the one key that a profile names is the key file
+/// of its subject.
+const PASTED_KEY: &str = "Remove the private key from this file now, and write \
+                          the path of its key file as `private_key`";
 const BODY: Body = Body {
     summary: "The subject that a program on a client host acts as, and the public \
               key of each node that it connects to.",
@@ -117,8 +121,11 @@ pub struct Profile {
 /// no `subject`, a `node` block without one label or its `public_key`, and each later
 /// `node` block of an address.
 pub fn decode(document: &Document) -> Result<Profile, Vec<Diagnostic>> {
-    let alarms = crate::private_key::alarms(std::slice::from_ref(document));
+    let mut alarms = crate::private_key::alarms(std::slice::from_ref(document));
     if !alarms.is_empty() {
+        for alarm in &mut alarms {
+            alarm.fix = PASTED_KEY.into();
+        }
         return Err(alarms);
     }
     let mut diagnostics = read::unknown(document, "the profile", &BODY);

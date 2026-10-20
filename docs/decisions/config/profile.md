@@ -28,10 +28,13 @@
   bad name, an empty path, a `private_key` with no `subject` (item 3 of 6280967938), a
   `node` label that is not `ip:port`, a key line that is not `ssh-ed25519`, and a second
   block of one address, with a note at the first. A string that holds a private key
-  gives only `config.private-key`, as in a config file (SUBJECT KEYS). A pin whose key
-  holds such text also gives it: a key holds it with a chance under 10^-19, and an
-  exception would pass a private key in the comment of the line (`laptop.architect-2`,
-  2026-10-20T01:53:14Z,
+  gives only `config.private-key`, as in a config file (SUBJECT KEYS), with the fix to
+  write the path of its key file as `private_key` (`laptop.architect-2`,
+  2026-10-20T01:51:26Z, item 1 of
+  https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6281458911). A pin
+  whose key holds such text also gives it: a key holds it with a chance under 10^-19,
+  and an exception would pass a private key in the comment of the line
+  (`laptop.architect-2`, 2026-10-20T01:53:14Z,
   https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6281480378).
   `config::profile::node(address, public_key)` gives the `node` block of a pin as a
   `document::Block`, and the program writes the file with `config_hcl::update`, so each
@@ -41,10 +44,12 @@
   ed25519 -N ""` writes it. `config::openssh` reads and writes it with `ssh-key`, and
   refuses another algorithm by its name (an ECDSA key as `ECDSA`, which `ssh-key` reads
   only with its `ecdsa` feature), an encrypted key, a public key that is not the key of
-  the private key (`Mismatch`), and a text that is not a key file. It takes a body of
-  any width, CRLF line ends, blank lines at the end, and no last line end, as OpenSSH
-  does. The formats are a key choice of kind (f) that `laptop.architect-2` sent to
-  `laptop.monitor` (plan review, 2026-10-19T23:24:32Z,
+  the private key (`Mismatch`), and a text that is not a key file. It reads each such
+  file that OpenSSH 9.6p1 reads, with a body of any width and any text after the end
+  mark, and also one with CRLF line ends or no line end after the end mark, which
+  OpenSSH refuses (`laptop.architect-2`, 2026-10-20T01:51:26Z, item 2 of 6281458911, and
+  2026-10-20T01:53:14Z, item 4 of 6281480378). The formats are a key choice of kind (f)
+  that `laptop.architect-2` sent to `laptop.monitor` (plan review, 2026-10-19T23:24:32Z,
   https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279566176). The
   profile is in `config`, beside `config::subject`, which takes the same key line; lost:
   a crate of its own for the profile, which must take `config::openssh` with it, to save

@@ -24,6 +24,9 @@ fn key(byte: u8) -> PublicKey {
 }
 
 /// Each problem of `text` as its code, message, and fix.
+const PASTED_KEY: &str = "Remove the private key from this file now, and write \
+                          the path of its key file as `private_key`";
+
 fn problems(text: &str) -> Vec<(&'static str, String, String)> {
     let Err(diagnostics) = profile::decode(&read(text)) else {
         panic!("the profile decodes: {text}");
@@ -337,8 +340,11 @@ fn a_private_key_pasted_as_the_path_is_only_an_alarm() {
     let text = format!("private_key = <<EOT\n{file}EOT\nstrict = 3\n");
     let problems = problems(&text);
     assert_eq!(
-        problems.iter().map(|(code, ..)| *code).collect::<Vec<_>>(),
-        ["config.private-key"]
+        problems
+            .iter()
+            .map(|(code, _, fix)| (*code, fix.as_str()))
+            .collect::<Vec<_>>(),
+        [("config.private-key", PASTED_KEY)]
     );
     let body = file.lines().nth(1).unwrap();
     assert!(!problems[0].1.contains(body), "{problems:?}");
@@ -359,8 +365,11 @@ fn a_private_key_in_a_node_block_is_only_an_alarm() {
         ),
     ] {
         let problems = problems(&text);
-        let codes: Vec<_> = problems.iter().map(|(code, ..)| *code).collect();
-        assert_eq!(codes, ["config.private-key"], "{text}");
+        let codes: Vec<_> = problems
+            .iter()
+            .map(|(code, _, fix)| (*code, fix.as_str()))
+            .collect();
+        assert_eq!(codes, [("config.private-key", PASTED_KEY)], "{text}");
         assert!(!problems[0].1.contains(body), "{problems:?}");
     }
 }
