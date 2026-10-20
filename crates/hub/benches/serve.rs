@@ -39,6 +39,7 @@ mod agent;
 #[expect(dead_code, reason = "the bench uses only some of the helpers")]
 #[path = "../tests/common/mod.rs"]
 mod common;
+#[expect(dead_code, reason = "the bench uses only some of the helpers")]
 mod fixture;
 #[path = "../tests/common/net.rs"]
 mod net;

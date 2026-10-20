@@ -36,6 +36,7 @@ mod agent;
 #[expect(dead_code, reason = "the bench uses only some of the helpers")]
 #[path = "../tests/common/mod.rs"]
 mod common;
+#[expect(dead_code, reason = "the bench uses only some of the helpers")]
 mod fixture;
 #[expect(dead_code, reason = "the bench uses only some of the helpers")]
 #[path = "../tests/common/net.rs"]
@@ -257,7 +258,7 @@ async fn bench(
         .map(|index| (index, index + 1..=index + 63));
     let (hub, now) = create_hub(&node, tasks.clone(), indexes).await;
     hub.set_rules(sessions::rules());
-    let mut timer = Line::new("timer", FRAMES);
+    let mut timer = Line::new("timer", 1);
     let mut lines = Vec::new();
     let mut stamp = now - 10_000_000;
     for (name, groups) in CONTROLS {
@@ -294,6 +295,7 @@ async fn bench(
             }
             node.clock().sleep(common::SETTLE).await;
             timer.add(table::timed(&ALLOCATOR, || ()).1);
+            timer.close(round >= WARMUP);
             line.add(table::timed(&ALLOCATOR, || serving::poll(serving.as_mut())).1);
             let mut waits = 0;
             while progress.frames.load(Ordering::Relaxed) < frames {
@@ -305,7 +307,6 @@ async fn bench(
                     waits = 0;
                 }
             }
-            timer.close(round >= WARMUP);
             line.close(round >= WARMUP);
         }
         let served = serving.await;
@@ -360,10 +361,10 @@ async fn control(
             }
             draft.set_counts(0, iter::repeat_n(1, series.len() / 2));
             timer.add(table::timed(&ALLOCATOR, || ()).1);
+            timer.close(round >= WARMUP);
             line.add(table::timed(&ALLOCATOR, || write(&mut writer, draft)).1);
         }
         node.clock().sleep(common::SETTLE).await;
-        timer.close(round >= WARMUP);
         line.close(round >= WARMUP);
     }
     (line, writer.now().nanos())

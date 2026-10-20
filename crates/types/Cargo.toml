@@ -28,6 +28,11 @@ name = "sample"
 harness = false
 test = true
 
+[[bench]]
+name = "wait"
+harness = false
+test = true
+
 [[test]]
 name = "alloc"
 harness = false

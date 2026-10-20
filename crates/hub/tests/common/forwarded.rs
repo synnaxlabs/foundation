@@ -1,13 +1,20 @@
-//! The home's end of a forward of a member, by hand, on a node that runs no mesh.
+//! Each end of a forward by hand: the home's, on a node that runs no mesh, and the
+//! member's.
 
-use transport::Session;
+use std::ops::Range;
+use std::rc::Rc;
+
+use block::Pool;
 use transport::stream::Incoming;
+use transport::{Class, Session};
+use types::hello::Hello;
 use wire::Protocol;
 use wire::hub::client::write::{Open, Write};
 use wire::hub::client::{Place, Places, Signed, place};
 use wire::hub::forward::{Forward, places};
+use wire::hub::write::{Outcome, Reply};
 
-use crate::agent::Stream;
+use crate::agent::{AGENT, Stream, signed};
 use crate::net::own_pool;
 
 /// The first messages of a forward that the member sent: the forward, the hello, the
@@ -69,6 +76,61 @@ pub(crate) async fn send_places(stream: &mut Stream, places: &[Place], most: usi
         message.encode(&mut out);
         stream.send(&out).await;
     }
+}
+
+/// Takes the frames of `frames` on `stream`, each of one body message, then sends the
+/// outcome and `Stored` of each, which the home takes.
+pub(crate) async fn answer(stream: &mut Stream, frames: Range<u64>) {
+    for _ in 0..3 * (frames.end - frames.start) {
+        let message = stream.recv().await.expect("receives");
+        message.expect("a message before the finish");
+    }
+    for seq in frames {
+        let taken = Outcome::Taken {
+            range: types::frame::Range { seq, count: 1 },
+        };
+        let replies = [
+            Reply::Outcome {
+                frame: seq + 1,
+                group: 0,
+                outcome: taken,
+            },
+            Reply::Stored {
+                group: 0,
+                frames: seq + 1,
+            },
+        ];
+        for reply in replies {
+            let mut out = vec![0; reply.encoded_len()];
+            reply.encode(&mut out);
+            stream.send(&out).await;
+        }
+    }
+}
+
+/// The member's end: opens a forward of a group of `places` places on `session`, and
+/// sends its header, the forward, and `hello` signed by [`AGENT`].
+pub(crate) async fn forward(
+    session: &Session,
+    pool: &Rc<Pool>,
+    places: u32,
+    hello: Hello,
+) -> Stream {
+    let (sender, receiver) = session.open(Class::Complete).await.expect("opens");
+    let mut stream = Stream::new(Rc::clone(pool), sender, receiver);
+    stream.send(&wire::header::encode(Protocol::Hub)).await;
+    let mut out = [0; Forward::LEN];
+    Forward { places }.encode(&mut out);
+    stream.send(&out).await;
+    stream.send(&signed(hello, &AGENT)).await;
+    stream
+}
+
+/// The run of `at` in one message.
+pub(crate) fn run(at: &[u32]) -> Vec<u8> {
+    let mut out = vec![0; at.len() * places::LEN];
+    places::encode(at.iter().copied(), &mut out);
+    out
 }
 
 /// The next stream of `session` whose header names the hub protocol, with the header

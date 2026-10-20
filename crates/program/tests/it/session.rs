@@ -23,7 +23,7 @@ use crate::agent::{AGENT, SUBJECT, name};
 use crate::connect::{ample, connect, connect_with};
 use crate::hand::by_hand;
 use crate::home::{accept, serve_session, serve_session_on};
-use crate::net::{HOME, header, own_pool, public_key, transport_sized};
+use crate::net::{HOME, STREAMS, header, own_pool, public_key, transport_sized};
 use crate::sessions::{Got, Home, OTHER, QUIET, rules, run_program, shrink_wall_error};
 
 /// Runs `program` with a session of [`SUBJECT`] on a home with mesh time and the
@@ -547,7 +547,8 @@ pub(super) fn raw_sized<F, H, G, P>(
     P: Future<Output = ()> + 'static,
 {
     let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
-        let transport = transport_sized(&node, &tasks, &own_pool(), HOME, sizes);
+        let transport =
+            transport_sized(&node, &tasks, &own_pool(), HOME, sizes, STREAMS);
         let session = transport.accept().await.expect("a session");
         let mut incoming = session.accept().await.expect("a stream");
         header(&mut incoming).await;
