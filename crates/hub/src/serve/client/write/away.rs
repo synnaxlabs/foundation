@@ -544,6 +544,8 @@ mod tests {
         }
     }
 
+    /// Through the private `Flight`: each poll of a forward comes from the one task of
+    /// the program's stream, so no caller or peer sees which waker the window keeps.
     #[test]
     fn an_outcome_wakes_the_last_task_that_waits_for_room() {
         let flight = Flight::new();

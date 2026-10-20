@@ -67,7 +67,8 @@ pub(super) async fn serve(
         None => return Ok(()),
         Some(Opened::Here(set, writes, ends)) => (set, writes, ends),
         Some(Opened::Away { home, open }) => {
-            // In its own box, so the poll of a local write holds none of its code.
+            // In its own box, so the future of a local write holds none of the state
+            // of a forward.
             let away =
                 || away::serve(state, admission, home, write, open, receiver, sender);
             return boxed(away).await;
