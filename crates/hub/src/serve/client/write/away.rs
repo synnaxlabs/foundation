@@ -403,7 +403,11 @@ impl Flight {
         if self.heads.get() - self.answered.get() < IN_FLIGHT {
             return Poll::Ready(());
         }
-        self.waiting.set(Some(cx.waker().clone()));
+        let waker = match self.waiting.take() {
+            Some(waker) if waker.will_wake(cx.waker()) => waker,
+            _ => cx.waker().clone(),
+        };
+        self.waiting.set(Some(waker));
         Poll::Pending
     }
 }
