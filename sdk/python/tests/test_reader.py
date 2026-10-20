@@ -283,7 +283,8 @@ class ReaderTest(unittest.TestCase):
             thread = threading.Thread(target=read, daemon=True)
             thread.start()
             with node.connect() as writes:
-                if self.flooded(writes):
+                fit = self.flooded(writes)
+                if fit == 2:
                     thread.join(PATIENCE)
                     self.assertEqual(
                         len(got), 1, f"no frame after a loss in {PATIENCE} s"
@@ -291,12 +292,21 @@ class ReaderTest(unittest.TestCase):
                     return reader, got[0]
             reader.close()
             thread.join(PATIENCE)
+            if fit == 0:
+                self.assertEqual(got, [])
+            else:
+                # The close can come before or after the read of the frame of 1.5.
+                self.assertLessEqual(len(got), 1, got)
+                kind = foundation.DataLost if on_loss == "raise" else foundation.Frame
+                for item in got:
+                    self.assertIsInstance(item, kind)
         self.fail("in 10 runs, no two frames of one sample found room after a loss")
 
-    def flooded(self, client: foundation.Client) -> bool:
+    def flooded(self, client: foundation.Client) -> int:
         """Writes frames of `COUNT` samples of `plant.a` on `client` until the node
         finds no room for one, then frames of one sample of 1.5 until one fits, then one
-        of 2.5. Gives whether a frame of 1.5 and the frame of 2.5 fit."""
+        of 2.5. Gives how many of a frame of 1.5 and the frame of 2.5 fit: 0, 1, or
+        2."""
         random = np.random.default_rng(3321)
         stamps = Stamps()
         with client.open_writer("plant.a", on_loss="raise") as writer:
@@ -317,12 +327,12 @@ class ReaderTest(unittest.TestCase):
                 except foundation.DataLost:
                     pass
             else:
-                return False
+                return 0
             try:
                 writer.write(2.5)
             except foundation.DataLost:
-                return False
-        return True
+                return 1
+        return 2
 
     def assert_lost(self, lost: dict) -> str:
         """Asserts that `lost` holds one range of seqs of `plant.a` and its index, and
