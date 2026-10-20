@@ -111,11 +111,16 @@
      seqs, so a write of it again gets `order` or stores its values after the gap that
      the log records. `written`, `unwritten`, and `ended` are in place order, each
      channel named once, also at a repeat of a channel. To write a frame again after
-     either, a program writes only the channels of `unwritten`. The text of each names
-     each group that the node did not take, by its index, with its cause: the end, the
-     refusal, or the count of lost samples. So a loss in a frame that raises for an end
-     or a refusal is not silent. Changed with item 1 (same links): `Stopped` was
-     `Refused`. Changed for many indexes by `laptop.architect-2` at 2026-10-20T13:37:38Z
+     either, a program writes only the channels of `unwritten`. Both also have `lost`, a
+     `dict` from each channel of the lost groups of the frame, the index included, to
+     the `range` of its lost seqs, as `DataLost.seqs` gives it, and empty when no group
+     was lost. It is set for each `on_loss`, as it states what the node did. In such a
+     frame, `on_loss="warn"` also logs the warning that a frame with only a loss logs;
+     `"raise"` and `"ignore"` add nothing. The text of each names each group that the
+     node did not take, by its index, with its cause: the end, the refusal, or the count
+     of lost samples. So a loss in a frame that raises for an end or a refusal is not
+     silent. Changed with item 1 (same links): `Stopped` was `Refused`. Changed for many
+     indexes by `laptop.architect-2` at 2026-10-20T13:37:38Z
      (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6292172439).
      `GroupEnded` and `ended`, in place of `PartialWrite`, decided by
      `laptop.architect-2` at 2026-10-20T16:11:34Z
@@ -123,17 +128,27 @@
      `unwritten` as the refused groups only, decided by `laptop.architect-2` at
      2026-10-20T16:31:02Z
      (https://github.com/synnaxlabs/foundation/pull/3613#issuecomment-6295861040).
-     Lost: a return of the outcome of each group with no raise, because an unchecked
-     return drops a refusal with no sign; an `ExceptionGroup` of the error of each
-     group, because `except Rejected` then misses it; an `Exception` of its own for the
-     end of a group, because `except Stopped` then misses it; `PartialWrite`, the end of
-     a group only when the node took another group, because the class of an end then
-     hangs on the rest of the frame, and a plain `Stopped` has two scopes that only its
-     text tells apart; a scope attribute on `Stopped`, because `except` cannot select on
-     it; and the text alone, because a program then parses it; `unwritten` as each group
-     that the node did not take, with a `lost` attribute, because each caller then
-     computes a difference of three lists; and the name `refused`, because
-     `Rejected.refused` repeats its class.
+     Accepted by `laptop.monitor` at 2026-10-20T16:12:11Z (`GroupEnded`,
+     https://github.com/synnaxlabs/foundation/pull/3613#issuecomment-6295475182) and at
+     2026-10-20T16:31:31Z (`unwritten`,
+     https://github.com/synnaxlabs/foundation/pull/3613#issuecomment-6295871094), with
+     the condition that a program learns of a lost group without its text. `lost`, its
+     form, decided by `laptop.architect-2` at 2026-10-20T16:33:59Z
+     (https://github.com/synnaxlabs/foundation/pull/3613#issuecomment-6295921325). Lost:
+     a return of the outcome of each group with no raise, because an unchecked return
+     drops a refusal with no sign; an `ExceptionGroup` of the error of each group,
+     because `except Rejected` then misses it; an `Exception` of its own for the end of
+     a group, because `except Stopped` then misses it; `PartialWrite`, the end of a
+     group only when the node took another group, because the class of an end then hangs
+     on the rest of the frame, and a plain `Stopped` has two scopes that only its text
+     tells apart; a scope attribute on `Stopped`, because `except` cannot select on it;
+     the text alone, because a program then parses it; `unwritten` as each group that
+     the node did not take, with a `lost` attribute, because each caller then computes a
+     difference of three lists; the name `refused`, because `Rejected.refused` repeats
+     its class; the `__cause__` of the raised error set to a `DataLost`, because a
+     traceback then says that the loss caused the refusal or the end, and a program
+     reaches it only with `isinstance`; and `lost` only with `"raise"`, because what an
+     attribute holds then hangs on a setting.
   7. `write_series` copies each array into the kept buffer with the GIL held, because
      another Python thread can change an array while the GIL is free. Before the copy
      of each array, it raises `ValueError` when the bytes copied so far and the bytes
