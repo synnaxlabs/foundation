@@ -508,6 +508,47 @@ fn a_private_key_of_a_tilde_and_a_user_is_in_the_directory_of_the_profile() {
     assert_eq!(read, Ok(key.0));
 }
 
+/// Only Unix: a test makes a link only there. A relative `private_key` of a profile
+/// that is a link to a file in another directory is next to the link.
+#[cfg(unix)]
+#[test]
+fn a_private_key_of_a_linked_profile_is_next_to_the_link() {
+    let dir = env::temp_dir().join(format!("foundation-linked-{}", std::process::id()));
+    for within in ["links", "real"] {
+        fs::create_dir_all(dir.join(within)).unwrap();
+    }
+    fs::write(dir.join("real/profile.hcl"), "").unwrap();
+    std::os::unix::fs::symlink(
+        dir.join("real/profile.hcl"),
+        dir.join("links/profile.hcl"),
+    )
+    .unwrap();
+    let (mine, theirs) = (PrivateKey([5; 32]), PrivateKey([6; 32]));
+    fs::write(
+        dir.join("links/mine.key"),
+        config::openssh::key_file(&mine, "k"),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("real/mine.key"),
+        config::openssh::key_file(&theirs, "k"),
+    )
+    .unwrap();
+    let profile = Profile {
+        path: dir.join("links/profile.hcl"),
+    };
+    Python::initialize();
+    let read = Python::attach(|py| {
+        let subject: types::name::Name = "alice".parse().unwrap();
+        profile
+            .private_key(py, &subject, Some(Path::new("mine.key")))
+            .map(|key| key.0)
+            .map_err(|e| e.value(py).to_string())
+    });
+    fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(read, Ok(mine.0));
+}
+
 /// Raises `OSError` for a profile that is a link to itself, and takes no lock.
 #[cfg(unix)]
 #[test]
