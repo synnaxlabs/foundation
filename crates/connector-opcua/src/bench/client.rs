@@ -276,7 +276,7 @@ impl Server {
     /// a Read request: the process stops as the Rust allocator does when it has no
     /// memory.
     pub async fn connect(&self, count: usize) -> Client {
-        let session = match self.dial(self.mode).await {
+        let session = match self.dial(self.mode, self.user).await {
             Ok(session) => session.expect("a pending wait never ends"),
             Err(crate::client::Error::Failed(status)) => {
                 panic!("a connect failed: {status:?}")
@@ -301,10 +301,12 @@ impl Server {
         }
     }
 
-    /// Connects a client to the server in `mode`, on its own connection manager.
+    /// Connects a client to the server in `mode` with `user`, on its own connection
+    /// manager. A client in no mode gives no user.
     async fn dial(
         &self,
         mode: Option<Mode>,
+        user: Option<User<'static>>,
     ) -> Result<Option<crate::client::Client>, crate::client::Error> {
         let rng = &mut Rng::from_seed(self.rng.borrow_mut().next_u64());
         crate::client::Client::connect(
@@ -316,7 +318,7 @@ impl Server {
             mode.map(|mode| crate::client::Session {
                 credentials: CLIENT_SIDE,
                 mode,
-                user: self.user,
+                user,
             })
             .as_ref(),
             future::pending(),
@@ -707,12 +709,32 @@ mod tests {
         ];
         let results = modes.map(|(served, mode)| {
             run(async move |node| {
-                let body = async |server: &Server| server.dial(mode).await.map(drop);
+                let body =
+                    async |server: &Server| server.dial(mode, None).await.map(drop);
                 secure(&node, served, body).await
             })
         });
         let refused = || Ok(Err(Error::Failed(Status::BAD_IDENTITY_TOKEN_REJECTED)));
         assert_eq!(results, [refused(), refused(), refused()]);
+    }
+
+    /// The server of [`Server::login`] lets in no anonymous client. The test calls the
+    /// private `Server::dial`: each public call connects with the user.
+    #[test]
+    fn a_login_server_refuses_an_anonymous_client() {
+        for mode in [Mode::Sign, Mode::SignAndEncrypt] {
+            let result = run(async move |node| {
+                let (clock, net, address) =
+                    (node.clock(), node.net(), node.addresses()[0]);
+                let body = async |server: &Server| {
+                    server.dial(Some(mode), None).await.map(drop)
+                };
+                Server::login(clock, net, address, node.entropy().rng(), mode, body)
+                    .await
+            });
+            let refused = Err(Error::Failed(Status::BAD_IDENTITY_TOKEN_REJECTED));
+            assert_eq!(result, Ok(refused), "{mode:?}");
+        }
     }
 
     #[test]
