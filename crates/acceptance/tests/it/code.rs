@@ -25,8 +25,8 @@ enum Front {
 fn plan_and_apply(lab: &mut Lab, node: Node, front: Front) -> Vec<String> {
     match front {
         Front::Cli => {
-            let changes = lab.plan(node, &site());
-            lab.apply(node, &site());
+            let (plan, changes) = lab.cli_plan(node, &site());
+            lab.cli_apply(node, &plan);
             changes
         }
         Front::Mcp => {
@@ -85,13 +85,13 @@ fn an_applied_index_gets_a_home_and_keeps_it() {
 }
 
 #[test]
-#[ignore = "waits on #274, #337"]
+#[ignore = "waits on #274"]
 fn plan_and_apply_from_hcl_through_the_json_cli() {
     check(Front::Cli);
 }
 
 #[test]
-#[ignore = "waits on #274, #337"]
+#[ignore = "waits on #274"]
 fn plan_and_apply_through_mcp() {
     check(Front::Mcp);
 }

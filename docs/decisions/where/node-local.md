@@ -16,6 +16,6 @@
 | Node key material | `node.key` on node-local disk | `node` (makes it at its first start or, in tests, with `node::create_key` under `sim`, with `sector::publish`) | `transport`, `node` | `node` |
 | Node name | `name` on node-local disk | `node` (writes it at its first start, under `lock`) | `node`, `node::name` (the CLI) | `node` |
 | Node address | `address` on node-local disk; format in `sector::address` (#3212) | `node` (shard 0, while it serves; NODE START) | `sector::local::read`, which `node::client::reach` (#1744 PR 2d) and `sdk::Node::local` call | `node`, `sector` (format) |
-| First admin key | `admin.key` on node-local disk; format in `sector::admin` (#3212) | `node` (at the start that makes the root region; FIRST ADMIN) | `sector::local::read`, which `sdk::Node::local` calls | `node`, `sector` (format) |
+| First admin key | `admin.key` on node-local disk; format in `sector::admin` (#3212) | `node` (at the start that makes the root region; FIRST ADMIN; in tests, `Lab::mesh` of `acceptance` on the first node of a `Region::Given` founding, with `sector::publish`) | `sector::local::read`, which `sdk::Node::local` calls | `node`, `sector` (format) |
 | Per-node settings (disk budget, pool budget, data directory) | Budgets: a policy in the spec; data directory: a start argument (NODE SETTINGS) | `apply`; whoever starts the node | `buffer`, `block` | `node` |
 | SDK guide, JSON schemas for editors | Generated from kinds and the operation table | `ops`, `init` | Agents, editors | `ops` |
