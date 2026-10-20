@@ -5,7 +5,7 @@ use std::future::poll_fn;
 use std::ops::Range;
 use std::pin::pin;
 use std::rc::Rc;
-use std::task::{Context, Poll, Waker};
+use std::task::Poll;
 
 use block::Block;
 use transport::stream::{Receiver, Sender};
@@ -87,7 +87,15 @@ pub(super) async fn serve(
         let mut up = pin!(up(state, &renewal, &mut frames, &flight, receiver, &mut to));
         let mut down = pin!(down(&flight, &mut from, sender));
         let mut finished = false;
+        // `down` goes first, so that an outcome it counts frees room for `up` in the
+        // same poll: `Flight` keeps no waker.
         poll_fn(|cx| {
+            if let Poll::Ready(cut) = down.as_mut().poll(cx) {
+                return Poll::Ready(match cut {
+                    Ok(None) if !finished || flight.due() => Ok(Some(Cut::Broken)),
+                    cut => cut,
+                });
+            }
             if !finished {
                 match up.as_mut().poll(cx) {
                     Poll::Ready(Ok(None)) => finished = true,
@@ -95,10 +103,7 @@ pub(super) async fn serve(
                     up @ Poll::Ready(_) => return up,
                 }
             }
-            down.as_mut().poll(cx).map(|cut| match cut {
-                Ok(None) if !finished || flight.due() => Ok(Some(Cut::Broken)),
-                cut => cut,
-            })
+            Poll::Pending
         })
         .await?
     };
@@ -238,7 +243,7 @@ async fn opened(
     let mut opening = Opening::default();
     let mut held: Option<Reserved> = None;
     loop {
-        let message = match next(renewal, |_| Poll::Ready(()), &mut from).await? {
+        let message = match next(renewal, || true, &mut from).await? {
             Next::Renewed(signed) => {
                 message(state, &mut to, signed.encoded_len(), |out| {
                     signed.encode(out);
@@ -361,8 +366,6 @@ struct Flight {
     replies: RefCell<Replies>,
     heads: Cell<u64>,
     answered: Cell<u64>,
-    /// The task that waits for an outcome while [`IN_FLIGHT`] frames are due.
-    waiting: Cell<Option<Waker>>,
 }
 
 impl Flight {
@@ -371,7 +374,6 @@ impl Flight {
             replies: RefCell::new(Replies::new(1)),
             heads: Cell::default(),
             answered: Cell::default(),
-            waiting: Cell::default(),
         }
     }
 
@@ -386,9 +388,6 @@ impl Flight {
     fn reply(&self, message: &[u8]) -> Result<(), wire::hub::Error> {
         if let Reply::Outcome { .. } = self.replies.borrow_mut().decode(message)? {
             self.answered.set(self.answered.get() + 1);
-            if let Some(waker) = self.waiting.take() {
-                waker.wake();
-            }
         }
         Ok(())
     }
@@ -398,20 +397,11 @@ impl Flight {
         self.heads.get() > self.answered.get()
     }
 
-    /// Ready while fewer than [`IN_FLIGHT`] frames have an outcome due.
-    fn poll_room(&self, cx: &Context<'_>) -> Poll<()> {
-        if self.heads.get() - self.answered.get() < IN_FLIGHT {
-            return Poll::Ready(());
-        }
-        let waker = match self.waiting.take() {
-            Some(mut waker) => {
-                waker.clone_from(cx.waker());
-                waker
-            }
-            None => cx.waker().clone(),
-        };
-        self.waiting.set(Some(waker));
-        Poll::Pending
+    /// Whether fewer than [`IN_FLIGHT`] frames have an outcome due. It keeps no
+    /// waker: only an outcome of [`Flight::reply`] frees room, in a poll of the same
+    /// task that polls `up` after it.
+    fn room(&self) -> bool {
+        self.heads.get() - self.answered.get() < IN_FLIGHT
     }
 }
 
@@ -435,7 +425,7 @@ async fn up(
             }
             Due::Body(_) => unreachable!("invariant: a forward takes no draft"),
             Due::Message if between => {
-                match next(renewal, |cx| flight.poll_room(cx), receiver).await? {
+                match next(renewal, || flight.room(), receiver).await? {
                     Next::Renewed(signed) => {
                         let mut block = alloc(state, signed.encoded_len())?;
                         signed.encode(&mut block);
@@ -479,11 +469,11 @@ enum Next {
     Message(Option<Block>),
 }
 
-/// Waits for a hello that `renewal` gives, or, once `room` is ready, for the next
+/// Waits for a hello that `renewal` gives, or, while `room` holds, for the next
 /// message of `receiver`. A renewal goes first.
 async fn next(
     renewal: &Renewal<'_>,
-    room: impl Fn(&Context<'_>) -> Poll<()>,
+    room: impl Fn() -> bool,
     receiver: &mut Receiver,
 ) -> Result<Next, Error> {
     let mut message = pin!(receiver.recv());
@@ -491,7 +481,7 @@ async fn next(
         if let Some(signed) = renewal.renewed() {
             return Poll::Ready(Ok(Next::Renewed(signed)));
         }
-        if room(cx).is_ready()
+        if room()
             && let Poll::Ready(message) = message.as_mut().poll(cx)
         {
             return Poll::Ready(message.map(Next::Message).map_err(Error::from));
@@ -527,53 +517,7 @@ async fn down(
 // this test calls the private `runs`.
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::task::Wake;
-
-    use types::frame;
-    use wire::hub::write::Outcome;
-
     use super::*;
-
-    struct Count(AtomicUsize);
-
-    impl Wake for Count {
-        fn wake(self: Arc<Self>) {
-            self.0.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    /// Through the private `Flight`: each poll of a forward comes from the one task of
-    /// the program's stream, so no caller or peer sees which waker the window keeps.
-    #[test]
-    fn an_outcome_wakes_the_last_task_that_waits_for_room() {
-        let flight = Flight::new();
-        for _ in 0..IN_FLIGHT {
-            flight.head();
-        }
-        let [first, last] = [(); 2].map(|()| Arc::new(Count(AtomicUsize::new(0))));
-        for count in [&first, &last] {
-            let waker = Waker::from(Arc::clone(count));
-            let polled = flight.poll_room(&Context::from_waker(&waker));
-            assert_eq!(polled, Poll::Pending);
-        }
-        let outcome = Reply::Outcome {
-            frame: 1,
-            group: 0,
-            outcome: Outcome::Taken {
-                range: frame::Range { seq: 0, count: 1 },
-            },
-        };
-        let mut message = vec![0; outcome.encoded_len()];
-        outcome.encode(&mut message);
-        flight.reply(&message).expect("an outcome of a sent frame");
-        let woken = [&first, &last].map(|count| count.0.load(Ordering::Relaxed));
-        assert_eq!(woken, [0, 1]);
-        let waker = Waker::from(first);
-        let polled = flight.poll_room(&Context::from_waker(&waker));
-        assert_eq!(polled, Poll::Ready(()));
-    }
 
     #[test]
     fn runs_cut_the_places_at_the_bytes_of_a_message() {
