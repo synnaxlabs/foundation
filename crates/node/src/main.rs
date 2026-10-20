@@ -17,6 +17,7 @@ use env::threads::Threads;
 use node::Budget;
 use ops::{Failure, Run, Start};
 use types::byte::Size;
+use types::ed25519::PublicKey;
 use types::name::Name;
 
 /// The most pool budget that a first start gives.
@@ -31,6 +32,7 @@ const PANIC: Duration = Duration::from_secs(1);
 const BUSY: Code = Code::new("node.busy");
 const DATA: Code = Code::new("node.data");
 const UNNAMED: Code = Code::new("node.unnamed");
+const UNSTARTED: Code = Code::new("node.unstarted");
 const RENAMED: Code = Code::new("node.renamed");
 const NAME: Code = Code::new("node.name");
 const RESERVED: Code = Code::new("node.reserved");
@@ -117,6 +119,7 @@ fn command_line(shards: &Shards, args: Vec<OsString>) -> Result<Run, Failure> {
             &node::front_ends(),
             &node::kinds(),
             async |dir: &Path| reach(dir, &tasks, &opened).await.map(send),
+            async |dir: &Path| public_key(dir, &opened).await,
         )
         .await;
         ran.send(run).expect("invariant: `main` keeps the receiver");
@@ -165,14 +168,8 @@ async fn reach(
     tasks: &Tasks,
     opened: &mpsc::Sender<env::thread::Handle>,
 ) -> Result<program::Session, Failure> {
-    let threads = os::threads().map_err(failed)?;
-    let (disk, handle) =
-        os::stored(dir, &threads, "files-reach").map_err(|error| stored(dir, error))?;
-    opened
-        .send(handle)
-        .expect("invariant: `main` keeps the receiver");
     let reached = node::client::reach(node::client::Config {
-        files: env::files::Files::new(disk),
+        files: files(dir, opened).map_err(|error| stored(dir, error))?,
         net: net(),
         clock: os::clock(),
         entropy: os::entropy(),
@@ -180,6 +177,75 @@ async fn reach(
     })
     .await;
     reached.map_err(|error| unreached(dir, error))
+}
+
+/// The files of the data directory `dir`, read on an I/O thread whose handle goes to
+/// `opened`, for the main thread to join.
+#[expect(
+    clippy::unwrap_in_result,
+    reason = "`main` keeps the receiver until the shard ends"
+)]
+fn files(
+    dir: &Path,
+    opened: &mpsc::Sender<env::thread::Handle>,
+) -> Result<env::files::Files, os::Error> {
+    let threads = os::threads()?;
+    let (disk, handle) = os::stored(dir, &threads, "files-reach")?;
+    opened
+        .send(handle)
+        .expect("invariant: `main` keeps the receiver");
+    Ok(env::files::Files::new(disk))
+}
+
+/// The public key of the node of the data directory `dir`, from its file `node.key`.
+/// It sends the handle of the I/O thread that reads `dir` to `opened`, for the main
+/// thread to join.
+async fn public_key(
+    dir: &Path,
+    opened: &mpsc::Sender<env::thread::Handle>,
+) -> Result<PublicKey, Failure> {
+    let files = match files(dir, opened) {
+        Ok(files) => files,
+        Err(os::Error::Dir(error)) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(unstarted(dir));
+        }
+        Err(os::Error::Dir(error)) if error.kind() == io::ErrorKind::NotADirectory => {
+            return Err(Failure {
+                code: UNSTARTED,
+                message: format!(
+                    "no node has started in {}, which is not a data directory",
+                    dir.display()
+                ),
+                fix: "Give `--data` the data directory of a node that has started once"
+                    .to_owned(),
+            });
+        }
+        Err(error) => return Err(stored(dir, error)),
+    };
+    node::public_key(&files).await.map_err(|error| match error {
+        node::Error::Unstarted => unstarted(dir),
+        node::Error::Directory(error) => unreadable(dir, error),
+        error => failed(error),
+    })
+}
+
+/// The failure of a data directory `dir` where no node has started.
+fn unstarted(dir: &Path) -> Failure {
+    Failure {
+        code: UNSTARTED,
+        message: format!("no node has started in {}", dir.display()),
+        fix: match quoted(dir) {
+            Some(dir) => format!(
+                "Start the node once with `foundation start --data={dir}`, with \
+                 `--name <name>`"
+            ),
+            None => {
+                "Start the node once with `foundation start`, with `--data` set to \
+                     that directory and `--name <name>`"
+                    .to_owned()
+            }
+        },
+    }
 }
 
 /// What sends a request through `client` and gives the reply.
@@ -1511,6 +1577,11 @@ mod tests {
             unreached(dir, error).fix,
             "Start the node again with `foundation start` and `--data` set to that \
              directory"
+        );
+        assert_eq!(
+            unstarted(dir).fix,
+            "Start the node once with `foundation start`, with `--data` set to that \
+             directory and `--name <name>`"
         );
     }
 

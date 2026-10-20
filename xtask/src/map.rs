@@ -32,7 +32,6 @@ pub(crate) const TEST_EDGES: &[(&str, &str)] = &[
     ("access", "document"),
     ("config", "config-hcl"),
     ("config", "connector-influx"),
-    ("ops", "config-hcl"),
     ("ops", "transport"),
     ("ops", "clock"),
     ("node", "sdk"),
@@ -248,6 +247,7 @@ pub(crate) const CRATES: &[Crate] = &[
         layer: 4,
         deps: Deps::Layer1And(&[
             "config",
+            "config-hcl",
             "connector",
             "secret",
             "hub",

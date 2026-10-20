@@ -109,6 +109,9 @@ fn run_on_cfg(args: &[&str], line: Option<Vec<u8>>) -> (String, String) {
             &front_ends,
             &kinds,
             reach,
+            async |_: &Path| -> Result<types::ed25519::PublicKey, ops::Failure> {
+                panic!("a plan read a key")
+            },
         );
         let Poll::Ready(_) = pin!(cli).poll(&mut Context::from_waker(Waker::noop()))
         else {

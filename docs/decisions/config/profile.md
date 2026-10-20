@@ -73,3 +73,40 @@
   second block, so a `Pin` adds a type with no rule of its own (`laptop.architect-2`,
   2026-10-20T01:11:29Z,
   https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6280967938).
+
+  `foundation profile [--data <dir>] [--json] <address>` prints the `node` block that
+  pins the node of `<dir>` (default `foundation-data`) at `<address>`, for the profile
+  of a program on another host. The operator runs it on the node's host (item 4 of the
+  plan review, 2026-10-19T23:24:32Z,
+  https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279566176). The
+  node must have started once: `node::public_key` reads the public key from the file
+  `node.key`, so a node that runs, that stopped, or that crashed gives its key. It
+  writes nothing and needs no lock. A data directory with no `node.key`
+  (`node::Error::Unstarted`) gives `node.unstarted` with the fix "Start the node once
+  with `foundation start --data=<dir>`, with `--name <name>`", and a `<dir>` or
+  `<dir>/data` that is a file gives `node.unstarted` with the fix "Give `--data` the
+  data directory of a node that has started once". A data directory, or a file or
+  directory in it, that `profile` cannot read gives `node.unreadable`. A `node.key`
+  that a node did not write (`node::Error::Key`), and a data directory with the
+  directory of a mesh and no `node.key`, whose key is lost (`node::Error::NoCard`, as
+  at a start), give `node.failed`. `<address>` is where the
+  program dials the node: an unspecified IP or port 0 gives `ops.argument`. The output
+  is the block as HCL, which `config_hcl::write` gives, or with `--json` one line
+  `{"address": "<ip:port>", "public_key": "<the line of an OpenSSH .pub file>"}`, a
+  format of kind (f). `ops::cli` writes either, and each error, in the one output form
+  of OPS OUTPUT, with the key from its `public_key` input, which `node` gives as a read
+  of `node::public_key` (NODE START). `profile` calls `public_key` once and never calls
+  `reach`. It is not an MCP tool, as `start` is not. `ops` takes `config-hcl` as a
+  normal dependency for it. `laptop.architect-2` gave this shape in
+  https://github.com/synnaxlabs/foundation/pull/3479#issuecomment-6281210000
+  (2026-10-20T01:31:13Z) and
+  https://github.com/synnaxlabs/foundation/pull/3479#issuecomment-6281253212
+  (2026-10-20T01:34:49Z), and the `--json` object as a format of kind (f), the
+  `node.failed` of `node::Error::NoCard`, and the `node.unstarted` of a `<dir>` or
+  `<dir>/data` that is a file in
+  https://github.com/synnaxlabs/foundation/pull/3479#issuecomment-6282278441
+  (2026-10-20T02:57:43Z). Lost: a read of the file `address` through
+  `sector::local::read`, which refuses a node that stopped; the `hcl` front end of
+  `FrontEnds` as the writer, which keeps the format of a file that `ops` writes in
+  `node`'s table; and a `Run::Profile` that `node` writes, which gives a second output
+  form.
