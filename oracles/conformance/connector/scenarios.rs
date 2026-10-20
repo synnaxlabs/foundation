@@ -58,7 +58,9 @@ mod inputs {
         pub setup:
             for<'a> fn(Plant<'a>) -> Pin<Box<dyn Future<Output = Document> + 'a>>,
         /// Runs the kind's simulator on `address` of the device node until `until`,
-        /// then closes each connection and returns.
+        /// then closes each connection and returns. For a kind that subscribes, the
+        /// simulator changes its data at least every 100 ms while it serves, so the
+        /// progress count grows.
         pub serve: fn(Serve) -> Pin<Box<dyn Future<Output = ()>>>,
         /// The count that grows while data moves.
         pub progress: &'static str,
