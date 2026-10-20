@@ -143,8 +143,7 @@ impl Node {
 }
 
 /// The public key of the node that answers first at `addresses`, on the drivers of
-/// `os` and `tasks`. Closes the session with code 0 and waits for its end. The close
-/// goes out once, so the node waits out its idle timeout only when the close is lost.
+/// `os` and `tasks`, as [`proved`] gives it.
 async fn answered(
     addresses: &[transport::Address],
     tasks: Tasks,
@@ -157,8 +156,19 @@ async fn answered(
         pool: Rc::new(block::Pool::heap(POOL)),
     })
     .map_err(Error::Bind)?;
-    let session = transport.dial_any(addresses).await;
-    let session = session.map_err(|e| Error::Session(program::Error::Transport(e)))?;
+    proved(&transport, addresses)
+        .await
+        .map_err(|e| Error::Session(program::Error::Transport(e)))
+}
+
+/// The public key of the node that answers first at `addresses` to a dial of no key
+/// on `transport`. Closes the session with code 0 and waits for its end. The close
+/// goes out once, so the node waits out its idle timeout only when the close is lost.
+async fn proved(
+    transport: &transport::Client,
+    addresses: &[transport::Address],
+) -> Result<PublicKey, transport::Error> {
+    let session = transport.dial_any(addresses).await?;
     let transport::Peer::Node(public_key) = session.peer() else {
         unreachable!("invariant: the dialed side always proves a node key");
     };
@@ -738,7 +748,7 @@ async fn connect(
 /// The error of a connect to the node of `pinned` that failed with `error`:
 /// [`Error::OtherKey`] when a dial of no key on `transport`, to each address that
 /// refused `pinned`, proves another key. Else `error`. A node that is down refuses no
-/// key, so it gets no second dial.
+/// key, so no address of it gets a second dial.
 async fn other_key(
     transport: &transport::Client,
     pinned: PublicKey,
@@ -754,18 +764,9 @@ async fn other_key(
         .filter(|(_, cause)| matches!(cause, transport::Error::Authentication { .. }))
         .map(|&(address, _)| address)
         .collect();
-    let Ok(session) = transport.dial_any(&refused).await else {
-        return Error::Session(error);
-    };
-    let transport::Peer::Node(proved) = session.peer() else {
-        unreachable!("invariant: the dialed side always proves a node key");
-    };
-    session.close(transport::Code(0));
-    session.closed().await;
-    if proved == pinned {
-        Error::Session(error)
-    } else {
-        Error::OtherKey { pinned, proved }
+    match proved(transport, &refused).await {
+        Ok(proved) if proved != pinned => Error::OtherKey { pinned, proved },
+        _ => Error::Session(error),
     }
 }
 
