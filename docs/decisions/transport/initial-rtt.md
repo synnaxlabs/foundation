@@ -9,4 +9,8 @@
   lower initial RTT (more false handshake retransmits on a long path with a long idle
   timeout). Decided by `laptop.architect-2` (2026-10-08T01:52:12Z:
   https://github.com/synnaxlabs/foundation/issues/1723#issuecomment-6050539702,
-  item 1).
+  item 1). So a dial waits `idle` for the first answer. Lost: a floor in the formula
+  (one under 333 ms gives the dial a hidden bound again, and one high enough to dial a
+  path slower than `idle` is a value tuned to a test). Decided by `laptop.architect-2`
+  (2026-10-19T12:41:49Z:
+  https://github.com/synnaxlabs/foundation/issues/1723#issuecomment-6267457867, item 1).

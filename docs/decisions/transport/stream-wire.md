@@ -202,7 +202,11 @@
   peer's hello and each resend of it are lost until the bound (`laptop.architect-2`,
   #2149, 2026-10-09 17:21 UTC:
   https://github.com/synnaxlabs/foundation/pull/2149#issuecomment-6085801016). The idle
-  timeout is QUIC's: `idle`, or 3 PTO when that is longer. The second idle timeout is
+  timeout is QUIC's: `idle`, or 3 PTO when that is longer. Before the first answer, 3
+  PTO is under `idle`, so a dial waits `idle` for it (`laptop.architect-2`, #1723,
+  2026-10-19 12:41 UTC:
+  https://github.com/synnaxlabs/foundation/issues/1723#issuecomment-6267457867).
+  The second idle timeout is
   for the probe that resends a hello that a cut the session lives through (PROBE GAP)
   held back (`laptop.architect-2`, #1628, 2026-10-09 13:35 UTC:
   https://github.com/synnaxlabs/foundation/issues/1628#issuecomment-6082002858; twice

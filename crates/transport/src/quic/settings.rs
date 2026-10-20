@@ -550,7 +550,11 @@ mod tests {
                         && reset.len() < usize::from(MTU_MIN)
                         && reset[0] & 0xc0 == 0x40
                 });
-                assert_eq!(resets.count(), pair.client.sent.len());
+                // The pacer sends the second Initial of the ClientHello 8 ms after the
+                // first, inside the reset window of the address, so only the first
+                // gets a reset.
+                assert_eq!(pair.client.sent.len(), 2);
+                assert_eq!(resets.count(), 1);
                 assert!(!connected(&pair.client) && lost(&pair.client).is_none());
             });
         }

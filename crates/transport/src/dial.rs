@@ -740,6 +740,40 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
+    /// With an idle of 1 s and no loss, 3 PTO before the first answer is under the
+    /// idle, so a dial waits the idle for it: on a link of 800 ms RTT it connects, and
+    /// on one of 1.2 s RTT it times out.
+    #[test]
+    fn a_dial_waits_the_idle_timeout_for_the_first_answer() {
+        assert_eq!(IDLE, Span::SECOND);
+        for (delay, connects) in [(400, true), (600, false)] {
+            let (mut sim, client, server) = nodes(0);
+            let link = sim::link::Config {
+                delay: spans(Span::MILLISECOND, delay),
+                ..sim::link::Config::default()
+            };
+            sim.link(&client, &server, link);
+            sim.link(&server, &client, link);
+            testing::transport(&server, SERVER, |transport, node| async move {
+                node.clock().sleep(spans(IDLE, 3)).await;
+                drop(transport);
+            });
+            let (peer, at) = (SERVER.public(), Address::Udp(address(&server)));
+            let want = if connects {
+                Ok(Peer::Node(peer))
+            } else {
+                let attempts = vec![(at, Error::TimedOut)];
+                Err(Error::Unreachable { peer, attempts })
+            };
+            testing::transport(&client, CLIENT, move |transport, _| async move {
+                let dialed = transport.dial(peer, &[at]).await;
+                let got = dialed.as_ref().map(Session::peer).map_err(Clone::clone);
+                assert_eq!(got, want);
+            });
+            assert_eq!(sim.run(), Ok(()), "{delay}");
+        }
+    }
+
     #[test]
     fn a_dial_with_no_address_is_unreachable_at_once() {
         let (mut sim, client, _) = nodes(0);
