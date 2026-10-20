@@ -22,9 +22,9 @@
   when that one is removed, still with each attribute with a default removed at once,
   and with one `document.unknown-attribute` for a name that the body does not state.
   Each `Unless` and each `When` names at least one attribute, and each name is another
-  attribute of its body. Each attribute with a `When` is absent in at least one
-  example. Without the `kind` that picks its form, a block reads as the form whose
-  `kind` has a default. No test reads the text of `value` or of a `Default`.
+  attribute of its body. Each attribute with an `Unless` or a `When` is not needed in
+  at least one example. Without the `kind` that picks its form, a block reads as the
+  form whose `kind` has a default. No test reads the text of `value` or of a `Default`.
   The first block of an example is of its body, and of a block with more than one form,
   it holds only attributes of its form. Each attribute and block of a body is in at
   least one, or, for the body of a block inside another body, in an example of that
@@ -50,9 +50,9 @@
   `document::testing::assert_examples`, behind `sim`, which checks each example, the
   example without each attribute that it does not need, the example without each
   attribute with a default, each name of each `Unless` and `When`, and, for each
-  attribute with a `When`, an example without it. The check that each attribute and
-  block of a body is in an example, and the check of an example without an attribute
-  that it needs, stay in each crate until #3349. `foundation docs`
+  attribute with an `Unless` or a `When`, an example that does not need it. The check
+  that each attribute and block of a body is in an example, and the check of an example
+  without an attribute that it needs, stay in each crate until #3349. `foundation docs`
   gives each kind example inside a whole `connector` block, labeled with the name of the
   kind, with `kind` and `node = "edge"`, so a copy is a block that a config takes. An
   example that holds `<<` keeps its lines with no indent, so a heredoc keeps its value.
