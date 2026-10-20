@@ -13,6 +13,14 @@ use types::ed25519::{PrivateKey, PublicKey};
 
 const BAD_PUBLIC_KEY: Code = Code::new("config.bad-public-key");
 const PUBLIC_KEY_ALGORITHM: Code = Code::new("config.public-key-algorithm");
+const KEY_FORMAT: Code = Code::new("config.key-format");
+const KEY_ALGORITHM: Code = Code::new("config.key-algorithm");
+const KEY_PASSPHRASE: Code = Code::new("config.key-passphrase");
+const KEY_MISMATCH: Code = Code::new("config.key-mismatch");
+const KEY_COMMENT: Code = Code::new("config.key-comment");
+/// The fix of a key that a subject cannot take.
+const NEW_KEY: &str = "Make a new key with `ssh-keygen -t ed25519 -N \"\"`, and add \
+                       its `.pub` line to `keys` of the `subject` block";
 const ALGORITHM: &str = "ssh-ed25519";
 /// The name of each other algorithm of an OpenSSH public key. A message names only
 /// these, since another first word can be a secret.
@@ -168,8 +176,10 @@ pub fn line(key: PublicKey) -> String {
         })
 }
 
-/// Why a text is not the OpenSSH private key file of an Ed25519 key with no
-/// passphrase. Its message quotes none of the text.
+/// Why a file is not the OpenSSH private key file of an Ed25519 key with no
+/// passphrase. `Display` gives the message, which quotes none of the text: a lower-case
+/// clause with no final period. [`Unreadable::code`] and [`Unreadable::fix`] give the
+/// other parts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unreadable {
     /// It is not an OpenSSH private key file as `ssh-keygen` writes it: its first line
@@ -186,6 +196,40 @@ pub enum Unreadable {
     Mismatch,
     /// A text of the file, such as its comment, is not UTF-8.
     Comment,
+}
+
+impl Unreadable {
+    /// The stable code of the error.
+    #[must_use]
+    pub const fn code(&self) -> Code {
+        match self {
+            Self::Format => KEY_FORMAT,
+            Self::Algorithm(_) => KEY_ALGORITHM,
+            Self::Passphrase => KEY_PASSPHRASE,
+            Self::Mismatch => KEY_MISMATCH,
+            Self::Comment => KEY_COMMENT,
+        }
+    }
+
+    /// What to do instead: a sentence with no final period.
+    #[must_use]
+    pub const fn fix(&self) -> &'static str {
+        match self {
+            Self::Format => {
+                "Use the private key file that `ssh-keygen -t ed25519 -N \"\"` writes, \
+                 not its `.pub` file"
+            }
+            Self::Algorithm(_) | Self::Mismatch => NEW_KEY,
+            Self::Passphrase => {
+                "Use a key file with no passphrase, as `ssh-keygen -t ed25519 -N \"\"` \
+                 writes it"
+            }
+            Self::Comment => {
+                "Give the key a comment in UTF-8 with `ssh-keygen -c -C <comment> -f \
+                 <file>`"
+            }
+        }
+    }
 }
 
 impl fmt::Display for Unreadable {
@@ -212,17 +256,19 @@ impl fmt::Display for Unreadable {
 
 /// Reads the OpenSSH private key file of an Ed25519 key with no passphrase, as
 /// `ssh-keygen -t ed25519 -N ""` and [`key_file`] write it. It reads each such file
-/// that `ssh-key` 0.6.7 reads, also one with a body of any width or with white space,
-/// any text after the end mark, CRLF line ends, or no line end after the end mark. It
-/// refuses some files that OpenSSH reads: a comment that is not UTF-8
-/// ([`Unreadable::Comment`]), and, as [`Unreadable::Format`], padding of a block or
-/// more, options of the `none` KDF, and a NUL in the body. The comment is not kept.
+/// that `ssh-key` 0.6.7 reads and that is UTF-8 up to its begin mark, also one with a
+/// body of any width or with white space, any bytes on the lines after the end mark,
+/// CRLF line ends, or no line end after the end mark. It refuses some files that
+/// OpenSSH reads: a comment that is not UTF-8 ([`Unreadable::Comment`]), and, as
+/// [`Unreadable::Format`], padding of a block or more, options of the `none` KDF, and a
+/// NUL in the body. The comment is not kept.
 ///
 /// # Errors
 ///
-/// [`Unreadable`] says why the text is not such a file.
-pub fn private_key(text: &str) -> Result<PrivateKey, Unreadable> {
-    let Some(text) = lines(text) else {
+/// [`Unreadable`] says why `file` is not such a file. A byte up to the line end of the
+/// end mark that is not UTF-8 gives [`Unreadable::Format`].
+pub fn private_key(file: &[u8]) -> Result<PrivateKey, Unreadable> {
+    let Some(text) = std::str::from_utf8(marked(file)).ok().and_then(lines) else {
         return Err(Unreadable::Format);
     };
     let file = match ssh_key::PrivateKey::from_openssh(&text) {
@@ -260,6 +306,31 @@ pub fn private_key(text: &str) -> Result<PrivateKey, Unreadable> {
         return Err(Unreadable::Mismatch);
     }
     Ok(key)
+}
+
+/// `file` up to the end of the line of the end mark that [`lines`] takes, or all of
+/// `file` with no begin mark or no end mark.
+fn marked(file: &[u8]) -> &[u8] {
+    let begin = if file.starts_with(b"-----BEGIN ") {
+        0
+    } else {
+        match file
+            .windows(12)
+            .position(|window| window == b"\n-----BEGIN ")
+        {
+            Some(newline) => newline,
+            None => return file,
+        }
+    };
+    let mut start = begin;
+    for line in file[begin..].split(|byte| *byte == b'\n' || *byte == b'\r') {
+        start += line.len();
+        if line.starts_with(b"-----END") {
+            return &file[..start];
+        }
+        start += 1;
+    }
+    file
 }
 
 /// `text` from its begin mark to its end mark as `ssh-key` takes it: the body with no

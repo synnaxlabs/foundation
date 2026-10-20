@@ -194,8 +194,10 @@ state on `main`.
   its use after them, so a join refusal names a key or a name of the region only to a
   peer with a good admission (MEMBER RECORD). A status holds at most 64 entries, so
   decode refuses more, and checks no signature. So a forged card or a body that does not
-  decode in a committed entry is a refused change, not a stopped group. The proposing
-  voter and the join answer are not built (#336). A ticket holder that learns a node key
+  decode in a committed entry is a refused change, not a stopped group. A node that
+  joins (`join::ask`) takes the founding of the first voter of its ticket that admits
+  it. Its transport proves the public key that the ticket gives that voter, so only a
+  voter that lies can give a false founding. A ticket holder that learns a node key
   out of band can take it with its own join, when that join gets to the leader first.
   The real join is refused. A join that apply refuses still binds its node key, so a
   voter that lies can deny a node key that it learns, with no ticket. The node joins
@@ -561,6 +563,7 @@ seconds on each PR, and `fuzz.yaml` runs each target for 600 seconds each night.
 | `env_host` | `env::net::host::Host::from_str` and `env::net::host::uri` | A host from either reads back from its text, and a name has no uppercase letter |
 | `mesh_change` | `mesh::change::Change::decode`, and `Card::decode` and `Status::decode` through a `Join`, by `mesh::testing::round_trip_change` | Encodes to the same bytes |
 | `mesh_message` | The decode of a mesh message, with its `raft` proof, chain, and entries, and the `region::Request` and `Refusal` of a join answer, by `mesh::testing::round_trip_message` | Encodes to the same bytes |
+| `mesh_founding` | `mesh::region::Founding::decode`, with `mesh::Member::decode` in it, which the join answer carries, and which the file `founding` of the mesh directory holds in its frame, by `mesh::testing::round_trip_founding` | Encodes to the same bytes |
 | `mesh_entries` | The decode of `raft` entries one after another, as a mesh log record body and an append hold them, by `mesh::testing::round_trip_entries` | Encode to the same bytes |
 | `mesh_log` | The decode of one mesh log record by `mesh::testing::round_trip_log_record`: the header, its version, and the hard state and entries of the body, after `seal_log_record` writes the length and both checks | Encodes to the same bytes |
 | `mesh_log_dir` | `mesh::log::sequence` and `mesh::log::scan` on the files of a log directory, by `mesh::testing::scan_log_dir`, after `seal_log_dir` writes the checks of each record | An open of the files that an open leaves reads the same hard state and entries, and the files are a fixed point after two opens |
@@ -580,7 +583,7 @@ seconds on each PR, and `fuzz.yaml` runs each target for 600 seconds each night.
 | `config_plan` | `config::plan::Plan::decode` | Encodes to the same bytes |
 | `config_check` | `config::check` on the documents that `config_hcl::read` reads from up to three files, with the influx kind in the kind table | The same entries or the same problems for the files in either order; with no problem, one entry for each block and one for each status channel of each connector, and no other, unique in any case, each policy and connector decodes to itself, and each edge of a channel names a channel entry; each problem's span is in its file, in the order of the files, then of the source; files that pass alone, with keys that differ in more than case and no subject named as a connector in any ASCII case, pass together and give the union of their entries |
 | `config_profile` | `config::profile::decode` on the document that `config_hcl::read` reads from a profile | A key file only with a subject; the `node` block of each pin decodes alone to that pin; with a problem, each has a message and a fix, in source order, and a private key in the text gives only `config.private-key` |
-| `config_openssh_private_key` | `config::openssh::private_key` on the text of a key file | A key that it reads writes back with `key_file` and reads again as itself; CRLF line ends give the same result |
+| `config_openssh_private_key` | `config::openssh::private_key` on the bytes of a key file | A key that it reads writes back with `key_file` and reads again as itself; CRLF line ends give the same result |
 | `connector_pem` | `connector::http::Roots::with_pem` on the text of a `ca` | The same error with a UTF-8 byte order mark put at the start; an `Ok` holds a root |
 | `connector_modbus_rtu` | `connector_modbus::rtu::decode_request`, `decode_reply`, `pdu::Request::decode`, `Request::decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `connector_modbus_tcp` | `connector_modbus::tcp::decode`, `pdu::Request::decode`, `decode_reply`, `read::groups`, `read::Group::values` | A request reads back unchanged; a reply has the asked count; reads of each register type that tile a read request group into that request, and give the values of its reply in address order, in each register order |
@@ -603,12 +606,10 @@ seconds on each PR, and `fuzz.yaml` runs each target for 600 seconds each night.
 
 No target yet, because the decoder is private, not built, not reached from a file, or
 not reached from the corpus: `transport::message` (#2139), the QUIC hello
-(`transport::quic::hello::Hello::decode`), the file `founding` of the mesh directory
-(`mesh::region::Founding::decode`, with `mesh::Member::decode` in it, #2311), the file
-`card` of the mesh directory (`mesh::driver::version::read`, #2311), the join
-answer (`mesh::Member::decode` from a peer, #336 adds its target),
-each connector's protocol parser, the `node_id`
-text of the `opcua` kind
+(`transport::quic::hello::Hello::decode`), the check and version of the file `founding`
+of the mesh directory (`mesh::driver::founding::read`, #2311), the file `card` of the
+mesh directory (`mesh::driver::version::read`, #2311), each connector's protocol
+parser, the `node_id` text of the `opcua` kind
 (`connector_opcua::node`, #2523), its `address`, which `UA_parseEndpointUrl` of
 open62541 reads (`connector_opcua::Kind::parse`, #2523), the readers of the answers of
 a browse and a describe, which the browse of the kind calls (`node_of`, `unit_of`,

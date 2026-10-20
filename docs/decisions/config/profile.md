@@ -15,8 +15,9 @@
   }
   ```
 
-  A relative `private_key` path is relative to the directory of the profile, and a path
-  that starts with `~/` to the home directory; each other path is as written.
+  A relative `private_key` path is in the directory of the profile's path, also when the
+  profile is a link, and a path that starts with `~/` is in the home directory; each
+  other path is as written.
   `sdk-python` joins it (`laptop.architect-2`, 2026-10-20T01:11:29Z, item 3 of
   https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6280967938).
   `config::profile::decode(&Document)` gives `config::profile::Profile`: the subject,
@@ -49,12 +50,19 @@
   refuses another algorithm by its name (an ECDSA key as `ECDSA`, which `ssh-key` reads
   only with its `ecdsa` feature), an encrypted key, a public key that is not the key of
   the private key (`Mismatch`), a comment that is not UTF-8 (`Comment`), and a text that
-  is not a key file. It reads each such file that `ssh-key` 0.6.7 reads, also one with a
-  body of any width or with white space, any text after the end mark, CRLF line ends, or
-  no line end after the end mark. It refuses some files that OpenSSH reads: a comment
-  that is not UTF-8 (`Comment`), and, as `Format`, padding of a block or more, options
-  of the `none` KDF, and a NUL in the body (`Format` with "the file is not an OpenSSH
-  private key as `ssh-keygen` writes it": `laptop.architect-2`, 2026-10-20T02:56:10Z,
+  is not a key file. It reads each such file that `ssh-key` 0.6.7 reads and that is
+  UTF-8 up to its begin mark (#3521; `laptop.architect-2`, 2026-10-20T08:27:22Z,
+  https://github.com/synnaxlabs/foundation/pull/3473#issuecomment-6286779741), also
+  one with a body of any width or with white space, any bytes on the lines after the
+  end mark, CRLF line ends, or no line end after the end mark (the bytes,
+  `laptop.architect-2`, 2026-10-20T02:30:05Z,
+  https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6281938918; on the
+  lines, 2026-10-20T03:11:15Z,
+  https://github.com/synnaxlabs/foundation/pull/3473#issuecomment-6282446293). It
+  refuses some files that OpenSSH reads: a comment that is not UTF-8 (`Comment`), and,
+  as `Format`, padding of a block or more, options of the `none` KDF, and a NUL in the
+  body (`Format` with "the file is not an OpenSSH private key as `ssh-keygen` writes
+  it": `laptop.architect-2`, 2026-10-20T02:56:10Z,
   https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6282260036;
   `laptop.director`, 2026-10-20T02:19:48Z,
   https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6281813278;
@@ -62,7 +70,27 @@
   https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6282027387; the line
   ends and white space, `laptop.architect-2`, 2026-10-20T02:08:10Z,
   https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6281670865, in place
-  of item 2 of 6281458911; and 2026-10-20T01:53:14Z, item 4 of 6281480378). The formats
+  of item 2 of 6281458911; and 2026-10-20T01:53:14Z, item 4 of 6281480378). Each refusal
+  is a `config::openssh::Unreadable`: `Display` gives the message, and `code` and `fix`
+  give the other parts, as `ops::Failure` takes them:
+
+  | Variant | Code | Fix |
+  | --- | --- | --- |
+  | `Format` | `config.key-format` | Use the private key file that `ssh-keygen -t ed25519 -N ""` writes, not its `.pub` file |
+  | `Algorithm` | `config.key-algorithm` | Make a new key with `ssh-keygen -t ed25519 -N ""`, and add its `.pub` line to `keys` of the `subject` block |
+  | `Passphrase` | `config.key-passphrase` | Use a key file with no passphrase, as `ssh-keygen -t ed25519 -N ""` writes it |
+  | `Mismatch` | `config.key-mismatch` | Make a new key with `ssh-keygen -t ed25519 -N ""`, and add its `.pub` line to `keys` of the `subject` block |
+  | `Comment` | `config.key-comment` | Give the key a comment in UTF-8 with `ssh-keygen -c -C <comment> -f <file>` |
+
+  No fix removes a passphrase, since that lowers the security of the user's own SSH key.
+  The node knows a subject only by the `.pub` lines in `keys` of its `subject` block, so
+  a new key also goes there (`laptop.architect-2`, 2026-10-20T02:11:21Z,
+  https://github.com/synnaxlabs/foundation/issues/3490#issuecomment-6281710183;
+  `Comment`, 2026-10-20T02:36:54Z, item 1 of
+  https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6282027387). Lost: a
+  `Diagnostic` from `private_key`. A key file is not a document and has no span, the
+  `Display` of a `Diagnostic` leaves out its code, and the caller loses the variant that
+  `sdk-python` matches for its own fix of a passphrase (the same comment). The formats
   are a key choice of kind (f) that `laptop.architect-2` sent to `laptop.monitor` (plan
   review, 2026-10-19T23:24:32Z,
   https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279566176). The

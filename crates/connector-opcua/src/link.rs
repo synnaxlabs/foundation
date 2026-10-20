@@ -4,6 +4,7 @@
 
 use env::rng::Rng;
 
+use crate::client;
 use crate::event::{self, Loop};
 use crate::ffi::Bytes;
 use crate::ffi::Status;
@@ -433,7 +434,6 @@ const OUTSIDE: &[&str] = if cfg!(target_os = "macos") {
         "__memcpy_chk",
         "__memmove_chk",
         "__memset_chk",
-        "__sprintf_chk",
         "__stack_chk_fail",
         "__stack_chk_guard",
         "__stderrp",
@@ -460,7 +460,6 @@ const OUTSIDE: &[&str] = if cfg!(target_os = "macos") {
         "memset",
         "printf",
         "puts",
-        "sprintf",
         "strcmp",
         "strlen",
         "strncmp",
@@ -478,7 +477,6 @@ const OUTSIDE: &[&str] = if cfg!(target_os = "macos") {
         "__memmove_chk",
         "__memset_chk",
         "__printf_chk",
-        "__sprintf_chk",
         "__stack_chk_fail",
         "__stack_chk_guard",
         "__syslog_chk",
@@ -503,7 +501,6 @@ const OUTSIDE: &[&str] = if cfg!(target_os = "macos") {
         "memset",
         "printf",
         "puts",
-        "sprintf",
         "stderr",
         "stdout",
         "strcmp",
@@ -1643,18 +1640,17 @@ fn stub(line: &str) -> Option<&str> {
         .or_else(named)
 }
 
-/// The three policies that the production code adds.
-const POLICIES: [&str; 3] = [
-    "UA_SecurityPolicy_Basic256Sha256",
-    "UA_SecurityPolicy_Aes128Sha256RsaOaep",
-    "UA_SecurityPolicy_Aes256Sha256RsaPss",
-];
+/// The functions of the three policies of [`client::POLICIES`], in its order.
+fn policies() -> Vec<String> {
+    let function = |name: &str| format!("UA_SecurityPolicy_{}", name.replace('_', ""));
+    client::POLICIES.map(function).to_vec()
+}
 
 /// Checks the reason of the clock key of `encryptUserIdentityTokenEcc` in `cargo xtask
 /// open62541`: the production code names no security policy, certificate group, or
 /// certificate function, and no function or field that adds policies of its own
-/// choice, other than [`POLICIES`] in `POLICIES` of `shim.c`, the memory store, the
-/// six certificate functions of the client, and the stubs of `shim.c` that abort.
+/// choice, other than [`policies`] in `POLICIES` of `shim.c`, the memory store, the
+/// eight certificate functions of the client, and the stubs of `shim.c` that abort.
 #[test]
 fn the_production_code_adds_only_the_three_policies() {
     let allowed = [
@@ -1664,8 +1660,12 @@ fn the_production_code_adds_only_the_three_policies() {
         "UA_CertificateUtils_checkTime",
         "UA_CertificateUtils_checkTrust",
         "UA_CertificateUtils_getApplicationUri",
+        "UA_CertificateUtils_getSubjectName",
+        "UA_CertificateUtils_getThumbprint",
         "UA_CertificateUtils_keyLine",
     ];
+    let policies = policies();
+    let listed = |name: &str| policies.iter().any(|policy| policy == name);
     let policy = |name: &str| {
         (name.starts_with("UA_SecurityPolicy_")
             || name.starts_with("UA_CertificateGroup_")
@@ -1676,7 +1676,7 @@ fn the_production_code_adds_only_the_three_policies() {
                 "authSecurityPolicies",
             ]
             .contains(&name))
-            && !POLICIES.contains(&name)
+            && !listed(name)
             && !allowed.contains(&name)
     };
     let shim = root().join("src/shim.c");
@@ -1704,13 +1704,10 @@ fn the_production_code_adds_only_the_three_policies() {
         .unwrap()
         .0;
     let at_list: Vec<_> = (first..)
-        .zip(POLICIES)
+        .zip(&policies)
         .map(|(line, name)| format!("{}:{line}: {name}", shim.display()))
         .collect();
-    assert_eq!(
-        named_in_production(&root(), |name| POLICIES.contains(&name)),
-        at_list
-    );
+    assert_eq!(named_in_production(&root(), listed), at_list);
 }
 
 /// When this test binary links the address sanitizer, the sanitizer instruments the C

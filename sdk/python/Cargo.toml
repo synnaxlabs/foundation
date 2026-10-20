@@ -15,6 +15,9 @@ doctest = false
 sim = []
 
 [dependencies]
+config = { path = "../../crates/config" }
+config-hcl = { path = "../../crates/config-hcl" }
+document = { path = "../../crates/document" }
 numpy = "0.30.0"
 program = { path = "../../crates/program" }
 pyo3 = { version = "0.30.1", features = ["abi3-py311"] }

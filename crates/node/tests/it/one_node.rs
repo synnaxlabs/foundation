@@ -41,6 +41,9 @@ const BOUND: Span = Span::SECOND;
 /// `Bad`, with no subcode.
 const BAD: Quality = Quality(0x8000_0000);
 
+/// `Uncertain`, with no subcode.
+const UNCERTAIN: Quality = Quality(0x4000_0000);
+
 /// A node, the OPC UA server that it reads, and the InfluxDB that it pushes to.
 #[derive(Debug)]
 struct Plant {
@@ -71,7 +74,7 @@ fn create_plant(hcl: &str) -> Plant {
     let mut opcua = Opcua::default();
     let mut influx = Influx::default();
     let rig = Rig::new();
-    rig.config(&served(&polled(hcl), opcua.serve(), influx.serve()));
+    rig.config(&served(hcl, opcua.serve(), influx.serve()));
     let plant = Plant::start(rig, opcua, influx);
     plant.rig.apply();
     plant
@@ -86,15 +89,19 @@ fn with_token(source: &str) -> String {
     hcl
 }
 
-/// A running node on [`with_token`] of `source`, with `INFLUX_TOKEN` set to `t0ken`,
-/// which pushes to an InfluxDB that takes only `t0ken`. No config applies yet.
-fn create_token_plant(source: impl FnOnce(&Rig) -> String) -> Plant {
+/// A running node on `edit` of the config with the token that `source` gives, with
+/// `INFLUX_TOKEN` set to `t0ken`, which pushes to an InfluxDB that takes only
+/// `t0ken`. No config applies yet.
+fn create_token_plant(
+    source: impl FnOnce(&Rig) -> String,
+    edit: fn(&str) -> String,
+) -> Plant {
     let mut opcua = Opcua::default();
     let mut influx = Influx::taking("t0ken");
     let mut rig = Rig::new();
     rig.var("INFLUX_TOKEN", "t0ken");
-    let hcl = with_token(&source(&rig));
-    rig.config(&served(&polled(&hcl), opcua.serve(), influx.serve()));
+    let hcl = edit(&with_token(&source(&rig)));
+    rig.config(&served(&hcl, opcua.serve(), influx.serve()));
     Plant::start(rig, opcua, influx)
 }
 
@@ -139,7 +146,9 @@ fn served(hcl: &str, opcua: SocketAddr, influx: SocketAddr) -> String {
 }
 
 /// `hcl` with its OPC UA connector polled, so that it reads each node at each tick, as
-/// the trace of [`held`] asks.
+/// the trace of [`held`] and a count that grows while the nodes do not change ask.
+/// Until #3537, a sink that opens after the first value of a node that does not change
+/// gets no sample of it, so a sink that starts late also asks for it.
 fn polled(hcl: &str) -> String {
     let rate = "  rate    = \"10Hz\"\n";
     let polled = hcl.replacen(rate, &format!("{rate}  polled  = true\n"), 1);
@@ -752,7 +761,7 @@ fn each_config_names_the_served_addresses() {
 
 #[test]
 fn samples_from_an_opc_ua_server_reach_influxdb() {
-    let plant = create_plant(plant());
+    let plant = create_plant(&polled(plant()));
     first_stored(&plant, &VARIABLES);
     let reads = change(&plant.opcua, &VARIABLES, Quality::GOOD, TRACED);
     for trace in held(&plant, &reads) {
@@ -836,8 +845,8 @@ fn a_subscribed_plant_stores_each_change_at_its_read() {
 }
 
 #[test]
-fn a_bad_value_is_left_out_and_counted() {
-    let plant = create_plant(QUALITY);
+fn a_polled_bad_value_is_left_out_and_counted() {
+    let plant = create_plant(&polled(QUALITY));
     let spike = &VARIABLES[..1];
     first_stored(&plant, spike);
     let [reads] = &change(&plant.opcua, spike, BAD, TICKS)[..] else {
@@ -856,6 +865,96 @@ fn a_bad_value_is_left_out_and_counted() {
     let mut stored = plant.influx.stored();
     let stored = stored.remove(reads.channel).unwrap_or_default();
     assert_eq!(traced(plant.started, &served, &stored), Ok(()));
+}
+
+/// A subscription leaves out each change that is Bad or Uncertain, and counts it in
+/// `bad` or `uncertain`.
+#[test]
+fn a_bad_value_is_left_out_and_counted() {
+    left_out_and_counted(|plant| plant.opcua.change(TICKS, BAD));
+}
+
+/// As [`a_bad_value_is_left_out_and_counted`], with the node stopped for most of the
+/// Bad changes, so that the queue of the server drops changes and `missed` counts each
+/// overflow, which holds more than one change. The queue holds two round trips of the
+/// first read of the server time, so after a slow first read it can drop none.
+#[test]
+fn a_bad_value_is_counted_after_a_stall() {
+    left_out_and_counted(|plant| {
+        plant.opcua.change(3, BAD);
+        plant.rig.stalled(|| plant.opcua.change(TICKS - 3, BAD));
+    });
+}
+
+/// The reads of `served` whose value differs from the read before, with `quality`.
+fn changes_to(served: &[Sample], quality: Quality) -> u64 {
+    let steps = (served.windows(2)).filter(|pair| {
+        matches!(pair, [a, b] if a.value.to_bits() != b.value.to_bits()
+            && b.quality == Some(quality))
+    });
+    u64::try_from(steps.count()).expect("a few")
+}
+
+/// Changes the value 20 times Bad through `bad`, then 10 times Uncertain and once Good,
+/// and asserts the counts of `plc` and the samples that InfluxDB holds.
+fn left_out_and_counted(bad: impl FnOnce(&Plant)) {
+    let plant = create_plant(QUALITY);
+    let [(variable, channel)] = VARIABLES[..1] else {
+        panic!("one variable");
+    };
+    first_stored(&plant, &VARIABLES[..1]);
+    // An overflow keeps the newest change, so a wait for a count after each phase holds
+    // with a correct kind. Unequal steps, so that a swap of the two counts fails.
+    let counted = |key: &str| {
+        plant.rig.wait("`plc` counts the phase", || {
+            match count(&plant.rig.status(), "plc", key) {
+                Some(counted) if counted > 0 => Ok(()),
+                counted => Err(format!("{key} {counted:?}")),
+            }
+        });
+    };
+    bad(&plant);
+    counted("bad");
+    plant.opcua.change(TICKS / 2, UNCERTAIN);
+    counted("uncertain");
+    // A Good last step, so that InfluxDB holds it only after each change before it.
+    plant.opcua.change(1, Quality::GOOD);
+    let last = f64::from(u32::try_from(TICKS + TICKS / 2 + 1).expect("a few"));
+    let (counts, steps) = plant.rig.wait("`plc` counts each change", || {
+        let stored = plant.influx.stored().remove(channel).unwrap_or_default();
+        let status = plant.rig.status();
+        let counts = ["bad", "uncertain", "missed"]
+            .map(|key| count(&status, "plc", key).unwrap_or_default());
+        let served = &plant.opcua.served()[variable];
+        let steps = [BAD, UNCERTAIN].map(|quality| changes_to(served, quality));
+        let [bad, uncertain, missed] = counts;
+        let held = stored
+            .last()
+            .is_some_and(|sample| sample.value.to_bits() == last.to_bits());
+        if held && (missed > 0 || bad + uncertain >= steps.iter().sum()) {
+            Ok((counts, steps))
+        } else {
+            Err(format!(
+                "{counts:?} of the steps {steps:?}, last held: {held}"
+            ))
+        }
+    });
+    let [bad, uncertain, missed] = counts;
+    let message = format!(
+        "bad {bad} and uncertain {uncertain} of the steps {steps:?}, missed {missed}"
+    );
+    if missed == 0 {
+        assert_eq!([bad, uncertain], steps, "{message}");
+    } else {
+        assert!(bad <= steps[0] && uncertain <= steps[1], "{message}");
+    }
+    let stored = plant.influx.stored().remove(channel).unwrap_or_default();
+    let values: Vec<_> = stored.iter().map(|sample| sample.value).collect();
+    assert_eq!(
+        values,
+        [0.0, last],
+        "InfluxDB holds the first and the last value"
+    );
 }
 
 #[test]
@@ -953,14 +1052,16 @@ fn a_wrong_endpoint_shows_in_status_and_heals() {
 
 #[test]
 fn a_token_from_the_environment_of_the_node_reaches_influxdb() {
-    let plant = create_token_plant(|_| "env(\"INFLUX_TOKEN\")".into());
+    let plant =
+        create_token_plant(|_| "env(\"INFLUX_TOKEN\")".to_owned(), str::to_owned);
     plant.rig.apply();
     first_stored(&plant, &VARIABLES);
 }
 
 #[test]
 fn a_plan_refuses_a_token_from_a_variable_that_the_node_does_not_set() {
-    let plant = create_token_plant(|_| "env(\"PLANT_TOKEN\")".into());
+    let plant =
+        create_token_plant(|_| "env(\"PLANT_TOKEN\")".to_owned(), str::to_owned);
     refuses_the_token(
         &plant.rig,
         "the secret env(\"PLANT_TOKEN\"): the environment variable PLANT_TOKEN of the \
@@ -972,7 +1073,7 @@ fn a_plan_refuses_a_token_from_a_variable_that_the_node_does_not_set() {
 fn a_token_file_shows_its_fix_until_it_holds_the_token() {
     for named in [false, true] {
         let mut given = None;
-        let plant = create_token_plant(|rig| {
+        let source = |rig: &Rig| {
             let (source, path) = if named {
                 let path = rig.dir.join("foundation-data/data/secrets/plant.token");
                 ("secret(\"plant.token\")".to_owned(), path)
@@ -982,7 +1083,8 @@ fn a_token_file_shows_its_fix_until_it_holds_the_token() {
             };
             given = Some((source.clone(), path));
             source
-        });
+        };
+        let plant = create_token_plant(source, polled);
         let (source, path) = given.expect("the plant names its source");
         let shown = path.display();
         let hidden = if named {
@@ -1024,7 +1126,7 @@ fn a_token_file_shows_its_fix_until_it_holds_the_token() {
 
 #[test]
 fn status_shows_samples_flow() {
-    let plant = create_plant(plant());
+    let plant = create_plant(&polled(plant()));
     let rig = &plant.rig;
     // The node reads each variable at each tick, also when its value does not change.
     let before = rig.wait("both counts are above 0", || counts_above(rig, (0, 0)));
