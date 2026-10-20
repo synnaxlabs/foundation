@@ -240,8 +240,8 @@ fn exhausted_aborts_with_the_size_of_a_header() {
     );
 }
 
-/// Frees a block of 4 bytes with 5 written, in a child process, and does nothing outside
-/// one.
+/// Frees a block of 4 bytes with 5 written, in a child process, and does nothing
+/// outside one.
 #[test]
 fn frees_more_than_its_block() {
     if child::running() {
