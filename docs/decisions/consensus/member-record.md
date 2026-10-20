@@ -116,7 +116,8 @@
   Amended (2026-10-20, round 2 of PR 5e of #336): "only a first open checks it" is of
   the founding that the open is given. Each read of the founding file refuses a body
   over `FOUNDING_BYTES_MAX` with `Error::Unfounded`, with no read. A file that a first
-  open wrote is never over it, so a node with a stored founding still always opens.
+  open wrote is never over it, so a node with a stored founding still always opens. No
+  build makes `FOUNDING_BYTES_MAX` smaller.
   `Config::time` gives the mesh time of the stamp, and a voter with no such time answers
   `Unsynced` (same ruling). `stamp` gives the `Refusal` of the answer, so `Unstamped` is
   gone, and `Unstamped::Stopped` above is `Refusal::Stopped`, which holds no cause: the
