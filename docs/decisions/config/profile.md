@@ -29,7 +29,25 @@
   passphrase, as `ssh-keygen -t ed25519 -N ""` writes it. `config::openssh` reads and
   writes it with `ssh-key`, and refuses another algorithm by its name (an ECDSA key
   as `ECDSA`, which `ssh-key` reads only with its `ecdsa` feature), an encrypted key,
-  and a text that is not a key file. The formats are a key choice of kind (f) that
+  a text that is not a key file, and a file whose public key is not the key of its
+  private key. Each refusal is a `config::openssh::Unreadable`: `Display` gives the
+  message, and `code` and `fix` give the other parts, as `ops::Failure` takes them:
+
+  | Variant | Code | Fix |
+  | --- | --- | --- |
+  | `Format` | `config.key-format` | Use the private key file that `ssh-keygen -t ed25519 -N ""` writes, not its `.pub` file |
+  | `Algorithm` | `config.key-algorithm` | Make a new key with `ssh-keygen -t ed25519 -N ""`, and add its `.pub` line to `keys` of the `subject` block |
+  | `Passphrase` | `config.key-passphrase` | Use a key file with no passphrase, as `ssh-keygen -t ed25519 -N ""` writes it |
+  | `Mismatch` | `config.key-mismatch` | Make a new key with `ssh-keygen -t ed25519 -N ""`, and add its `.pub` line to `keys` of the `subject` block |
+
+  No fix removes a passphrase, since that lowers the security of the user's own SSH
+  key. The node knows a subject only by the `.pub` lines in `keys` of its `subject`
+  block, so a new key also goes there (`laptop.architect-2`, 2026-10-20T02:11:21Z,
+  https://github.com/synnaxlabs/foundation/issues/3490#issuecomment-6281710183).
+  Lost: a `Diagnostic` from `private_key`. A key file is not a document and has no
+  span, the `Display` of a `Diagnostic` leaves out its code, and the caller loses the
+  variant that `sdk-python` matches for its own fix of a passphrase (the same
+  comment). The formats are a key choice of kind (f) that
   `laptop.architect-2` sent to `laptop.monitor` (plan review, 2026-10-19T23:24:32Z,
   https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279566176). The
   profile is in `config`, beside `config::subject`, which reads the same key line;

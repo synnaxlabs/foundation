@@ -88,11 +88,16 @@
     add `subject = "<name>"` to <profile>, or pass subject=``.
   - `ValueError`, for a profile or a key file that is not UTF-8: `<file>: the file is
     not UTF-8`.
-  - `ValueError`, for a key file with a passphrase that the profile's `private_key`
-    names: ``<file>: the private key has a passphrase: remove `private_key` from
-    <profile>, and connect makes ~/.foundation/<subject>.key``; for
-    `~/.foundation/<subject>.key`: `...: move the file away, and connect makes a new
-    key there`. The fix never removes the passphrase of the user's own SSH key.
+  - `ValueError`, for a key file that is not the OpenSSH private key file of an
+    Ed25519 key with no passphrase: `<file>: <code>: <message>. <fix>`, with the parts
+    of `config::openssh::Unreadable` (PROFILE in `docs/decisions/config/profile.md`).
+    For a key file with a passphrase that the profile's `private_key` names, a second
+    fix follows: ``... Or remove `private_key` from <profile>, and connect makes
+    ~/.foundation/<subject>.key``; for `~/.foundation/<subject>.key`: `... Or move the
+    file away, and connect makes a new key there` (`laptop.architect-2`,
+    2026-10-20T02:11:21Z,
+    https://github.com/synnaxlabs/foundation/issues/3490#issuecomment-6281710183). The
+    fix never removes the passphrase of the user's own SSH key.
   - `OSError`, for a key file that the profile names and that is not there:
     ``<file>: no file is there: remove `private_key` from <profile>, and connect
     makes ~/.foundation/<subject>.key``; for a key file that is a link to no file:
