@@ -16,6 +16,7 @@ dependencies = [
  "ops",
  "os",
  "proptest",
+ "sector",
  "serde_json",
  "sim",
  "spec",

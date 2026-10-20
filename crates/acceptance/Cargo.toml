@@ -18,6 +18,7 @@ node = { path = "../node", features = ["sim"] }
 ops = { path = "../ops" }
 os = { path = "../os" }
 proptest.workspace = true
+sector = { path = "../sector" }
 serde_json.workspace = true
 sim = { path = "../sim" }
 spec = { path = "../spec" }
