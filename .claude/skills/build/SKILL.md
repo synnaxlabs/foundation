@@ -19,8 +19,8 @@ when its PR merges, `mcp__factory__next` clears it and starts `/build` again.
    by the exact path that its task notification gives, other than after a crash or a
    restart (`docs/coordination.md`, "Worktrees"). Never loop over `.claude/worktrees` or
    `git worktree list`: the worktrees of other sessions are there too.
-2. An open issue labeled `owner:$FACTORY_NAME` that is not `blocked` comes first:
-   resume it from its last state comment.
+2. An open issue labeled `owner:$FACTORY_NAME` that is not `blocked` comes first, one
+   with no open PR before one with an open PR: resume it from its last state comment.
 3. Give back each issue labeled `owner:$FACTORY_NAME` that you do not resume and that
    no open PR closes or has in its branch: comment its state, and remove your `owner:`
    label. Remove `blocked` from one when each issue that it waits on is closed and each
@@ -96,7 +96,10 @@ or a line range.
 
     Never check by hand, `/loop`, or `ScheduleWakeup`. A message or the script's exit
     wakes you.
-    - Exit 0 (merged): comment the final state on the issue, call
+    - Exit 0 (merged): comment the final state on the issue. Send the link of each
+      open issue labeled `blocked` that waits on it (`gh issue list --state open
+      --label blocked --search "<issue> in:body"`) to its owner, or to
+      `laptop.coordinator` when it has no `owner:` label. Then call
       `mcp__factory__next`, and end your turn. On the night lane, take the next
       `night` issue in this context instead.
     - Exit 1: read the cause it prints (`gh pr checks <n>`,
@@ -157,9 +160,11 @@ take the next issue meanwhile.
 - Ask the person in a comment on the issue or PR, then send `laptop.coordinator` the
   link to that comment at once (`docs/coordination.md`, "Messages"). A comment alone
   reaches no one. When no part of the issue is left to build, add `blocked` and take
-  other work (Take an issue). When the answer comes, remove `blocked`. If no open PR
-  closes the issue or has its number in its branch, also remove your `owner:` label if
-  it is there, and add `ready`. If you build no other issue, take one (Take an issue).
+  other work (Take an issue). When the answer or the link of a merged issue comes, and
+  each issue that it waits on is closed and each question on it has an answer, remove
+  `blocked`. If no open PR closes the issue or has its number in its branch, also
+  remove your `owner:` label if it is there, and add `ready`. If you build no other
+  issue, take one (Take an issue).
 - A key choice (`CLAUDE.md`, "The person decides the design"): send it to
   `laptop.monitor` when you make it, before work builds on it, then go on. Never add
   `blocked` for it.

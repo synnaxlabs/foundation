@@ -39,7 +39,7 @@ Never read all of `docs/decisions/`: read only the records that an issue names.
 - **Route.** An issue that changes crates on two machines: split it into one issue per
   machine, linked, each with its `crate:` labels. A builder blocked on another machine's
   issue: admit that issue first, and `send` its link to the blocked builder only when it
-  merges or changes.
+  changes. Its builder sends the link at the merge (`/build`, "Wait once").
 - **Order.** Mark issues ready in the order of the milestone's plan issue, which
   `laptop.director` keeps. The director also owns each issue's text: send it an issue
   that is unclear instead of admitting it.
