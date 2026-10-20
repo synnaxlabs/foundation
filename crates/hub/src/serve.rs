@@ -151,7 +151,8 @@ pub enum Error {
     /// The home of the index of a program's write is `home`, another node, and the
     /// forward of the write to it ended before the program finished it. Code:
     /// `refusal`, the code that `home` stopped the forward with, or `FAILED` when
-    /// `home` gave `MALFORMED`, the session to `home` failed, or `home` broke HUB WIRE.
+    /// `home` gave `MALFORMED`, finished the forward first, or broke HUB WIRE, or the
+    /// session to `home` failed.
     Forward {
         /// The home.
         home: node::Key,
