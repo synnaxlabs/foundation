@@ -863,9 +863,10 @@ fn a_voter_that_goes_silent_in_its_put_misses_the_deadline_after_its_last_stored
 // before each stored a chunk, or lost to the dial of voter 2 at its start. So the
 // apply commits.
 fn restart_in_put(restarts: &[i64]) {
+    const DELAY: Span = Span::from_nanos(300 * Span::MILLISECOND.nanos());
     for seed in 0..16 {
         let mut cluster = Cluster::new(seed);
-        cluster.delay(Span::from_nanos(300 * Span::MILLISECOND.nanos()));
+        cluster.delay(DELAY);
         cluster.start_voter(1);
         cluster.start_voter(2);
         cluster.run(seconds(10));
@@ -882,7 +883,11 @@ fn restart_in_put(restarts: &[i64]) {
         let board = cluster.board();
         assert_eq!(board.applied, [(1, moved, Ok(moved))], "seed {seed}");
         assert_used(&board, &[1, 2], moved, &definitions);
-        assert!(!board.blobs.contains_key(&1), "seed {seed}: {:?}", board.blobs);
+        assert!(
+            !board.blobs.contains_key(&1),
+            "seed {seed}: {:?}",
+            board.blobs
+        );
     }
 }
 
