@@ -61,8 +61,8 @@ mod validity;
 #[cfg(feature = "open62541")]
 mod value;
 
-// The copy calls the libcrypto of `aws-lc-sys`, and no Rust here names the crate, which
-// rustc links only when it is named.
+// The copy calls the libcrypto of `aws-lc-sys`, and no product code names the crate,
+// which rustc links only when it is named.
 #[cfg(feature = "open62541")]
 use aws_lc_sys as _;
 #[cfg(feature = "open62541")]

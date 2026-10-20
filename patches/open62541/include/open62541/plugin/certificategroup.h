@@ -99,6 +99,16 @@ typedef enum {
 UA_EXPORT UA_TrustLoad
 UA_CertificateUtils_checkTrust(const UA_ByteString *trust, size_t *number);
 
+/* Gives the line, from 1, at which the security policies refuse to load
+ * `certificate` as `UA_TRUSTLOAD_LINE` refuses a trust entry, else 0. */
+UA_EXPORT size_t
+UA_CertificateUtils_certificateLine(const UA_ByteString *certificate);
+
+/* Gives the line, from 1, at which the security policies refuse to load `key` as
+ * `UA_TRUSTLOAD_LINE` refuses a trust entry, else 0. */
+UA_EXPORT size_t
+UA_CertificateUtils_keyLine(const UA_ByteString *key);
+
 /* BadCertificateTimeInvalid when `now` is outside the validity window of the
  * certificate, as the verify of the memory group tests a leaf, and
  * BadCertificateInvalid when it does not parse. */
