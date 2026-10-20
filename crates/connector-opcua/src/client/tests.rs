@@ -988,30 +988,51 @@ fn a_close_frees_the_session_on_the_server_and_a_drop_does_not() {
 }
 
 /// A crash of the node drops a connected client off the threads of the sim, as a
-/// failed scenario does, and the drop does not abort the process.
+/// failed scenario does, and the drop does not abort the process. The server runs on
+/// another node, which closes it after the crash, so that it does not leak.
 #[test]
 fn a_crash_drops_a_connected_client_off_the_threads_of_the_sim() {
     let mut sim = Sim::new(sim::Config::default());
+    let host = sim.node(node::Config::default());
     let node = sim.node(node::Config::default());
-    let (own, connected) = (node.clone(), Arc::new(AtomicBool::new(false)));
-    let on = Arc::clone(&connected);
-    let config = shards::Config {
-        name: "client".into(),
+    let local = SocketAddr::new(host.addresses()[0], PORT);
+    let url = CString::new(format!("opc.tcp://{local}")).expect("no NUL");
+    let (connected, crashed) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let (own, ended) = (host.clone(), Arc::clone(&crashed));
+    let config = |name: &str| shards::Config {
+        name: name.into(),
         core: None,
     };
-    let start = node.shards().start(config, move |_| async move {
-        serve(&own, 4, async |mut peer| {
-            let _client = peer.connected().await;
-            on.store(true, Ordering::Relaxed);
-            future::pending::<()>().await;
+    let served = host.shards().start(config("server"), move |_| async move {
+        serve(&own, 4, async |peer| {
+            while !ended.load(Ordering::Relaxed) {
+                peer.clock.sleep(Span::from_nanos(10_000_000)).await;
+            }
         })
         .await;
+    });
+    drop(served.expect("a shard with no core gets no fault"));
+    let (own, on) = (node.clone(), Arc::clone(&connected));
+    let start = node.shards().start(config("client"), move |_| async move {
+        let time = event::Time::monotonic(own.clock());
+        let mut rng = own.entropy().rng();
+        let _client = open(time, own.net(), &mut rng, &url)
+            .await
+            .expect("the client connects");
+        on.store(true, Ordering::Relaxed);
+        future::pending::<()>().await;
     });
     drop(start.expect("a shard with no core gets no fault"));
     sim.run_for(Span::from_nanos(10_000_000_000))
         .expect("the run goes on");
     assert!(connected.load(Ordering::Relaxed));
     sim.crash(&node, Crash::Process);
+    crashed.store(true, Ordering::Relaxed);
+    sim.run_for(Span::from_nanos(1_000_000_000))
+        .expect("the server closes");
 }
 
 /// Connects to a listener on `node` that gives `accepted` each stream it accepts, and
