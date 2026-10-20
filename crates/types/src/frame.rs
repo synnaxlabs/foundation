@@ -273,11 +273,6 @@ impl<'a> Layout<'a> {
     /// [`Error::OutOfRange`], [`Error::Unordered`], or [`Error::IndexAbsent`] as for
     /// [`Layout::new`]. [`Error::End`] with [`BadEnd::Before`] for the first end below
     /// the start of its series.
-    #[expect(
-        clippy::inline_always,
-        reason = "fat LTO made it a call on each frame once it had a second caller"
-    )]
-    #[inline(always)]
     pub fn from_ends(
         set: &'a KeySet,
         ends: &'a [(usize, usize)],
@@ -370,11 +365,9 @@ impl<'a> Layout<'a> {
     /// # Errors
     ///
     /// The pool's error when it cannot give the block.
-    #[expect(
-        clippy::inline_always,
-        reason = "with `inline`, fat LTO made it a call once it had a second caller"
-    )]
-    #[inline(always)]
+    // Without the hint, fat LTO stops inlining it into `Draft::new` once it has a
+    // second caller.
+    #[inline]
     pub fn draft(self, pool: &block::Pool, form: Form) -> Result<Draft, block::Error> {
         let Self {
             set,

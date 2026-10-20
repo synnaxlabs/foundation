@@ -399,11 +399,6 @@ fn renewal(
 /// Writes `draft`, a frame of `time`, with `writer`, and gives its outcome. A frame of
 /// [`Time::Node`] gets its stamp from [`next`], which `stamped` keeps when the home
 /// takes or loses the frame.
-#[expect(
-    clippy::inline_always,
-    reason = "with the second relay, of a forward, fat LTO made it a call on each frame"
-)]
-#[inline(always)]
 fn write(
     writer: &mut Writer,
     mut draft: Draft,
@@ -450,11 +445,6 @@ fn stamp_index(index: &mut [u8], stamp: Stamp) -> Option<Stamp> {
 
 /// The outcome of a frame from what the write gave, or the error that stops the
 /// stream.
-#[expect(
-    clippy::inline_always,
-    reason = "with the second relay, of a forward, fat LTO made it a call on each frame"
-)]
-#[inline(always)]
 fn outcome(written: Result<&[::home::Outcome], Failure>) -> Result<Outcome, Error> {
     let outcomes = match written {
         Ok(outcomes) => outcomes,
@@ -515,11 +505,6 @@ struct Pending {
 
 impl Replies {
     /// Counts the frame whose head came, and gives the block for its outcome.
-    #[expect(
-        clippy::inline_always,
-        reason = "with the second relay, of a forward, fat LTO made it a call on each frame"
-    )]
-    #[inline(always)]
     fn head(&mut self, state: &RefCell<State>) -> Result<Pending, Error> {
         self.heads += 1;
         let block = alloc(state, Outcome::LEN_MAX)?;
@@ -559,11 +544,6 @@ impl Replies {
     /// A frame that the home did not take gives back the block of the next `Stored`
     /// while no taken frame waits for one. Sync, so the relay's future holds no nested
     /// one.
-    #[expect(
-        clippy::inline_always,
-        reason = "with the second relay, of a forward, fat LTO made it a call on each frame"
-    )]
-    #[inline(always)]
     fn outcome(
         &mut self,
         state: &RefCell<State>,
