@@ -90,5 +90,5 @@
   In run 39351739537, `nextest` took 12.7 min (11762 passed, 12 skipped), `serial` 8.2
   min (79 test targets with no harness, 235 doc tests), and the workflow 13.1 min; in
   run 39349284591, 13.1, 11.1, and 13.4 min. No part of these three runs found a cache.
-  Each part builds on its own runner, and ARM keeps a cache entry for each part in
-  place of one.
+  In run 39353435114, `nextest` restored its cache and took 10.2 min. Each part builds
+  on its own runner, and ARM keeps a cache entry for each part in place of one.
