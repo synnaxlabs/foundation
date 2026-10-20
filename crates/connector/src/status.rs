@@ -851,7 +851,6 @@ impl Frame {
         bytes: &mut [u8],
     ) {
         let text = match self.positions[entry] {
-            // The index, whose stamp `stamp::Writer::write` puts.
             0 => return,
             ERROR => &self.error,
             NOTE => &self.note,

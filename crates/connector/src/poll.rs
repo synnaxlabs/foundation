@@ -144,7 +144,7 @@ impl Writer {
                     group, data_type, ..
                 } = *entry;
                 if channel.is_some() {
-                    samples[stamp::to_usize(group)] += 1;
+                    samples[to_usize(group)] += 1;
                 }
                 let scalar = match data_type {
                     Type::Scalar(scalar) => Some(scalar),
@@ -271,7 +271,7 @@ impl Writer {
         let groups = stamped.write(stamp, &shape.series, fill)?;
         let (mut wrote, mut gone) = (0, 0);
         for &(group, applied) in groups {
-            let n = shape.samples[stamp::to_usize(group)];
+            let n = shape.samples[to_usize(group)];
             if applied {
                 wrote += n;
             } else {
@@ -314,14 +314,12 @@ impl Kept {
         samples.resize(all.samples.len(), 0);
         for fill in fills {
             if fill.channel.is_some_and(|channel| channels[channel]) {
-                samples[stamp::to_usize(fill.group)] += 1;
+                samples[to_usize(fill.group)] += 1;
             }
         }
         let held = |&&(entry, _): &&(usize, usize)| {
             let Fill { group, channel, .. } = fills[entry];
-            channel.map_or(samples[stamp::to_usize(group)] > 0, |channel| {
-                channels[channel]
-            })
+            channel.map_or(samples[to_usize(group)] > 0, |channel| channels[channel])
         };
         shape.series.clear();
         shape.series.extend(all.series.iter().filter(held));
@@ -381,4 +379,9 @@ fn index(name: &Name) -> Diagnostic {
         ),
         "Write the value to a data channel".into(),
     )
+}
+
+/// `group` as a position.
+fn to_usize(group: u32) -> usize {
+    usize::try_from(group).expect("invariant: a usize holds a group")
 }

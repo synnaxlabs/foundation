@@ -338,7 +338,7 @@ fn backwards_again(before: Stamp, last: Stamp) -> ! {
 }
 
 /// `group` as a position.
-pub(crate) fn to_usize(group: u32) -> usize {
+fn to_usize(group: u32) -> usize {
     usize::try_from(group).expect("invariant: a usize holds a group")
 }
 

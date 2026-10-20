@@ -45,13 +45,15 @@
   https://github.com/synnaxlabs/foundation/issues/2830#issuecomment-6209753061).
   `poll::Writer` and `status::Writer` each write through `stamp::Writer::write`
   (STAMP), which owns the draft, the stamp of each index, the class of each outcome,
-  and the write again. Each gives the bytes of each sample through a fill, which puts
-  nothing in an index, and acts on the groups that it gives: `poll::Writer` counts their
-  samples applied or lost, and `status::Writer` stages its values again for a group
-  that is not applied, and closes on `Removed` or a failed disk (`laptop.architect-2`,
-  2026-10-20T09:06:36Z:
+  and the write again. Each gives the bytes of its data samples through a fill that
+  gets each entry and puts nothing in an index, and acts on the groups that it gives:
+  `poll::Writer` counts their samples applied or lost, and `status::Writer` stages its
+  values again for a group that is not applied, and closes on `Removed` or a failed
+  disk (`laptop.architect-2`, 2026-10-20T09:06:36Z:
   https://github.com/synnaxlabs/foundation/pull/3556#issuecomment-6287471425, on the
-  plan https://github.com/synnaxlabs/foundation/issues/2527#issuecomment-6287263795).
+  plan https://github.com/synnaxlabs/foundation/issues/2527#issuecomment-6287263795;
+  the fill: 2026-10-20T10:53:12Z,
+  https://github.com/synnaxlabs/foundation/pull/3556#issuecomment-6289249752).
   Lost: `status::Writer` writes through `poll::Writer`, which then takes text values
   and a second rule for a pool with no block in its hot path; a `stamp::Writer::write`
   that takes a closure that sends the frame, so that each writer keeps its own draft and
