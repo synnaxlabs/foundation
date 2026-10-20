@@ -22,8 +22,9 @@ use wire::hub::forward::{Forward, places};
 use wire::hub::write::{Head, Time};
 use wire::hub::{BUSY, NOT_HOME};
 
-use super::write::{end, place, send, stored, taken};
+use super::write::{end, send, stored, taken};
 use super::{AREA, BODY_MAX, I64, POOL, RING, STAMP, TIME, Test, channels, region};
+use crate::agent::place;
 use crate::agent::{
     AGENT, Agent, CONNECTION, LIFE, SECOND, SUBJECT, Stream, name, reset_with, signed,
 };

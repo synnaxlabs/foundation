@@ -68,3 +68,60 @@
   states the renewal rule as a rule of the forwarding node. Lost: a forward as a client
   session from the node to the home for each program connection, which needs no
   dispatch, but the home would check a nonce that the program never saw.
+
+  At the member (#3104 PR 4a), a program's write whose one index has a home on another
+  node of the region goes to `serve::client::write::away`. A write on more than one
+  index with a home on another node still stops with `NOT_HOME` until PR 4b
+  (`laptop.monitor`, key choice 1, 2026-10-20T06:26Z:
+  https://github.com/synnaxlabs/foundation/pull/3546#issuecomment-6286607969). It
+  reserves the ends and counts of the open and the encoded open, `Write::length`, in the
+  subject's share, and encodes the open again from its decoded fields. Each field of the
+  wire `Open` has one encoding, so these are the bytes that the program signed, and the
+  member holds the names once while it waits for the home. Lost: keeping the program's
+  body, which holds the names twice during that wait. `hub::dial` dials the home and
+  retries a session that closes with `Code(0)` before the places, as the remote reader
+  does. A forward to a home whose stream takes messages under the member transport's
+  `message_bytes_max` gives the program `FAILED` at the open, before the places, so a
+  mesh whose limits differ fails at its first forwarded write. The member gives
+  `serve::Error::Limit`, whose text names both limits and tells the user to give each
+  node of the mesh the same limit (condition of `laptop.monitor` on key choice 3,
+  2026-10-20T06:33Z:
+  https://github.com/synnaxlabs/foundation/pull/3546#issuecomment-6286607969).
+  A reply before the places that `Opening` refuses, or a count of places over the
+  channels of the open plus one, gives `FAILED` to the program and `MALFORMED` to the
+  home. The member holds the places in the subject's share until it sends them to the
+  program, so a home that sends more than the share holds gives `BUSY`. While it waits
+  for the places, it sends the home each renewal of the hello. A code of the home before
+  the places stops the program's stream with that code, `NOT_HOME` included, and with
+  `FAILED` in place of `MALFORMED`, as `serve::Error::Forward { home, refusal }`, and an
+  end of the stream with no code gives `FAILED`. The member finds no new home (#3541). A
+  write whose lease is zero gets `MALFORMED` before the find of its home, not the
+  `FAILED` of a forward that the home refuses. After the places, the member splices:
+  each message of the program goes to the home as it came, each renewal of the hello
+  goes between frames, and each reply goes to the program as it came. It reads no more
+  of the program while 64 frames have an outcome due, so a forward moves at most 64
+  frames in each round trip to the home (answer 4 of
+  https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6269021946). When
+  the forward is cut, the member resets the program's write with the code of the home,
+  and with `FAILED` in place of `MALFORMED`. It also gives `FAILED` for a reply that
+  `Replies` refuses, a finish of the home before the program's, a finish with an outcome
+  due, and an error of the session to the home. For the first three, it stops the home
+  with `MALFORMED`, which the home gets only while it does not have each message of
+  the member. A reply that the member read but did not send has an unknown fate,
+  as for each reset of a write. Lost: an end of group 0 with `Reply::Ended`, which needs
+  an end of unknown fate in `wire` (PR 4b). The cut reset: `laptop.monitor`, key choice
+  4, 2026-10-20T08:17:05Z
+  (https://github.com/synnaxlabs/foundation/pull/3546#issuecomment-6286607969), and
+  `laptop.architect`, 2026-10-20T08:21:06Z, with the lease check as its condition
+  (https://github.com/synnaxlabs/foundation/pull/3546#issuecomment-6286674415). A close
+  of the program's session resets the stream to the home with code 0. A split of each
+  message for a home with smaller messages: #3542, not before the demo. Plan:
+  https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6284841084, with the
+  changes of
+  https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6284933117. The doc
+  of `Frames::skip` and `serve::Error::Forward`: `laptop.architect`,
+  2026-10-20T06:53:02Z
+  (https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6285208337).
+  `serve::Error::Limit`, with the stop at the open: `laptop.architect`,
+  2026-10-20T07:12:26Z
+  (https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6285493756).

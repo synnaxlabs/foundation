@@ -3,11 +3,12 @@
 
 use transport::stream::{Receiver, Sender};
 use transport::{Address, Class, Code, Session};
-use types::connection;
 use types::ed25519::{Pair, PrivateKey};
 use types::hello::Hello;
 use types::name::Name;
+use types::sample::Type;
 use types::time::Span;
+use types::{channel, connection};
 use wire::Protocol;
 use wire::hub::FromHome;
 use wire::hub::client::{
@@ -29,6 +30,16 @@ pub(crate) const LIFE: Span = Span::from_nanos(60 * Span::SECOND.nanos());
 
 pub(crate) fn name(name: &str) -> Name {
     name.parse().expect("a valid name")
+}
+
+/// The place of `channel`, whose group's index is at place `index`.
+pub(crate) fn place(key: u128, data_type: Type, channel: &str, index: usize) -> Place {
+    Place {
+        key: channel::Key::from_u128(key),
+        data_type,
+        name: name(channel),
+        index,
+    }
 }
 
 /// The program's end of one stream.

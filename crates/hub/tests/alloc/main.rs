@@ -8,25 +8,29 @@
 //! allocation for each channel. The names of a reader make no allocation at a change
 //! to a key set no larger than one before. A client read makes as many allocations for
 //! each frame it relays as a HUB WIRE session, and a client write of one or two groups
-//! makes none. A complete reader that catches up from disk allocates only at each
-//! read. This binary has no test harness: the count covers each thread, and a harness
-//! allocates on its own thread at any time.
+//! makes none, also at a member that forwards it to its home. A complete reader that
+//! catches up from disk allocates only at each read. This binary has no test harness:
+//! the count covers each thread, and a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
 #[path = "../common/agent.rs"]
 #[expect(dead_code, reason = "the binary uses only some of the helpers")]
 mod agent;
-#[expect(dead_code, reason = "the binary uses only some of the helpers")]
 #[path = "../common/mod.rs"]
 mod common;
-#[path = "../common/net.rs"]
+mod forward;
+#[path = "../common/forwarded.rs"]
 #[expect(dead_code, reason = "the binary uses only some of the helpers")]
+mod forwarded;
+#[path = "../common/net.rs"]
 mod net;
 #[path = "../common/node.rs"]
 mod node;
 #[path = "../common/peer.rs"]
 mod peer;
+#[path = "../common/region.rs"]
+mod region;
 mod relay;
 #[path = "../common/serving.rs"]
 mod serving;
@@ -487,6 +491,8 @@ fn main() {
     for groups in [write::Groups::One, write::Groups::Two] {
         write::relays_a_frame_with_no_allocation(groups);
     }
+    forward::forwards_a_frame_with_no_allocation();
+    forward::forwards_a_full_window_with_no_allocation();
     catch_up_from_disk();
     woken_of_a_reader_that_takes_each_frame();
     woken_of_a_reader_that_falls_behind_again();

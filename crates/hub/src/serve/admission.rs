@@ -1,14 +1,15 @@
 //! The hello that a session admitted, its renewals, and its end.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::future::poll_fn;
 use std::pin::pin;
-use std::task::Poll;
+use std::task::{Context, Poll};
 
 use access::proof::{self, Admitted};
 use types::ed25519::PublicKey;
 use types::name::Name;
 use types::time::Stamp;
+use types::wait;
 use wire::hub::client::Signed;
 
 use super::Error;
@@ -21,6 +22,12 @@ pub(crate) struct Admission {
     /// The public key of the node that carried each hello of the session.
     peer: PublicKey,
     admitted: RefCell<Option<(Admitted, [u8; 64])>>,
+    /// The count of hellos admitted.
+    count: Cell<u64>,
+    /// The waker of each [`Renewal`] that waits, by its key.
+    waiting: RefCell<wait::Set>,
+    /// The key of the next [`Renewal`].
+    key: Cell<u64>,
 }
 
 impl Admission {
@@ -30,6 +37,9 @@ impl Admission {
         Self {
             peer,
             admitted: RefCell::default(),
+            count: Cell::default(),
+            waiting: RefCell::default(),
+            key: Cell::default(),
         }
     }
 
@@ -46,16 +56,54 @@ impl Admission {
         signed: Signed,
     ) -> Result<(), Error> {
         let Signed { hello, signature } = signed;
-        let state = state.borrow();
-        let now = state.time.now().mesh;
-        let mut admitted = self.admitted.borrow_mut();
-        let next = match admitted.as_ref() {
-            None => state.rules.admit(now, self.peer, hello, &signature),
-            Some((first, _)) => state.rules.renew(first, now, hello, &signature),
+        {
+            let state = state.borrow();
+            let now = state.time.now().mesh;
+            let mut admitted = self.admitted.borrow_mut();
+            let next = match admitted.as_ref() {
+                None => state.rules.admit(now, self.peer, hello, &signature),
+                Some((first, _)) => state.rules.renew(first, now, hello, &signature),
+            }
+            .map_err(|error| Error::Access(Box::new(error)))?;
+            *admitted = Some((next, signature));
         }
-        .map_err(|error| Error::Access(Box::new(error)))?;
-        *admitted = Some((next, signature));
+        self.count.set(self.count.get() + 1);
+        // A wake can drop a task whose renewal borrows the map.
+        let mut woken = Vec::new();
+        self.waiting.borrow_mut().drain(&mut woken);
+        for waker in woken {
+            waker.wake();
+        }
         Ok(())
+    }
+
+    /// The admitted hello and its signature, with the count of hellos admitted
+    /// through it.
+    ///
+    /// # Panics
+    ///
+    /// When no hello is admitted.
+    fn signed(&self) -> (Signed, u64) {
+        let admitted = self.admitted.borrow();
+        let (admitted, signature) = admitted
+            .as_ref()
+            .expect("invariant: a session holds a hello only after its admission");
+        let signed = Signed {
+            hello: admitted.hello().clone(),
+            signature: *signature,
+        };
+        (signed, self.count.get())
+    }
+
+    /// A wait for the renewals of the session, from now until its drop.
+    pub(crate) fn renewal(&self) -> Renewal<'_> {
+        let key = self.key.get();
+        self.key.set(key + 1);
+        Renewal {
+            admission: self,
+            key,
+            seen: Cell::new(self.count.get()),
+        }
     }
 
     /// The subject of the admitted hello, or `None` before one. A renewal never
@@ -143,5 +191,54 @@ impl Admission {
             .expect("invariant: a session waits only after its hello")
             .0
             .ends()
+    }
+}
+
+/// A wait for the renewals of a session. It keeps at most one waker, and its drop takes
+/// it out.
+#[derive(Debug)]
+pub(crate) struct Renewal<'a> {
+    admission: &'a Admission,
+    key: u64,
+    /// The count of hellos admitted through the last hello that it gave.
+    seen: Cell<u64>,
+}
+
+impl Renewal<'_> {
+    /// The admitted hello and its signature. A later [`Renewal::renewed`] gives only a
+    /// hello admitted after it.
+    ///
+    /// # Panics
+    ///
+    /// When no hello is admitted.
+    pub(crate) fn signed(&self) -> Signed {
+        let (signed, seen) = self.admission.signed();
+        self.seen.set(seen);
+        signed
+    }
+
+    /// The admitted hello when the session admitted it after the last hello that this
+    /// renewal gave, else `None`.
+    pub(crate) fn renewed(&self) -> Option<Signed> {
+        (self.admission.count.get() > self.seen.get()).then(|| self.signed())
+    }
+
+    /// Keeps the waker of `cx` until the session admits the next hello.
+    pub(crate) fn register(&self, cx: &Context<'_>) {
+        let replaced = self
+            .admission
+            .waiting
+            .borrow_mut()
+            .insert(self.key, cx.waker());
+        // The last drop of a waker can drop a task that borrows the map.
+        drop(replaced);
+    }
+}
+
+impl Drop for Renewal<'_> {
+    fn drop(&mut self) {
+        let held = self.admission.waiting.borrow_mut().remove(self.key);
+        // As in `register`.
+        drop(held);
     }
 }

@@ -562,9 +562,9 @@ impl Reply {
 }
 
 /// The order of the replies of a write stream at the program: an outcome answers the
-/// oldest group of a frame sent whole with no outcome, and names it, a
-/// [`Reply::Stored`] never passes the frames answered nor goes back in its group, and
-/// after a [`Reply::Ended`] its group gets only outcomes of its end.
+/// oldest group of a frame counted with [`Replies::sent`] with no outcome, and names
+/// it, a [`Reply::Stored`] never passes the frames answered nor goes back in its
+/// group, and after a [`Reply::Ended`] its group gets only outcomes of its end.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Replies {
     sent: u64,
@@ -630,8 +630,9 @@ impl Replies {
         }
     }
 
-    /// Counts a frame that the program sent whole, whose present groups are `groups`,
-    /// in group order.
+    /// Counts a frame that the program sent, whole or only its head, whose present
+    /// groups are `groups`, in group order. Call it before [`Replies::decode`] decodes
+    /// a reply of the frame.
     ///
     /// # Panics
     ///
@@ -756,6 +757,12 @@ impl Replies {
             self.answered = frame;
         }
         Ok(())
+    }
+
+    /// The count of frames sent, which is the frame of the last [`Replies::sent`].
+    #[must_use]
+    pub fn frames(&self) -> u64 {
+        self.sent
     }
 
     /// Whether each group of each frame sent got its outcome.

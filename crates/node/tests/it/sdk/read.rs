@@ -311,10 +311,10 @@ fn a_reader_reads_a_frame_larger_than_a_draft_of_the_sdk() {
             channels: vec!["plant.a".parse().unwrap()],
         };
         let mut writer = session.writer(config).await.unwrap();
-        let time = writer.index();
+        let index = writer.places()[0].index;
         let encoded: Vec<Vec<u8>> = (0..2)
             .map(|place| {
-                let raw = &raws[usize::from(place == time)];
+                let raw = &raws[usize::from(place == index)];
                 let data_type = Type::Scalar(Scalar::I64);
                 let mut out = vec![0; codec::max_len(data_type, raw.len())];
                 let len = codec::Encoder::new(data_type)
@@ -324,15 +324,18 @@ fn a_reader_reads_a_frame_larger_than_a_draft_of_the_sdk() {
                 out
             })
             .collect();
-        assert!(encoded[1 - time].len() > draft_max);
-        let layout: Vec<_> = encoded.iter().map(Vec::len).enumerate().collect();
+        assert!(encoded[1 - index].len() > draft_max);
         let count = u32::try_from(SAMPLES).unwrap();
-        let draft = writer.draft(Form::Encoded, count, &layout).await.unwrap();
+        let layout: Vec<_> = (encoded.iter().enumerate())
+            .map(|(place, bytes)| (place, count, bytes.len()))
+            .collect();
+        let mut draft = writer.draft(Form::Encoded, &layout).await.unwrap();
         for ((_, to), bytes) in draft.iter_mut().zip(&encoded) {
             to.copy_from_slice(bytes);
         }
         let time = program::write::Time::Frame(Path::Live);
-        written.send(writer.write(time).await.unwrap()).unwrap();
+        let outcomes = writer.write(time).await.unwrap().to_vec();
+        written.send((index, outcomes)).unwrap();
         writer.finish().await.unwrap();
         drop(session);
         group.ended().await;
@@ -343,7 +346,8 @@ fn a_reader_reads_a_frame_larger_than_a_draft_of_the_sdk() {
     };
     let handle = os::shards().unwrap().start(config, main).unwrap();
     let count = u32::try_from(SAMPLES).unwrap();
-    assert_eq!(wait(&outcome), taken(0, count));
+    let (index, outcomes) = wait(&outcome);
+    assert_eq!(outcomes, [(index, taken(0, count))]);
     handle.join().unwrap();
     let frame = reader.next().unwrap();
     assert_eq!(frame.count(), count);

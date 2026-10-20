@@ -199,6 +199,7 @@ fn code(error: &Error) -> Option<Code> {
         | Error::Founding { .. }
         | Error::Unjoinable { .. }
         | Error::Unfounded { .. }
-        | Error::CardFile { .. } => Some(REFUSED),
+        | Error::CardFile { .. }
+        | Error::Unjoined { .. } => Some(REFUSED),
     }
 }

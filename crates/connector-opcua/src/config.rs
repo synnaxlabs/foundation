@@ -73,11 +73,11 @@ pub(crate) const BODY: Body = Body {
         schema::Attribute {
             name: "polled",
             value: "a bool",
-            presence: Presence::Optional,
+            presence: Presence::Default("false"),
             summary: "Reads each node once per tick of the rate, in place of a \
                       subscription. A subscription writes a node only at its first \
                       value and at each change, so a reader that opens later gets no \
-                      sample of a node until it changes. Default false.",
+                      sample of a node until it changes.",
         },
         schema::Attribute {
             name: "certificate",

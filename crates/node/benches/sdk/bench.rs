@@ -228,7 +228,7 @@ fn program(
             channels: names(),
         };
         let mut writer = session.writer(config).await.expect("the writer opens");
-        let layout: Vec<_> = (0..writer.places().len()).map(|p| (p, 8)).collect();
+        let layout: Vec<_> = (0..writer.places().len()).map(|p| (p, 1, 8)).collect();
         let mut reader = None;
         if read {
             let select = Selector::new(["plant.a", "plant.b"]).expect("a selector");
@@ -256,22 +256,25 @@ fn program(
     all[WARMUP..].chunks(calls).map(<[_]>::to_vec).collect()
 }
 
-/// Writes a frame of 1 sample of each place of `layout`, a place and 8 bytes for each
-/// place of `writer`, with the node's stamp.
-async fn write(writer: &mut program::Writer, layout: &[(usize, usize)]) {
-    let index = writer.index();
-    let draft = writer
-        .draft(Form::Raw, 1, layout)
+/// Writes a frame of 1 sample of each place of `layout`, a place, a count, and 8 bytes
+/// for each place of `writer`, with the node's stamp.
+async fn write(writer: &mut program::Writer, layout: &[(usize, u32, usize)]) {
+    let index = writer.places()[0].index;
+    let mut draft = writer
+        .draft(Form::Raw, layout)
         .await
         .expect("the frame fits the pool");
-    for (place, _) in layout.iter().filter(|(place, _)| *place != index) {
+    for (place, ..) in layout.iter().filter(|(place, ..)| *place != index) {
         draft
             .series_mut(*place)
             .expect("the layout holds it")
             .fill(1);
     }
     let written = writer.write(Time::Node).await;
-    assert!(matches!(written, Ok(Outcome::Taken { .. })), "{written:?}");
+    assert!(
+        matches!(written, Ok(&[(_, Outcome::Taken { .. })])),
+        "{written:?}"
+    );
 }
 
 /// The channels that each writer writes.
