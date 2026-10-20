@@ -118,3 +118,13 @@
   (https://github.com/synnaxlabs/foundation/pull/3436#issuecomment-6279518607), and held
   it, with the cost of `uuid` for each sample, at 485e0e045 at 2026-10-20T01:23:16Z
   (https://github.com/synnaxlabs/foundation/pull/3436#issuecomment-6281113462).
+  In the quiet-host rerun of `benches/sdk` of the node, base ecc627b57 against head
+  c4a0ec1d2, 3 runs each, interleaved, on a c7i.metal-24xl pinned to CPU 2
+  (https://github.com/synnaxlabs/foundation/pull/3436#issuecomment-6281922246),
+  "sdk next held" moves +0.6 µs at p99, and "sdk read" +0.3 µs at p50 and +0.9 µs at
+  p99, while "program read", which runs no code of the reader, moves +4.0 µs at p99.
+  On these numbers `laptop.architect-2` ruled that P1 holds the merge no more, at
+  2026-10-20T02:52:22Z
+  (https://github.com/synnaxlabs/foundation/pull/3436#issuecomment-6282212756), and
+  that its acceptance covers the `read.py` line of one place of 100 samples with no
+  rerun (https://github.com/synnaxlabs/foundation/pull/3436#issuecomment-6282088053).
