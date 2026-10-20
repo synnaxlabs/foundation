@@ -1175,9 +1175,9 @@ fn freeze(
 }
 
 /// Whether an accepted group of `checks` with samples has an index frame that no block
-/// of the pool of `buffer` holds, or whether their stored entries pass a
-/// limit of one record of `buffer`, as [`Buffer::append`] checks a batch of entries
-/// with tag 0. Reads the lengths of `split`, so it needs no block.
+/// of the pool of `buffer` holds, or whether their stored entries pass a limit of one
+/// record of `buffer`, as [`Buffer::append`] checks a batch of entries with tag 0.
+/// Reads the lengths of `split`, so it needs no block.
 fn too_large(
     buffer: &Buffer,
     split: &mut Split<'_>,
