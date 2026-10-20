@@ -67,15 +67,41 @@ struct Buffers {
 
 impl Writer {
     /// The Python writer of `writer`, opened in `process`.
-    pub(crate) fn new(writer: sdk::write::Writer, process: u32, loss: Loss) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// `Stopped`, code `malformed`, when the channels of `writer` are of more than one
+    /// index, which drops `writer`.
+    pub(crate) fn new(
+        py: Python<'_>,
+        writer: sdk::write::Writer,
+        process: u32,
+        loss: Loss,
+    ) -> PyResult<Self> {
+        let places = writer.places();
+        let mut indexes: Vec<&str> = Vec::new();
+        for place in places {
+            let index = places[place.index].name.as_str();
+            if !indexes.contains(&index) {
+                indexes.push(index);
+            }
+        }
+        if indexes.len() > 1 {
+            let text = format!(
+                "channels of more than one index ({}): open one writer for each index",
+                indexes.join(", ")
+            );
+            let stopped = crate::Stopped::new_err(text);
+            return Err(crate::coded(py, stopped, program::Refusal::Malformed));
+        }
         let mut named = hash::Map::default();
         for (place, Place { name, .. }) in writer.places().iter().enumerate() {
             named.entry(name.as_str().to_owned()).or_insert(place);
         }
-        Self {
+        Ok(Self {
             places: writer.places().to_vec(),
             named,
-            index: writer.index(),
+            index: writer.places()[0].index,
             bytes_max: writer.bytes_max(),
             state: Mutex::new(Some(State {
                 writer,
@@ -85,7 +111,7 @@ impl Writer {
             loss,
             #[cfg(feature = "sim")]
             part: crate::sim::Part::default(),
-        }
+        })
     }
 
     /// The state, which it waits for with other Python threads running. No Python code
@@ -316,7 +342,7 @@ impl Writer {
         let send = |writer: &mut sdk::write::Writer, buffers: &Buffers| {
             #[cfg(feature = "sim")]
             self.part.mark(began);
-            writer.write(&buffers.values)
+            one(writer.write(&buffers.values))
         };
         self.send(py, buffers, send, |buffers| {
             let index = (!buffers.values.is_empty()).then_some(self.index);
@@ -378,11 +404,15 @@ impl Writer {
             let Buffers { bytes, series, .. } = buffers;
             let parts: Vec<_> = series
                 .iter()
-                .map(|(place, range)| (*place, &bytes[range.clone()]))
+                .map(|(place, range)| sdk::write::Series {
+                    place: *place,
+                    count: samples,
+                    bytes: &bytes[range.clone()],
+                })
                 .collect();
             #[cfg(feature = "sim")]
             self.part.mark(began);
-            writer.write_series(samples, &parts)
+            one(writer.write_series(&parts))
         };
         self.send(py, buffers, send, |buffers| {
             buffers.series.iter().map(|&(place, _)| place).collect()
@@ -469,6 +499,27 @@ fn rejection(refusal: Refusal) -> (&'static str, &'static str) {
              the node's pool: write it again later",
         ),
         Refusal::Large => ("large", "the frame is too large for one write: split it"),
+    }
+}
+
+/// The outcome of the one group of a frame of a writer of one index, from what a call
+/// of the `sdk` writer gave: the end of the group for `Partial`.
+fn one(
+    written: Result<&[(usize, Outcome)], sdk::Error>,
+) -> Result<Outcome, sdk::Error> {
+    let single = |outcomes: &[(usize, Outcome)]| {
+        let &[(_, outcome)] = outcomes else {
+            panic!(
+                "invariant: a frame of a writer of one index has one group, not {}",
+                outcomes.len()
+            );
+        };
+        outcome
+    };
+    match written {
+        Ok(outcomes) => Ok(single(outcomes)),
+        Err(sdk::Error::Partial { outcomes, .. }) => Ok(single(&outcomes)),
+        Err(error) => Err(error),
     }
 }
 
