@@ -540,6 +540,14 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "Cycle.: y")]
+    fn fails_each_when_that_each_example_holds() {
+        let examples = [&["b", "x", "y"][..], &["b", "y"]]
+            .map(|keys| ((), &CYCLE, document(keys, Vec::new())));
+        assert_examples(examples, |(), _| Vec::new());
+    }
+
+    #[test]
     #[should_panic(expected = "Unnamed.: u")]
     fn fails_an_unless_that_names_nothing() {
         let example = document(&[], Vec::new());
