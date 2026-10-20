@@ -7,6 +7,7 @@
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #include <open62541/client.h>
+#include <open62541/plugin/accesscontrol_default.h>
 #include <open62541/plugin/certificategroup_default.h>
 #include <open62541/server_config_default.h>
 /* For the Publish decode memory of a client. */
@@ -425,6 +426,91 @@ UA_StatusCode shim_server_set_source(UA_Server *server, shim_node node,
 /* Sets the most session timeout of `server`, in ms. */
 void shim_server_session_timeout(UA_Server *server, UA_UInt32 ms) {
     UA_Server_getConfig(server)->maxSessionTimeout = ms;
+}
+
+/* Lets in a later session of `server` only with one of the `count` logins of `logins`,
+ * which it copies, and no anonymous session. */
+UA_StatusCode shim_server_users(UA_Server *server,
+                                const UA_UsernamePasswordLogin *logins, size_t count) {
+    return UA_AccessControl_default(UA_Server_getConfig(server), false, NULL, count,
+                                    logins);
+}
+
+static UA_StatusCode invalid_token(UA_Server *server, UA_AccessControl *ac,
+                                   const UA_EndpointDescription *endpoint,
+                                   const UA_ByteString *certificate,
+                                   const UA_NodeId *session,
+                                   const UA_ExtensionObject *token, void **context) {
+    (void)server;
+    (void)ac;
+    (void)endpoint;
+    (void)certificate;
+    (void)session;
+    (void)token;
+    (void)context;
+    return UA_STATUSCODE_BADIDENTITYTOKENINVALID;
+}
+
+static UA_StatusCode denied_user(UA_Server *server, UA_AccessControl *ac,
+                                 const UA_EndpointDescription *endpoint,
+                                 const UA_ByteString *certificate,
+                                 const UA_NodeId *session,
+                                 const UA_ExtensionObject *token, void **context) {
+    (void)server;
+    (void)ac;
+    (void)endpoint;
+    (void)certificate;
+    (void)session;
+    (void)token;
+    (void)context;
+    return UA_STATUSCODE_BADUSERACCESSDENIED;
+}
+
+/* Makes `server` refuse each later session with `status`, `BadIdentityTokenInvalid`
+ * or `BadUserAccessDenied`. Returns `BadInvalidArgument` for another status. */
+UA_StatusCode shim_server_refuse_sessions(UA_Server *server, UA_StatusCode status) {
+    UA_AccessControl *ac = &UA_Server_getConfig(server)->accessControl;
+    switch(status) {
+    case UA_STATUSCODE_BADIDENTITYTOKENINVALID:
+        ac->activateSession = invalid_token;
+        return UA_STATUSCODE_GOOD;
+    case UA_STATUSCODE_BADUSERACCESSDENIED:
+        ac->activateSession = denied_user;
+        return UA_STATUSCODE_GOOD;
+    default:
+        return UA_STATUSCODE_BADINVALIDARGUMENT;
+    }
+}
+
+/* Gives each endpoint of `server` one user token policy, a user name with the
+ * security policy of the URI `uri`. */
+UA_StatusCode shim_server_token_policy(UA_Server *server, const char *uri) {
+    UA_String postfix = securityPolicyUriPostfix(UA_STRING((char *)uri));
+    if(postfix.length == 0 || postfix.data[0] != '#')
+        return UA_STATUSCODE_BADINVALIDARGUMENT;
+    const char prefix[] = "open62541-username-policy";
+    size_t length = sizeof prefix - 1 + postfix.length;
+    UA_ServerConfig *config = UA_Server_getConfig(server);
+    for(size_t i = 0; i < config->endpointsSize; i++) {
+        UA_EndpointDescription *endpoint = &config->endpoints[i];
+        UA_Array_delete(endpoint->userIdentityTokens, endpoint->userIdentityTokensSize,
+                        &UA_TYPES[UA_TYPES_USERTOKENPOLICY]);
+        endpoint->userIdentityTokensSize = 0;
+        endpoint->userIdentityTokens = UA_UserTokenPolicy_new();
+        if(!endpoint->userIdentityTokens)
+            return UA_STATUSCODE_BADOUTOFMEMORY;
+        endpoint->userIdentityTokensSize = 1;
+        UA_UserTokenPolicy *policy = endpoint->userIdentityTokens;
+        policy->tokenType = UA_USERTOKENTYPE_USERNAME;
+        policy->policyId.data = (UA_Byte *)UA_malloc(length);
+        policy->securityPolicyUri = UA_STRING_ALLOC(uri);
+        if(!policy->policyId.data || !policy->securityPolicyUri.data)
+            return UA_STATUSCODE_BADOUTOFMEMORY;
+        policy->policyId.length = length;
+        memcpy(policy->policyId.data, prefix, sizeof prefix - 1);
+        memcpy(policy->policyId.data + sizeof prefix - 1, postfix.data, postfix.length);
+    }
+    return UA_STATUSCODE_GOOD;
 }
 
 /* Gives in `id` the number of the DataType of the variable `node` of `server`.

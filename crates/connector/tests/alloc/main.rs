@@ -1,7 +1,7 @@
 //! Polling a registered wait or race allocates nothing, and so do a tick from the third
-//! call on, a stamped request, each call of a fit and of a sample stamp, and a set of a
-//! status count. This binary has no test harness: the count covers each thread, and a
-//! harness allocates on its own thread at any time.
+//! call on, a stamped request and a sample stamp of a `poll::Writer`, each call of a
+//! fit, and a set of a status count. This binary has no test harness: the count
+//! covers each thread, and a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -14,12 +14,8 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::task::{Context, Wake, Waker};
 
 use connector::cancel::Token;
-use connector::kind::Table;
 use connector::pace::Timer;
-use connector::stamp::{Fit, Fitted, Stamps};
-use connector::testing::{self, Rig};
-use types::channel;
-use types::name::Name;
+use connector::stamp::{Fit, Fitted};
 use types::time::{Monotonic, Rate, Span, Stamp};
 
 /// A waker with a reference count, as a task has. It counts its wakes.
@@ -55,7 +51,7 @@ fn main() {
         "race",
     );
     check_ticks();
-    check_stamps();
+    stamps::check();
     check_fit();
     status::check(status::Shows::Nothing);
     status::check(status::Shows::Error);
@@ -105,41 +101,10 @@ fn check_ticks() {
     handle.join().expect("the shard ends");
 }
 
-/// Checks that 64 polls of a stamped request that is ready allocate nothing, after
-/// one warm-up request.
-fn check_stamps() {
-    let mut sim = sim::Sim::new(sim::Config::default());
-    let node = sim.node(sim::node::Config::default());
-    let result = sim.run_on(&node, |node, tasks| async move {
-        let rig = Rig::open(env(&node, tasks), node.net(), Table::new()).await;
-        let connector: Name = "plant.stamp".parse().expect("a valid name");
-        let first = channel::Key::from_u128(100);
-        rig.define(testing::create_status(&connector, &[], first));
-        let state = "plant.stamp.status.state".parse().expect("a valid name");
-        let writer = rig.writer(connector, vec![state]).await;
-        let mut stamps = Stamps::default();
-        stamps.request(&writer, future::ready(())).await;
-        let mut cx = Context::from_waker(Waker::noop());
-        let ((), allocations) = ALLOCATOR.count(|| {
-            for _ in 0..64 {
-                let request = pin!(stamps.request(&writer, future::ready(())));
-                assert!(request.poll(&mut cx).is_ready(), "a ready request");
-            }
-        });
-        allocations
-    });
-    assert_eq!(
-        result.expect("the run ends"),
-        0,
-        "a stamped request allocates nothing"
-    );
-}
-
-/// Checks that 64 calls each of `Fit::between`, `Fit::before`, `Fit::mesh`, and
-/// `Stamps::sample` allocate nothing.
+/// Checks that 64 calls each of `Fit::between`, `Fit::before`, and `Fit::mesh`
+/// allocate nothing.
 fn check_fit() {
     let mut fit = Fit::default();
-    let mut stamps = Stamps::default();
     let ((), allocations) = ALLOCATOR.count(|| {
         for n in 0..64_i64 {
             let device = Monotonic(n.unsigned_abs() * 1_000);
@@ -150,10 +115,9 @@ fn check_fit() {
             assert_eq!(fit.before(device, mesh), kept, "a true timestamp fits");
             let time = fit.mesh(device).expect("the fit bounds the clock");
             assert_eq!(time.earliest, early, "the fit holds the reading");
-            std::hint::black_box(stamps.sample(time, mesh));
         }
     });
-    assert_eq!(allocations, 0, "a fit and a sample stamp allocate nothing");
+    assert_eq!(allocations, 0, "a fit allocates nothing");
 }
 
 /// The inputs of a hub on a new shard of `node`.
@@ -183,6 +147,65 @@ fn check<F: Future>(mut f: Pin<&mut F>, token: &Token, wakers: &[Waker], name: &
         allocations, 0,
         "{name}: a registered poll allocates nothing"
     );
+}
+
+#[path = "../common/stamped.rs"]
+mod stamped;
+
+mod stamps {
+    use std::future;
+    use std::pin::pin;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering::Relaxed;
+    use std::task::{self, Waker};
+
+    use types::time::{Interval, Span};
+
+    use super::{ALLOCATOR, stamped};
+
+    /// Checks that 64 polls of a stamped request of a `poll::Writer` that is ready,
+    /// after one warm-up request, and 64 sample stamps allocate nothing.
+    pub(super) fn check() {
+        let requests = Arc::new(AtomicU64::new(1));
+        let samples = Arc::new(AtomicU64::new(1));
+        let (into_requests, into_samples) =
+            (Arc::clone(&requests), Arc::clone(&samples));
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let node = sim.node(sim::node::Config::default());
+        let result = sim.run_on(&node, |node, tasks| async move {
+            let env = super::env(&node, tasks);
+            let rig = stamped::rig(env, node.net(), move |writer| {
+                let mut cx = task::Context::from_waker(Waker::noop());
+                let warm = pin!(writer.request(future::ready(()))).poll(&mut cx);
+                let task::Poll::Ready(((), first)) = warm else {
+                    panic!("a ready request")
+                };
+                let ((), counted) = ALLOCATOR.count(|| {
+                    for _ in 0..64 {
+                        let request = pin!(writer.request(future::ready(())));
+                        assert!(request.poll(&mut cx).is_ready(), "a ready request");
+                    }
+                });
+                into_requests.store(counted, Relaxed);
+                let ((), counted) = ALLOCATOR.count(|| {
+                    for n in 1..=64 {
+                        let earliest = first + Span::from_nanos(n * 1_000);
+                        let latest = earliest + Span::from_nanos(200);
+                        let time = Interval { earliest, latest };
+                        std::hint::black_box(writer.sample(time, earliest));
+                    }
+                });
+                into_samples.store(counted, Relaxed);
+            })
+            .await;
+            stamped::run(&rig).await;
+        });
+        result.expect("the run ends");
+        let requests = requests.load(Relaxed);
+        assert_eq!(requests, 0, "a stamped request allocates nothing");
+        assert_eq!(samples.load(Relaxed), 0, "a sample stamp allocates nothing");
+    }
 }
 
 mod status {

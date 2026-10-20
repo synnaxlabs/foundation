@@ -12,7 +12,7 @@ use types::authority::Authority;
 use types::frame::{Form, Path};
 use types::sample::{Scalar, Type, Value};
 
-use super::{planted, session, taken, wait};
+use super::{of, planted, session, taken, wait};
 
 /// A reader of `channels` of `mode` on `client`.
 fn reader(client: &Client, channels: &[&str], mode: Mode) -> Reader {
@@ -31,10 +31,12 @@ fn writer(client: &Client, channels: &[&str]) -> Writer {
 /// larger one.
 fn draft_max(client: &Client) -> usize {
     let mut writer = writer(client, &["plant.a"]);
-    let (a, time) = (at(writer.places(), "plant.a"), writer.index());
+    let (a, time) = (
+        at(writer.places(), "plant.a"),
+        at(writer.places(), "plant.time"),
+    );
     let bytes = vec![0; 1 << 20];
-    let series = [(a, bytes.as_slice()), (time, bytes.as_slice())];
-    match writer.write_series(1 << 17, &series) {
+    match writer.write_series(&[of(a, 1 << 17, &bytes), of(time, 1 << 17, &bytes)]) {
         Err(Error::Stream(program::Error::Pool(block::Error::TooLarge {
             largest,
             ..
@@ -106,8 +108,9 @@ fn a_reader_of_a_name_gets_the_frames_of_a_writer_in_order() {
         at(writer.places(), "plant.b"),
     );
     let values_ab = [(wa, Value::I64(1)), (wb, Value::I64(2))];
-    assert_eq!(writer.write(&values_ab), Ok(taken(0, 1)));
-    assert_eq!(writer.write(&[(wa, Value::I64(3))]), Ok(taken(1, 1)));
+    assert_eq!(writer.write(&values_ab), Ok(&[(2, taken(0, 1))][..]));
+    let taken = Ok(&[(2, taken(1, 1))][..]);
+    assert_eq!(writer.write(&[(wa, Value::I64(3))]), taken);
     let first = reader.next().unwrap();
     assert_eq!((first.count(), first.index()), (1, time));
     assert_eq!(values(first, a), [1]);
@@ -138,7 +141,7 @@ fn a_place_of_a_reader_is_the_channel_of_its_name_then_its_index() {
     let mut plant = writer(&client, &["plant.a", "plant.b"]);
     let (wa, wb) = (at(plant.places(), "plant.a"), at(plant.places(), "plant.b"));
     let pair = [(wa, Value::I64(1)), (wb, Value::I64(2))];
-    assert_eq!(plant.write(&pair), Ok(taken(0, 1)));
+    assert_eq!(plant.write(&pair), Ok(&[(2, taken(0, 1))][..]));
     let frame = swapped.next().unwrap();
     assert_eq!(
         (values(frame, 0), values(frame, 1), frame.index()),
@@ -181,7 +184,8 @@ fn a_latest_reader_gets_a_frame_that_a_writer_writes() {
     let a = at(reader.places(), "plant.a");
     let mut writer = writer(&client, &["plant.a"]);
     let wa = at(writer.places(), "plant.a");
-    assert_eq!(writer.write(&[(wa, Value::I64(4))]), Ok(taken(0, 1)));
+    let taken = Ok(&[(1, taken(0, 1))][..]);
+    assert_eq!(writer.write(&[(wa, Value::I64(4))]), taken);
     let frame = reader.next().unwrap();
     assert_eq!(values(frame, a), [4]);
     assert_eq!(frame.lost(a), 0..0);
@@ -256,7 +260,10 @@ fn a_reader_reads_the_largest_frame_that_a_writer_of_the_sdk_writes() {
     let mut reader = reader(&client, &["plant.a"], Mode::Complete);
     let a = at(reader.places(), "plant.a");
     let mut writer = writer(&client, &["plant.a"]);
-    let (wa, time) = (at(writer.places(), "plant.a"), writer.index());
+    let (wa, time) = (
+        at(writer.places(), "plant.a"),
+        at(writer.places(), "plant.time"),
+    );
     let mut state = 7;
     let samples = random(SAMPLES, &mut state);
     // Each vector of 1,024 stamps has one step of 2^56, so no codec saves 1/8 of it.
@@ -274,11 +281,9 @@ fn a_reader_reads_the_largest_frame_that_a_writer_of_the_sdk_writes() {
     let (sample_bytes, stamp_bytes) = (raw(&samples), raw(&stamps));
     assert!(sample_bytes.len() + stamp_bytes.len() <= draft_max);
     let count = u32::try_from(SAMPLES).unwrap();
-    let series = [
-        (wa, sample_bytes.as_slice()),
-        (time, stamp_bytes.as_slice()),
-    ];
-    assert_eq!(writer.write_series(count, &series), Ok(taken(0, count)));
+    let series = [of(wa, count, &sample_bytes), of(time, count, &stamp_bytes)];
+    let taken = Ok(&[(time, taken(0, count))][..]);
+    assert_eq!(writer.write_series(&series), taken);
     let frame = reader.next().unwrap();
     assert_eq!(frame.count(), count);
     assert_eq!(values(frame, a), samples);
@@ -391,7 +396,7 @@ pub(super) fn a_warm_next_makes_no_allocation() {
     let mut call = || {
         let written = writer.write(&[(0, Value::I64(1))]);
         assert!(
-            matches!(written, Ok(sdk::write::Outcome::Taken { .. })),
+            matches!(written, Ok([(1, sdk::write::Outcome::Taken { .. })])),
             "{written:?}"
         );
         let frame = reader.next().unwrap();

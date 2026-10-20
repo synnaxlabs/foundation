@@ -33,16 +33,19 @@
      sent, and the writer goes on, or, at the open, no writer or reader opened.
      `Stream` with `Unstored` raises `Stopped` with the code of the end of the first
      group (`Removed` gives `unknown`, `Failed` gives `failed`, `Refused` gives
-     `refused`): an `sdk` writer has one index, so one group, and only `close` gives
-     it. Approved in PR 3372 by `laptop.architect-2` at 2026-10-19T20:32:43Z
-     (https://github.com/synnaxlabs/foundation/pull/3372#issuecomment-6276693435).
-     Lost: a class or a code of its own for `Unstored`, since after both the caller
-     does the same: a frame that the node took may not be on disk. So the code alone
-     does not tell a refusal at `close` from the end of the group; the text does.
-     When an `sdk` writer can hold more than one group, this map comes back to
-     `laptop.architect-2`. A `Pool` error of the stream of a reader, after its open,
-     raises `ConnectionError` in place of `ValueError` (item 2 of SDK PYTHON READER).
-     Each other `Stream` or `Session` error raises `ConnectionError`.
+     `refused`): an `sdk-python` writer has one index until #3283 PR 4, so one group,
+     and only `close` gives it. Approved in PR 3372 by `laptop.architect-2` at
+     2026-10-19T20:32:43Z
+     (https://github.com/synnaxlabs/foundation/pull/3372#issuecomment-6276693435). Lost:
+     a class or a code of its own for `Unstored`, since after both the caller does the
+     same: a frame that the node took may not be on disk. So the code alone does not
+     tell a refusal at `close` from the end of the group; the text does. When an
+     `sdk-python` writer can hold more than one group (#3283 PR 4), this map comes back
+     to `laptop.architect-2` (2026-10-20T11:52:04Z,
+     https://github.com/synnaxlabs/foundation/pull/3581#issuecomment-6290213494). A
+     `Pool` error of the stream of a reader, after its open, raises `ConnectionError` in
+     place of `ValueError` (item 2 of SDK PYTHON READER). Each other `Stream` or
+     `Session` error raises `ConnectionError`.
   2. `sdk-python` takes `program` as a normal dependency and matches
      `program::Error::Refused` itself. Lost: a re-export of `program::Error` and
      `program::Refusal` from `sdk`, two public items that no Rust caller names yet. The

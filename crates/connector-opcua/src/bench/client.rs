@@ -274,7 +274,12 @@ impl Server {
             Net::clone(&self.net),
             rng,
             &self.url,
-            mode.map(|mode| (&CLIENT_SIDE, mode)),
+            mode.map(|mode| crate::client::Session {
+                credentials: CLIENT_SIDE,
+                mode,
+                user: None,
+            })
+            .as_ref(),
             future::pending(),
         )
         .await

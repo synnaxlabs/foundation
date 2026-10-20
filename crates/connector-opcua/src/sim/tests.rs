@@ -15,7 +15,7 @@ use crate::client::browse::{
     Base, Cause, Class, Description, Foreign, Page, Reference, Unit,
 };
 use crate::client::subscription::Change;
-use crate::client::{self, Client, Mode};
+use crate::client::{self, Client, Mode, Session};
 use crate::connection::OPTIONS;
 use crate::event;
 use crate::ffi::Status;
@@ -969,7 +969,11 @@ fn secure_connects() -> (Option<Status>, Option<client::Error>, Result<Value, Fa
                     node.net(),
                     &mut rng,
                     &url,
-                    Some((&CLIENT_SIDE, mode)),
+                    Some(&Session {
+                        credentials: CLIENT_SIDE,
+                        mode,
+                        user: None,
+                    }),
                     future::pending(),
                 )
                 .await

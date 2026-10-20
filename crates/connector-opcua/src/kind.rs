@@ -251,96 +251,102 @@ async fn run(ctx: Context<Config>) -> Result<(), Error> {
     let security = ctx.config().security.as_ref();
     let secured =
         Secured::read(security, async |source| ctx.secret(source).await).await?;
+    let run = Run { ctx: &ctx, secured };
     if ctx.config().reads.is_empty() {
-        return idle(&ctx, secured.as_ref()).await;
+        return run.idle().await;
     }
     let Some(mut frames) = Frames::open(&ctx).await? else {
         return Ok(());
     };
-    let ran = connect(
-        &ctx,
-        frames.writer.time(),
-        secured.as_ref(),
-        async |client| {
+    let ran = run
+        .connect(frames.writer.time(), async |client| {
             if ctx.config().polled {
                 read(&ctx, client, &mut frames).await.map(|()| None)
             } else {
                 watch::run(&ctx, client, &mut frames).await
             }
-        },
-    )
-    .await?;
+        })
+        .await?;
     match ran.transpose()?.flatten() {
-        Some(status) => fall_back(&ctx, &mut frames, secured.as_ref(), status).await,
+        Some(status) => run.fall_back(&mut frames, status).await,
         None => Ok(()),
     }
 }
 
-/// Notes that the server answered the subscribe with `status`, and polls as [`read`]
-/// does on a new session, so that the client and the server keep nothing of the
-/// subscribe.
-#[cold]
-async fn fall_back(
-    ctx: &Context<Config>,
-    frames: &mut Frames<'_>,
-    secured: Option<&Secured<'_>>,
-    status: Status,
-) -> Result<(), Error> {
-    frames.note.polls = Some(status);
-    frames.note.show(ctx, None);
-    let mesh = frames.writer.time();
-    let ran = connect(ctx, mesh, secured, async |client| {
-        read(ctx, client, frames).await
-    })
-    .await?;
-    ran.unwrap_or(Ok(()))
+/// A run of the kind: its context and the credentials of its secure channel.
+struct Run<'a> {
+    ctx: &'a Context<Config>,
+    secured: Option<Secured<'a>>,
 }
 
-/// Connects, notes [`NO_READ`], and keeps the session until the cancel. A writer
-/// refuses no channel, so this run opens none.
-async fn idle(
-    ctx: &Context<Config>,
-    secured: Option<&Secured<'_>>,
-) -> Result<(), Error> {
-    // The status channels opened, so the node has mesh time and this gives at once.
-    let mesh = ctx.time().await;
-    let ran = connect(ctx, mesh, secured, async |client| {
-        ctx.clear_error();
-        ctx.note(&NO_READ);
-        let idle = client.idle(ctx.cancel().wait()).await;
-        idle.map_err(|status| failed(client.url(), Call::Check, status))
-    })
-    .await?;
-    ran.unwrap_or(Ok(()))
+impl Run<'_> {
+    /// Notes that the server answered the subscribe with `status`, and polls as
+    /// [`read`] does on a new session, so that the client and the server keep nothing
+    /// of the subscribe.
+    #[cold]
+    async fn fall_back(
+        &self,
+        frames: &mut Frames<'_>,
+        status: Status,
+    ) -> Result<(), Error> {
+        frames.note.polls = Some(status);
+        frames.note.show(self.ctx, None);
+        let mesh = frames.writer.time();
+        let ran = self
+            .connect(mesh, async |client| read(self.ctx, client, frames).await)
+            .await?;
+        ran.unwrap_or(Ok(()))
+    }
+
+    /// Connects, notes [`NO_READ`], and keeps the session until the cancel. A writer
+    /// refuses no channel, so this run opens none.
+    async fn idle(&self) -> Result<(), Error> {
+        let ctx = self.ctx;
+        // The status channels opened, so the node has mesh time and this gives at once.
+        let mesh = ctx.time().await;
+        let ran = self
+            .connect(mesh, async |client| {
+                ctx.clear_error();
+                ctx.note(&NO_READ);
+                let idle = client.idle(ctx.cancel().wait()).await;
+                idle.map_err(|status| failed(client.url(), Call::Check, status))
+            })
+            .await?;
+        ran.unwrap_or(Ok(()))
+    }
+
+    /// Runs `work` on a session to the server until the cancel, as [`session`] does,
+    /// with the mesh time `mesh`.
+    async fn connect<T>(
+        &self,
+        mesh: hub::Time,
+        work: impl AsyncFnOnce(&mut Client) -> T,
+    ) -> Result<Option<T>, Error> {
+        let ctx = self.ctx;
+        session(
+            event::Time::mesh(ctx.clock().clone(), mesh),
+            ctx.span().clone(),
+            ctx.net().clone(),
+            &mut ctx.rng(),
+            &ctx.config().address,
+            self.secured.as_ref(),
+            ctx.cancel().wait(),
+            work,
+        )
+        .await
+    }
 }
 
-/// Runs `work` on a session to the server of `ctx` until its cancel, as [`session`]
-/// does, with the mesh time `mesh`, over the channel of `secured`.
-async fn connect<T>(
-    ctx: &Context<Config>,
-    mesh: hub::Time,
-    secured: Option<&Secured<'_>>,
-    work: impl AsyncFnOnce(&mut Client) -> T,
-) -> Result<Option<T>, Error> {
-    session(
-        event::Time::mesh(ctx.clock().clone(), mesh),
-        ctx.span().clone(),
-        ctx.net().clone(),
-        &mut ctx.rng(),
-        &ctx.config().address,
-        secured,
-        ctx.cancel().wait(),
-        work,
-    )
-    .await
-}
-
-/// The credentials of a secure channel, read from the sources of the config.
+/// The credentials of a secure channel and the user of its session, read from the
+/// sources of the config.
 struct Secured<'a> {
     security: &'a Security,
     certificate: secret::Value,
     key: secret::Value,
     trust: secret::Value,
+    /// The password of the user of `security`, which has a user exactly when it is
+    /// `Some`.
+    password: Option<secret::Value>,
 }
 
 impl<'a> Secured<'a> {
@@ -358,14 +364,29 @@ impl<'a> Secured<'a> {
             certificate: read(&security.certificate).await?,
             key: read(&security.key).await?,
             trust: read(&security.trust).await?,
+            password: match &security.user {
+                Some(user) => Some(read(&user.password).await?),
+                None => None,
+            },
         }))
     }
 
-    fn credentials(&self) -> Credentials<'_> {
-        Credentials {
-            certificate: self.certificate.expose(),
-            key: self.key.expose(),
-            trust: self.trust.expose(),
+    fn session(&self) -> client::Session<'_> {
+        client::Session {
+            credentials: Credentials {
+                certificate: self.certificate.expose(),
+                key: self.key.expose(),
+                trust: self.trust.expose(),
+            },
+            mode: self.security.mode,
+            user: self.security.user.as_ref().map(|user| client::User {
+                name: &user.name,
+                password: self
+                    .password
+                    .as_ref()
+                    .expect("invariant: Secured::read reads the password of each user")
+                    .expose(),
+            }),
         }
     }
 
@@ -441,12 +462,9 @@ async fn session<T>(
     until: impl Future<Output = ()>,
     work: impl AsyncFnOnce(&mut Client) -> T,
 ) -> Result<Option<T>, Error> {
-    let credentials =
-        secured.map(|secured| (secured.credentials(), secured.security.mode));
-    let security =
-        (credentials.as_ref()).map(|(credentials, mode)| (credentials, *mode));
+    let session = secured.map(Secured::session);
     let connected =
-        Client::connect(time, span, net, rng, address, security, until).await;
+        Client::connect(time, span, net, rng, address, session.as_ref(), until).await;
     let connected = connected.map_err(|error| match error {
         client::Error::Failed(status) => device(Failure::Connect {
             address: address.to_string_lossy().into_owned(),
@@ -470,17 +488,30 @@ async fn session<T>(
 /// The likely cause, which ends with its fix, of a connect over `secured`, or in the
 /// mode None when it is `None`, that failed with `status`. `None` when the status names
 /// no cause. A server can send the trust, time, URI, and use statuses about the
-/// certificate of the node too, so their causes name both certificates. The connector
-/// has no `user`, so `BadIdentityTokenRejected` names the endpoints of an anonymous
-/// user.
+/// certificate of the node too, so their causes name both certificates. A server can
+/// send `BadIdentityTokenRejected` and `BadIdentityTokenInvalid` for a token that it
+/// refuses or cannot read, so with a user their causes name that too.
 fn cause(status: Status, secured: Option<&Secured<'_>>) -> Option<String> {
     if status == Status::BAD_IDENTITY_TOKEN_REJECTED {
-        return Some(unoffered(secured.map(|secured| secured.security.mode)));
+        return Some(unoffered(secured));
     }
     let secured = secured?;
     let (certificate, trust) = (&secured.security.certificate, &secured.security.trust);
     let cause = match status {
         Status::BAD_SECURITY_CHECKS_FAILED => secured.distrusted(),
+        Status::BAD_USER_ACCESS_DENIED => {
+            format!("the server {}", refused(secured.security.user.as_ref()?))
+        }
+        Status::BAD_IDENTITY_TOKEN_INVALID => {
+            let user = secured.security.user.as_ref()?;
+            let (name, password) = (&user.name, &user.password);
+            format!(
+                "the server could not read the user token (its policy or its \
+                 encryption), or refused the user {name:?} with the password \
+                 {password}. Check the user token policies of the server, `user`, and \
+                 the password {password}"
+            )
+        }
         Status::BAD_CERTIFICATE_UNTRUSTED => format!(
             "the trust holds neither the certificate of the server nor the CA that \
              issued it, or the server does not trust the certificate of the node \
@@ -517,30 +548,59 @@ fn cause(status: Status, secured: Option<&Secured<'_>>) -> Option<String> {
     Some(cause)
 }
 
-/// The cause of a server that offers no endpoint in `mode`, or in the mode None when it
-/// is `None`, with an anonymous user and a policy of the client.
-fn unoffered(mode: Option<client::Mode>) -> String {
-    let (mode, fix) = match mode {
-        None => {
-            return "the server offers no endpoint in the mode None that lets in an \
-                    anonymous user. For a server with only secure endpoints, give \
-                    `certificate`, `key`, and `trust`"
-                .into();
-        }
-        Some(client::Mode::SignAndEncrypt) => (
+/// The cause of a server that offers no endpoint in the mode of `secured`, or in the
+/// mode None when it is `None`, with its user, else an anonymous user, and a policy of
+/// the client. With a user, it also names the policies of a user token that the client
+/// takes in the mode, and a refusal of the user.
+fn unoffered(secured: Option<&Secured<'_>>) -> String {
+    let Some(secured) = secured else {
+        return "the server offers no endpoint in the mode None that lets in an \
+                anonymous user. For a server with only secure endpoints, give \
+                `certificate`, `key`, and `trust`"
+            .into();
+    };
+    let (mode, fix) = match secured.security.mode {
+        client::Mode::SignAndEncrypt => (
             "SignAndEncrypt",
             "For a server with only Sign endpoints, set `unencrypted = true`; else \
-             turn on one of these policies on the server",
+             turn on one of these policies",
         ),
-        Some(client::Mode::Sign) => (
-            "Sign",
-            "Turn on one of these policies in the mode Sign on the server",
-        ),
+        client::Mode::Sign => {
+            ("Sign", "Turn on one of these policies in the mode Sign")
+        }
     };
     let [first, second, third] = client::POLICIES;
-    format!(
+    let offers = format!(
         "the server offers no endpoint in the mode {mode} with the policy {first}, \
-         {second}, or {third} that lets in an anonymous user. {fix}"
+         {second}, or {third} that lets in"
+    );
+    let Some(user) = &secured.security.user else {
+        return format!("{offers} an anonymous user. {fix} on the server");
+    };
+    let (token, policy) = match secured.security.mode {
+        client::Mode::SignAndEncrypt => (
+            "with a token in the policy None or one of these",
+            "in the policy None or one of these",
+        ),
+        client::Mode::Sign => (
+            "with a token in one of these policies, since a token in the policy None \
+             would send the password in clear",
+            "in one of these policies",
+        ),
+    };
+    format!(
+        "{offers} a user name and password {token}, or it {}. {fix} with a user name \
+         token {policy} on the server",
+        refused(user)
+    )
+}
+
+/// The refusal of `user`, with its fix.
+fn refused(user: &config::User) -> String {
+    let (name, password) = (&user.name, &user.password);
+    format!(
+        "refused the user {name:?} with the password {password}. Check `user` and the \
+         password {password}"
     )
 }
 
@@ -777,7 +837,7 @@ impl Left {
 impl Note {
     /// Sets the note of `ctx` for `mistyped`, when it is not the note of the frame
     /// before: the read at a value of another type, its type, and the sample type of
-    /// its channel, after the note of [`fall_back`] for `polls`. `None` shows only
+    /// its channel, after the note of [`Run::fall_back`] for `polls`. `None` shows only
     /// that note, or none.
     #[inline]
     fn set(

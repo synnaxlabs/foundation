@@ -1,4 +1,4 @@
-use std::ffi::{c_int, c_void};
+use std::ffi::{c_char, c_int, c_void};
 use std::mem::offset_of;
 
 use super::{
@@ -8,6 +8,13 @@ use super::{
 /// `UA_Server`, which Rust holds only by pointer.
 #[repr(C)]
 pub(crate) struct Server([u8; 0]);
+
+/// `UA_UsernamePasswordLogin`, which borrows its bytes.
+#[repr(C)]
+pub(crate) struct Login {
+    pub(crate) name: Bytes,
+    pub(crate) password: Bytes,
+}
 
 /// `PublishArena` of open62541: the memory of the decode of a Publish answer.
 #[repr(C)]
@@ -369,6 +376,16 @@ unsafe extern "C" {
         source: *mut c_void,
     ) -> u32;
     pub(crate) fn shim_server_session_timeout(server: *mut Server, ms: u32);
+    pub(crate) fn shim_server_users(
+        server: *mut Server,
+        logins: *const Login,
+        count: usize,
+    ) -> u32;
+    pub(crate) fn shim_server_token_policy(
+        server: *mut Server,
+        uri: *const c_char,
+    ) -> u32;
+    pub(crate) fn shim_server_refuse_sessions(server: *mut Server, status: u32) -> u32;
     pub(crate) fn shim_server_data_type(
         server: *mut Server,
         node: Node<'_>,

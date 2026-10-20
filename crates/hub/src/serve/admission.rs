@@ -3,7 +3,7 @@
 use std::cell::{Cell, RefCell};
 use std::future::poll_fn;
 use std::pin::pin;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 use access::proof::{self, Admitted};
 use types::ed25519::PublicKey;
@@ -24,7 +24,9 @@ pub(crate) struct Admission {
     admitted: RefCell<Option<(Admitted, [u8; 64])>>,
     /// The count of hellos admitted.
     count: Cell<u64>,
-    /// The waker of each [`Renewal`] that waits, by its key.
+    /// The waker of each [`Renewal`] that waits, by its key. Only [`Admission::wake`]
+    /// drains it, and it moves `count` with the drain: a [`Renewal`] reads an unchanged
+    /// `count` as its waker still here.
     waiting: RefCell<wait::Set>,
     /// The key of the next [`Renewal`].
     key: Cell<u64>,
@@ -67,6 +69,14 @@ impl Admission {
             .map_err(|error| Error::Access(Box::new(error)))?;
             *admitted = Some((next, signature));
         }
+        self.wake();
+        Ok(())
+    }
+
+    /// Counts a hello admitted, and wakes each [`Renewal`] that waits. The count moves
+    /// only here, with the drain, so a renewal reads an unchanged count as its waker
+    /// still in the set.
+    fn wake(&self) {
         self.count.set(self.count.get() + 1);
         // A wake can drop a task whose renewal borrows the map.
         let mut woken = Vec::new();
@@ -74,7 +84,6 @@ impl Admission {
         for waker in woken {
             waker.wake();
         }
-        Ok(())
     }
 
     /// The admitted hello and its signature, with the count of hellos admitted
@@ -103,6 +112,7 @@ impl Admission {
             admission: self,
             key,
             seen: Cell::new(self.count.get()),
+            held: Cell::new(None),
         }
     }
 
@@ -196,12 +206,14 @@ impl Admission {
 
 /// A wait for the renewals of a session. It keeps at most one waker, and its drop takes
 /// it out.
-#[derive(Debug)]
 pub(crate) struct Renewal<'a> {
     admission: &'a Admission,
     key: u64,
     /// The count of hellos admitted through the last hello that it gave.
     seen: Cell<u64>,
+    /// The waker that it put in the set last, and the count of hellos admitted then. The
+    /// set still holds that waker while the count is the same.
+    held: Cell<Option<(Waker, u64)>>,
 }
 
 impl Renewal<'_> {
@@ -225,13 +237,24 @@ impl Renewal<'_> {
 
     /// Keeps the waker of `cx` until the session admits the next hello.
     pub(crate) fn register(&self, cx: &Context<'_>) {
+        let count = self.admission.count.get();
+        let held = self.held.take();
+        if let Some((waker, at)) = &held
+            && *at == count
+            && waker.will_wake(cx.waker())
+        {
+            self.held.set(held);
+            return;
+        }
         let replaced = self
             .admission
             .waiting
             .borrow_mut()
             .insert(self.key, cx.waker());
+        self.held.set(Some((cx.waker().clone(), count)));
         // The last drop of a waker can drop a task that borrows the map.
         drop(replaced);
+        drop(held);
     }
 }
 
@@ -240,5 +263,123 @@ impl Drop for Renewal<'_> {
         let held = self.admission.waiting.borrow_mut().remove(self.key);
         // As in `register`.
         drop(held);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Wake;
+
+    use types::ed25519::PrivateKey;
+
+    use super::*;
+
+    /// A task that counts its wakes.
+    #[derive(Default)]
+    struct Task(AtomicUsize);
+
+    impl Wake for Task {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    impl Task {
+        fn wakes(&self) -> usize {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    fn task() -> (Arc<Task>, Waker) {
+        let task = Arc::new(Task::default());
+        let waker = Waker::from(Arc::clone(&task));
+        (task, waker)
+    }
+
+    fn admission() -> Admission {
+        Admission::new(PrivateKey([3; 32]).public())
+    }
+
+    /// Takes the entry out by hand, which no production path does without a count or a
+    /// drop, to show that the second poll does not touch the set. No caller sees the
+    /// skip: an insert of a waker of the same task changes nothing, so only the time of
+    /// the poll shows it, which the `forward` bench measures.
+    #[test]
+    fn a_poll_with_the_same_waker_leaves_the_set_alone() {
+        let admission = admission();
+        let renewal = admission.renewal();
+        let (task, waker) = task();
+        renewal.register(&Context::from_waker(&waker));
+        let taken = admission.waiting.borrow_mut().remove(renewal.key);
+        assert!(taken.is_some_and(|taken| taken.will_wake(&waker)));
+        for _ in 0..2 {
+            renewal.register(&Context::from_waker(&waker.clone()));
+            assert!(admission.waiting.borrow_mut().remove(renewal.key).is_none());
+        }
+        admission.wake();
+        assert_eq!(task.wakes(), 0);
+    }
+
+    /// No caller sees this case: `away.rs` polls each renewal in one task, and `os` and
+    /// `sim` give one waker for each task. No crate call drains the set without a
+    /// `State`, so the test calls `wake`.
+    #[test]
+    fn a_poll_with_another_task_inserts_its_waker() {
+        let admission = admission();
+        let renewal = admission.renewal();
+        let (first, waker) = task();
+        let (second, other) = task();
+        renewal.register(&Context::from_waker(&waker));
+        renewal.register(&Context::from_waker(&other));
+        admission.wake();
+        assert_eq!([first.wakes(), second.wakes()], [0, 1]);
+    }
+
+    /// The drain of an admit empties the set, so the next poll with the same waker
+    /// must insert it again, or the next admit loses its wake.
+    #[test]
+    fn a_poll_after_an_admit_registers_again() {
+        let admission = admission();
+        let renewal = admission.renewal();
+        let (task, waker) = task();
+        renewal.register(&Context::from_waker(&waker));
+        admission.wake();
+        assert_eq!(task.wakes(), 1);
+        renewal.register(&Context::from_waker(&waker));
+        admission.wake();
+        assert_eq!(task.wakes(), 2);
+    }
+
+    /// The last drop of the held waker of a drained renewal drops a task whose renewal
+    /// borrows the map, so it comes after the borrow of the insert. No caller sees
+    /// this order: `os` and `sim` poll a renewal in its own live task, so the drop of
+    /// its held waker never drops a task. No crate call drains the set without a
+    /// `State`, so the test calls `wake` and reads `waiting`.
+    #[test]
+    fn a_held_waker_drops_after_the_borrow_of_the_insert() {
+        let admission: &'static Admission = Box::leak(Box::new(admission()));
+        let renewal = admission.renewal();
+        let held = waker::holding(admission.renewal());
+        renewal.register(&Context::from_waker(&held));
+        drop(held);
+        admission.wake();
+        let (_task, waker) = task();
+        renewal.register(&Context::from_waker(&waker));
+        let mut woken = Vec::new();
+        admission.waiting.borrow_mut().drain(&mut woken);
+        assert_eq!(woken.len(), 1);
+    }
+
+    #[test]
+    fn a_drop_takes_its_waker_out() {
+        let admission = admission();
+        let (task, waker) = task();
+        let renewal = admission.renewal();
+        renewal.register(&Context::from_waker(&waker));
+        drop(renewal);
+        admission.wake();
+        assert_eq!(task.wakes(), 0);
     }
 }

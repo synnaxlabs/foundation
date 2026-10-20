@@ -13,7 +13,7 @@ use types::time::{Span, Stamp};
 use super::common::channel;
 use super::{Client, PORT, VALUE, fits, fitting, long, run, serve_on};
 use crate::client::{
-    Credential, Credentials, Error, Large, Mode, Names, Refusal, names,
+    Credential, Credentials, Error, Large, Mode, Names, Refusal, Session, names,
 };
 use crate::event;
 use crate::ffi::{self, Status};
@@ -640,7 +640,11 @@ fn refused(own: Identity) -> Result<(), Error> {
 /// [`refused`] with a trust of `trust`, on a loop whose wall time starts at `wall`.
 fn refused_at(own: Identity, trust: &'static [u8], wall: Stamp) -> Result<(), Error> {
     let (connect, _) = run(0, async move |node| {
-        let client = own.trusting(trust);
+        let session = Session {
+            credentials: own.trusting(trust),
+            mode: Mode::Sign,
+            user: None,
+        };
         let mut rng = node.entropy().rng();
         let url = format!("opc.tcp://{}", SocketAddr::new(node.addresses()[0], PORT));
         let url = CString::new(url).expect("the URL holds no NUL");
@@ -650,7 +654,7 @@ fn refused_at(own: Identity, trust: &'static [u8], wall: Stamp) -> Result<(), Er
             node.net(),
             &mut rng,
             &url,
-            Some((&client, Mode::Sign)),
+            Some(&session),
             future::pending(),
         );
         connect.await.map(|_| ())

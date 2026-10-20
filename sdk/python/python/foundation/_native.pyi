@@ -92,13 +92,13 @@ class Stopped(Exception):
     session goes on. A writer that raises it has ended, and each later call raises it
     again. `code` is its name in lower case. At the open: `unknown` for a name of no
     channel, `not_home` when the node is not the home of the index, `malformed` for
-    channels of more than one index or a lease that the home refuses, `failed` when the
-    home cannot open the write, `refused` when the access check of the node refuses the
-    write, and `busy` when the node has no room for the open. Later: `unknown` when a
-    channel was removed, `failed` when the home failed, `refused` when the home refuses
-    the program's proof, such as a renewal of its hello, `busy` when the home has no
-    room for the outcome of a frame, and `malformed` for a frame that breaks a rule of
-    the wire.
+    channels of more than one index, which the client refuses for a writer and the node
+    for a reader, `failed` when the home cannot open the write, `refused` when the
+    access check of the node refuses the write, and `busy` when the node has no room
+    for the open. Later: `unknown` when a channel was removed, `failed` when the home
+    failed, `refused` when the home refuses the program's proof, such as a renewal of
+    its hello, `busy` when the home has no room for the outcome of a frame, and
+    `malformed` for a frame that breaks a rule of the wire.
     """
 
     code: str
@@ -169,9 +169,11 @@ class Client:
         a name that does not parse, an `authority` outside 0 to 255, a `lease` that,
         taken as a `float`, does not round to 1 to 2^63 - 1 nanoseconds, or another
         `on_loss`, with no writer opened; `Stopped` when the node refused the open, with
-        a text that names each channel of the open for `unknown`; `ConnectionError` when
-        the session failed; `RuntimeError` when the client closed or in a process that
-        the program forked; and `PanicException` when the client's thread panicked.
+        a text that names each channel of the open for `unknown`, or with code
+        `malformed` for channels of more than one index, which the client refuses;
+        `ConnectionError` when the session failed; `RuntimeError` when the client closed
+        or in a process that the program forked; and `PanicException` when the client's
+        thread panicked.
         """
 
     def open_reader(

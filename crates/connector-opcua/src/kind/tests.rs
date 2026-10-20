@@ -479,22 +479,66 @@ struct Record {
     logged: Vec<String>,
 }
 
-/// Runs `script` on a scene of `setup` that polls at 10 Hz, as [`run_at`] does.
+/// Runs `script` on a scene of `setup` on [`Stage::POLL`], as [`scene`] does.
 fn run<S, F>(setup: Setup, script: S) -> Record
 where
     S: FnOnce(Rc<Scene>) -> F + Send + 'static,
     F: Future<Output = Result<(), Error>> + 'static,
 {
-    run_at("10Hz", setup, script)
+    scene(setup, Stage::POLL, script)
 }
 
-/// Runs `script` on a scene of `setup` that polls at `rate`, as [`scene`] does.
-fn run_at<S, F>(rate: &'static str, setup: Setup, script: S) -> Record
-where
-    S: FnOnce(Rc<Scene>) -> F + Send + 'static,
-    F: Future<Output = Result<(), Error>> + 'static,
-{
-    run_on(rate, setup, None, script)
+/// The inputs of a scene other than its setup and its script.
+#[derive(Clone, Copy)]
+struct Stage {
+    /// The port of the server.
+    port: u16,
+    /// The rate of the reads.
+    rate: &'static str,
+    /// The kind subscribes, as with no `polled`. Else it polls.
+    subscribed: bool,
+    /// The secure channel, or none for the mode `None`.
+    secure: Option<Secure>,
+}
+
+impl Stage {
+    /// A kind that polls at 10 Hz a server on port 4840 in the mode `None`.
+    const POLL: Self = Self {
+        port: 4840,
+        rate: "10Hz",
+        subscribed: false,
+        secure: None,
+    };
+
+    /// A kind that subscribes at 20 Hz to a server on port 4840 in the mode `None`.
+    /// The server samples each 50 ms and publishes each 100 ms, so a change arrives up
+    /// to 50 ms after its source timestamp.
+    const WATCH: Self = Self {
+        rate: "20Hz",
+        subscribed: true,
+        ..Self::POLL
+    };
+
+    /// This stage at `rate`.
+    const fn at(self, rate: &'static str) -> Self {
+        Self { rate, ..self }
+    }
+
+    /// This stage with the server behind a relay on [`RELAY`].
+    const fn relayed(self) -> Self {
+        Self {
+            port: RELAY,
+            ..self
+        }
+    }
+
+    /// This stage over the channel of `secure`.
+    const fn over(self, secure: Secure) -> Self {
+        Self {
+            secure: Some(secure),
+            ..self
+        }
+    }
 }
 
 /// The secure channel of a scene.
@@ -517,6 +561,24 @@ struct Secure {
     /// The secrets [`CERTIFICATE`], [`KEY`], and [`TRUST`] of the connector, each
     /// written before the run when it is `Some`.
     credentials: [Option<&'static [u8]>; 3],
+    /// The `user` of the connector and its password, the secret [`PASSWORD`], which is
+    /// written before the run when it is `Some`. No `user` when it is `None`.
+    user: Option<(&'static str, Option<&'static [u8]>)>,
+    /// The sessions that the server lets in.
+    login: Login,
+    /// The status with which the server refuses each session, after [`Secure::login`].
+    refusal: Option<Status>,
+    /// The URI of the security policy of the one user token policy of the server,
+    /// else the user token policies of open62541.
+    token: Option<&'static CStr>,
+}
+
+/// The sessions that the server of a scene lets in.
+#[derive(Clone, Copy)]
+enum Login {
+    Anonymous,
+    /// Only the user names and passwords of the list.
+    Only(&'static [(&'static str, &'static [u8])]),
 }
 
 /// The secret of the certificate of [`PLC`].
@@ -525,6 +587,14 @@ const CERTIFICATE: &str = "plant.opcua_certificate";
 const KEY: &str = "plant.opcua_key";
 /// The secret of the trust of [`PLC`].
 const TRUST: &str = "plant.opcua_trust";
+/// The secret of the password of [`PLC`].
+const PASSWORD: &str = "plant.opcua_password";
+/// The one login of a server that needs a user.
+const LOGINS: &[(&str, &[u8])] = &[("operator", b"pass\0word")];
+/// The URI of the security policy `None`.
+const NONE: &CStr = c"http://opcfoundation.org/UA/SecurityPolicy#None";
+/// The URI of the security policy `Basic256`, which the client does not have.
+const BASIC256: &CStr = c"http://opcfoundation.org/UA/SecurityPolicy#Basic256";
 
 impl Secure {
     /// A channel in `policy` and the mode `SignAndEncrypt` on the credentials of
@@ -544,6 +614,22 @@ impl Secure {
                 Some(CLIENT.key),
                 Some(SERVER.certificate),
             ],
+            user: None,
+            login: Login::Anonymous,
+            refusal: None,
+            token: None,
+        }
+    }
+
+    /// [`Secure::of`], with the user of [`LOGINS`] on the connector and the server.
+    fn with_user(policy: Policy) -> Self {
+        let [(user, password)] = LOGINS else {
+            unreachable!("one login")
+        };
+        Self {
+            user: Some((user, Some(password))),
+            login: Login::Only(LOGINS),
+            ..Self::of(policy)
         }
     }
 
@@ -557,6 +643,16 @@ impl Secure {
     ) {
         variables.secure(self.server, self.policy, self.offered);
         variables.set_clock(self.ahead);
+        match self.login {
+            Login::Anonymous => {}
+            Login::Only(users) => variables.admit(users),
+        }
+        if let Some(status) = self.refusal {
+            variables.refuse_sessions(status);
+        }
+        if let Some(uri) = self.token {
+            variables.set_token_policy(uri);
+        }
         if self.plain {
             return;
         }
@@ -569,8 +665,15 @@ impl Secure {
         if self.unencrypted {
             attributes.push(attribute("unencrypted", value::Kind::Bool(true)));
         }
+        let mut password = None;
+        if let Some((user, held)) = self.user {
+            attributes.push(attribute("user", value::Kind::String(user.into())));
+            attributes.push(attribute("password", secret(PASSWORD)));
+            password = held;
+        }
         config.attributes = Map::new(attributes).expect("unique keys");
-        let held = [CERTIFICATE, KEY, TRUST].into_iter().zip(self.credentials);
+        let held = ([CERTIFICATE, KEY, TRUST, PASSWORD].into_iter())
+            .zip(self.credentials.into_iter().chain([password]));
         for (text, bytes) in held {
             if let Some(bytes) = bytes {
                 testing::create_secret(&node.files(), &name(text), bytes).await;
@@ -591,35 +694,19 @@ fn secret(name: &str) -> value::Kind {
     })
 }
 
-/// [`run_at`] over the channel of `secure`, or with no security when it is `None`.
-fn run_on<S, F>(
-    rate: &'static str,
-    setup: Setup,
-    secure: Option<Secure>,
-    script: S,
-) -> Record
-where
-    S: FnOnce(Rc<Scene>) -> F + Send + 'static,
-    F: Future<Output = Result<(), Error>> + 'static,
-{
-    scene(4840, rate, true, setup, secure, script)
-}
-
-/// Runs `script` on a scene of `setup` that reads at `rate` from port `port`, and polls
-/// when `polled`, over the channel of `secure`, with its server started, and records
+/// Runs `script` on a scene of `setup` on `stage`, with its server started, and records
 /// the frames of each channel until 1 s after the script returns.
-fn scene<S, F>(
-    port: u16,
-    rate: &'static str,
-    polled: bool,
-    setup: Setup,
-    secure: Option<Secure>,
-    script: S,
-) -> Record
+fn scene<S, F>(setup: Setup, stage: Stage, script: S) -> Record
 where
     S: FnOnce(Rc<Scene>) -> F + Send + 'static,
     F: Future<Output = Result<(), Error>> + 'static,
 {
+    let Stage {
+        port,
+        rate,
+        subscribed,
+        secure,
+    } = stage;
     let mut node = node::Config::default();
     if let Some(secure) = secure {
         node.wall = secure.wall;
@@ -628,7 +715,7 @@ where
         let rig = rig(&node, tasks.clone()).await;
         let hub = rig.hub();
         let address = format!("opc.tcp://{}:{port}", node.addresses()[0]);
-        let mut config = config(&address, rate, polled, &setup.reads);
+        let mut config = config(&address, rate, !subscribed, &setup.reads);
         let variables = setup.variables();
         if let Some(secure) = secure {
             secure.apply(&node, &mut config, &variables).await;
@@ -930,7 +1017,8 @@ fn ends_the_run_with_a_device_error_when_the_server_stops_and_reads_again_after(
 /// in the last 50 s.
 #[test]
 fn reads_at_a_rate_slower_than_the_session_timeout_with_no_device_error() {
-    let outcome = run_at("0.0005Hz", Setup::three(), |scene| async move {
+    let stage = Stage::POLL.at("0.0005Hz");
+    let outcome = scene(Setup::three(), stage, |scene| async move {
         scene.supervise(ms(4_050_000)).await
     });
     assert!(outcome.result.is_ok(), "{:?}", outcome.result);
@@ -944,7 +1032,8 @@ fn reads_at_a_rate_slower_than_the_session_timeout_with_no_device_error() {
 /// answer in 5 s.
 #[test]
 fn ends_the_run_when_a_check_gets_no_answer() {
-    let outcome = run_at("0.01Hz", Setup::three(), |scene| async move {
+    let stage = Stage::POLL.at("0.01Hz");
+    let outcome = scene(Setup::three(), stage, |scene| async move {
         scene.after(ms(1_050), |scene| async move { scene.gate.close() });
         scene.supervise(ms(16_050)).await
     });
@@ -959,7 +1048,8 @@ fn ends_the_run_when_a_check_gets_no_answer() {
 /// next tick ends the run at the next check of the connection, at most 10 s later.
 #[test]
 fn ends_the_run_when_a_check_finds_no_session() {
-    let outcome = run_at("0.01Hz", Setup::three(), |scene| async move {
+    let stage = Stage::POLL.at("0.01Hz");
+    let outcome = scene(Setup::three(), stage, |scene| async move {
         scene.stop().await;
         scene.variables.time_out_sessions(ms(5_000));
         scene.serve();
@@ -979,7 +1069,8 @@ fn ends_the_run_when_a_check_finds_no_session() {
 #[test]
 fn keeps_the_run_when_a_check_answers_with_a_bad_state() {
     for status in [Status::BAD_USER_ACCESS_DENIED, Status::BAD_NODE_ID_UNKNOWN] {
-        let outcome = run_at("0.01Hz", Setup::three(), move |scene| async move {
+        let stage = Stage::POLL.at("0.01Hz");
+        let outcome = scene(Setup::three(), stage, move |scene| async move {
             scene.variables.answer_states(Quality(status.0));
             scene.supervise(ms(41_050)).await
         });
@@ -1114,7 +1205,8 @@ fn sends_no_check_when_it_reads_more_often_than_each_ten_seconds() {
 /// once, and the supervisor connects again and reads before that tick.
 #[test]
 fn ends_the_run_at_once_when_the_server_stops_between_ticks() {
-    let outcome = run_at("0.01Hz", Setup::three(), |scene| async move {
+    let stage = Stage::POLL.at("0.01Hz");
+    let outcome = scene(Setup::three(), stage, |scene| async move {
         scene.after(ms(1_050), |scene| async move { scene.stop().await });
         scene.after(ms(3_050), |scene| async move { scene.serve() });
         scene.supervise(ms(8_050)).await
@@ -2027,15 +2119,13 @@ fn refuses_to_discover() {
     assert_eq!(diagnostics, [expected]);
 }
 
-/// Runs `script` on a scene of `setup` that subscribes at 20 Hz, as [`scene`] does.
-/// The server samples each 50 ms and publishes each 100 ms, so a change arrives up to
-/// 50 ms after its source timestamp.
+/// Runs `script` on a scene of `setup` on [`Stage::WATCH`], as [`scene`] does.
 fn watch<S, F>(setup: Setup, script: S) -> Record
 where
     S: FnOnce(Rc<Scene>) -> F + Send + 'static,
     F: Future<Output = Result<(), Error>> + 'static,
 {
-    scene(4840, "20Hz", false, setup, None, script)
+    scene(setup, Stage::WATCH, script)
 }
 
 /// The offset of mesh time from the clock of the node of `scene`, in ns.
@@ -2260,7 +2350,8 @@ where
     S: FnOnce(Rc<Scene>) -> F + Send + 'static,
     F: Future<Output = Result<(), Error>> + 'static,
 {
-    scene(RELAY, "10Hz", false, setup, None, move |scene| async move {
+    let stage = Stage::WATCH.relayed().at("10Hz");
+    scene(setup, stage, move |scene| async move {
         let node = scene.node.clone();
         let up = move |message: &mut Vec<u8>| unsupport(message, kind);
         relayed_up(&node, up, script(scene)).await
@@ -2301,35 +2392,35 @@ fn polls_a_server_with_no_subscription_service() {
         let log = Arc::new(Mutex::new(Vec::new()));
         let sent = Arc::clone(&log);
         let setup = Setup::three();
-        let outcome =
-            scene(RELAY, "10Hz", false, setup, None, move |scene| async move {
-                let node = scene.node.clone();
-                let up = move |message: &mut Vec<u8>| {
-                    let kinds = [
-                        CREATE_SESSION,
-                        CREATE_SUBSCRIPTION,
-                        CREATE_MONITORED_ITEMS,
-                        PUBLISH,
-                        CLOSE_SESSION,
-                    ];
-                    if let Some(&kind) = kinds.iter().find(|&&kind| is(message, kind)) {
-                        sent.lock().expect("the log").push(kind);
-                    }
-                    if let Some(kind) = request {
-                        unsupport(message, kind);
-                    }
-                };
-                let down = move |message: &mut Vec<u8>| {
-                    if answer.is_some_and(|kind| is(message, kind)) {
-                        set_result(message, Status::BAD_NOT_IMPLEMENTED);
-                    }
-                };
-                scene.after(ms(430), |scene| async move {
-                    scene.variables.change(Quality::GOOD);
-                });
-                let supervised = scene.supervise(ms(1_050));
-                Box::pin(relayed_both(&node, up, down, supervised)).await
+        let stage = Stage::WATCH.relayed().at("10Hz");
+        let outcome = scene(setup, stage, move |scene| async move {
+            let node = scene.node.clone();
+            let up = move |message: &mut Vec<u8>| {
+                let kinds = [
+                    CREATE_SESSION,
+                    CREATE_SUBSCRIPTION,
+                    CREATE_MONITORED_ITEMS,
+                    PUBLISH,
+                    CLOSE_SESSION,
+                ];
+                if let Some(&kind) = kinds.iter().find(|&&kind| is(message, kind)) {
+                    sent.lock().expect("the log").push(kind);
+                }
+                if let Some(kind) = request {
+                    unsupport(message, kind);
+                }
+            };
+            let down = move |message: &mut Vec<u8>| {
+                if answer.is_some_and(|kind| is(message, kind)) {
+                    set_result(message, Status::BAD_NOT_IMPLEMENTED);
+                }
+            };
+            scene.after(ms(430), |scene| async move {
+                scene.variables.change(Quality::GOOD);
             });
+            let supervised = scene.supervise(ms(1_050));
+            Box::pin(relayed_both(&node, up, down, supervised)).await
+        });
         let case = (request, answer);
         assert!(outcome.result.is_ok(), "{:?}", outcome.result);
         assert_eq!(errors(&outcome.statuses), [], "{case:?}");
@@ -2399,23 +2490,17 @@ const CREATED: [u8; 4] = [0x01, 0x00, 0x16, 0x03];
 /// and the kind does not poll.
 #[test]
 fn fails_on_a_subscribe_that_the_server_refuses() {
-    let outcome = scene(
-        RELAY,
-        "20Hz",
-        false,
-        Setup::three(),
-        None,
-        |scene| async move {
-            let node = scene.node.clone();
-            let refuse = |message: &mut Vec<u8>| {
-                if is(message, CREATED) {
-                    set_result(message, Status(0x8077_0000));
-                }
-            };
-            let supervised = scene.supervise(ms(350));
-            Box::pin(relayed(&node, &Relay::default(), refuse, supervised)).await
-        },
-    );
+    let stage = Stage::WATCH.relayed();
+    let outcome = scene(Setup::three(), stage, |scene| async move {
+        let node = scene.node.clone();
+        let refuse = |message: &mut Vec<u8>| {
+            if is(message, CREATED) {
+                set_result(message, Status(0x8077_0000));
+            }
+        };
+        let supervised = scene.supervise(ms(350));
+        Box::pin(relayed(&node, &Relay::default(), refuse, supervised)).await
+    });
     assert!(outcome.result.is_ok(), "{:?}", outcome.result);
     let refused = "the subscribe to opc.tcp://10.0.0.1:4841 failed with \
                    BadTooManySubscriptions";
@@ -2436,28 +2521,22 @@ const CURRENT_TIME: [u8; 4] = [0x01, 0x00, 0xD2, 0x08];
 fn reads_the_current_time_of_the_server_each_10_s() {
     let reads = Arc::new(AtomicU32::new(0));
     let count = Arc::clone(&reads);
-    let outcome = scene(
-        RELAY,
-        "20Hz",
-        false,
-        Setup::three(),
-        None,
-        |scene| async move {
-            let node = scene.node.clone();
-            let up = move |message: &mut Vec<u8>| {
-                let time = message.windows(4).any(|node| node == CURRENT_TIME);
-                if is(message, READ_REQUEST) && time {
-                    count.fetch_add(1, Ordering::Relaxed);
-                }
-            };
-            for at in (430..25_000).step_by(1_000) {
-                scene.after(ms(at), |scene| async move {
-                    scene.variables.change(Quality::GOOD);
-                });
+    let stage = Stage::WATCH.relayed();
+    let outcome = scene(Setup::three(), stage, |scene| async move {
+        let node = scene.node.clone();
+        let up = move |message: &mut Vec<u8>| {
+            let time = message.windows(4).any(|node| node == CURRENT_TIME);
+            if is(message, READ_REQUEST) && time {
+                count.fetch_add(1, Ordering::Relaxed);
             }
-            Box::pin(relayed_up(&node, up, scene.supervise(ms(25_050)))).await
-        },
-    );
+        };
+        for at in (430..25_000).step_by(1_000) {
+            scene.after(ms(at), |scene| async move {
+                scene.variables.change(Quality::GOOD);
+            });
+        }
+        Box::pin(relayed_up(&node, up, scene.supervise(ms(25_050)))).await
+    });
     assert!(outcome.result.is_ok(), "{:?}", outcome.result);
     assert_eq!(errors(&outcome.statuses), []);
     assert_eq!(outcome.frames.len(), 26);
@@ -2602,36 +2681,29 @@ const SOURCE: Stamp = Stamp::from_nanos(1_767_139_200 * 1_000_000_000);
 /// Runs a watch of [`Setup::three`] in which each node changes at 430 ms with the
 /// status `quality`, and a relay sets both timestamps of each of those changes to 0.
 fn untimed(quality: Quality) -> Record {
-    scene(
-        RELAY,
-        "20Hz",
-        false,
-        Setup::three(),
-        None,
-        move |scene| async move {
-            let node = scene.node.clone();
-            let nanos = u64::try_from(SOURCE.nanos()).expect("after 1970");
-            let time = (nanos / 100 + 116_444_736_000_000_000).to_le_bytes();
-            let clear = move |message: &mut Vec<u8>| {
-                if !is(message, PUBLISHED) {
-                    return;
-                }
-                let mut at = 0;
-                while let Some(found) = message[at..].windows(8).position(|w| w == time)
-                {
-                    // The test server sets no picoseconds, so the server timestamp
-                    // follows the source timestamp. No other 8 bytes are equal.
-                    message[at + found..at + found + 16].fill(0);
-                    at += found + 16;
-                }
-            };
-            scene.after(ms(430), move |scene| async move {
-                scene.variables.change_at(quality, SOURCE);
-            });
-            let supervised = scene.supervise(ms(1_050));
-            Box::pin(relayed(&node, &Relay::default(), clear, supervised)).await
-        },
-    )
+    let stage = Stage::WATCH.relayed();
+    scene(Setup::three(), stage, move |scene| async move {
+        let node = scene.node.clone();
+        let nanos = u64::try_from(SOURCE.nanos()).expect("after 1970");
+        let time = (nanos / 100 + 116_444_736_000_000_000).to_le_bytes();
+        let clear = move |message: &mut Vec<u8>| {
+            if !is(message, PUBLISHED) {
+                return;
+            }
+            let mut at = 0;
+            while let Some(found) = message[at..].windows(8).position(|w| w == time) {
+                // The test server sets no picoseconds, so the server timestamp
+                // follows the source timestamp. No other 8 bytes are equal.
+                message[at + found..at + found + 16].fill(0);
+                at += found + 16;
+            }
+        };
+        scene.after(ms(430), move |scene| async move {
+            scene.variables.change_at(quality, SOURCE);
+        });
+        let supervised = scene.supervise(ms(1_050));
+        Box::pin(relayed(&node, &Relay::default(), clear, supervised)).await
+    })
 }
 
 /// A Good change with no timestamp ends the run with a config error, as no time
@@ -2693,33 +2765,27 @@ fn writes_two_drives_whose_source_timestamps_cross_at_stamps_that_increase() {
 /// device error, and the next run subscribes again and writes.
 #[test]
 fn subscribes_again_after_the_server_ends_the_subscription() {
-    let outcome = scene(
-        RELAY,
-        "20Hz",
-        false,
-        Setup::three(),
-        None,
-        |scene| async move {
-            let node = scene.node.clone();
-            let armed = Rc::new(Cell::new(false));
-            let arm = Rc::clone(&armed);
-            let end = move |message: &mut Vec<u8>| {
-                if armed.get() && is(message, PUBLISHED) {
-                    armed.set(false);
-                    set_result(message, Status::BAD_SESSION_CLOSED);
-                }
-            };
-            scene.after(ms(430), move |scene| async move {
-                scene.variables.change(Quality::GOOD);
-                arm.set(true);
-            });
-            scene.after(ms(3_030), |scene| async move {
-                scene.variables.change(Quality::GOOD);
-            });
-            let supervised = scene.supervise(ms(4_050));
-            Box::pin(relayed(&node, &Relay::default(), end, supervised)).await
-        },
-    );
+    let stage = Stage::WATCH.relayed();
+    let outcome = scene(Setup::three(), stage, |scene| async move {
+        let node = scene.node.clone();
+        let armed = Rc::new(Cell::new(false));
+        let arm = Rc::clone(&armed);
+        let end = move |message: &mut Vec<u8>| {
+            if armed.get() && is(message, PUBLISHED) {
+                armed.set(false);
+                set_result(message, Status::BAD_SESSION_CLOSED);
+            }
+        };
+        scene.after(ms(430), move |scene| async move {
+            scene.variables.change(Quality::GOOD);
+            arm.set(true);
+        });
+        scene.after(ms(3_030), |scene| async move {
+            scene.variables.change(Quality::GOOD);
+        });
+        let supervised = scene.supervise(ms(4_050));
+        Box::pin(relayed(&node, &Relay::default(), end, supervised)).await
+    });
     assert!(outcome.result.is_ok(), "{:?}", outcome.result);
     let ended = "the subscription to opc.tcp://10.0.0.1:4841 ended with \
                  BadNoSubscription";
@@ -2779,26 +2845,19 @@ fn a_cancel_during_a_read_of_the_current_time_ends_after_the_grace() {
 #[test]
 fn a_node_of_another_type_that_goes_bad_clears_the_note_in_both_modes() {
     for polled in [true, false] {
-        let rate = if polled { "10Hz" } else { "20Hz" };
-        let outcome = scene(
-            4840,
-            rate,
-            polled,
-            Setup::three(),
-            None,
-            |scene| async move {
-                scene.variables.set(B, crate::value::Value::I32(1));
-                scene.after(ms(1_530), |scene| async move {
-                    scene.variables.set_quality(B, Quality(0x8000_0000));
+        let stage = if polled { Stage::POLL } else { Stage::WATCH };
+        let outcome = scene(Setup::three(), stage, |scene| async move {
+            scene.variables.set(B, crate::value::Value::I32(1));
+            scene.after(ms(1_530), |scene| async move {
+                scene.variables.set_quality(B, Quality(0x8000_0000));
+            });
+            for at in [2_530, 3_530] {
+                scene.after(ms(at), |scene| async move {
+                    scene.variables.change(Quality::GOOD);
                 });
-                for at in [2_530, 3_530] {
-                    scene.after(ms(at), |scene| async move {
-                        scene.variables.change(Quality::GOOD);
-                    });
-                }
-                scene.supervise(ms(4_550)).await
-            },
-        );
+            }
+            scene.supervise(ms(4_550)).await
+        });
         assert!(outcome.result.is_ok(), "{polled}: {:?}", outcome.result);
         assert_eq!(errors(&outcome.statuses), [], "{polled}");
         let mistyped = "leaves out the values of the node `ns=3;i=7` of the channel \
@@ -2855,21 +2914,21 @@ fn polls_a_server_with_no_monitored_items_and_a_node_whose_watch_is_too_large() 
 fn a_cancel_while_the_subscribe_is_in_flight_ends_after_the_grace() {
     for request in [CURRENT_TIME, CREATE_SUBSCRIPTION] {
         let setup = Setup::three();
-        let outcome =
-            scene(RELAY, "20Hz", false, setup, None, move |scene| async move {
-                let node = scene.node.clone();
-                let stops = Rc::clone(&scene);
-                let up = move |message: &mut Vec<u8>| {
-                    let time = is(message, READ_REQUEST)
-                        && message.windows(4).any(|node| node == CURRENT_TIME);
-                    if time && request == CURRENT_TIME || is(message, request) {
-                        stops.gate.close();
-                    }
-                };
-                let end = relayed_up(&node, up, ends_after_the_cancel(&scene, ms(500)));
-                assert_eq!(Box::pin(end).await, GRACE, "{request:?}");
-                Ok(())
-            });
+        let stage = Stage::WATCH.relayed();
+        let outcome = scene(setup, stage, move |scene| async move {
+            let node = scene.node.clone();
+            let stops = Rc::clone(&scene);
+            let up = move |message: &mut Vec<u8>| {
+                let time = is(message, READ_REQUEST)
+                    && message.windows(4).any(|node| node == CURRENT_TIME);
+                if time && request == CURRENT_TIME || is(message, request) {
+                    stops.gate.close();
+                }
+            };
+            let end = relayed_up(&node, up, ends_after_the_cancel(&scene, ms(500)));
+            assert_eq!(Box::pin(end).await, GRACE, "{request:?}");
+            Ok(())
+        });
         assert!(outcome.result.is_ok(), "{request:?}: {:?}", outcome.result);
         assert_eq!(errors(&outcome.statuses), [], "{request:?}");
     }
@@ -2877,7 +2936,8 @@ fn a_cancel_while_the_subscribe_is_in_flight_ends_after_the_grace() {
 
 /// [`PLC`] supervised for 1.05 s over `secure`.
 fn secured(secure: Secure) -> Record {
-    run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
+    let stage = Stage::POLL.over(secure);
+    scene(Setup::three(), stage, |scene| async move {
         scene.supervise(ms(1_050)).await
     })
 }
@@ -2903,25 +2963,50 @@ const KEY_FIX: &str =
 const TRUST_FIX: &str =
     "Give the DER or PEM certificate of the server, or of the CA that issued it";
 
+/// Each policy in each security mode reads each change: a frame at each tick when the
+/// kind polls, and at each change when it subscribes.
 #[test]
 fn reads_over_a_secure_channel_of_each_policy_in_each_mode() {
-    for policy in Policy::ALL {
-        for unencrypted in [false, true] {
-            let offered = if unencrypted {
-                client::Mode::Sign
-            } else {
-                client::Mode::SignAndEncrypt
-            };
-            let outcome = secured(Secure {
-                offered,
-                unencrypted,
-                ..Secure::of(policy)
-            });
-            let at = format!("{policy:?}, unencrypted {unencrypted}");
-            assert!(outcome.result.is_ok(), "{at}: {:?}", outcome.result);
-            assert_eq!(errors(&outcome.statuses), [], "{at}");
-            assert_eq!(outcome.frames.len(), 11, "{at}");
-            assert_eq!(values(&outcome.frames, 2), served(&outcome, A), "{at}");
+    for stage in [Stage::POLL, Stage::WATCH] {
+        for policy in Policy::ALL {
+            for unencrypted in [false, true] {
+                let offered = if unencrypted {
+                    client::Mode::Sign
+                } else {
+                    client::Mode::SignAndEncrypt
+                };
+                let secure = stage.over(Secure {
+                    offered,
+                    unencrypted,
+                    ..Secure::of(policy)
+                });
+                let outcome = scene(Setup::three(), secure, |scene| async move {
+                    scene.after(ms(430), |scene| async move {
+                        scene.variables.change(Quality::GOOD);
+                    });
+                    scene.supervise(ms(1_050)).await
+                });
+                let at = format!(
+                    "{policy:?}, unencrypted {unencrypted}, subscribed {}",
+                    stage.subscribed
+                );
+                assert!(outcome.result.is_ok(), "{at}: {:?}", outcome.result);
+                assert_eq!(errors(&outcome.statuses), [], "{at}");
+                assert_eq!(notes(&outcome.statuses), Vec::<String>::new(), "{at}");
+                let mut served = served(&outcome, A);
+                let frames = if stage.subscribed {
+                    served.dedup();
+                    2
+                } else {
+                    11
+                };
+                assert_eq!(
+                    keys(&outcome.frames),
+                    vec![vec![1, 2, 3, 4]; frames],
+                    "{at}"
+                );
+                assert_eq!(values(&outcome.frames, 2), served, "{at}");
+            }
         }
     }
 }
@@ -2935,7 +3020,8 @@ fn a_run_with_no_read_keeps_its_session_over_a_secure_channel() {
         ..Setup::three()
     };
     let secure = Secure::of(Policy::Basic256Sha256);
-    let outcome = run_on("10Hz", setup, Some(secure), |scene| async move {
+    let stage = Stage::POLL.over(secure);
+    let outcome = scene(setup, stage, |scene| async move {
         scene.supervise(ms(1_050)).await
     });
     assert!(outcome.result.is_ok(), "{:?}", outcome.result);
@@ -3046,20 +3132,37 @@ fn an_expired_ca_of_the_node_certificate_names_the_certificate() {
 /// `certificate`, the key of [`CLIENT`], and [`SERVER`] as the trust, whose sources are
 /// variables of the environment.
 fn cause_on(status: Status, certificate: &[u8]) -> Option<String> {
+    let security = cause_security();
+    cause(status, Some(&secured_on(&security, certificate, None)))
+}
+
+/// A channel in `SignAndEncrypt` with no user, whose sources are variables of the
+/// environment.
+fn cause_security() -> Security {
     let env = |name: &str| secret::Source::Env(name.into());
-    let security = Security {
+    Security {
         certificate: env("CERTIFICATE"),
         key: env("KEY"),
         trust: env("TRUST"),
         mode: client::Mode::SignAndEncrypt,
-    };
-    let secured = Secured {
-        security: &security,
+        user: None,
+    }
+}
+
+/// `security` read as `certificate`, the key of [`CLIENT`], [`SERVER`] as the trust,
+/// and `password` as the password of its user.
+fn secured_on<'a>(
+    security: &'a Security,
+    certificate: &[u8],
+    password: Option<secret::Value>,
+) -> Secured<'a> {
+    Secured {
+        security,
         certificate: secret::Value::new(certificate.to_vec()),
         key: secret::Value::new(CLIENT.key.to_vec()),
         trust: secret::Value::new(SERVER.certificate.to_vec()),
-    };
-    cause(status, Some(&secured))
+        password,
+    }
 }
 
 /// The certificate to install has its names when it parses, no subject when its
@@ -3210,6 +3313,243 @@ fn a_secure_server_asks_a_plain_connector_for_credentials() {
     connect_fails(secure, "BadIdentityTokenRejected", cause);
 }
 
+/// The password of [`LOGINS`] holds a NUL byte, so a read lands only when the client
+/// sends all of it.
+#[test]
+fn reads_with_a_user_over_a_secure_channel_of_each_policy_in_each_mode() {
+    for policy in Policy::ALL {
+        for unencrypted in [false, true] {
+            let offered = if unencrypted {
+                client::Mode::Sign
+            } else {
+                client::Mode::SignAndEncrypt
+            };
+            let outcome = secured(Secure {
+                offered,
+                unencrypted,
+                ..Secure::with_user(policy)
+            });
+            let at = format!("{policy:?}, unencrypted {unencrypted}");
+            assert!(outcome.result.is_ok(), "{at}: {:?}", outcome.result);
+            assert_eq!(errors(&outcome.statuses), [], "{at}");
+            assert_eq!(outcome.frames.len(), 11, "{at}");
+            assert_eq!(values(&outcome.frames, 2), served(&outcome, A), "{at}");
+        }
+    }
+}
+
+const REFUSED: &str = "refused the user \"operator\" with the password \
+                       secret(\"plant.opcua_password\"). Check `user` and the password \
+                       secret(\"plant.opcua_password\")";
+
+/// The cause of `BadIdentityTokenRejected` over a channel in `mode` with the user of
+/// [`LOGINS`].
+fn rejected(mode: client::Mode) -> String {
+    match mode {
+        client::Mode::SignAndEncrypt => format!(
+            "{UNOFFERED} SignAndEncrypt {POLICIES} that lets in a user name and \
+             password with a token in the policy None or one of these, or it \
+             {REFUSED}. For a server with only Sign endpoints, set `unencrypted = \
+             true`; else turn on one of these policies with a user name token in the \
+             policy None or one of these on the server"
+        ),
+        client::Mode::Sign => format!(
+            "{UNOFFERED} Sign {POLICIES} that lets in a user name and password with a \
+             token in one of these policies, since a token in the policy None would \
+             send the password in clear, or it {REFUSED}. Turn on one of these \
+             policies in the mode Sign with a user name token in one of these \
+             policies on the server"
+        ),
+    }
+}
+
+#[test]
+fn a_wrong_password_names_the_user_and_the_password() {
+    let secure = Secure {
+        user: Some(("operator", Some(b"pass"))),
+        ..Secure::with_user(Policy::Basic256Sha256)
+    };
+    let cause = format!("the server {REFUSED}");
+    connect_fails(secure, "BadUserAccessDenied", &cause);
+}
+
+/// A server sends `BadIdentityTokenInvalid` for a user token that it cannot read, and
+/// some servers for a wrong password too.
+#[test]
+fn an_invalid_token_names_both_causes() {
+    let secure = Secure {
+        refusal: Some(Status::BAD_IDENTITY_TOKEN_INVALID),
+        ..Secure::with_user(Policy::Basic256Sha256)
+    };
+    let cause = "the server could not read the user token (its policy or its \
+                 encryption), or refused the user \"operator\" with the password \
+                 secret(\"plant.opcua_password\"). Check the user token policies of \
+                 the server, `user`, and the password secret(\"plant.opcua_password\")";
+    connect_fails(secure, "BadIdentityTokenInvalid", cause);
+}
+
+/// A server can send `BadIdentityTokenRejected` for a token that it refuses, so with a
+/// user the cause names that and the endpoints, in each mode. The client sends it too
+/// for a user token in a policy that it does not have.
+#[test]
+fn a_rejected_token_of_a_user_names_both_causes_in_each_mode() {
+    for (mode, unencrypted) in [
+        (client::Mode::SignAndEncrypt, false),
+        (client::Mode::Sign, true),
+    ] {
+        let secure = Secure {
+            offered: mode,
+            unencrypted,
+            token: Some(BASIC256),
+            ..Secure::with_user(Policy::Basic256Sha256)
+        };
+        let outcome = secured(secure);
+        assert!(outcome.result.is_ok(), "{mode:?}: {:?}", outcome.result);
+        let connect = format!(
+            "the connect to opc.tcp://10.0.0.1:4840 failed with \
+             BadIdentityTokenRejected: {}",
+            rejected(mode)
+        );
+        assert_eq!(errors(&outcome.statuses), [(DEVICE, connect)], "{mode:?}");
+        let security = Security {
+            mode,
+            user: Some(config::User {
+                name: "operator".into(),
+                password: secret::Source::Secret(name(PASSWORD)),
+            }),
+            ..cause_security()
+        };
+        let password = secret::Value::new(b"pass".to_vec());
+        let secured = secured_on(&security, CLIENT.certificate, Some(password));
+        let cause = cause(Status::BAD_IDENTITY_TOKEN_REJECTED, Some(&secured));
+        assert_eq!(cause, Some(rejected(mode)), "{mode:?}");
+    }
+}
+
+/// A user with no password is a broken invariant, never an anonymous session. No
+/// caller can see it: [`Secured::read`] reads the password of each user, so only this
+/// private call of [`Secured::session`] makes the case.
+#[test]
+#[should_panic(expected = "invariant: Secured::read reads the password of each user")]
+fn a_user_with_no_password_panics() {
+    let security = Security {
+        user: Some(config::User {
+            name: "operator".into(),
+            password: secret::Source::Secret(name(PASSWORD)),
+        }),
+        ..cause_security()
+    };
+    secured_on(&security, CLIENT.certificate, None).session();
+}
+
+/// With no `user`, the two statuses name no cause.
+#[test]
+fn a_refused_anonymous_user_names_no_cause() {
+    for status in [
+        Status::BAD_USER_ACCESS_DENIED,
+        Status::BAD_IDENTITY_TOKEN_INVALID,
+    ] {
+        let outcome = secured(Secure {
+            refusal: Some(status),
+            ..Secure::of(Policy::Basic256Sha256)
+        });
+        assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+        let connect = format!(
+            "the connect to opc.tcp://10.0.0.1:4840 failed with {}",
+            status.name()
+        );
+        assert_eq!(
+            errors(&outcome.statuses),
+            [(DEVICE, connect)],
+            "{}",
+            status.name()
+        );
+    }
+}
+
+#[test]
+fn a_server_with_no_users_asks_to_turn_them_on() {
+    let secure = Secure {
+        login: Login::Anonymous,
+        ..Secure::with_user(Policy::Basic256Sha256)
+    };
+    let cause = rejected(client::Mode::SignAndEncrypt);
+    connect_fails(secure, "BadIdentityTokenRejected", &cause);
+}
+
+#[test]
+fn a_server_that_needs_a_user_asks_an_anonymous_connector_as_before() {
+    let secure = Secure {
+        user: None,
+        ..Secure::with_user(Policy::Basic256Sha256)
+    };
+    let cause = format!(
+        "{UNOFFERED} SignAndEncrypt {POLICIES} that lets in an anonymous user. For a \
+         server with only Sign endpoints, set `unencrypted = true`; else turn on one \
+         of these policies on the server"
+    );
+    connect_fails(secure, "BadIdentityTokenRejected", &cause);
+}
+
+/// The server takes a password in clear over `Sign`, so the read would land if the
+/// client sent it.
+#[test]
+fn never_sends_a_password_in_clear() {
+    let secure = Secure {
+        offered: client::Mode::Sign,
+        unencrypted: true,
+        token: Some(NONE),
+        ..Secure::with_user(Policy::Basic256Sha256)
+    };
+    let cause = rejected(client::Mode::Sign);
+    connect_fails(secure, "BadIdentityTokenRejected", &cause);
+}
+
+/// `SignAndEncrypt` encrypts the password that the token policy does not.
+#[test]
+fn reads_with_a_token_policy_in_none_over_sign_and_encrypt() {
+    let outcome = secured(Secure {
+        token: Some(NONE),
+        ..Secure::with_user(Policy::Basic256Sha256)
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    assert_eq!(errors(&outcome.statuses), []);
+    assert_eq!(outcome.frames.len(), 11);
+    assert_eq!(values(&outcome.frames, 2), served(&outcome, A));
+}
+
+/// A run with no secret of the password ends with the error of the store, and the run
+/// after the secret is written reads.
+#[test]
+fn a_missing_password_ends_the_run_until_it_is_written() {
+    let secure = Secure {
+        user: Some(("operator", None)),
+        ..Secure::with_user(Policy::Basic256Sha256)
+    };
+    let outcome = scene(
+        Setup::three(),
+        Stage::POLL.over(secure),
+        |scene| async move {
+            scene.after(ms(1_050), |scene| async move {
+                let [(_, password)] = LOGINS else {
+                    unreachable!("one login")
+                };
+                testing::create_secret(&scene.node.files(), &name(PASSWORD), password)
+                    .await;
+            });
+            scene.supervise(ms(5_050)).await
+        },
+    );
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    let unread = "the secret secret(\"plant.opcua_password\"): the file \
+                  /data/secrets/plant.opcua_password is not there. Write the value to \
+                  it, unreadable by other users: chmod o-r \
+                  /data/secrets/plant.opcua_password";
+    assert_eq!(errors(&outcome.statuses), [(RETRY, unread.to_owned())]);
+    assert!(!outcome.frames.is_empty());
+    assert_eq!(values(&outcome.frames, 2), served(&outcome, A));
+}
+
 #[test]
 fn refuses_a_key_with_a_byte_past_0x7f_in_a_pem_line_with_its_secret() {
     let mut secure = Secure::of(Policy::Basic256Sha256);
@@ -3265,7 +3605,8 @@ fn refuses_a_trust_with_no_certificate_with_the_secret_of_the_trust() {
 fn a_missing_secret_ends_the_run_until_it_is_written() {
     let mut secure = Secure::of(Policy::Basic256Sha256);
     secure.credentials[1] = None;
-    let outcome = run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
+    let stage = Stage::POLL.over(secure);
+    let outcome = scene(Setup::three(), stage, |scene| async move {
         scene.after(ms(1_050), |scene| async move {
             testing::create_secret(&scene.node.files(), &name(KEY), CLIENT.key).await;
         });
@@ -3286,7 +3627,8 @@ fn a_missing_secret_ends_the_run_until_it_is_written() {
 fn a_replaced_key_heals_the_run() {
     let mut secure = Secure::of(Policy::Basic256Sha256);
     secure.credentials[1] = Some(OTHER.key);
-    let outcome = run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
+    let stage = Stage::POLL.over(secure);
+    let outcome = scene(Setup::three(), stage, |scene| async move {
         scene.after(ms(1_050), |scene| async move {
             testing::create_secret(&scene.node.files(), &name(KEY), CLIENT.key).await;
         });
@@ -3305,7 +3647,8 @@ fn a_replaced_key_heals_the_run() {
 fn a_replaced_trust_heals_the_run() {
     let mut secure = Secure::of(Policy::Basic256Sha256);
     secure.credentials[2] = Some(b"no certificate");
-    let outcome = run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
+    let stage = Stage::POLL.over(secure);
+    let outcome = scene(Setup::three(), stage, |scene| async move {
         scene.after(ms(1_050), |scene| async move {
             let files = scene.node.files();
             testing::create_secret(&files, &name(TRUST), SERVER.certificate).await;
@@ -3330,7 +3673,8 @@ fn a_certificate_whose_window_opens_later_reads_once_it_opens() {
         wall: START - Span::from_nanos(2 * Span::SECOND.nanos()),
         ..Secure::of(Policy::Basic256Sha256)
     };
-    let outcome = run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
+    let stage = Stage::POLL.over(secure);
+    let outcome = scene(Setup::three(), stage, |scene| async move {
         scene.supervise(ms(10_050)).await
     });
     assert!(outcome.result.is_ok(), "{:?}", outcome.result);
@@ -3348,7 +3692,8 @@ fn browses_over_a_secure_channel() {
     let found = Arc::new(Mutex::new(None));
     let slot = Arc::clone(&found);
     let secure = Secure::of(Policy::Aes256Sha256RsaPss);
-    let outcome = run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
+    let stage = Stage::POLL.over(secure);
+    let outcome = scene(Setup::three(), stage, |scene| async move {
         let query = browse::Query {
             start: browse::Path::root(),
             scope: browse::Scope::Level(None),
@@ -3377,7 +3722,8 @@ fn a_browse_names_the_certificate_that_the_server_does_not_trust() {
     let slot = Arc::clone(&found);
     let mut secure = Secure::of(Policy::Basic256Sha256);
     secure.server.trust = OTHER.certificate;
-    run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
+    let stage = Stage::POLL.over(secure);
+    scene(Setup::three(), stage, |scene| async move {
         let query = browse::Query {
             start: browse::Path::root(),
             scope: browse::Scope::Level(None),
@@ -3408,7 +3754,8 @@ fn a_browse_refuses_the_key_of_another_certificate() {
     let slot = Arc::clone(&found);
     let mut secure = Secure::of(Policy::Basic256Sha256);
     secure.credentials[1] = Some(OTHER.key);
-    run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
+    let stage = Stage::POLL.over(secure);
+    scene(Setup::three(), stage, |scene| async move {
         let query = browse::Query {
             start: browse::Path::root(),
             scope: browse::Scope::Level(None),
