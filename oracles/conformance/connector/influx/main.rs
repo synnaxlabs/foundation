@@ -38,9 +38,7 @@ const SUITE: Suite = Suite {
     progress: "confirmed",
     backoff: Backoff::Run,
     refused,
-    secrets: Some(|config, source| {
-        scenarios::with(config, "token", scenarios::inputs::secret(source))
-    }),
+    secrets: Some(marked),
     echo: Some(|inputs| Box::pin(echo(inputs))),
 };
 
@@ -48,6 +46,9 @@ scenarios::suite!(SUITE);
 
 /// The time from one frame of the writer to the next.
 const PERIOD: Span = Span::from_nanos(100_000_000);
+
+/// The secret that the marked config reads its token from.
+const TOKEN: &str = "conformance.token";
 
 fn kinds() -> Table {
     Table::new().with("influx", Kind::default())
@@ -130,6 +131,13 @@ async fn simulate(inputs: Serve) {
     let database = "plant".into();
     let served = serve(listener, tasks, until, Scheme::Plain, store, database, None);
     served.await.expect("the listener holds");
+}
+
+/// `config` with its token read from [`TOKEN`], whose value is `marker`.
+fn marked(config: Document, marker: &str) -> scenarios::inputs::Marked {
+    let token = scenarios::inputs::secret(TOKEN);
+    let secrets = vec![(name(TOKEN), marker.as_bytes().to_vec())];
+    (scenarios::with(config, "token", token), secrets)
 }
 
 /// Answers each request until `until` with 400 and a text of each header of the

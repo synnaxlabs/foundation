@@ -51,6 +51,7 @@ pub(crate) mod inputs {
     use document::diagnostic::Diagnostic;
     use document::value::{self, Call, Value};
     use env::tasks::Tasks;
+    use types::name::Name;
 
     /// What the suite of one kind gives the scenarios.
     pub(crate) struct Suite {
@@ -70,10 +71,12 @@ pub(crate) mod inputs {
         pub backoff: Backoff,
         /// Configs that the kind's check refuses, each with its exact diagnostics.
         pub refused: fn() -> Vec<(Document, Vec<Diagnostic>)>,
-        /// Sets each attribute of `config`, the config of [`Suite::setup`], that takes
-        /// a secret to read `secret("<source>")`, and adds each attribute that those
-        /// need to check. `None` for a kind that takes no secret.
-        pub secrets: Option<fn(config: Document, source: &str) -> Document>,
+        /// Marks `config`, the config of [`Suite::setup`]: each attribute that takes a
+        /// secret reads one, and the value of each holds `marker`. Gives the marked
+        /// config and each secret that it reads, by name and value. `None` for a kind
+        /// that takes no secret, and for each kind that CONNECTOR CONFORMANCE names as
+        /// not yet in scenario 7.
+        pub secrets: Option<fn(config: Document, marker: &str) -> Marked>,
         /// A simulator that answers each request with an error whose text holds each
         /// header and value of the request, as a gateway in debug mode does. `None`
         /// for a kind whose device answers with a code and no text of its own.
@@ -92,6 +95,9 @@ pub(crate) mod inputs {
             arguments: vec![source],
         })
     }
+
+    /// A marked config, and each secret that it reads, by name and value.
+    pub(crate) type Marked = (Document, Vec<(Name, Vec<u8>)>);
 
     /// A simulator: it serves on `address` of the device node until `until`, then
     /// closes each connection and returns.
@@ -277,10 +283,7 @@ const FAULTS_MAX: u64 = 8;
 const TEXT_MAX: usize = 1024;
 /// A name that no spec of the scenarios defines.
 const UNDEFINED: &str = "conformance.undefined";
-/// The secret that [`Suite::secrets`] reads in
-/// [`keeps_each_secret_from_the_status`].
-const SECRET: &str = "conformance.marker";
-/// The value of [`SECRET`], which no status shows.
+/// The text that each secret of [`Suite::secrets`] holds, which no status shows.
 const MARKER: &str = "c0nformance-marker-5e7c41";
 /// How long [`keeps_each_secret_from_the_status`] watches after each error.
 const GLANCE: Span = Span::from_nanos(5_000_000_000);
@@ -1073,8 +1076,8 @@ async fn faulted(scene: Rc<Scene>, seed: u64) {
     }
 }
 
-/// For a kind with [`Suite::secrets`], whose config reads each secret from
-/// [`SECRET`], no status, no end of a run, and no check shows [`MARKER`], its value.
+/// For a kind with [`Suite::secrets`], whose config reads secrets that each hold
+/// [`MARKER`], no status, no end of a run, and no check shows it.
 /// One run meets the simulator, and is Running with progress within [`START`], then
 /// its stop, and gives an error within [`LOST`] and 5 s more. A second run meets no
 /// device: an error within [`START`], and 5 s more. A third meets the echo of
@@ -1085,11 +1088,20 @@ pub(crate) fn keeps_each_secret_from_the_status(suite: &'static Suite) {
         return;
     };
     run(suite, direct, move |scene| async move {
-        let secret = SECRET.parse().expect("a valid name");
-        create_secret(&scene.node.files(), &secret, MARKER.as_bytes()).await;
         let setup = scene.setup().await;
-        let config = marked(setup.clone(), SECRET);
+        let (config, secrets) = marked(setup.clone(), MARKER);
         assert_ne!(config, setup, "the kind reads a secret");
+        assert!(
+            !secrets.is_empty(),
+            "the kind gives each secret that it reads"
+        );
+        for (name, value) in &secrets {
+            let held = value
+                .windows(MARKER.len())
+                .any(|part| part == MARKER.as_bytes());
+            assert!(held, "the secret {name} holds the marker");
+            create_secret(&scene.node.files(), name, value).await;
+        }
         let kinds = (suite.kinds)();
         let checked = kinds.check(suite.kind(), None, &config);
         let writes = checked.expect("the config with secrets checks").writes;

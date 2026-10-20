@@ -34,10 +34,10 @@ heals_after_random_faults`. A range `<start>..<end>` in hex, the end excluded, s
 - People own the scenarios. A kind that fails one has a defect, or the person changes
   the scenario.
 - A new scenario goes into `suite!`, so it reaches each kind at once.
-- A kind gives plain inputs: its table, a setup, its simulator, the name of its
-  progress count, its backoff form, the configs that its check refuses, a form of its
-  config that reads each secret, and an echo simulator when its device can answer with a
-  text of its own. A kind that needs a hook to pass a scenario has a scenario that is
-  wrong.
+- A kind gives plain inputs: its table, a setup, its simulator, the name of its progress
+  count, its backoff form, the configs that its check refuses, a function that marks its
+  config and gives each secret that it reads, and an echo simulator when its device can
+  answer with a text of its own. A kind that needs a hook to pass a scenario has a
+  scenario that is wrong.
 - The simulator of a kind that subscribes changes its data at least every 100 ms.
 - A new kind adds `<kind>/main.rs` and its `[[test]]` entry.
