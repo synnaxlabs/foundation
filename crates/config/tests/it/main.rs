@@ -6,7 +6,9 @@
 
 mod connector;
 mod import;
+mod openssh;
 mod plan;
 mod private_key;
+mod profile;
 mod schema;
 mod subject;
