@@ -85,11 +85,11 @@
   (`node::Error::Unstarted`) gives `node.unstarted` with the fix "Start the node once
   with `foundation start --data=<dir>`, with `--name <name>`", and a `<dir>` or
   `<dir>/data` that is a file gives `node.unstarted` with the fix "Give `--data` the
-  data directory of a node that has started once". A file or directory of the data
-  directory that this user cannot read gives `node.unreadable`. A `node.key` that a
-  node did not write (`node::Error::Key`), and a data directory with the directory of a
-  mesh and no `node.key`, whose key is lost (`node::Error::NoCard`, as at a start),
-  give `node.failed`. `<address>` is where the
+  data directory of a node that has started once". A data directory, or a file or
+  directory in it, that `profile` cannot read gives `node.unreadable`. A `node.key`
+  that a node did not write (`node::Error::Key`), and a data directory with the
+  directory of a mesh and no `node.key`, whose key is lost (`node::Error::NoCard`, as
+  at a start), give `node.failed`. `<address>` is where the
   program dials the node: an unspecified IP or port 0 gives `ops.argument`. The output
   is the block as HCL, which `config_hcl::write` gives, or with `--json` one line
   `{"address": "<ip:port>", "public_key": "<the line of an OpenSSH .pub file>"}`, a
