@@ -28,10 +28,12 @@
   each data sample. It puts the stamp in each index, gives each group of the frame and
   whether the home applied it, and writes the refused groups again. A group for which
   the pool has no block, or that the home loses or refuses for another cause, is not
-  applied. `Expired` and `Codec` panic: a writer with no lease that writes raw frames
-  never gets them. `connector::poll::Writer` (POLL WRITER) and the status writer each
-  write through it, and neither matches the outcomes itself (`laptop.architect-2`,
-  2026-10-20T09:06:36Z:
+  applied. `Expired` and `Codec` panic: a writer with no lease never gets `Expired`,
+  and `codec` refuses only raw bytes that are not samples of their type, which no fill
+  writes (`laptop.architect`, 2026-10-20:
+  https://github.com/synnaxlabs/foundation/pull/3556#issuecomment-6287519381).
+  `connector::poll::Writer` (POLL WRITER) and the status writer each write through it,
+  and neither matches the outcomes itself (`laptop.architect-2`, 2026-10-20T09:06:36Z:
   https://github.com/synnaxlabs/foundation/pull/3556#issuecomment-6287471425, on the
   plan https://github.com/synnaxlabs/foundation/issues/2527#issuecomment-6287263795).
   The status writer of the supervisor stamps its frames with `Stamps::next`

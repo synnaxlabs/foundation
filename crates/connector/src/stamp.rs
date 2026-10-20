@@ -191,9 +191,9 @@ impl Writer {
     ///
     /// # Panics
     ///
-    /// When the home refuses a group as `Expired` or `Codec`, which a writer with no
-    /// lease and a raw frame never gets, or refuses a group written again as
-    /// `Backwards`.
+    /// When the home refuses a group as `Expired` or `Codec`, or a group written again
+    /// as `Backwards`. A writer with no lease never gets `Expired`, and `codec`
+    /// refuses only raw bytes that are not samples of their type, which no fill writes.
     pub(crate) fn write(
         &mut self,
         stamp: Stamp,
@@ -318,8 +318,8 @@ impl<F: FnMut(Stamp, usize, &mut [u8])> Sent<'_, F> {
                     refusal: refusal @ (Refusal::Expired | Refusal::Codec { .. }),
                     ..
                 } => panic!(
-                    "invariant: the home refuses no frame with no lease in raw form, \
-                     but gives {refusal}"
+                    "invariant: a writer with no lease and a fill of samples of their \
+                     type are never refused, but the home gives {refusal}"
                 ),
             }
         }
