@@ -104,5 +104,6 @@
   of a value that a kind makes, such as the base64 of `user:password`, is the duty of
   that kind. The trigger to hide values in the browse answer of #2705 is a browse error
   that holds server text. Decided by `laptop.architect-2` on 2026-10-16T17:54:49Z
-  (https://github.com/synnaxlabs/foundation/issues/2849#issuecomment-6221505945 and
-  https://github.com/synnaxlabs/foundation/issues/3603#issuecomment-6295375095).
+  (https://github.com/synnaxlabs/foundation/issues/2849#issuecomment-6221505945), and
+  the last value of each source on 2026-10-20T16:07:17Z
+  (https://github.com/synnaxlabs/foundation/issues/3603#issuecomment-6295375095).
