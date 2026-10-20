@@ -17,7 +17,7 @@ use env::files::Files;
 use env::tasks::{self, Tasks};
 use raft::{Admission, Data, Entry, Position, Raft, Ready, Start, Voters};
 use spec::Pointer;
-use spec::tree::Chunks;
+use spec::tree::{self, Chunks};
 use transport::{Code, Session, Transport};
 use types::channel;
 use types::digest::Digest;
@@ -1250,6 +1250,26 @@ fn check_members(
         return Err(Error::NotMember(key));
     }
     Ok(())
+}
+
+// Reads with `read` from `chunks`, and gets each chunk that the read needs from
+// `store`, until the read ends or the store lacks a chunk (`Missing`).
+async fn fetched<T>(
+    store: &blob::Store,
+    chunks: &mut Chunks,
+    mut read: impl FnMut(&Chunks) -> Result<T, tree::Error>,
+) -> Result<Result<T, tree::Error>, Error> {
+    loop {
+        let digest = match read(chunks) {
+            Ok(value) => return Ok(Ok(value)),
+            Err(tree::Error::Missing(digest)) => digest,
+            Err(error) => return Ok(Err(error)),
+        };
+        match store.get(digest).await.map_err(Error::Blob)? {
+            Some(chunk) => chunks.insert(chunk.to_vec()),
+            None => return Ok(Err(tree::Error::Missing(digest))),
+        };
+    }
 }
 
 // Puts each chunk of `digests`, which `chunks` holds, in `store`.
