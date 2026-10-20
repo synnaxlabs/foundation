@@ -102,6 +102,8 @@
     ``<file>: no file is there: remove `private_key` from <profile>, and connect
     makes ~/.foundation/<subject>.key``; for a key file that is a link to no file:
     `<file>: <cause>, and it names no file`.
+  - `OSError`, for a user with no home directory: `the user has no home directory for
+    <path>: set HOME`, where `<path>` is the `~/` path that it needs.
   - The WARNING of trust on first use: `trusted the node at <address> on first use:
     public key <fingerprint>; it is pinned in <profile>`.
   - `Refused`, for a subject with a key: `<refusal>. If the spec of the node does not

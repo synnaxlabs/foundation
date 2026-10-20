@@ -138,14 +138,23 @@ fn home(py: Python<'_>) -> PyResult<PathBuf> {
 }
 
 /// `path` in the home directory when it starts with `~/`, else `path` as written.
+/// Raises `OSError` when the user has no home directory.
 fn expanded(py: Python<'_>, path: &Path) -> PyResult<PathBuf> {
     let Some(within) = path.to_str().and_then(|path| path.strip_prefix("~/")) else {
         return Ok(path.to_owned());
     };
+    // With no `HOME` and no entry of the uid in the password file, `expanduser` gives
+    // `~` as it is.
     let home: PathBuf = py
         .import("os.path")?
         .call_method1("expanduser", ("~",))?
         .extract()?;
+    if !home.is_absolute() {
+        return Err(PyOSError::new_err(format!(
+            "the user has no home directory for {}: set HOME",
+            path.display()
+        )));
+    }
     Ok(home.join(within.trim_start_matches('/')))
 }
 

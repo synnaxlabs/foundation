@@ -62,8 +62,9 @@ def connect(
     file that is not the OpenSSH file of an Ed25519 key with no passphrase,
     `RuntimeError` when a thread of the client or of the read of `data` cannot start,
     `OSError` when the local UDP socket cannot bind, the profile or a key file cannot be
-    read or written, or the profile names a key file that is not there, `MemoryError`
-    when the OS refuses the memory of the pool of the frames of the client's readers,
+    read or written, the profile names a key file that is not there, or the user has
+    no home directory for a `~/` path that it needs, `MemoryError` when the OS
+    refuses the memory of the pool of the frames of the client's readers,
     `ConnectionError` when no source gives the address, or with `strict` the public key,
     the data directory cannot be read, the client cannot reach the node, the node proves
     another key than its source gives, or the node refuses the subject, and

@@ -4,6 +4,7 @@
 """
 
 import base64
+import contextlib
 import errno
 import gc
 import getpass
@@ -1058,6 +1059,34 @@ class ProfileTest(unittest.TestCase):
             f"the user has no login name: {cause}; add `subject = \"<name>\"` to "
             f"{self.profile}, or pass subject=",
         )
+
+    def test_a_user_with_no_home_directory_gets_the_fix_and_no_file(self) -> None:
+        environ = dict(os.environ)
+        environ.pop("HOME")
+        unknown = KeyError("getpwuid(): uid not found")
+        work = tempfile.TemporaryDirectory(prefix="foundation-python-")
+        self.addCleanup(work.cleanup)
+        with (
+            unittest.mock.patch.dict(os.environ, environ, clear=True),
+            unittest.mock.patch("pwd.getpwuid", side_effect=unknown),
+            contextlib.chdir(work.name),
+        ):
+            self.assertEqual(os.path.expanduser("~"), "~")
+            with self.assertRaises(OSError) as raised:
+                foundation.connect(self.node.address, subject="alice")
+            with self.assertRaises(foundation.Refused) as refused:
+                foundation.connect(
+                    self.node.address,
+                    public_key=self.node.public_key(),
+                    subject="plant.dave",
+                    private_key=bytes(32),
+                )
+        self.assertEqual(
+            str(raised.exception),
+            "the user has no home directory for ~/.foundation: set HOME",
+        )
+        self.assertEqual(str(refused.exception), refusal("plant.dave", ZERO))
+        self.assertEqual(os.listdir(work.name), [])
 
     def test_another_error_of_the_login_name_is_raised_as_it_is(self) -> None:
         broken = RuntimeError("the password database is broken")

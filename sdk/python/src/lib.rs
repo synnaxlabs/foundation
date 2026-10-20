@@ -118,8 +118,9 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
 /// file that is not the OpenSSH file of an Ed25519 key with no passphrase,
 /// `RuntimeError` when a thread of the client or of the read of `data` cannot start,
 /// `OSError` when the local UDP socket cannot bind, the profile or a key file cannot be
-/// read or written, or the profile names a key file that is not there, `MemoryError`
-/// when the OS refuses the memory of the pool of the frames of the client's readers,
+/// read or written, the profile names a key file that is not there, or the user has
+/// no home directory for a `~/` path that it needs, `MemoryError` when the OS
+/// refuses the memory of the pool of the frames of the client's readers,
 /// `ConnectionError` when no source gives the address, or with `strict` the public key,
 /// the data directory cannot be read, the client cannot reach the node, the node proves
 /// another key than its source gives, or the node refuses the subject, and
@@ -160,8 +161,14 @@ fn connect(
             data.display()
         )));
     };
-    let profile = Profile::host(py)?;
-    let held = if given { None } else { Some(profile.read()?) };
+    // A program that passes the key and the subject needs no home directory.
+    let host = Profile::host(py);
+    let profile = || host.as_ref().map_err(|e| e.clone_ref(py));
+    let held = if given {
+        None
+    } else {
+        Some(profile()?.read()?)
+    };
     let profiled = Given::profiled(held.as_ref(), address);
     let Given {
         public_key,
@@ -177,14 +184,14 @@ fn connect(
             "no source gives the public key of the node at {address}, and `strict` \
              refuses a node that no source pins: pass public_key=, or add the block \
              that `foundation profile {address}` prints on the node's host to {}{held}",
-            profile.path.display()
+            profile()?.path.display()
         )));
     }
-    let (subject, admitted) = keyed(py, subject, &profile, &data)?;
+    let (subject, admitted) = keyed(py, subject, profile, &data)?;
     let (public_key, pinned) = match public_key {
         Some(Key::Known(public_key)) => (public_key, None),
-        Some(Key::Pinned(public_key)) => (public_key, Some(&profile)),
-        None => (trust(py, address, &profile)?, Some(&profile)),
+        Some(Key::Pinned(public_key)) => (public_key, Some(profile()?)),
+        None => (trust(py, address, profile()?)?, Some(profile()?)),
     };
     let node = sdk::Node {
         addresses: vec![address],
@@ -286,16 +293,16 @@ impl Given {
 /// The subject of `given`, the subject that the first source gives, with whether a
 /// refusal gives the blocks that admit it: each subject but the first admin of the
 /// data directory `data`. With no source, it is the [`login`] subject of `profile`.
-fn keyed(
+fn keyed<'a>(
     py: Python<'_>,
     given: Option<Subject>,
-    profile: &Profile,
+    profile: impl Fn() -> PyResult<&'a Profile>,
     data: &Path,
 ) -> PyResult<(sdk::Subject, bool)> {
     match given {
         Some(Subject::Keyed(subject)) => Ok((subject, true)),
         Some(Subject::Filed(name, named)) => {
-            let private_key = profile.private_key(py, &name, named.as_deref())?;
+            let private_key = profile()?.private_key(py, &name, named.as_deref())?;
             Ok((sdk::Subject { name, private_key }, true))
         }
         Some(Subject::Admin(Some(subject))) => Ok((subject, false)),
@@ -303,7 +310,7 @@ fn keyed(
             "{} holds no admin.key that a node wrote",
             data.display()
         ))),
-        None => Ok((login(py, profile)?, true)),
+        None => Ok((login(py, profile()?)?, true)),
     }
 }
 
