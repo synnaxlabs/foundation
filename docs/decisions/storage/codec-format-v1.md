@@ -29,8 +29,15 @@
   (BQ4). Timestamp stride (BQ4) comes later as a new tag. The
   validator checks tags, bit widths, lengths, run sums, and the ALP exponents, factors,
   and positions, not padding. `max_len` of the raw length (raw plus one raw header per
-  vector) sizes the output, and the encoder makes one pass. `codec/src/vector.rs` is the
-  full spec. `codec` is the one place that checks a series against its count (#359):
+  vector) sizes the output, and the encoder makes one pass. `len_within(types, bytes)`
+  is its inverse for one series of each of `types`: the most raw bytes in all, split
+  in any way, whose encodings fit in `bytes`. It counts the headers of one vector of
+  each type and the highest rate of headers to values, so no search is needed and it
+  never panics (#3366). Decided by `laptop.architect` (2026-10-20T10:15:37Z):
+  https://github.com/synnaxlabs/foundation/issues/3366#issuecomment-6288645507. Lost:
+  a `max_len_among` with a binary search in `home`, which needs a fact of `codec`.
+  `codec/src/vector.rs` is the full spec. `codec` is the one place that checks a series
+  against its count (#359):
   `encode` refuses raw values that do not hold `count` samples, and `validate` refuses
   encoded bytes that do not parse as `count` samples. The bytes do not carry the count,
   so a wrong count passes when the vectors also parse at it: a vector with bit width 0

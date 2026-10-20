@@ -30,3 +30,11 @@
   sentence departs from that ruling on the bound, approved by `laptop.architect`
   (2026-10-12T20:04:12Z):
   https://github.com/synnaxlabs/foundation/pull/2464#issuecomment-6131705729.
+  `Shard::write_body_max(set)` gives the most body bytes of a frame of `set`, raw or
+  encoded, that `Shard::write` never refuses with `Large`: the least of the largest
+  block of the pool less the frame overhead, and for each group, of one record and
+  `Buffer::block_max` less the stored header, through `codec::len_within`.
+  `Shard::read_body_max` gives the longest body of one stored entry. `home` owns the
+  entry layout, so it computes both (#3366). Decided by `laptop.architect`
+  (2026-10-20T10:07:34Z):
+  https://github.com/synnaxlabs/foundation/issues/3366#issuecomment-6288511691.
