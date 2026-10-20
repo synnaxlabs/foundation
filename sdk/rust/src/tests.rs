@@ -41,63 +41,58 @@ fn each_private_key_is_new() {
     assert_ne!(private_key().0, private_key().0);
 }
 
-/// The node sees the close of an answer at once, not at the end of its idle timeout,
-/// also when the shard of the answer ends right after it.
+/// The node sees the close of an answer at once, not at the end of its idle timeout.
+/// Loopback loses no close, which goes out only once.
 #[test]
-fn an_answer_closes_its_session_with_code_0() {
+fn answering_closes_its_session_with_code_0_on_the_os() {
     let server_key = PrivateKey([2; 32]);
     let proved = server_key.public();
-    let mut sim = sim::Sim::new(sim::Config::default());
-    let client = sim.node(sim::node::Config::default());
-    let server = sim.node(sim::node::Config::default());
-    let at = SocketAddr::new(server.addresses()[0], 4433);
+    let (bound, address) = mpsc::channel();
     let (sent, ended) = mpsc::channel();
-    let own = server.clone();
-    let shard = env::shards::Config {
+    let shards = os::shards().expect("shards");
+    let config = env::shards::Config {
         name: "server".into(),
         core: None,
     };
-    let started = server.shards().start(shard, move |tasks| async move {
-        let pool = block::Config::new(1 << 20).expect("the budget fits");
-        let memory = block::Heap::new(pool.reservation());
-        let config = transport::Config {
-            private_key: server_key,
-            message_bytes_max: NonZeroUsize::new(1 << 16).expect("not zero"),
-            window_bytes: 1 << 20,
-            streams_max: NonZeroU32::new(16).expect("not zero"),
-            idle: Span::from_nanos(60 * Span::SECOND.nanos()),
-            clock: own.clock(),
-            entropy: own.entropy(),
-            tasks,
-            pool: Rc::new(block::Pool::new(pool, memory)),
-        };
-        let part = transport::Port::bind(&own.net(), at)
-            .expect("a port")
-            .split(NonZeroUsize::MIN)
-            .pop()
-            .expect("one part");
-        let transport = transport::Transport::new(config, part).expect("a transport");
-        let session = transport.accept().await.expect("a session");
-        let start = own.clock().now();
-        let error = session.closed().await;
-        sent.send((error, own.clock().now() - start))
-            .expect("the test keeps the receiver");
-    });
-    let serving = started.expect("the server starts");
-    let answered = sim.run_on(&client, move |node, tasks| async move {
-        let config = transport::client::Config {
-            net: node.net(),
-            clock: node.clock(),
-            entropy: node.entropy(),
-            tasks,
-            pool: Rc::new(block::Pool::heap(POOL)),
-        };
-        answered(&[transport::Address::Udp(at)], config).await
-    });
-    let public_key = answered.expect("the run ends").expect("an answer");
-    serving.join().expect("the server did not panic");
-    assert_eq!(public_key, proved);
-    let (error, waited) = ended.try_recv().expect("the server saw the end");
+    let _server = shards
+        .start(config, move |tasks| async move {
+            let pool = block::Config::new(1 << 20).expect("the budget fits");
+            let memory = block::Heap::new(pool.reservation());
+            let clock = os::clock();
+            let config = transport::Config {
+                private_key: server_key,
+                message_bytes_max: NonZeroUsize::new(1 << 16).expect("not zero"),
+                window_bytes: 1 << 20,
+                streams_max: NonZeroU32::new(16).expect("not zero"),
+                idle: Span::from_nanos(60 * Span::SECOND.nanos()),
+                clock: clock.clone(),
+                entropy: os::entropy(),
+                tasks,
+                pool: Rc::new(block::Pool::new(pool, memory)),
+            };
+            let at = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+            let bound_port = transport::Port::bind(&os::net(), at).expect("a port");
+            let transport::Address::Udp(at) = bound_port.addresses()[0] else {
+                unreachable!("a UDP port");
+            };
+            let part = bound_port.split(NonZeroUsize::MIN).pop().expect("one part");
+            let transport =
+                transport::Transport::new(config, part).expect("a transport");
+            bound.send(at).expect("the test keeps the receiver");
+            let session = transport.accept().await.expect("a session");
+            let start = clock.now();
+            let error = session.closed().await;
+            sent.send((error, clock.now() - start))
+                .expect("the test keeps the receiver");
+        })
+        .expect("the server starts");
+    #[expect(clippy::disallowed_methods, reason = "the test waits for the server")]
+    let at = address.recv().expect("the server binds");
+    let node = Node::answering(vec![at]).expect("an answer");
+    assert_eq!(node.public_key, proved);
+    #[expect(clippy::disallowed_methods, reason = "the test waits for the server")]
+    let ended = ended.recv_timeout(Duration::from_secs(5));
+    let (error, waited) = ended.expect("the server saw the end");
     assert_eq!(
         error,
         transport::Error::PeerClosed {

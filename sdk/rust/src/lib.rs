@@ -102,11 +102,10 @@ impl Node {
     }
 
     /// The node that answers first at `addresses`, dialed in this order with a
-    /// stagger, with the public key that it proves. Blocks until a node answers or each
-    /// address fails.
-    /// Trust on first use: nothing proves that it is the node the caller means, so the
-    /// caller pins the result and gives it to each later [`Client::connect`]. It sends
-    /// no hello, so it needs no subject.
+    /// stagger, with the public key that it proves. Blocks until a node answers or
+    /// each address fails. Trust on first use: nothing proves that it is the node the
+    /// caller means, so the caller pins the result and gives it to each later
+    /// [`Client::connect`]. It sends no hello, so it needs no subject.
     ///
     /// # Errors
     ///
@@ -129,7 +128,7 @@ impl Node {
         let (sender, key) = mpsc::channel();
         let shard = shard(move |tasks| async move {
             sender
-                .send(answered(&dialed, config(tasks)).await)
+                .send(answered(&dialed, tasks).await)
                 .expect("invariant: `answering` keeps the receiver");
         })?;
         shard.join().map_err(|_panicked| Error::Panicked)?;
@@ -143,25 +142,21 @@ impl Node {
     }
 }
 
-/// The config of a transport client on the drivers of `os` and `tasks`.
-fn config(tasks: Tasks) -> transport::client::Config {
-    transport::client::Config {
+/// The public key of the node that answers first at `addresses`, on the drivers of
+/// `os` and `tasks`. Closes the session with code 0 and waits for its end. The close
+/// goes out once, so the node waits out its idle timeout only when the close is lost.
+async fn answered(
+    addresses: &[transport::Address],
+    tasks: Tasks,
+) -> Result<PublicKey, Error> {
+    let transport = transport::Client::new(transport::client::Config {
         net: os::net(),
         clock: os::clock(),
         entropy: os::entropy(),
         tasks,
         pool: Rc::new(block::Pool::heap(POOL)),
-    }
-}
-
-/// The public key of the node that answers first at `addresses`, on a transport
-/// client of `config`. Closes the session with code 0 and waits for its end, so the
-/// node does not wait out its idle timeout.
-async fn answered(
-    addresses: &[transport::Address],
-    config: transport::client::Config,
-) -> Result<PublicKey, Error> {
-    let transport = transport::Client::new(config).map_err(Error::Bind)?;
+    })
+    .map_err(Error::Bind)?;
     let session = transport.dial_any(addresses).await;
     let session = session.map_err(|e| Error::Session(program::Error::Transport(e)))?;
     let transport::Peer::Node(public_key) = session.peer() else {
