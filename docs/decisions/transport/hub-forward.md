@@ -36,8 +36,9 @@
   At the home (#3104 PR 3b), `Link::serve` takes the member of the hub's region that
   holds the node's key at the call, and `serve::run` tells a forward from a reader
   `Open` by `Forward::decode`. A forward from a node that is not a member panics: the
-  route checks the member in the same turn. The home admits the hello with that member
-  as its carrier and with no nonce check, as `access::proof` states. From then on, the
+  route checks the member in the same turn. The home admits the hello with the public
+  key that the node's transport session proved as its carrier (SUBJECT PROOF), and with
+  no nonce check, as `access::proof` states. From then on, the
   stream races the end of the hello, which stops it with `EXPIRED`. The stream polls
   first, so a renewal moves the end in the poll that admits it. The home reads the
   `Write` and its body as a program's write, verifies the open, holds its decoded names
