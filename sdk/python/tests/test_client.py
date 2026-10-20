@@ -29,6 +29,14 @@ ADMIN = "@admin"
 # The encoding of the base point of Ed25519: a public key that is not of small order.
 BASE = bytes([0x58]) + bytes([0x66] * 31)
 WRONG = bytes(31) + b"\x01"
+# The watcher of a node, `sh -c WATCH <pid> <directory>`. Its stdin ends when the test
+# process and its forked children end.
+WATCH = """
+cat >/dev/null
+kill -CONT "$0"; kill -TERM "$0"
+while kill -0 "$0" 2>/dev/null; do sleep 0.1; done
+rm -rf "$1"
+"""
 FORKED = (
     "a connect in a forked child traps on macOS (#3370): connect in the test process"
 )
@@ -114,9 +122,16 @@ def quick(call) -> object:
 
 class Node:
     """`foundation start --name edge` in a new directory, with a budget of 1 GiB of
-    pool and 8 MiB of disk for each core. It goes with #3064."""
+    pool and 8 MiB of disk for each core. It goes with #3064. A watcher stops the node
+    and removes the directory when the test process dies before `stop`."""
 
     def __init__(self) -> None:
+        self.start()
+        self.address = self.first().address
+
+    def start(self) -> None:
+        """Makes the directory, starts the node and its watcher, and waits for the
+        first line of the node."""
         self.dir = tempfile.TemporaryDirectory(prefix="foundation-python-")
         self.data = os.path.join(self.dir.name, "foundation-data")
         os.makedirs(os.path.join(self.data, "data"))
@@ -129,6 +144,11 @@ class Node:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        self.watcher = subprocess.Popen(
+            ["sh", "-c", WATCH, str(self.process.pid), self.dir.name],
+            stdin=subprocess.PIPE,
+            start_new_session=True,
+        )
         line = self.process.stdout.readline()
         if not line:
             self.process.wait(PATIENCE)
@@ -136,7 +156,6 @@ class Node:
                 f"the node exited with {self.process.returncode}:\n"
                 + self.process.stderr.read().decode()
             )
-        self.address = self.first().address
 
     def first(self) -> foundation.Client:
         """A closed client of the first connect from the data directory. The node
@@ -171,7 +190,10 @@ class Node:
         self.process.send_signal(signal.SIGCONT)
 
     def stop(self) -> None:
-        """Stops the node with SIGTERM, and waits until it exits."""
+        """Stops the watcher, then the node with SIGTERM, waits until the node exits,
+        and removes the directory."""
+        self.watcher.kill()
+        self.watcher.communicate()
         if self.process.poll() is None:
             self.process.send_signal(signal.SIGCONT)
             self.process.send_signal(signal.SIGTERM)
@@ -441,6 +463,45 @@ class ClientTest(unittest.TestCase):
                 "the session (0)"
             ],
         )
+
+
+def alive(pid: int) -> bool:
+    """Whether a process `pid` runs."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+class NodeTest(unittest.TestCase):
+    def test_a_node_stops_and_its_directory_goes_when_its_test_process_is_killed(
+        self,
+    ) -> None:
+        read, write = os.pipe()
+
+        def started() -> None:
+            node = Node.__new__(Node)
+            node.start()
+            os.write(write, f"{node.process.pid} {node.dir.name}\n".encode())
+            time.sleep(PATIENCE)
+
+        child = spawn(started)
+        os.close(write)
+        with os.fdopen(read) as lines:
+            line = lines.readline()
+        os.kill(child, signal.SIGKILL)
+        os.waitpid(child, 0)
+        self.assertNotEqual(line, "", "the child started no node")
+        pid, directory = int(line.split()[0]), line.split()[1]
+        deadline = time.monotonic() + PATIENCE
+        while alive(pid) or os.path.exists(directory):
+            if time.monotonic() > deadline:
+                if alive(pid):
+                    os.kill(pid, signal.SIGKILL)
+                shutil.rmtree(directory, ignore_errors=True)
+                self.fail(f"the node {pid} or its directory {directory} is left")
+            time.sleep(0.01)
 
 
 class ArgumentTest(unittest.TestCase):
