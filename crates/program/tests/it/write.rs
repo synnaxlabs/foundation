@@ -54,25 +54,27 @@ fn place(at: u128, data_type: Type, channel: &str, index: usize) -> Place {
 }
 
 /// `time` with key 1, and `value` and `extra` with keys 2 and 3, `i64` channels on
-/// `time`.
+/// `time`; `other` with key 4, and `b` with key 5, an `i64` channel on `other`.
 fn definitions() -> BTreeMap<types::name::Name, Definition> {
-    let time = Channel {
-        key: key(1),
+    let index = |at| Channel {
+        key: key(at),
         kind: Kind::Index {
             error: None,
             control: None,
         },
     };
-    let data = |at| Channel {
+    let data = |at, on| Channel {
         key: key(at),
         kind: Kind::Data(
-            Data::new(time.key, None, DataType::Sample(I64), None).expect("no unit"),
+            Data::new(key(on), None, DataType::Sample(I64), None).expect("no unit"),
         ),
     };
     BTreeMap::from([
-        (name("time"), Definition::Channel(time.clone())),
-        (name("value"), Definition::Channel(data(2))),
-        (name("extra"), Definition::Channel(data(3))),
+        (name("time"), Definition::Channel(index(1))),
+        (name("value"), Definition::Channel(data(2, 1))),
+        (name("extra"), Definition::Channel(data(3, 1))),
+        (name("other"), Definition::Channel(index(4))),
+        (name("b"), Definition::Channel(data(5, 4))),
     ])
 }
 
@@ -455,7 +457,7 @@ fn gives_unsent_for_a_frame_of_no_sample_or_a_bad_frame_to_stamp() {
         );
         assert_eq!(
             got.unwrap_err().to_string(),
-            "the frame holds no sample, so it was not sent"
+            "the frame or a group of it holds no sample, so it was not sent"
         );
         frame(&mut writer, 2, 0, &[(2, 1)]).await;
         let got = writer.write(Time::Node).await.map(<[_]>::to_vec);
@@ -1116,6 +1118,25 @@ fn panics_at_a_write_after_an_unsent_with_no_new_draft() {
         });
         assert_eq!(writer.write(Time::Node).await.map(<[_]>::to_vec), unsent);
         drop(writer.write(Time::Node).await.map(<[_]>::to_vec));
+    });
+}
+
+/// A draft of two groups, swapped into a writer of one group, is a bug of the
+/// program: the write panics before it sends.
+#[test]
+#[should_panic(expected = "a write sends a draft of its own groups, not group 1 of 1")]
+fn panics_at_a_write_of_a_swapped_draft_of_a_group_that_the_writer_does_not_have() {
+    on_hub(797, |session, _| async move {
+        let mut one = session.writer(config(&["value"], 1)).await.expect("opens");
+        let mut two = session
+            .writer(config(&["value", "b"], 1))
+            .await
+            .expect("opens");
+        let mine = frame(&mut one, 1, 0, &[(2, 1)]).await;
+        let series = [(0, 1, 8), (1, 1, 8), (2, 1, 8), (3, 1, 8)];
+        let other = two.draft(Form::Raw, &series).await.expect("a frame");
+        std::mem::swap(mine, other);
+        drop(one.write(Time::Node).await.map(<[_]>::to_vec));
     });
 }
 
@@ -1921,6 +1942,78 @@ fn gives_layout_for_a_draft_whose_series_are_not_valid() {
             Ok(one(taken(0, 1)))
         );
     });
+}
+
+/// A draft of two counts whose series also break a rule of the layout gives `Layout`.
+#[test]
+fn gives_layout_before_count_for_series_of_two_counts() {
+    on_hub(795, |session, _| async move {
+        let mut writer = session.writer(config(&["value"], 1)).await.expect("opens");
+        let got = writer
+            .draft(Form::Raw, &[(0, 1, 8), (2, 2, 16)])
+            .await
+            .map(drop);
+        let out = types::frame::Error::OutOfRange {
+            entry: 2,
+            entries: 2,
+        };
+        assert_eq!(got, Err(Error::Layout(out)));
+        let got = writer
+            .draft(Form::Raw, &[(1, 1, 8), (0, 2, 16)])
+            .await
+            .map(drop);
+        let unordered = types::frame::Error::Unordered { entry: 0, last: 1 };
+        assert_eq!(got, Err(Error::Layout(unordered)));
+    });
+}
+
+/// A draft of two counts in one group gives `Count` at once while the pool is full.
+#[test]
+fn gives_count_with_no_wait_while_the_pool_is_full() {
+    raw(
+        796,
+        |session, mut hello, node| async move {
+            admit(&mut hello, &node.clock()).await;
+            let _first = opened(&session).await;
+            let _second = opened(&session).await;
+            node.clock().sleep(QUIET).await;
+            node.clock().sleep(QUIET).await;
+        },
+        |node, tasks, at| async move {
+            let clock = node.clock();
+            let budget = block::Config::new(
+                u64::try_from(block::footprint(1 << 12)).expect("a usize fits a u64"),
+            )
+            .expect("the budget fits");
+            let frames = block::Pool::new(
+                budget.clone(),
+                block::Heap::new(budget.reservation()),
+            );
+            let session =
+                connect_with(&node, tasks, at, AGENT, ample(), Rc::new(frames))
+                    .await
+                    .expect("connects");
+            let mut first = session.writer(config(&["value"], 1)).await.expect("opens");
+            let mut second =
+                session.writer(config(&["value"], 1)).await.expect("opens");
+            frame(&mut first, 240, 1_000, &[(2, 1)]).await;
+            let got = within(&clock, QUIET, async {
+                second
+                    .draft(Form::Raw, &[(0, 1, 8), (1, 2, 16)])
+                    .await
+                    .map(drop)
+            });
+            let count = Error::Count {
+                place: 0,
+                count: 1,
+                other: 1,
+                other_count: 2,
+            };
+            assert_eq!(got.await, Some(Err(count)));
+            drop(first);
+            clock.sleep(QUIET).await;
+        },
+    );
 }
 
 /// A draft waits while the pool of frames is full, and takes the block that another

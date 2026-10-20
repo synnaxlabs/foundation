@@ -621,9 +621,9 @@ impl fmt::Display for Error {
                 f,
                 "the node gave no place for the channel {name} of the open"
             ),
-            Self::Unsent { count: 0, .. } => {
-                f.write_str("the frame holds no sample, so it was not sent")
-            }
+            Self::Unsent { count: 0, .. } => f.write_str(
+                "the frame or a group of it holds no sample, so it was not sent",
+            ),
             Self::Unsent { count, form } => write!(
                 f,
                 "a frame that the node stamps holds 1 sample in the raw form, not \

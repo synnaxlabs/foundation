@@ -294,7 +294,11 @@ class WriterTest(unittest.TestCase):
                 "the series of the draft are not valid: entry 0 follows entry 0: "
                 "entries must increase",
             ),
-            ({}, ValueError, "the frame holds no sample, so it was not sent"),
+            (
+                {},
+                ValueError,
+                "the frame or a group of it holds no sample, so it was not sent",
+            ),
         ]
         for values, kind, text in cases:
             with self.subTest(values=values):
@@ -391,7 +395,11 @@ class WriterTest(unittest.TestCase):
                 "the series of the draft are not valid: entry 0 is present but its "
                 "index, entry 2, is absent",
             ),
-            ({}, ValueError, "the frame holds no sample, so it was not sent"),
+            (
+                {},
+                ValueError,
+                "the frame or a group of it holds no sample, so it was not sent",
+            ),
         ]
         for series, kind, text in cases:
             with self.subTest(series=list(series)):

@@ -438,8 +438,12 @@ async fn sent(
     for ((_, to), (_, bytes)) in draft.iter_mut().zip(frame.each()) {
         to.copy_from_slice(bytes);
     }
-    let &[(_, outcome)] = writer.write(time).await? else {
-        panic!("invariant: a frame of one index has one group");
+    let outcomes = writer.write(time).await?;
+    let &[(_, outcome)] = outcomes else {
+        panic!(
+            "invariant: a frame of one index has one group, not {}",
+            outcomes.len()
+        );
     };
     Ok(outcome)
 }

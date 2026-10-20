@@ -251,7 +251,7 @@ fn error_raises_value_error_for_each_stream_error_that_sent_nothing() {
                 form: frame::Form::Raw,
             }),
             "ValueError",
-            "the frame holds no sample, so it was not sent",
+            "the frame or a group of it holds no sample, so it was not sent",
         ),
         (
             sdk::Error::Stream(program::Error::Body { length: 9 }),
