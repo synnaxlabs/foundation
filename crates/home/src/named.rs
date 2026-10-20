@@ -207,7 +207,8 @@ impl Parts {
         self.place(records)?;
         let listed = Listed::new(records);
         for (part, body) in self.changed(&listed) {
-            if !state::append(target.buffer, tag(part), Some(&body), target.head) {
+            if !state::append(target.buffer, tag(part), Some(&body), target.head, None)
+            {
                 self.keys.retain(|(_, placed)| placed.state != Kept::Added);
                 return Ok(Appended { until: part });
             }

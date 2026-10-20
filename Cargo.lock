@@ -964,6 +964,7 @@ dependencies = [
  "env",
  "home",
  "proptest",
+ "serde_json",
  "sim",
  "types",
 ]

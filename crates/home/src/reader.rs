@@ -852,7 +852,7 @@ mod tests {
             assert_eq!(woken(&mut set), []);
             set.applied(1, frames.frame(Path::Live, 0..2), &frames.set, 0..2);
             assert_eq!(woken(&mut set), [reader(1, latest)]);
-            assert_eq!(set.listed(), []);
+            assert_eq!(set.listed(), [0_usize; 0]);
             assert_eq!(taken(&mut set, 1, latest), [range(0, 2)]);
         }
 
@@ -878,7 +878,7 @@ mod tests {
                 set.open_complete(0, 0, u64::MAX, complete::Charge::Whole);
             set.applied(0, frames.frame(Path::Backfill, 0..2), &frames.set, 0..2);
             assert_eq!(woken(&mut set), []);
-            assert_eq!(set.listed(), []);
+            assert_eq!(set.listed(), [0_usize; 0]);
             assert_eq!(released(&mut set, 0, 2), []);
             assert_eq!(taken(&mut set, 0, latest), []);
             set.applied(0, frames.frame(Path::Live, 0..1), &frames.set, 0..1);
@@ -897,7 +897,7 @@ mod tests {
             let complete = set.open_complete(0, 0, u64::MAX, complete::Charge::Whole);
             set.lost(0, Some(frames.frame(Path::Live, 0..2)));
             assert_eq!(woken(&mut set), [reader(0, latest)]);
-            assert_eq!(set.listed(), []);
+            assert_eq!(set.listed(), [0_usize; 0]);
             assert_eq!(taken(&mut set, 0, latest), [range(0, 2)]);
             assert_eq!(taken(&mut set, 0, complete), []);
             set.applied(0, frames.frame(Path::Live, 2..3), &frames.set, 2..3);
@@ -1058,7 +1058,7 @@ mod tests {
                 taken(&mut set, 0, session),
                 [range(0, 1), range(1, 1), range(2, 1)]
             );
-            assert_eq!(set.listed(), [], "no live frame waits");
+            assert_eq!(set.listed(), [0_usize; 0], "no live frame waits");
         }
 
         #[test]
