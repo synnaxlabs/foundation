@@ -229,8 +229,9 @@ impl Session {
     }
 
     /// Opens a writer on `config.channels` as the session's subject, and waits until
-    /// the node opened it. The node must be the home of each of their indexes. A write
-    /// takes no turn: it runs beside the requests and the reads.
+    /// the node opened it. A write of one index whose home is another node of the
+    /// region goes to that home through the node. A write takes no turn: it runs beside
+    /// the requests and the reads.
     ///
     /// # Errors
     ///
@@ -238,9 +239,12 @@ impl Session {
     /// open is over `OPEN_BYTES_MAX`, each with nothing sent. The error that ended the
     /// renewal, when it ended before or during the open. Else [`Error::Refused`] when
     /// the node stopped the write (`UNKNOWN` for a name of no channel, `FAILED` when
-    /// the home cannot open the write, `MALFORMED` for a lease that the home refuses,
-    /// `NOT_HOME` when the node is not the home of an index, `REFUSED` for a signature
-    /// that the node refuses, `BUSY` when the node has no room for the open),
+    /// the home cannot open the write or the forward to the home fails, `MALFORMED` for
+    /// a lease that is not longer than zero, `NOT_HOME` when the write has more than
+    /// one index and the node is not the home of one, or the home of its one index is
+    /// not the home when the write reaches it, `REFUSED` for a signature that the node
+    /// or the home refuses, `VIA` or `CHANGED` when the home refuses the hello that the
+    /// node carried, `BUSY` when the node or the home has no room for the open),
     /// [`Error::Transport`], [`Error::Message`] for places that `wire` refuses or a
     /// stream that ends before the last place, [`Error::Unplaced`] for places that hold
     /// no place of a channel of the open, and [`Error::Pool`] when no block of
@@ -549,14 +553,27 @@ pub enum Error {
     /// The node gave no place for `0`, a channel of the open. The stream stops with
     /// code `MALFORMED`.
     Unplaced(Name),
-    /// [`Writer::write`] cannot send a frame: it holds no sample, or it is of
-    /// [`write::Time::Node`] and is encoded or holds more than one sample. Nothing was
-    /// sent, and the writer goes on.
+    /// [`Writer::write`] cannot send a frame: it holds no series, a group of it holds no
+    /// sample, or it is of [`write::Time::Node`] and is encoded or a group of it holds
+    /// more than one sample. Nothing was sent, and the writer goes on.
     Unsent {
-        /// The samples of each series of the frame.
+        /// The samples of each series of the first group that it refuses, or 0 for a
+        /// frame of no series.
         count: u32,
         /// The form of the frame.
         form: Form,
+    },
+    /// Two series of one group of [`Writer::draft`] hold two counts. Nothing was taken,
+    /// and the writer goes on.
+    Count {
+        /// The lowest place of the group's series.
+        place: usize,
+        /// Its count.
+        count: u32,
+        /// The lowest place of the group whose count is not `count`.
+        other: usize,
+        /// Its count.
+        other_count: u32,
     },
     /// Each group that it names ended with a frame that its home took and whose
     /// `Stored` did not come, so that frame may not be on disk. Each item is the place
@@ -608,13 +625,23 @@ impl fmt::Display for Error {
                 f,
                 "the node gave no place for the channel {name} of the open"
             ),
-            Self::Unsent { count: 0, .. } => {
-                f.write_str("the frame holds no sample, so it was not sent")
-            }
+            Self::Unsent { count: 0, .. } => f.write_str(
+                "the frame or a group of it holds no sample, so it was not sent",
+            ),
             Self::Unsent { count, form } => write!(
                 f,
                 "a frame that the node stamps holds 1 sample in the raw form, not \
                  {count} in the {form:?} form, so it was not sent"
+            ),
+            Self::Count {
+                place,
+                count,
+                other,
+                other_count,
+            } => write!(
+                f,
+                "places {place} and {other} are of one index but hold {count} and \
+                 {other_count} samples"
             ),
             Self::Unstored(groups) => {
                 f.write_str(

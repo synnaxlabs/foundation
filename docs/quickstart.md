@@ -12,9 +12,12 @@ pushes each sample to InfluxDB.
 
 ```sh
 docker run -d --name opcua -p 50000:50000 \
-  mcr.microsoft.com/iotedge/opc-plc --pn=50000 --ut --aa
+  mcr.microsoft.com/iotedge/opc-plc --pn=50000 --ut --aa --ct=200
 docker run -d --name influxdb -p 8086:8086 -e INFLUXDB_DB=plant influxdb:1.8
 ```
+
+`--ct=200` sets the cycle of the server to 200 ms, so each value changes at most 5 times
+a second, slower than the `rate` of step 2.
 
 ## 1. Install
 
@@ -55,7 +58,7 @@ channel "plant.trend" {
   index     = "plant.time"
 }
 
-# On node "edge", reads three values from the OPC UA server 10 times a second.
+# On node "edge", subscribes to three values that the server samples 10 times a second.
 connector "plc" {
   kind    = "opcua"
   node    = "edge"
@@ -79,7 +82,14 @@ connector "influx" {
 
 A `channel` block makes a channel. An index channel holds the time of each sample,
 and each data channel points at its index. A `connector` block runs on the node that
-`node` names. The `rate` of the `opcua` connector sets how often it reads.
+`node` names. The `opcua` connector subscribes to the OPC UA node of each `read`: the
+server samples each one at the `rate`, and the connector stores a sample at its first
+value and at each change. The server sees only the value at each of its samples, so a
+change that a later change replaces before the next sample is not stored. To store each
+change, set the `rate` faster than the values change. A reader that opens later gets no
+sample of a channel until its value changes. With `polled = true`, the connector reads
+each OPC UA node at each tick of the `rate` in place of a subscription, so such a reader
+gets a sample at the next tick.
 
 ## 3. Start the node
 
@@ -176,7 +186,14 @@ influx     influx  running  http://localhost:8086      confirmed=1517 lost=0 ove
 plc        opcua   running  opc.tcp://localhost:50000  bad=0 in=1520 lost=0 missed=0 mistyped=0 uncertain=0
 ```
 
-`in` counts the samples that the connector read from the server and the node stored.
+`in` counts the samples that the node stored: one for the first value and for each
+change of an OPC UA node, or with `polled = true` one for each OPC UA node at each read,
+other than the values that `bad`, `uncertain`, and `mistyped` count and the samples that
+`lost` counts.
+`missed` counts each change after values that the server dropped from a full queue
+because the node did not take them in time, or with `polled = true` each tick that the
+connector skipped. No count shows a change that a later change replaced before the next
+sample.
 `confirmed` counts the samples that InfluxDB confirmed, and `lost` the sample times that
 the node lost before InfluxDB got them, not the lines of only NaN or infinite values
 that the run leaves out. A gap that the node reports again after a restart counts again.

@@ -308,7 +308,7 @@ async fn step<F: Future>(clock: &Clock, future: F) -> Result<F::Output, Failed> 
 }
 
 /// The output of `future`, or `None` when `span` passes first.
-pub(super) async fn within<F: Future>(
+pub(crate) async fn within<F: Future>(
     clock: &Clock,
     span: Span,
     future: F,

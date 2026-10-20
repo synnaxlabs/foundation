@@ -16,7 +16,7 @@ use crate::change::Unknown;
 use crate::driver::DEADLINE;
 use crate::member::Member;
 use crate::region::{self, Unfit};
-use crate::{claim, file, log};
+use crate::{claim, file, join, log};
 
 /// Why a mesh call failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -190,6 +190,11 @@ pub enum Error {
         /// The path of the file.
         path: PathBuf,
     },
+    /// No voter of the ticket admitted this node in the last round of asks.
+    Unjoined {
+        /// Each voter of the ticket, in its order, with the miss of its last ask.
+        missed: Vec<(node::Key, join::Miss)>,
+    },
 }
 
 impl fmt::Display for Error {
@@ -318,6 +323,11 @@ impl fmt::Display for Error {
                 "the file {} holds no valid card version that this node signed",
                 path.display()
             ),
+            Self::Unjoined { missed } => {
+                f.write_str("no voter of the ticket admitted this node")?;
+                let mut each = missed.iter();
+                each.try_for_each(|(voter, miss)| write!(f, "; {voter}: {miss}"))
+            }
         }
     }
 }

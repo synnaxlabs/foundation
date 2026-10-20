@@ -21,6 +21,7 @@ mod driver;
 mod entry;
 mod error;
 mod file;
+pub mod join;
 pub mod log;
 mod member;
 mod message;

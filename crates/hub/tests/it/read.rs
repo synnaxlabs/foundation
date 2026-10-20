@@ -12,7 +12,6 @@ use env::files::Operation;
 use hub::{reader, serve};
 use transport::Class;
 use types::channel;
-use types::sample::Type;
 use types::time::Span;
 use wire::header::MALFORMED;
 use wire::hub::client::{
@@ -26,7 +25,7 @@ use super::{
     AREA, BODY_MAX, COMMIT, DataType, I64, NODE, POOL, RING, STAMP, TIME, TIME_B, Test,
     channels, region, without, write, write_wide,
 };
-use crate::agent::{AGENT, Agent, SUBJECT, Stream, name, reset_with};
+use crate::agent::{AGENT, Agent, SUBJECT, Stream, name, place, reset_with};
 use crate::net::{HOME, own_pool, transport};
 use crate::sessions::{
     Got, Home, OTHER, QUIET, recorded, rules, run_program, serve_each,
@@ -91,16 +90,6 @@ fn open(mode: Mode, select: &[&str]) -> Open {
     Open {
         mode,
         select: types::name::Selector::new(select.iter().copied()).expect("a selector"),
-    }
-}
-
-/// The place of `channel`, whose group's index is at place `index`.
-fn place(key: u128, data_type: Type, channel: &str, index: usize) -> Place {
-    Place {
-        key: channel::Key::from_u128(key),
-        data_type,
-        name: name(channel),
-        index,
     }
 }
 

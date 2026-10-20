@@ -47,7 +47,7 @@ const CLOCKS: [&str; 3] = [
 /// symbol outside the copy that [`SYMBOLS`] does not admit. A clock counts only as a
 /// call. A test of `connector-opcua` names the function of each key of [`CLOCKS`] and
 /// fails when its reason becomes false. [`AWS_LC_KEYS`] holds the keys of aws-lc.
-const FUNCTION_SYMBOLS: [(&str, &str, &str, Access); 25] = [
+const FUNCTION_SYMBOLS: [(&str, &str, &str, Access); 24] = [
     // `isdigit` reads the locale, which stays C: nothing calls `setlocale`.
     (
         "deps/musl_inet_pton.c",
@@ -71,13 +71,6 @@ const FUNCTION_SYMBOLS: [(&str, &str, &str, Access); 25] = [
     ),
     // `strtod` reads the decimal point of the locale, which stays C.
     ("deps/parse_num.c", "parseDouble", "strtod", Access::Call),
-    // Formats a byte of a digest as hex, which reads no locale.
-    (
-        "plugins/crypto/openssl/certificategroup.c",
-        "UA_CertificateUtils_getThumbprint",
-        "sprintf",
-        Access::Call,
-    ),
     // `UA_Server_runUntilInterrupt`, which we never call.
     (
         "plugins/ua_config_default.c",
@@ -3616,7 +3609,6 @@ End of search list.
             "fflush" => "fflush(stdout);".to_owned(),
             "fgets" => "{ char b[8]; (void)fgets(b, 8, stdin); }".to_owned(),
             "fwrite" => "fwrite(\"x\", 1, 1, stdout);".to_owned(),
-            "sprintf" => "{ char b[16]; sprintf(b, \"%d\", n); }".to_owned(),
             "stderr" | "stdin" | "stdout" => {
                 format!("{{ FILE *volatile f = {symbol}; (void)f; }}")
             }

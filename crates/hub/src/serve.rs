@@ -40,12 +40,14 @@ pub use client::{Reply, Request};
 /// the body of a request from its decode until the caller sends or drops its [`Reply`],
 /// the open of a read until it decodes after the wait for the home of its index, the
 /// open of a write until it decodes, the decoded names of each write stream, 16 bytes
-/// and the length of each, and the places of a forward, 4 bytes for each channel of
-/// its open, from that decode until it sends its places, and its ends and counts, 20
-/// bytes for each place of its writers, from the home of each index until the stream
-/// ends. A body that does not fit stops with `BUSY` before the hub reads a byte of it,
-/// and ends or names that do not fit stop with `BUSY` before the writer opens. The
-/// bodies of one subject hold at most [`BODY_BYTES_MAX`] of it ([`Error::Share`]).
+/// and the length of each, and the places of a forward, 4 bytes for each channel of its
+/// open, from that decode until it sends its places, and its ends and counts, 20 bytes
+/// for each place of its writers, from the home of each index until the stream ends. A
+/// write whose home is another node holds its open, encoded, until the home gives its
+/// places, and those places until it sends them to the program. A body that does not
+/// fit stops with `BUSY` before the hub reads a byte of it, and ends or names that do
+/// not fit stop with `BUSY` before the writer opens. The bodies of one subject hold at
+/// most [`BODY_BYTES_MAX`] of it ([`Error::Share`]).
 pub const BODIES_BYTES_MAX: u64 = 2 * BODY_BYTES_MAX;
 
 /// Why [`Link::serve`](crate::Link::serve) ended a stream.
@@ -107,8 +109,8 @@ pub enum Error {
     /// released only when its stream ends. A retry can succeed once enough of them
     /// are released.
     Bodies {
-        /// The bytes of the refused request, read, or write: a body, or the ends,
-        /// counts, or names of a write.
+        /// The bytes of the refused request, read, or write: a body, the ends,
+        /// counts, or names of a write, or the places of the home of a forward.
         length: u64,
         /// The body bytes that the open requests, reads, and writes of the hub held.
         held: u64,
@@ -122,8 +124,8 @@ pub enum Error {
     Share {
         /// The subject of the link's admitted hello.
         subject: Name,
-        /// The bytes of the refused request, read, or write: a body, or the ends,
-        /// counts, or names of a write.
+        /// The bytes of the refused request, read, or write: a body, the ends,
+        /// counts, or names of a write, or the places of the home of a forward.
         length: u64,
         /// The body bytes that the open requests, reads, and writes of `subject` held.
         held: u64,
@@ -146,6 +148,29 @@ pub enum Error {
     Writer(Box<writer::Error>),
     /// The ends of a frame of a write break a rule of its key set. Code `MALFORMED`.
     Frame(types::frame::Error),
+    /// The home of the index of a program's write is `home`, another node, and the
+    /// forward of the write to it ended before the program finished it. Code:
+    /// `refusal`, the code that `home` stopped the forward with, or `FAILED` when
+    /// `home` gave `MALFORMED`, finished the forward first, or broke HUB WIRE, or the
+    /// session to `home` failed.
+    Forward {
+        /// The home.
+        home: node::Key,
+        /// The refusal that the program gets.
+        refusal: Refusal,
+    },
+    /// The stream to `home`, the home of the index of a program's write, takes
+    /// messages of at most `home_max` bytes, under the `max` bytes of this node's
+    /// transport, so the node cannot forward the program's messages as they came.
+    /// Code: `FAILED`.
+    Limit {
+        /// The home.
+        home: node::Key,
+        /// The largest message that the stream to `home` takes.
+        home_max: usize,
+        /// The largest message that this node's transport takes.
+        max: usize,
+    },
 }
 
 impl Error {
@@ -175,6 +200,8 @@ impl Error {
             Self::Reader(error) => Some(Code(client::read::refused(error).code())),
             Self::Ended(ended) => Some(Code(client::read::ended(ended).code())),
             Self::Writer(error) => Some(Code(client::write::refused(error).code())),
+            Self::Forward { refusal, .. } => Some(Code(refusal.code())),
+            Self::Limit { .. } => Some(Code(Refusal::Failed.code())),
         }
     }
 }
@@ -264,6 +291,21 @@ impl fmt::Display for Error {
             Self::Frame(error) => {
                 write!(f, "a frame of a write is not valid: {error}")
             }
+            Self::Forward { home, refusal } => write!(
+                f,
+                "the forward of the write to node {home}, the home of its index, \
+                 ended: {refusal}"
+            ),
+            Self::Limit {
+                home,
+                home_max,
+                max,
+            } => write!(
+                f,
+                "the home {home} takes messages of at most {home_max} bytes, under the \
+                 {max} bytes of this node: give each node of the mesh the same message \
+                 limit"
+            ),
         }
     }
 }

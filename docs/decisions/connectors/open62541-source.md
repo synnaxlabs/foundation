@@ -371,18 +371,20 @@
   aligned to 16. No pointer crosses between the libc allocator and these: the objects of
   the copy, `shim.c`, and `server.c` call no libc function that gives or takes a heap
   pointer. Our change makes `UA_CertificateUtils_getThumbprint` of
-  `plugins/crypto/openssl/certificategroup.c` give and take its block with `UA_malloc`
-  and `UA_free`, in place of `malloc` and `free`. Our change: decided by
-  `laptop.architect-2`
-  (https://github.com/synnaxlabs/foundation/pull/3037#issuecomment-6236391062,
-  2026-10-17 16:11 UTC). A crypto library that a later PR links
-  keeps its own allocator. So the counting allocator of a test or benchmark binary
-  counts C too. The copy check compiles without `alloc.h`. A test reads the archive that
-  `build.rs` makes with it, and fails on each symbol outside the copy, `shim.c`, and
-  `server.c` that its closed list does not hold. The list holds no clock function and no
-  libc function that gives or takes a heap pointer. Lost: `UA_ENABLE_MALLOC_SINGLETON`
-  (a global), `--wrap=malloc` (`std::alloc` calls `malloc`, so it recurses), and 4 `-D`
-  flags (a define gives no prototype, and C99 needs one).
+  `plugins/crypto/openssl/certificategroup.c` write the hex of the digest into the
+  thumbprint, in place of a block from `malloc` and `free`, and makes
+  `UA_CertificateUtils_getSubjectName` free the name of aws-lc with `OPENSSL_free`.
+  Our change: decided by `laptop.architect-2` (2026-10-20 08:02:50 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3545#issuecomment-6286349076, item 2).
+  Supersedes items 1 and 3 of
+  https://github.com/synnaxlabs/foundation/pull/3037#issuecomment-6236391062. A crypto
+  library that a later PR links keeps its own allocator. So the counting allocator of a
+  test or benchmark binary counts C too. The copy check compiles without `alloc.h`. A
+  test reads the archive that `build.rs` makes with it, and fails on each symbol outside
+  the copy, `shim.c`, and `server.c` that its closed list does not hold. The list holds
+  no clock function and no libc function that gives or takes a heap pointer. Lost:
+  `UA_ENABLE_MALLOC_SINGLETON` (a global), `--wrap=malloc` (`std::alloc` calls `malloc`,
+  so it recurses), and 4 `-D` flags (a define gives no prototype, and C99 needs one).
   Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6067206932,
   2026-10-08 19:13 UTC; the header:
@@ -977,10 +979,13 @@
   file to panic with its name and abort, and a test calls each one. A test fails on
   another policy file in `sources.txt`. A test fails when the production code names a
   policy or a certificate group, or a function `UA_CertificateUtils_*`, other than the
-  three policies in `POLICIES` of `shim.c`, `UA_CertificateGroup_Memorystore`,
-  `UA_CertificateUtils_checkKeyPair`, `UA_CertificateUtils_getApplicationUri`, and the
-  stubs of `shim.c` (`laptop.architect-2`, 2026-10-18 21:39 UTC,
-  https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255470380, item 1).
+  three policies in `POLICIES` of `shim.c`, `UA_CertificateGroup_Memorystore`, the
+  functions `UA_CertificateUtils_certificateLine`, `checkKeyPair`, `checkTime`,
+  `checkTrust`, `getApplicationUri`, `getSubjectName`, `getThumbprint`, and `keyLine`,
+  and the stubs of `shim.c` (`laptop.architect-2`, 2026-10-18 21:39 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255470380, item 1;
+  the full list, 2026-10-20 07:27:55 UTC,
+  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6285738820).
   A test fails when the objects of `shim.c` or `server.c` name aws-lc or a symbol of
   `PLUGINS`. `UA_Openssl_Init` of `securitypolicy_common.c` keeps
   no state: the copy removes its `static` flag, which it wrote with no lock and which
@@ -1241,3 +1246,24 @@
   same credentials at the connect, so two paths state each refusal; and a log line of
   the cause, which no status carries (`laptop.architect-2`, 2026-10-19 12:04 UTC,
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6266776077).
+  PR 2e of #2934 names the certificate that a server does not trust by its SHA-1
+  thumbprint and its subject, from `UA_CertificateUtils_getThumbprint` and
+  `UA_CertificateUtils_getSubjectName` of the copy, through `shim_certificate_names`.
+  The test of the names that the production code calls takes these two, as item 1 of
+  the ruling above states. Our change makes `getSubjectName` read the whole name, with
+  no cut at 1024 bytes, and give `BadOutOfMemory` when memory runs out or the one-line
+  name passes 1 MiB, in place of `Good` and a NULL subject. Then the text names only the
+  source. Our change makes `getThumbprint` write the thumbprint with no block, in place
+  of a write through a `malloc` that it did not check (`laptop.architect-2`, 2026-10-20
+  08:02 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3545#issuecomment-6286349076, item 2,
+  which replaces the check of a NULL subject in the shim). An empty subject is legal
+  X.509: the copy gives the sentinel, and the text gives the thumbprint with no subject
+  (`laptop.architect-2`,
+  2026-10-20 07:32:19 UTC,
+  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6285815315, which
+  corrects condition 2 of
+  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6285738820).
+  Lost: a parse of the certificate in Rust, a second parser, and a hash of the DER in
+  Rust, which needs its own PEM read for a PEM certificate
+  (https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6285525305).

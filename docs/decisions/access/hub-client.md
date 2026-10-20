@@ -285,6 +285,7 @@
   impossible. The same ruling moves the `os` bench of the node cost to PR 4 of #2718, in
   place of condition 2 of
   https://github.com/synnaxlabs/foundation/pull/3161#issuecomment-6248331209.
+  Superseded for the `&mut Draft` of `Writer::draft` by "PR 3a" below.
   Amended (#2718 PR 3, round 1): `Writer::draft(form, count, series)` is async. It sets
   the count of group 0, and it waits for a block of a full pool of frames, as a read
   does. It gives `Error::Layout` when the series break a rule of the frame layout:
@@ -296,6 +297,7 @@
   last one or past the outcomes gives `wire::hub::Error::Stored`. Each ends the writer
   with a reset of `MALFORMED`. Decided by `laptop.architect` at 2026-10-18T14:44:41Z
   (https://github.com/synnaxlabs/foundation/pull/3201#issuecomment-6251244519).
+  Superseded for the `count` of `Writer::draft` by "PR 3a" below.
   Amended (#2718 PR 3, round 2): `Writer::draft` gives the error that ended the writer
   before it takes a block. `wire::hub::Error::Stored` holds `frames` and `bound`, the
   last `Stored` when `frames` is below it, else the frames that got an outcome, so
@@ -353,6 +355,7 @@
   changes `wire` for one fact of the stream. Decided by `laptop.architect` at
   2026-10-18T20:58:27Z
   (https://github.com/synnaxlabs/foundation/issues/3266#issuecomment-6255066811).
+  Superseded for `Writer::index` by "PR 3a" below.
   Amended (#3283): the node splits a write by index, not the client. The person, at
   2026-10-19T12:27:44Z
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267198734):
@@ -502,3 +505,36 @@
   one home writer for all groups, which cannot end one group, one block of `Stored`
   for all groups, which can pass the largest block of the pool, and one due commit for
   each group, which polls each group at each message.
+  PR 3a: a `program::Writer` writes channels of any index. `Writer::draft(form,
+  series)` takes the place, count, and byte length of each series, and gives
+  `Error::Count { place, count, other, other_count }`, with no block taken, when two
+  series of one group hold two counts. `Writer::write(time)` gives the place of the
+  index and the outcome of each group of the frame, in group order, and `Unsent` applies
+  to each group of it. The lease is for each group, and with `Time::Node` each group
+  gets its own stamp: the docs of `Config::lease` and `Writer::write` say so. Ruled by
+  `laptop.architect` at 2026-10-19T13:10:34Z
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268011114, items
+  4 and 5). `Writer::index` is gone: the `index` of each place gives it. This changes
+  item 5 of that ruling, as `laptop.architect` decided at 2026-10-19T15:10:51Z
+  (https://github.com/synnaxlabs/foundation/pull/3365#issuecomment-6270542720, item 3)
+  and approved on #3558 at 2026-10-20T09:20:44Z
+  (https://github.com/synnaxlabs/foundation/pull/3558#issuecomment-6287720622).
+  Supersedes the `Writer::index` of
+  https://github.com/synnaxlabs/foundation/issues/3266#issuecomment-6255066811. It
+  also supersedes the `count` of `Writer::draft(form, count, series)` of
+  https://github.com/synnaxlabs/foundation/pull/3201#issuecomment-6251244519, and the
+  `&mut Draft` that `Writer::draft` gives in the plan approved at
+  https://github.com/synnaxlabs/foundation/issues/2718#issuecomment-6250729056.
+  `draft` gives a `Fill`, which holds a borrow of the writer's draft and fills only its
+  series, so no caller can swap two drafts or change a head. Ruled by
+  `laptop.architect` at 2026-10-20T09:54:23Z
+  (https://github.com/synnaxlabs/foundation/pull/3558#issuecomment-6288292277). Lost:
+  the address check, which a block that comes back passes, and `Pin<&mut Draft>`
+  (#3561), which keeps the setters of the head and needs `!Unpin` in `types`.
+  `wire::hub::write::Replies::frames` gives the frame of the last send, so the writer
+  keeps only the outcomes of that frame. Ruled by `laptop.architect` at
+  2026-10-20T09:26:59Z
+  (https://github.com/synnaxlabs/foundation/pull/3558#issuecomment-6287830271). Plan:
+  https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6286854444. Lost: a
+  draft that takes one count for each group, which makes the caller find the group of
+  each place.

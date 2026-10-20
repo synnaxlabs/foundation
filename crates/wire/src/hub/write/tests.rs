@@ -811,6 +811,13 @@ mod replies {
     }
 
     #[test]
+    fn counts_the_frames_sent_but_not_their_outcomes() {
+        assert_eq!(Replies::new(1).frames(), 0);
+        assert_eq!(sent(3).frames(), 3);
+        assert_eq!(after(sent(2), &[lost(1), refused(2)]).frames(), 2);
+    }
+
+    #[test]
     fn is_answered_once_each_frame_sent_has_an_outcome() {
         let replies = sent(2);
         assert!(!replies.answered());

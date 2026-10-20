@@ -1,9 +1,10 @@
 //! A request that the hub refuses for its length allocates no body, the heap of a hub
 //! does not grow over many opens and closes of a named complete reader, a served open
 //! holds and copies each of its keys once, a read that waits for its home holds no
-//! places, the channels of a hub hold each name once, and an open defines no channel of
-//! the spec that its hub applied again. This binary has no test harness: the count
-//! covers each thread, and a harness allocates on its own thread at any time.
+//! places, the channels of a hub hold each name once, an open defines no channel of the
+//! spec that its hub applied again, and the forwards of one session keep no waker. This
+//! binary has no test harness: the count covers each thread, and a harness allocates on
+//! its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -13,6 +14,9 @@ mod agent;
 #[path = "../common/mod.rs"]
 #[expect(dead_code, reason = "the binary uses only some of the helpers")]
 mod common;
+#[path = "../common/forwarded.rs"]
+#[expect(dead_code, reason = "the binary uses only some of the helpers")]
+mod forwarded;
 #[path = "../common/net.rs"]
 mod net;
 #[path = "../common/node.rs"]
@@ -24,21 +28,25 @@ mod region;
 mod sessions;
 
 use std::cell::Cell;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::pin;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Waker};
 
 use agent::{Agent, SUBJECT, name, reset_with};
 use block::{Heap, Pool};
+use forwarded::{Forwarded, send_places};
 use hub::reader::{self, Mode};
 use hub::serve;
 use sessions::{closed_after, rules, serve_each, sessions};
-use transport::{Class, Code};
+use transport::{Address, Class, Code};
 use types::channel;
 use types::frame::key_set::Interner;
 use types::name::Selector;
+use types::sample::{Scalar, Type};
 use types::time::{Span, Stamp};
 use wire::hub::client::{self, BODY_BYTES_MAX, OPEN_BYTES_MAX, Place};
 use wire::hub::{BUSY, Open, keys};
@@ -66,6 +74,7 @@ fn main() {
     holds_each_channel_name_once();
     defines_no_channel_again_at_an_open_of_the_spec_applied();
     defines_no_channel_again_at_the_first_poll_of_the_spec_task();
+    holds_the_same_bytes_over_many_forwards_of_one_session();
 }
 
 /// Patterns `x` that fill the open of a read of `value` to [`OPEN_BYTES_MAX`]: one
@@ -811,4 +820,128 @@ async fn opened(agent: &Agent, select: &str) -> agent::Stream {
     let mut stream = agent.read(client::Mode::Complete, &[select]).await;
     stream.opened().await;
     stream
+}
+
+/// The forwards after which the pools and the maps of the three nodes stop growing.
+const FORWARDS_WARM: usize = 100;
+/// The most bytes by which each forward after [`FORWARDS_WARM`] may grow the heap. The
+/// nodes grow it by about 1.3.
+const FORWARD_GROWTH: usize = 16;
+
+/// A program writes `value` [`FORWARDS_WARM`] and then [`MANY`] times, one at a time,
+/// on one session at a member whose region names another node the home of `time`.
+/// The program renews no hello, so each forward ends while the session admits none.
+/// The [`MANY`] forwards grow the heap by less than [`FORWARD_GROWTH`] bytes each. A
+/// forward that kept its waker until the next hello would grow it by about 77.
+fn holds_the_same_bytes_over_many_forwards_of_one_session() {
+    let measured = Arc::new(Mutex::new(None));
+    let kept = Arc::clone(&measured);
+    let mut sim = sim::Sim::new(sim::Config::default());
+    let [member, home, program] =
+        [(); 3].map(|()| sim.node(sim::node::Config::default()));
+    let address = |node: &sim::node::Node| {
+        Address::Udp(SocketAddr::new(node.addresses()[0], net::PORT))
+    };
+    let (at, other) = (address(&member), address(&home));
+    let shard = |name: &str| env::shards::Config {
+        name: name.into(),
+        core: None,
+    };
+    let done = Arc::new(AtomicBool::new(false));
+    let (node, ends) = (home.clone(), Arc::clone(&done));
+    let main = move |tasks| forwarded_home(node, tasks, ends);
+    drop(home.shards().start(shard("home"), main).expect("starts"));
+    let node = program.clone();
+    let main = move |tasks| async move {
+        let mut agent = Agent::dial(&node, tasks, at, name(SUBJECT)).await;
+        agent.admit().await;
+        let mut warm = 0;
+        for n in 0..FORWARDS_WARM + MANY {
+            if n == FORWARDS_WARM {
+                agent.sleep(common::SETTLE).await;
+                warm = ALLOCATOR.held();
+            }
+            let mut stream = agent.write(&["value"]).await;
+            stream.started().await;
+            stream.sender.finish().expect("finishes");
+            assert_eq!(stream.recv().await, Ok(None), "forward {n}");
+        }
+        agent.sleep(common::SETTLE).await;
+        *kept.lock().expect("not poisoned") = Some((warm, ALLOCATOR.held()));
+        done.store(true, Ordering::Relaxed);
+        agent.session.close(Code(0));
+    };
+    drop(
+        program
+            .shards()
+            .start(shard("program"), main)
+            .expect("starts"),
+    );
+    sim.run_on(&member, move |node, tasks| forwarding(node, tasks, other))
+        .expect("the run ends");
+    let (warm, after) = measured
+        .lock()
+        .expect("not poisoned")
+        .take()
+        .expect("the program measured");
+    let grown = after.saturating_sub(warm);
+    assert!(
+        grown < MANY * FORWARD_GROWTH,
+        "the heap grew by {grown} bytes over {MANY} forwards"
+    );
+}
+
+/// The member: a hub whose region names [`region::OTHER`], at `other`, the home of
+/// `time`. Serves each stream of the first session of a program until it ends.
+async fn forwarding(node: sim::node::Node, tasks: env::tasks::Tasks, other: Address) {
+    let transport = net::transport(&node, &tasks, &net::own_pool(), net::HOME, 1 << 16);
+    let transport = Rc::new(transport);
+    let definitions = common::definitions(&[]);
+    let region = region::open(
+        &node,
+        &tasks,
+        Rc::clone(&transport),
+        vec![other],
+        definitions,
+    )
+    .await;
+    let mesh = region.mesh.clone();
+    let hub = common::hub_in(&node, tasks.clone(), region).await;
+    hub.set_rules(rules());
+    let set = mesh
+        .set_home(channel::Key::from_u128(1), region::OTHER)
+        .await;
+    set.expect("sets the home");
+    let session = transport.accept().await.expect("a session");
+    let link = hub.link(session.clone());
+    // With room for each stream, so that what the member records holds no more bytes.
+    let served = Arc::new(Mutex::new(Vec::with_capacity(FORWARDS_WARM + MANY + 1)));
+    let accepted = Rc::new(Cell::new(0));
+    let clock = node.clock();
+    serve_each(&session, &link, &tasks, &clock, &served, &accepted).await;
+}
+
+/// The home at the node of [`region::OTHER`]: takes each forward of the member, sends
+/// the places of `time` and `value`, and finishes once the member finished. Holds the
+/// session until `done`.
+async fn forwarded_home(
+    node: sim::node::Node,
+    tasks: env::tasks::Tasks,
+    done: Arc<AtomicBool>,
+) {
+    let transport = net::transport(&node, &tasks, &net::own_pool(), net::PEER, 1 << 16);
+    let session = transport.accept().await.expect("a session");
+    let places = [
+        agent::place(1, Type::Scalar(Scalar::Stamp), "time", 0),
+        agent::place(2, Type::Scalar(Scalar::I64), "value", 0),
+    ];
+    for n in 0..FORWARDS_WARM + MANY {
+        let mut stream = Forwarded::accept(&session).await.stream;
+        send_places(&mut stream, &places, 1 << 16).await;
+        assert_eq!(stream.recv().await, Ok(None), "forward {n}");
+        stream.sender.finish().expect("finishes");
+    }
+    while !done.load(Ordering::Relaxed) {
+        node.clock().sleep(Span::MILLISECOND).await;
+    }
 }

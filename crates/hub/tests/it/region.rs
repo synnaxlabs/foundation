@@ -91,6 +91,22 @@ fn a_writer_does_not_open_at_a_home_that_moved_while_it_waits_for_mesh_time() {
     });
 }
 
+/// A lease of zero fails before the find of the home, so no write goes to a home that
+/// would refuse it.
+#[test]
+fn opens_no_writer_with_a_lease_of_zero_before_the_find_of_its_home() {
+    run(13, |test| async move {
+        test.set_home(TIME, OTHER).await;
+        let config = hub::writer::Config {
+            lease: Some(Span::ZERO),
+            ..config("a", &["value"])
+        };
+        let error = test.hub.writer(config).await.expect_err("a lease of zero");
+        let lease = hub::home::writer::Error::Lease { span: Span::ZERO };
+        assert_eq!(error, writer::Error::Home(lease));
+    });
+}
+
 /// A writer on two indexes checks the home of the first again once the second has one.
 #[test]
 fn a_writer_does_not_open_at_a_home_that_moved_while_it_waits_for_another_home() {

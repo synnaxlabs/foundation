@@ -13,14 +13,13 @@ use hub::{serve, writer};
 use spec::data_type::DataType;
 use transport::Class;
 use types::authority::Authority;
-use types::channel;
 use types::frame::{Form, Path};
 use types::time::Span;
 use wire::header::MALFORMED;
 use wire::hub::client::write::Open;
-use wire::hub::client::{BODY_BYTES_MAX, Mode, Place, Places, REFUSED};
+use wire::hub::client::{BODY_BYTES_MAX, Mode, Places, REFUSED};
 use wire::hub::write::{End, Head, Outcome, Reply, Time};
-use wire::hub::{BUSY, NOT_HOME, UNKNOWN};
+use wire::hub::{BUSY, FAILED, NOT_HOME, UNKNOWN};
 
 use super::link::{as_agent, serve_session_after};
 use super::read::{finish, read_session};
@@ -29,27 +28,12 @@ use super::{
     AREA, BODY_MAX, COMMIT, I64, NODE, POOL, RING, STAMP, TIME, TIME_B, Test, channels,
     region, without,
 };
-use crate::agent::{AGENT, Agent, SUBJECT, Stream, name, reset_with};
+use crate::agent::{AGENT, Agent, SUBJECT, Stream, name, place, reset_with};
 use crate::net::{HOME, own_pool, transport};
 use crate::sessions::{Got, Kept, OTHER, recorded, rules, run_program, serve_each};
 
 /// When the home of a test changes what the write meets, after the program opened it.
 const START: Span = Span::from_nanos(100_000_000);
-
-/// The place of `channel`, whose group's index is at place `index`.
-pub(super) fn place(
-    key: u128,
-    data_type: types::sample::Type,
-    channel: &str,
-    index: usize,
-) -> Place {
-    Place {
-        key: channel::Key::from_u128(key),
-        data_type,
-        name: name(channel),
-        index,
-    }
-}
 
 /// The head of a frame of `series` series on the live path.
 fn live(series: u32) -> Head {
@@ -1690,10 +1674,10 @@ fn stops_a_write_on_two_indexes_whose_one_home_is_another_node_as_not_home() {
     );
 }
 
-/// A node serves a write only of an index whose home it is: a write whose home is
-/// another node stops with `NOT_HOME`, and takes no control there.
+/// A write whose home is another node goes there, so it stops as `FAILED` when no
+/// node answers at the home's addresses.
 #[test]
-fn stops_a_write_whose_home_is_another_node_as_not_home() {
+fn stops_a_write_whose_home_does_not_answer_as_failed() {
     let served = Arc::new(Mutex::new(Vec::new()));
     let kept = Arc::clone(&served);
     let home = move |node, tasks| split_home(node, tasks, kept);
@@ -1701,18 +1685,16 @@ fn stops_a_write_whose_home_is_another_node_as_not_home() {
         as_agent(node, tasks, at, |mut agent| async move {
             agent.admit().await;
             let mut stream = agent.write(&["value"]).await;
-            assert_eq!(stream.recv().await, reset_with(NOT_HOME));
+            assert_eq!(stream.recv().await, reset_with(FAILED));
             finish(&mut agent).await;
         })
     });
-    let remote = writer::Error::Remote {
+    let forward = serve::Error::Forward {
         home: region::OTHER,
+        refusal: wire::hub::client::Refusal::Failed,
     };
     let served = std::mem::take(&mut *served.lock().expect("not poisoned"));
-    assert_eq!(
-        served,
-        [Err(serve::Error::Writer(Box::new(remote))), Ok(Got::Ended)]
-    );
+    assert_eq!(served, [Err(forward), Ok(Got::Ended)]);
 }
 
 /// A write whose channel moves to a second index while it waits for the home of its

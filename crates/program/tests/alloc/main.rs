@@ -40,6 +40,8 @@ use wire::hub::client::write::Write;
 use wire::hub::client::{Mode, Place};
 use wire::hub::write::Reply;
 
+use transport::stream::Sender;
+
 use crate::hand::{accept_stream, by_hand, opened, send, send_frame, start};
 
 #[global_allocator]
@@ -113,13 +115,15 @@ fn takes_a_frame_with_no_allocation() {
     );
 }
 
-/// Each warm call of `write` takes a draft, sends its frame at the first poll, and
-/// gives the outcome at the first poll after the node replied, and none of it makes
-/// an allocation.
+/// Each warm call of `write` on two groups takes a draft, sends its frame at the first
+/// poll, and gives the outcome of each group at the first poll after the node replied,
+/// and none of it makes an allocation. The groups of each odd frame hold two counts.
 fn writes_a_frame_with_no_allocation() {
     let places = [
         place(1, Type::Scalar(Scalar::Stamp), "time", 0),
         place(10, Type::Scalar(Scalar::I64), "a", 0),
+        place(2, Type::Scalar(Scalar::Stamp), "other", 2),
+        place(11, Type::Scalar(Scalar::I64), "b", 2),
     ];
     by_hand(
         431,
@@ -134,16 +138,7 @@ fn writes_a_frame_with_no_allocation() {
                     let message = write.receiver.recv().await.expect("receives");
                     message.expect("a message of the frame");
                 }
-                let reply = Reply::Outcome {
-                    frame: seq + 1,
-                    group: 0,
-                    outcome: Outcome::Taken {
-                        range: Range { seq, count: 1 },
-                    },
-                };
-                let mut bytes = vec![0; reply.encoded_len()];
-                reply.encode(&mut bytes);
-                send(write.sender.as_mut().expect("two-way"), &bytes).await;
+                taken(write.sender.as_mut().expect("two-way"), seq, other(seq)).await;
             }
             node.clock().sleep(SENT).await;
         },
@@ -152,13 +147,19 @@ fn writes_a_frame_with_no_allocation() {
                 let config = Config {
                     authority: Authority(1),
                     lease: None,
-                    channels: vec!["a".parse().expect("a valid name")],
+                    channels: ["a", "b"]
+                        .map(|n| n.parse().expect("a valid name"))
+                        .into(),
                 };
                 let mut writer = session.writer(config).await.expect("opens");
                 let mut context = Context::from_waker(Waker::noop());
                 for seq in 0..WARM + COUNTED {
                     let (ready, drafted) = ALLOCATOR.count(|| {
-                        let draft = pin!(writer.draft(Form::Raw, 1, &[(0, 8), (1, 8)]));
+                        let count = other(seq);
+                        let len = 8 * usize::try_from(count).expect("fits");
+                        let series =
+                            [(0, 1, 8), (1, 1, 8), (2, count, len), (3, count, len)];
+                        let draft = pin!(writer.draft(Form::Raw, &series));
                         matches!(draft.poll(&mut context), Poll::Ready(Ok(_)))
                     });
                     assert!(ready, "frame {seq} has a block");
@@ -169,10 +170,14 @@ fn writes_a_frame_with_no_allocation() {
                     node.clock().sleep(SENT).await;
                     let (outcome, taking) =
                         ALLOCATOR.count(|| write.as_mut().poll(&mut context));
-                    let taken = Outcome::Taken {
-                        range: Range { seq, count: 1 },
+                    let taken = |count| Outcome::Taken {
+                        range: Range { seq, count },
                     };
-                    assert_eq!(outcome, Poll::Ready(Ok(taken)), "frame {seq}");
+                    assert_eq!(
+                        outcome,
+                        Poll::Ready(Ok(&[(0, taken(1)), (2, taken(other(seq)))][..])),
+                        "frame {seq}"
+                    );
                     if seq >= WARM {
                         assert_eq!(
                             (drafted, sending, taking),
@@ -184,4 +189,27 @@ fn writes_a_frame_with_no_allocation() {
             })
         },
     );
+}
+
+/// The count of group 1 of frame `seq`: 1, or 2 in an odd frame.
+fn other(seq: u64) -> u32 {
+    if seq % 2 == 1 { 2 } else { 1 }
+}
+
+/// Sends `Taken` of frame `seq` for group 0 with 1 sample and group 1 with `count`.
+async fn taken(sender: &mut Sender, seq: u64, count: u32) {
+    for (group, count) in [(0, 1), (1, count)] {
+        let outcome = Outcome::Taken {
+            range: Range { seq, count },
+        };
+        let frame = seq + 1;
+        let reply = Reply::Outcome {
+            frame,
+            group,
+            outcome,
+        };
+        let mut bytes = vec![0; reply.encoded_len()];
+        reply.encode(&mut bytes);
+        send(sender, &bytes).await;
+    }
 }

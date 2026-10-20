@@ -235,7 +235,7 @@ fn a_write_sends_one_sample_of_each_value_and_a_stamp_of_0_in_place_order() {
     };
     assert_eq!(*time, Time::Node);
     assert_eq!(frame.count, 1);
-    assert_eq!(frame.series, [(0, 8), (1, 8), (2, 8)]);
+    assert_eq!(frame.series, [(0, 1, 8), (1, 1, 8), (2, 1, 8)]);
     assert_eq!(
         series(frame),
         [
@@ -254,7 +254,7 @@ fn a_write_with_a_value_of_the_index_sends_it_as_the_stamp_of_the_frame() {
     assert_eq!(writer.close(), Ok(()));
     let sent = served.join().unwrap();
     assert_eq!(sent[0].1, Time::Frame(Path::Live));
-    assert_eq!(sent[0].0.series, [(0, 8), (1, 8)]);
+    assert_eq!(sent[0].0.series, [(0, 1, 8), (1, 1, 8)]);
     assert_eq!(
         series(&sent[0].0),
         [
@@ -354,7 +354,7 @@ fn a_write_of_series_with_none_of_the_index_gives_index_absent_and_sends_nothing
     assert_eq!(writer.close(), Ok(()));
     let sent = served.join().unwrap();
     assert_eq!(sent.len(), 2);
-    assert_eq!(sent[0].0.series, [(0, 8), (2, 8)]);
+    assert_eq!(sent[0].0.series, [(0, 1, 8), (2, 1, 8)]);
     assert_eq!(sent[1].0.series, []);
 }
 
@@ -380,7 +380,7 @@ fn a_write_of_series_sends_each_series_in_place_order_with_its_stamps() {
     let (frame, time) = &sent[0];
     assert_eq!(*time, Time::Frame(Path::Live));
     assert_eq!(frame.count, 2);
-    assert_eq!(frame.series, [(0, 16), (1, 16)]);
+    assert_eq!(frame.series, [(0, 2, 16), (1, 2, 16)]);
     assert_eq!(series(frame), [(0, stamps), (1, counts)]);
 }
 
