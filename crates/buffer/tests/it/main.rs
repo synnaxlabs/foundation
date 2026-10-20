@@ -8081,3 +8081,28 @@ fn after_the_largest_count_other_entries_commit_and_reopen() {
         assert_eq!(read.next, mark(1, 1));
     });
 }
+
+/// An append holds `append_footprint` bytes of its pool past the blocks of its entries
+/// until it commits, and none after.
+#[test]
+fn an_append_holds_its_footprint_until_it_commits() {
+    run(209, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard.open(least(600_000), &mut slots).await.expect("opens");
+        let pool = buffer.pool();
+        pool.purge();
+        pool.purge();
+        let a = slots.index(key(1));
+        let parts = parts_of(pool, &[30, 4000]);
+        let entries = pool.committed();
+        assert_eq!(entries, block::footprint(30) + block::footprint(4000));
+        let appended = buffer.append([entry(1, a, Path::Live, 0, 1, Some(1), parts)]);
+        assert_eq!(appended, Ok(()));
+        let held = pool.committed() - entries;
+        buffer.committed().await.expect("commits");
+        pool.purge();
+        pool.purge();
+        assert_eq!([held, pool.committed()], [buffer.append_footprint(), 0]);
+        assert_eq!(buffer.append_footprint(), 57_536);
+    });
+}

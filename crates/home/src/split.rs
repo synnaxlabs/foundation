@@ -329,6 +329,41 @@ impl<'a> Split<'a> {
         Some((group, Ok(Stamps(stamps))))
     }
 
+    /// Each entry of the index frame of `group` and its encoded length, in entry order,
+    /// as [`Split::frame`] makes it.
+    ///
+    /// # Panics
+    ///
+    /// If `group` is absent.
+    pub(crate) fn lens(&mut self, group: u32) -> &[(usize, usize)] {
+        let at = self.place(group);
+        let scratch = &mut *self.scratch;
+        fill_lens(
+            &mut scratch.lens,
+            &scratch.series[scratch.parts[at].series.clone()],
+        );
+        &scratch.lens
+    }
+
+    /// The place of `group` in the parts.
+    ///
+    /// # Panics
+    ///
+    /// If `group` is absent.
+    fn place(&self, group: u32) -> usize {
+        let scratch = &*self.scratch;
+        let at = scratch.places.get(to_usize(group)).copied().filter(|&at| {
+            scratch
+                .parts
+                .get(at)
+                .is_some_and(|part| part.group == group)
+        });
+        let Some(at) = at else {
+            panic!("group {group} is absent from the frame");
+        };
+        at
+    }
+
     /// The index frame of `group`: the writer's key set with only `group` present, its
     /// count, and its series encoded. The index frame of an encoded frame with one
     /// group is that frame, with no copy. It checks an encoded index whose stamps did
@@ -346,16 +381,8 @@ impl<'a> Split<'a> {
         pool: &block::Pool,
         group: u32,
     ) -> Result<Draft, block::Error> {
+        let at = self.place(group);
         let scratch = &mut *self.scratch;
-        let at = scratch.places.get(to_usize(group)).copied().filter(|&at| {
-            scratch
-                .parts
-                .get(at)
-                .is_some_and(|part| part.group == group)
-        });
-        let Some(at) = at else {
-            panic!("group {group} is absent from the frame");
-        };
         let part = &mut scratch.parts[at];
         if part.pending {
             let Some(draft) = self.draft.as_mut() else {
@@ -378,11 +405,8 @@ impl<'a> Split<'a> {
             scratch.parts[at].made = true;
             return Ok(draft);
         }
+        fill_lens(&mut scratch.lens, &scratch.series[part.series.clone()]);
         let series = &scratch.series[part.series.clone()];
-        scratch.lens.clear();
-        scratch
-            .lens
-            .extend(series.iter().map(|series| (series.entry, series.len)));
         let mut index = match Draft::new(pool, self.set, Form::Encoded, &scratch.lens) {
             Ok(index) => index,
             Err(frame::Error::Pool(error)) => return Err(error),
@@ -397,6 +421,12 @@ impl<'a> Split<'a> {
         scratch.parts[at].made = true;
         Ok(index)
     }
+}
+
+/// Replaces `lens` with the entry and encoded length of each of `series`.
+fn fill_lens(lens: &mut Vec<(usize, usize)>, series: &[Series]) {
+    lens.clear();
+    lens.extend(series.iter().map(|series| (series.entry, series.len)));
 }
 
 /// The encoded bytes of `series`: in `draft` when the frame is encoded, else in
@@ -509,11 +539,13 @@ mod tests {
     use types::frame::key_set::Group;
     use types::frame::{Form, Frame, Path, Range};
     use types::sample::Sides;
+    use types::time::Stamp;
 
     use super::*;
     use crate::common::{
         self, create_interner, create_pool, data_type, intern, key, values,
     };
+    use crate::stored;
 
     /// The samples of one present group: its count and each present entry's values.
     #[derive(Clone, Debug)]
@@ -1659,6 +1691,31 @@ mod tests {
             for &group in write.keys() {
                 let frame = split.frame(&pool, group).expect("room");
                 assert_index_frame(&set, &write, group, &frame.freeze(Path::Live));
+            }
+        }
+
+        #[test]
+        fn gives_the_lens_of_the_stored_entry_of_each_frame(
+            (set, write) in writes(),
+            raw in any::<bool>(),
+        ) {
+            let form = if raw { Form::Raw } else { Form::Encoded };
+            let pool = create_pool(1 << 20);
+            let mut scratch = Scratch::default();
+            let draft = draft(&pool, &set, form, &write);
+            let mut writer = Writer::new(Arc::clone(&set));
+            let mut split = scratch.split(&mut writer, draft);
+
+            drain(&mut split);
+            for (&group, samples) in write.iter().filter(|(_, s)| s.count > 0) {
+                let len = stored::len(&set, split.lens(group));
+                let frame = split.frame(&pool, group).expect("room");
+                let frame = frame.freeze(Path::Live);
+                let stamp = Stamp::from_nanos(0);
+                let entry = stored::entry(&pool, &frame, &set, stamp, stamp);
+                let parts = entry.expect("room").parts.into_iter();
+                let stored: usize = parts.map(|part| part.len()).sum();
+                prop_assert_eq!(len, stored, "group {} of {}", group, samples.count);
             }
         }
 

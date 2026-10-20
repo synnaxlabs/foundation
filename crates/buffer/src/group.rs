@@ -17,6 +17,11 @@ use crate::{carry, record};
 pub(crate) const META_LEN: usize = record::HEADER_LEN + entry::TABLE_MAX;
 const _: () = assert!(META_LEN <= 1 << 16, "the table fits one 64 KiB block");
 
+/// Budget bytes of the blocks that one append holds other than its entries: the
+/// record header and table, and the wrap header.
+pub(crate) const META_FOOTPRINT: usize =
+    block::footprint(META_LEN).saturating_add(block::footprint(record::HEADER_LEN));
+
 /// The most bytes of parts, joined, that one entry may have on `pool`: one block of
 /// `pool` holds them, and the group's two blocks and the entry, in any split into two
 /// parts, fit its budget at once.
@@ -72,8 +77,6 @@ fn class_starts(largest: usize) -> Vec<usize> {
 /// the split into two parts that takes the most. `starts` holds the class starts up
 /// to at least `len`: in a class, the first length leaves the most to the other part.
 fn need(starts: &[usize], len: usize) -> usize {
-    let group =
-        block::footprint(META_LEN).saturating_add(block::footprint(record::HEADER_LEN));
     let parts = starts
         .iter()
         .take_while(|&&first| first <= len)
@@ -83,7 +86,7 @@ fn need(starts: &[usize], len: usize) -> usize {
         })
         .max()
         .expect("invariant: the class of 0 starts at 0");
-    group.saturating_add(parts)
+    META_FOOTPRINT.saturating_add(parts)
 }
 
 /// The bytes that the copies of the entries of `batch` with a nonzero tag take in a

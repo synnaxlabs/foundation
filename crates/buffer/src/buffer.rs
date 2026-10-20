@@ -738,6 +738,14 @@ impl Buffer {
         self.shared.block_max
     }
 
+    /// Pool bytes that one append holds at once other than its entries: the
+    /// footprints, by [`block::footprint`], of the blocks of its record header,
+    /// entry table, and wrap.
+    #[must_use]
+    pub fn append_footprint(&self) -> usize {
+        group::META_FOOTPRINT
+    }
+
     /// Where `path` of the index at `slot` stands, with every appended entry.
     #[must_use]
     pub fn tail(&self, slot: Slot, path: Path) -> Tail {

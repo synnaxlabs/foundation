@@ -292,4 +292,10 @@ exclude_re = [
   # With the mutant, the node refuses each writer of one index, and each writer test of
   # `crates/node/tests/it/sdk.rs` fails at its open.
   'sdk/rust/src/write\.rs:.*replace != with == in served$',
+  # Two rates of equal ratio give the same floor of the length, so `len_within` gives
+  # the same value whichever of the two it keeps.
+  'crates/codec/src/lib\.rs:.*replace > with >= in len_within$',
+  # The arm is `unreachable!`: `too_large` checks each block that the freeze takes, so
+  # no frame gets `TooLarge` from the pool unless the two disagree.
+  'crates/home/src/shard\.rs:.*delete match arm .*TooLarge.* in Shard::write$',
 ]

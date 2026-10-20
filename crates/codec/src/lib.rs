@@ -48,6 +48,36 @@ pub fn max_len(data_type: Type, len: usize) -> usize {
     Shape::of(data_type).max_len(len)
 }
 
+/// Bytes of values that one series of each of `types` holds in all, split among them
+/// in any way, such that one [`Encoder`] for each writes at most `bytes` in all. It is
+/// a lower bound of the most such bytes, with no search. 0 when the headers alone pass
+/// `bytes`.
+#[must_use]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "a u128 holds a usize, and the length is at most `bytes`"
+)]
+pub fn len_within(types: impl IntoIterator<Item = Type>, bytes: usize) -> usize {
+    // A series of `l` bytes takes `h * ceil(l / k)` header bytes for each layout of its
+    // shape, at most `h + l * h / k`. So a split of `len` takes at most the headers of
+    // one vector of each series, plus `len` at the highest rate `h / k`.
+    let (mut first, mut rate) = (0_usize, (0_u128, 1_u128));
+    for data_type in types {
+        let shape = Shape::of(data_type);
+        first = first.saturating_add(shape.max_len(1).strict_sub(1));
+        let next = shape.rate();
+        if next.0.strict_mul(rate.1) > rate.0.strict_mul(next.1) {
+            rate = next;
+        }
+    }
+    let wide = |n: usize| u128::try_from(n).expect("invariant: a u128 holds a usize");
+    let (h, k) = rate;
+    let len = wide(bytes.saturating_sub(first))
+        .strict_mul(k)
+        .strict_div(k.strict_add(h));
+    usize::try_from(len).expect("invariant: the length is at most `bytes`")
+}
+
 /// Encodes the series of one channel. It keeps the ALP exponent pairs that its
 /// float series pick, so keep one encoder for each channel across its series: a
 /// new one searches the pairs again, which costs encode time. The bytes of a
@@ -685,6 +715,21 @@ impl Shape {
             panic!("the encoded size of {len} bytes of values is more than usize::MAX")
         })
     }
+
+    /// The header bytes of [`max_len`](Self::max_len) for each byte of values, past
+    /// the first vector, as a fraction.
+    fn rate(self) -> (u128, u128) {
+        match self {
+            Self::Fixed { element, .. } => element.rate(),
+            Self::Variable { element, .. } => {
+                let ((h, k), (end, of)) = (element.rate(), Layout::END.rate());
+                (
+                    h.strict_mul(of).strict_add(end.strict_mul(k)),
+                    k.strict_mul(of),
+                )
+            }
+        }
+    }
 }
 
 /// Checks the ends of a variable series in order, any number at a time.
@@ -855,6 +900,15 @@ impl Layout {
     fn headers(self, len: usize) -> usize {
         let width = self.width();
         vectors(len.div_ceil(width)).strict_mul(vector::header_len(0, width))
+    }
+
+    /// The bytes of [`headers`](Self::headers) of one vector, and the bytes of values
+    /// of a full vector.
+    fn rate(self) -> (u128, u128) {
+        let wide =
+            |n: usize| u128::try_from(n).expect("invariant: a u128 holds a usize");
+        let full = VECTOR_LEN.strict_mul(self.width());
+        (wide(self.headers(1)), wide(full))
     }
 
     /// Encodes `values` as vectors into the front of `out` and returns the bytes
@@ -1591,6 +1645,78 @@ mod tests {
         )]
         fn panics_past_usize() {
             std::hint::black_box(max_len(Type::Scalar(Scalar::U16), usize::MAX));
+        }
+
+        #[test]
+        fn within_takes_the_first_headers_and_the_highest_rate() {
+            let (u8, i64) = (Type::Scalar(Scalar::U8), Type::Scalar(Scalar::I64));
+            for (types, bytes, len) in [
+                (&[][..], 4_096, 4_096),
+                (&[u8], 1, 0),
+                (&[u8], 2, 0),
+                (&[u8], 1_028, 1_024),
+                (&[u8], 1_029, 1_024),
+                (&[i64], 8_208, 8_192),
+                (&[i64, u8], 8_218, 8_192),
+                (&[u8, i64], 8_218, 8_192),
+                (&[Type::Bytes], 1_033, 1_024),
+                (&[Type::Scalar(Scalar::Uuid)], 16_416, 16_384),
+                (&[u8], usize::MAX, 18_410_785_508_263_724_027),
+            ] {
+                assert_eq!(len_within(types.iter().copied(), bytes), len, "{types:?}");
+            }
+        }
+
+        proptest! {
+            #[test]
+            fn within_holds_each_split_and_wastes_at_most_one_vector_each(
+                parts in prop::collection::vec((any_type(), 0..1_000_usize), 1..6),
+                bytes in 0..300_000_usize,
+            ) {
+                let types: Vec<Type> = parts.iter().map(|&(data_type, _)| data_type).collect();
+                let len = len_within(types.iter().copied(), bytes);
+                let weight: usize = parts.iter().map(|&(_, weight)| weight).sum();
+                let mut splits: Vec<Vec<usize>> = (0..parts.len())
+                    .map(|one| {
+                        let mut split = vec![0; parts.len()];
+                        split[one] = len;
+                        split
+                    })
+                    .collect();
+                if weight > 0 {
+                    let mut split: Vec<usize> =
+                        parts.iter().map(|&(_, w)| len * w / weight).collect();
+                    split[0] += len - split.iter().sum::<usize>();
+                    splits.push(split);
+                }
+                for split in splits {
+                    let sum: usize = types
+                        .iter()
+                        .zip(&split)
+                        .map(|(&data_type, &len)| max_len(data_type, len))
+                        .sum();
+                    prop_assert!(sum <= bytes, "{split:?} takes {sum}");
+                }
+                let highest = types
+                    .iter()
+                    .copied()
+                    .max_by(|&a, &b| {
+                        let ((ah, ak), (bh, bk)) = (Shape::of(a).rate(), Shape::of(b).rate());
+                        (ah * bk).cmp(&(bh * ak))
+                    })
+                    .expect("the types are not empty");
+                let (mut low, mut high) = (0, bytes);
+                while low < high {
+                    let mid = low.midpoint(high) + 1;
+                    if max_len(highest, mid) <= bytes {
+                        low = mid;
+                    } else {
+                        high = mid - 1;
+                    }
+                }
+                let slack: usize = types.iter().map(|&t| max_len(t, 1) - 1).sum();
+                prop_assert!(low - len <= slack, "{low} fits {highest:?}, {len} all");
+            }
         }
     }
 

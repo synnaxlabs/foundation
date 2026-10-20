@@ -29,6 +29,26 @@ mod at {
     pub(super) const END: usize = 22;
 }
 
+/// Bytes of the header of a stored body of `series` series.
+pub(crate) const fn header_len(series: usize) -> usize {
+    COUNT + DESCRIPTOR * series
+}
+
+/// Parts of each entry that [`entry`] makes: the header, then the body of the frame.
+pub(crate) const PARTS: usize = 2;
+
+/// Bytes of the parts of the entry that [`entry`] makes of an index frame of `set` with
+/// `series`, each an entry and its encoded length, in entry order.
+///
+/// # Panics
+///
+/// If `series` makes no frame of `set`.
+pub(crate) fn len(set: &KeySet, series: &[(usize, usize)]) -> usize {
+    let layout = Layout::new(set, series);
+    let layout = layout.expect("invariant: the series of a group make a frame");
+    header_len(series.len()) + layout.body_len()
+}
+
 /// The buffer entry that stores `frame`, an encoded index frame of one group of `set`
 /// whose newest stamp is `last`, at mesh time `stored_at`. Its parts are a header
 /// block from `pool`, then [`Frame::body`]. Copies no series byte.
@@ -88,7 +108,7 @@ fn body(
     pool: &block::Pool,
     frame: &Frame,
     set: &KeySet,
-) -> Result<[Block; 2], block::Error> {
+) -> Result<[Block; PARTS], block::Error> {
     assert_eq!(frame.form(), Form::Encoded, "the frame is not encoded");
     assert_eq!(
         frame.key_set(),
@@ -98,7 +118,7 @@ fn body(
     let entries = set.entries();
     let group = frame.ends().next().map(|(entry, _)| entries[entry].group);
     let count = frame.ends().count();
-    let mut head = pool.alloc(COUNT + DESCRIPTOR * count)?;
+    let mut head = pool.alloc(header_len(count))?;
     let (start, descriptors) = head.split_at_mut(COUNT);
     start.copy_from_slice(&to_u32(count).to_le_bytes());
     let (descriptors, _) = descriptors.as_chunks_mut::<DESCRIPTOR>();
