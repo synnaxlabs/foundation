@@ -7,6 +7,7 @@ import _thread
 import collections.abc
 import gc
 import os
+import signal
 import sys
 import threading
 import time
@@ -446,10 +447,13 @@ class ReaderTest(unittest.TestCase):
     def test_ctrl_c_ends_a_reader_that_waits_and_the_next_call_gets_the_frame(
         self,
     ) -> None:
-        # CPython runs the signal handlers only on its main thread, which a suite
-        # embedded in `cargo test` may not run on. The wheel jobs run this test.
-        if threading.current_thread() is not threading.main_thread():
-            self.skipTest("the suite runs on a thread other than the main thread")
+        # CPython runs the signal handlers only on its main thread, and the interpreter
+        # of `cargo test` has no handler of SIGINT, so `interrupt_main` does nothing.
+        # `main_thread` is the thread that first imported `threading`, which can be the
+        # suite's. The wheel jobs run this test.
+        if (threading.current_thread() is not threading.main_thread()
+                or signal.getsignal(signal.SIGINT) is not signal.default_int_handler):
+            self.skipTest("Python does not handle SIGINT on this thread")
         reader = self.client.open_reader("plant.a")
         self.addCleanup(reader.close)
         interrupted = []
