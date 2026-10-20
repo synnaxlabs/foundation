@@ -172,9 +172,11 @@ pub fn line(key: PublicKey) -> String {
 /// passphrase. Its message quotes none of the text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unreadable {
-    /// It is not an OpenSSH private key file as `ssh-keygen` writes it: it does not
-    /// start `-----BEGIN OPENSSH PRIVATE KEY-----`, or it breaks the format in a way
-    /// that OpenSSH reads, as [`private_key`] says.
+    /// It is not an OpenSSH private key file as `ssh-keygen` writes it: its first line
+    /// that starts `-----BEGIN ` at the start of the text or after a `\n` is not
+    /// `-----BEGIN OPENSSH PRIVATE KEY-----`, the text before that line holds a NUL, no
+    /// end mark follows that line, or it breaks the format in a way that OpenSSH reads,
+    /// as [`private_key`] says.
     Format,
     /// The key is of another algorithm: its name, or `ECDSA` for an ECDSA key.
     Algorithm(&'static str),
@@ -220,7 +222,9 @@ impl fmt::Display for Unreadable {
 ///
 /// [`Unreadable`] says why the text is not such a file.
 pub fn private_key(text: &str) -> Result<PrivateKey, Unreadable> {
-    let text = lines(text);
+    let Some(text) = lines(text) else {
+        return Err(Unreadable::Format);
+    };
     let file = match ssh_key::PrivateKey::from_openssh(&text) {
         Ok(file) => file,
         // With no `ecdsa` feature, `ssh-key` reads no ECDSA private key.
@@ -258,18 +262,33 @@ pub fn private_key(text: &str) -> Result<PrivateKey, Unreadable> {
     Ok(key)
 }
 
-/// `text` up to its end mark as `ssh-key` takes it: the body with no white space, in
-/// lines of 70 characters, and each line end as `\n`. `ssh-key` 0.6.7 reads only lines
-/// of 70, as `ssh-keygen` writes them, and OpenSSH reads any width, skips white space
-/// in the body as C `isspace` finds it, and skips the text after the end mark.
-fn lines(text: &str) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    let end = lines.iter().position(|line| line.starts_with("-----END"));
-    let Some([begin, body @ .., end]) = end.map(|end| &lines[..=end]) else {
-        return text.to_owned();
+/// `text` from its begin mark to its end mark as `ssh-key` takes it: the body with no
+/// white space, in lines of 70 characters, and each line end (`\n`, `\r\n`, or `\r`)
+/// as `\n`. `ssh-key` 0.6.7 takes a begin mark only at the start of the text or after
+/// a `\n`, skips the text before it when it holds no NUL, and reads only lines of 70,
+/// as `ssh-keygen` writes them. OpenSSH reads any width, skips white space in the body
+/// as C `isspace` finds it, and skips the text after the end mark. `None` when the text
+/// before the begin mark holds a NUL, or no end mark follows a begin mark.
+fn lines(text: &str) -> Option<String> {
+    let start = if text.starts_with("-----BEGIN ") {
+        0
+    } else {
+        text.find("\n-----BEGIN ")? + 1
     };
+    if text[..start].contains('\0') {
+        return None;
+    }
+    let mut lines = text[start..].split(['\n', '\r']);
+    let begin = lines.next()?;
     let space = |c: &char| c.is_ascii_whitespace() || *c == '\x0b';
-    let body: Vec<char> = body.concat().chars().filter(|c| !space(c)).collect();
+    let mut body = Vec::new();
+    let end = loop {
+        let line = lines.next()?;
+        if line.starts_with("-----END") {
+            break line;
+        }
+        body.extend(line.chars().filter(|c| !space(c)));
+    };
     let mut file = format!("{begin}\n");
     for line in body.chunks(70) {
         file.extend(line);
@@ -277,7 +296,7 @@ fn lines(text: &str) -> String {
     }
     file.push_str(end);
     file.push('\n');
-    file
+    Some(file)
 }
 
 /// Whether the public key of `file`, as [`lines`] gives it, is an ECDSA key.
