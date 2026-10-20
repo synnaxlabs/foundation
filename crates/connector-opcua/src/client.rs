@@ -106,10 +106,18 @@ pub(crate) unsafe fn unconnected(el: *mut ffi::EventLoop) -> NonNull<ffi::Client
 /// # Errors
 ///
 /// [`Client::connect`] gives a [`Refusal`] of them.
+#[derive(Clone, Copy)]
 pub(crate) struct Credentials<'a> {
     pub(crate) certificate: &'a [u8],
     pub(crate) key: &'a [u8],
     pub(crate) trust: &'a [u8],
+}
+
+/// Prints `<credentials>`, never the key.
+impl fmt::Debug for Credentials<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<credentials>")
+    }
 }
 
 impl<'a> Credentials<'a> {

@@ -106,7 +106,6 @@ impl Server {
     /// # Panics
     ///
     /// As [`Server::start`].
-    #[cfg(test)]
     pub(crate) unsafe fn start_secure(
         manager: &Manager,
         host: &CStr,
@@ -598,7 +597,8 @@ impl Server {
     }
 
     /// Starts a server on `manager` with an empty host and room for `sessions`
-    /// sessions, as [`Server::start`] does, and gives it to `add`. Then drives
+    /// sessions, as [`Server::start`] does, or as [`Server::start_secure`] does on the
+    /// credentials and policies of `security`, and gives it to `add`. Then drives
     /// `manager` until `until` completes or the accept of its listener fails, closes
     /// the server as [`Server::close`] does, drops `manager`, and gives the output of
     /// `until`.
@@ -617,13 +617,20 @@ impl Server {
     pub(crate) async fn serve<T>(
         manager: Manager,
         sessions: u16,
+        security: Option<(&crate::client::Credentials<'_>, &[crate::secure::Policy])>,
         add: impl FnOnce(&mut Self),
         until: impl Future<Output = T>,
     ) -> Result<T, net::Error> {
         let manager = ManuallyDrop::new(manager);
-        // SAFETY: each close deletes the server before the manager drops. A panic out
-        // of `start` leaks the manager, and the server if open62541 made it.
-        let server = unsafe { Self::start(&manager, c"", sessions) };
+        let server = match security {
+            // SAFETY: each close deletes the server before the manager drops. A panic
+            // out of the start leaks the manager, and the server if open62541 made it.
+            Some((credentials, policies)) => unsafe {
+                Self::start_secure(&manager, c"", sessions, credentials, policies)
+            },
+            // SAFETY: as above.
+            None => unsafe { Self::start(&manager, c"", sessions) },
+        };
         let mut serving = Serving {
             server: Some(server),
             manager,

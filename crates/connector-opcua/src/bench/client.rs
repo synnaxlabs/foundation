@@ -122,7 +122,8 @@ impl Server {
             server.add_bytes(&BYTES, 7 << 16);
         };
         let body = caught(async { body(&this).await });
-        let value = crate::server::Server::serve(manager, SESSIONS, add, body).await;
+        let value =
+            crate::server::Server::serve(manager, SESSIONS, None, add, body).await;
         let value = value.expect("the listener of a bench does not fail");
         value.unwrap_or_else(|panic| panic::resume_unwind(panic))
     }

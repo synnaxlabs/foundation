@@ -43,10 +43,12 @@ use env::rng::Rng;
 use types::quality::Quality;
 use types::time::{Monotonic, Span, Stamp};
 
+use crate::client::Credentials;
 use crate::connection::Manager;
 use crate::event;
 pub use crate::log::call_refused;
 use crate::node::Node;
+use crate::secure::Policy;
 use crate::server::Server;
 use crate::value::Value;
 
@@ -77,6 +79,8 @@ struct State {
     /// The status of each answer of the state of the server, at first Good.
     #[cfg(test)]
     answer: Quality,
+    /// The credentials and the one policy of a server, set before it starts.
+    security: Option<(Credentials<'static>, Policy)>,
 }
 
 #[derive(Debug)]
@@ -149,6 +153,7 @@ impl Variables {
             states: 0,
             #[cfg(test)]
             answer: Quality::GOOD,
+            security: None,
         })))
     }
 
@@ -221,6 +226,13 @@ impl Variables {
     #[cfg(test)]
     pub(crate) fn time_out_sessions(&self, most: Span) {
         self.state().session = Some(most);
+    }
+
+    /// Makes a server offer `policy` in `Sign` and in `SignAndEncrypt` on the
+    /// certificate and key of `credentials`, and trust only their `trust`.
+    #[cfg(test)]
+    pub(crate) fn secure(&self, credentials: Credentials<'static>, policy: Policy) {
+        self.state().security = Some((credentials, policy));
     }
 
     /// Gives each later answer of the state of the server the status `quality`.
@@ -353,6 +365,7 @@ pub async fn serve(
         .collect();
     #[cfg(test)]
     let (most, session, fixed) = variables.hooks();
+    let security = variables.state().security;
     let add = |server: &mut Server| {
         server.cap_references(tree::REFERENCES);
         tree::add(server);
@@ -394,7 +407,9 @@ pub async fn serve(
             server.add_source(node, move || variables.read(index, clock.now()));
         }
     };
-    Server::serve(manager, SESSIONS, add, until.wait()).await
+    let security = (security.as_ref())
+        .map(|(credentials, policy)| (credentials, std::slice::from_ref(policy)));
+    Server::serve(manager, SESSIONS, security, add, until.wait()).await
 }
 
 /// Runs the [`serve`] that `serve` gives for a new token until `work` ends, then
