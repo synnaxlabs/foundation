@@ -95,21 +95,49 @@ fn refuses_a_text_that_is_not_a_private_key_file() {
     assert_eq!(unreadable(KEYGEN_PUB), expected);
 }
 
-/// A text whose first line is an end mark gives one error with LF and CRLF line ends.
-/// The fuzz target found it.
+/// A text after an end mark gives one error with each line end. The fuzz target found
+/// it: its algorithm name is not UTF-8.
 #[test]
-fn refuses_a_text_that_starts_with_an_end_mark_with_each_line_end() {
+fn gives_one_error_for_a_text_after_an_end_mark_with_each_line_end() {
     let text = "-----ENDOXc\n\n-----BEGIN OPENSSH PRIVATE KEY-----\n\
         b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gZtW\n\
         QyNTUxOQAAACDyYqNHsEEJBY9+1DrLFvXJtoCq/Jio0ewQQkFj37UOssW9cm2\n\
         gKr9m07\n5UHcwrYgPa9XoAAA{\0\0\0\0\0\0J\n\n\n\n\n\0lQGxhcHRvcAE=\n\
         -----END OPENSSH PRIVATE KEY-----\n";
-    let expected = (
-        Unreadable::Format,
-        "the file is not an OpenSSH private key as `ssh-keygen` writes it".into(),
-    );
-    assert_eq!(unreadable(text), expected);
-    assert_eq!(unreadable(&text.replace('\n', "\r\n")), expected);
+    for end in ["\n", "\r\n", "\r"] {
+        assert_eq!(
+            unreadable(&text.replace('\n', end)),
+            (
+                Unreadable::Comment,
+                "the key file holds a text that is not UTF-8, such as its comment"
+                    .into()
+            ),
+            "{end:?}"
+        );
+    }
+}
+
+/// `ssh-key` 0.6.7 skips the text before the begin mark, also an end mark.
+#[test]
+fn reads_a_key_file_after_text_before_its_begin_mark_with_each_line_end() {
+    for before in ["-----END x\n", "x\n", "\n"] {
+        for end in ["\n", "\r\n", "\r"] {
+            let text = format!("{before}{KEYGEN}").replace('\n', end);
+            let key = openssh::private_key(&text).unwrap();
+            assert_eq!(openssh::line(key.public()), KEYGEN_PUB, "{text:?}");
+        }
+    }
+}
+
+/// `ssh-key` 0.6.7 takes a lone CR as a line end.
+#[test]
+fn reads_a_key_file_with_cr_line_ends() {
+    let cr = KEYGEN.replace('\n', "\r");
+    let cr_before_end = KEYGEN.replace("\n-----END", "\r-----END");
+    for text in [cr, cr_before_end] {
+        let key = openssh::private_key(&text).unwrap();
+        assert_eq!(openssh::line(key.public()), KEYGEN_PUB, "{text:?}");
+    }
 }
 
 #[test]
