@@ -320,7 +320,7 @@ fn renewal(
     frames: &Frames,
     message: &[u8],
 ) -> Result<bool, Error> {
-    if frames.finish().is_err() {
+    if !frames.between() {
         return Ok(false);
     }
     match Signed::decode(message) {
