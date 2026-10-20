@@ -99,4 +99,10 @@
   (2026-10-20T04:28:21Z). The fixes of review round 3, approved with two word fixes
   by `laptop.architect-2`:
   https://github.com/synnaxlabs/foundation/pull/3475#issuecomment-6283869366
-  (2026-10-20T05:09:13Z).
+  (2026-10-20T05:09:13Z). The lost answer that holds the retry state of the end that
+  waits, and the lost RST that drops or goes as a SYN by when a listener starts, wait
+  on #3515, the next `sim` item after #3040, before any new rule here. Until then, a
+  test outside `sim` that asserts a TCP time under loss states the Not-as-Linux clause
+  that it meets. By `laptop.architect-2`:
+  https://github.com/synnaxlabs/foundation/pull/3475#issuecomment-6283950925
+  (2026-10-20T05:15:52Z).
