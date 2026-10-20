@@ -1033,15 +1033,15 @@
   each certificate of each trust entry, and refuses an entry whose load stops before its
   end, and the constructor of the group gives that status (ruling A). PEM is read by the
   loop of `PEM_read_bio` of aws-lc on a BIO of the full length, which reads each block
-  and skips the text outside them. The copy takes `CERTIFICATE`, `X509 CERTIFICATE`,
-  and `TRUSTED CERTIFICATE` blocks, the labels that aws-lc reads as `TRUSTED
-  CERTIFICATE`, as aws-lc does not export that rule. It reads the header of each with
-  `PEM_get_EVP_CIPHER_INFO` and `PEM_do_header` of aws-lc and a callback that refuses
-  a password, so a header such as of encryption gives `Invalid` (round 1 of review of
-  #3469). Then `d2i_X509` reads the bytes of each block, not
-  the leaf loader of the copy, which drops a block that does not start with the exact
-  line `-----BEGIN CERTIFICATE-----` (round 2 of review of #3271). `d2i_X509` is the
-  one step of the DER path (#3288 item 4, OK of `laptop.architect-2`,
+  and skips the text outside them. The load takes the `CERTIFICATE`, `X509
+  CERTIFICATE`, and `TRUSTED CERTIFICATE` blocks with no header: the labels that
+  aws-lc reads as `TRUSTED CERTIFICATE`, which the copy states, as aws-lc does not
+  export that rule, and the header through `PEM_get_EVP_CIPHER_INFO` and
+  `PEM_do_header` of aws-lc with a callback that refuses a password, so a block with a
+  header gives `Invalid` (round 1 of review of #3469). Then `d2i_X509` reads the bytes
+  of each block, not the leaf loader of the copy, which drops a block that does not
+  start with the exact line `-----BEGIN CERTIFICATE-----` (round 2 of review of #3271).
+  `d2i_X509` is the one step of the DER path (#3288 item 4, OK of `laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6266776077). This
   supersedes item 1 of
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255744593. A DER
@@ -1050,9 +1050,9 @@
   PR 2b paragraph below. What the load skips is dropped: text, as the comment of
   `openSSLLoadEachCertificate` states, DER bytes after PEM, a damaged first DER
   certificate before a PEM block, and a block of another label. A block of any label
-  that `PEM_read_bio` cannot read fails the load, such as an empty one or one whose `END` line
-  names another label. So the connect fails closed with an untrusted certificate
-  (`laptop.architect-2`, 2026-10-18 22:30 UTC,
+  that `PEM_read_bio` cannot read fails the load, such as an empty one or one whose
+  `END` line names another label. So the connect fails closed with an untrusted
+  certificate (`laptop.architect-2`, 2026-10-18 22:30 UTC,
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255959458; for the
   second, 2026-10-18 22:50 UTC,
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6256155598; and for
