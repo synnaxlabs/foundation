@@ -10,6 +10,7 @@ use std::rc::Rc;
 use std::slice;
 use std::sync::Arc;
 use std::task::Poll;
+use std::vec::Drain;
 
 use access::proof;
 use block::Unique;
@@ -21,7 +22,7 @@ use wire::hub::client::Place;
 use wire::hub::client::write::{Open, Write};
 use wire::hub::write::{Due, Frames, Outcome, Reply, Step, Time};
 
-use self::group::{Frame, Group, Parts};
+use self::group::{Frame, Group, Parts, Written};
 use super::{Reserved, body};
 use crate::State;
 use crate::link::Session;
@@ -200,18 +201,14 @@ async fn relay(
                     Ok(draft) => frames.draft(draft),
                     Err(error) => {
                         frames.skip();
-                        writes.refuse(&error);
-                        flush(sender, &mut writes.replies).await?;
+                        flush(sender, writes.refuse(&error)).await?;
                         Step::More
                     }
                 }
             }
         };
         if let Step::Frame { draft, time } = step {
-            writes.write(state, draft, time);
-            for (block, reply) in writes.replies.drain(..) {
-                send(sender, block, reply).await?;
-            }
+            flush(sender, writes.write(state, draft, time)).await?;
         }
     }
 }
@@ -233,7 +230,7 @@ struct Writes {
     covered: Vec<u32>,
     /// Each group that took a frame since the call of the commit in `due`.
     waiting: Vec<u32>,
-    /// The replies to send, in order, with their blocks.
+    /// The replies to send, in order, with their blocks, empty outside a method.
     replies: Vec<(Unique, Reply)>,
 }
 
@@ -310,9 +307,9 @@ impl Writes {
         Ok(())
     }
 
-    /// Adds to `replies` the outcome of each group of the frame whose draft found no
-    /// block with `error`.
-    fn refuse(&mut self, error: &block::Error) {
+    /// Gives the outcome of each group of the frame whose draft found no block with
+    /// `error`, each with its block, to send in order.
+    fn refuse(&mut self, error: &block::Error) -> Drain<'_, (Unique, Reply)> {
         let frame = self.heads;
         match &mut self.spread {
             Spread::One { group, block } => {
@@ -329,14 +326,20 @@ impl Writes {
                 }
             }
         }
+        self.replies.drain(..)
     }
 
-    /// Writes each group of `draft`, the frame whose head came last, and adds to
-    /// `replies` the outcome of each, in group order, after the `Ended` of a group that
-    /// ends at it. A frame of a stream of one group goes to its group as it is; else
+    /// Writes each group of `draft`, the frame whose head came last, and gives the
+    /// outcome of each, in group order, after the `Ended` of a group that ends at it,
+    /// each with its block, to send in order. A frame of a stream of one group goes to its group as it is; else
     /// each group gets a copy of its series. Sync, so the relay's future holds no
     /// nested one.
-    fn write(&mut self, state: &RefCell<State>, draft: Draft, time: Time) {
+    fn write(
+        &mut self,
+        state: &RefCell<State>,
+        draft: Draft,
+        time: Time,
+    ) -> Drain<'_, (Unique, Reply)> {
         let Self {
             heads,
             spread,
@@ -364,6 +367,7 @@ impl Writes {
             }
         }
         self.call(state);
+        self.replies.drain(..)
     }
 
     /// Calls a commit for the taken frames of each waiting group when none is due.
@@ -415,7 +419,7 @@ impl Writes {
                 Err(committed) => {
                     self.due = None;
                     self.committed(state, &committed);
-                    flush(sender, &mut self.replies).await?;
+                    flush(sender, self.replies.drain(..)).await?;
                 }
             }
         }
@@ -435,7 +439,7 @@ impl Writes {
         while let Some(due) = self.due.take() {
             let committed = due.await;
             self.committed(state, &committed);
-            flush(sender, &mut self.replies).await?;
+            flush(sender, self.replies.drain(..)).await?;
         }
         sender.finish()?;
         Ok(())
@@ -452,9 +456,9 @@ impl Spread {
     }
 }
 
-/// Writes `frame`, the frame `heads` of the stream, to `group`, which adds its number
-/// to `waiting` when it starts to wait for a commit, and adds to `replies` the `Ended`
-/// of the group when it ends at the frame, then the outcome of the frame in `block`.
+/// Writes `frame`, the frame `heads` of the stream, to `group`, adds its number to
+/// `waiting` when it starts to wait for a commit, and adds to `replies` the `Ended` of
+/// the group when it ends at the frame, then the outcome of the frame in `block`.
 #[expect(
     clippy::too_many_arguments,
     reason = "the parts of a frame that both paths of `Writes::write` give"
@@ -469,7 +473,14 @@ fn put(
     frame: Frame<'_>,
     time: Time,
 ) {
-    let (ended, outcome) = group.write(state, frame, time, heads, waiting);
+    let Written {
+        ended,
+        outcome,
+        first,
+    } = group.write(state, frame, time, heads);
+    if first {
+        waiting.push(group.number());
+    }
     replies.extend(ended);
     replies.push((block, reply(heads, group.number(), outcome)));
 }
@@ -477,9 +488,9 @@ fn put(
 /// Sends each of `replies`, in order.
 async fn flush(
     sender: &mut Sender,
-    replies: &mut Vec<(Unique, Reply)>,
+    replies: Drain<'_, (Unique, Reply)>,
 ) -> Result<(), Error> {
-    for (block, reply) in replies.drain(..) {
+    for (block, reply) in replies {
         send(sender, block, reply).await?;
     }
     Ok(())

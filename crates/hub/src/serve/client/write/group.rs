@@ -35,6 +35,17 @@ pub(super) enum Frame<'a> {
     },
 }
 
+/// What the write of a frame to a group gives.
+pub(super) struct Written {
+    /// The `Ended` reply and its block, when the group ends at the frame.
+    pub(super) ended: Option<(Unique, Reply)>,
+    /// The outcome of the frame.
+    pub(super) outcome: Outcome,
+    /// Whether the group took the frame and took none since the last
+    /// [`cover`](Group::cover), so it starts to wait for a commit.
+    pub(super) first: bool,
+}
+
 /// The write of one group of a stream at its home, and the `Stored` of the frames that
 /// it took, until the group ends.
 pub(super) struct Group {
@@ -78,29 +89,25 @@ impl Group {
     }
 
     /// Writes the series of the group in `frame`, frame `count` of the stream, of
-    /// `time`, and gives its outcome, after the `Ended` reply and its block when the
-    /// group ends at it. Adds the number of the group to `waiting` when it takes the
-    /// frame while it took none since the last [`cover`](Self::cover). First takes
-    /// the block of the next `Stored` from the home's pool when the group holds none,
-    /// so each taken frame has the block of its `Stored`. A frame that finds no block
-    /// for it or for the copy of its series is refused as `Full` or `Large`, and the
-    /// home does not see it.
+    /// `time`. First takes the block of the next `Stored` from the home's pool when the
+    /// group holds none, so each taken frame has the block of its `Stored`. A frame
+    /// that finds no block for it or for the copy of its series is refused as `Full`
+    /// or `Large`, and the home does not see it.
     pub(super) fn write(
         &mut self,
         state: &RefCell<State>,
         frame: Frame<'_>,
         time: Time,
         count: u64,
-        waiting: &mut Vec<u32>,
-    ) -> (Option<(Unique, Reply)>, Outcome) {
+    ) -> Written {
         if let Some(end) = self.ended {
-            return (None, Outcome::Ended(end));
+            return Written::of(Outcome::Ended(end));
         }
         if self.next.is_none() {
             self.next = state.borrow().alloc(STORED_BYTES).ok();
         }
         if self.next.is_none() {
-            return (None, self.untaken(Outcome::Refused(Refusal::Full)));
+            return Written::of(self.untaken(Outcome::Refused(Refusal::Full)));
         }
         let draft = match frame {
             Frame::Whole(draft) => draft,
@@ -110,7 +117,7 @@ impl Group {
                 sources,
             } => match self.copy(state, frame, series, sources) {
                 Ok(draft) => draft,
-                Err(error) => return (None, self.untaken(refused(&error))),
+                Err(error) => return Written::of(self.untaken(refused(&error))),
             },
         };
         let writer = self
@@ -118,13 +125,17 @@ impl Group {
             .as_mut()
             .expect("invariant: a group that did not end writes until the finish");
         match write(writer, draft, time, &mut self.stamped) {
-            Ok(outcome) => (None, self.counted(count, outcome, waiting)),
+            Ok(outcome) => self.counted(count, outcome),
             Err(end) => {
                 let block = self
                     .next
                     .take()
                     .expect("invariant: a group writes with the block of its `Stored`");
-                (Some(self.end(end, block)), Outcome::Ended(end))
+                Written {
+                    ended: Some(self.end(end, block)),
+                    outcome: Outcome::Ended(end),
+                    first: false,
+                }
             }
         }
     }
@@ -212,22 +223,17 @@ impl Group {
         (block, Reply::Ended { group, end })
     }
 
-    /// Counts a taken frame for the next commit, adds the group to `waiting` when it
-    /// took none before, and gives `outcome`.
-    fn counted(
-        &mut self,
-        count: u64,
-        outcome: Outcome,
-        waiting: &mut Vec<u32>,
-    ) -> Outcome {
+    /// Counts a taken frame for the next commit, and gives `outcome`.
+    fn counted(&mut self, count: u64, outcome: Outcome) -> Written {
         if let Outcome::Taken { .. } = outcome {
-            if self.taken.is_none() {
-                waiting.push(self.number);
-            }
-            self.taken = Some(count);
-            return outcome;
+            let first = self.taken.replace(count).is_none();
+            return Written {
+                ended: None,
+                outcome,
+                first,
+            };
         }
-        self.untaken(outcome)
+        Written::of(self.untaken(outcome))
     }
 
     /// Gives back the block of the next `Stored` while no taken frame waits for one,
@@ -237,6 +243,17 @@ impl Group {
             self.next = None;
         }
         outcome
+    }
+}
+
+impl Written {
+    /// The write of a frame that the group did not take, with `outcome`.
+    fn of(outcome: Outcome) -> Self {
+        Self {
+            ended: None,
+            outcome,
+            first: false,
+        }
     }
 }
 
