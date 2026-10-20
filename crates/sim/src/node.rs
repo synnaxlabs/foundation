@@ -113,15 +113,21 @@ impl Node {
     ///   [`rate`](crate::link::Config::rate) and no packet waits on it. A send is
     ///   pending while the send buffer is not empty and takes `send_buffer_bytes` or
     ///   more, so the datagrams of one send may go past it.
-    /// - A TCP segment is never lost or duplicated, and each direction of a stream
-    ///   keeps its order. A connect is ready after one round trip, and its accept
-    ///   after one and a half. A connect takes the next free port after the node's
-    ///   last connect, from 49152. A listen conflicts only with other listens.
+    /// - A TCP segment is never duplicated, and each direction of a stream keeps its
+    ///   order. A lost one goes again after its RTO: 1 s for a SYN, a SYN-ACK, or an
+    ///   ACK or an RST to an end that connects or accepts, else the round trip plus
+    ///   200 ms, twice as long after each loss, to at most 120 s, with no fast
+    ///   retransmit. An end that waits on lost segments gives `Error::TimedOut` as
+    ///   Linux does: 127 s after the first SYN of a connect, else at the first try
+    ///   924.6 s or more after it began to wait. On a link with no loss, a connect is
+    ///   ready after one round trip, and its accept after one and a half. A connect
+    ///   takes the next free port after the node's last connect, from 49152. A listen
+    ///   conflicts only with other listens.
     /// - A peer sends at most `recv_buffer_bytes` past the bytes read, and a stream
     ///   holds at most `send_buffer_bytes` that its peer has not received. A write
     ///   of bytes after `poll_close` gives `Error::Io` with code 32 (`EPIPE`).
-    /// - TCP panics on a link with loss, on `delayed` sends, on a connect to an
-    ///   address that no node has, and on a connect to a full backlog.
+    /// - TCP panics on `delayed` sends, on a connect to an address that no node has,
+    ///   and on a connect to a full backlog.
     /// - A socket half, a stream, or a listener panics when it polls outside the
     ///   node's threads or after a crash of the node.
     #[must_use]

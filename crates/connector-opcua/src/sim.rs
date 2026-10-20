@@ -44,11 +44,13 @@ use env::rng::Rng;
 use types::quality::Quality;
 use types::time::{Monotonic, Span, Stamp};
 
+use crate::client::{Credentials, Mode};
 use crate::connection::Manager;
 use crate::event;
 pub use crate::log::call_refused;
 use crate::node::Node;
-use crate::server::{Answer, Server};
+use crate::secure::Policy;
+use crate::server::{Answer, Secure, Server};
 use crate::value::Value;
 
 /// The sessions and secure channels of [`serve`].
@@ -82,6 +84,8 @@ struct State {
     /// The status of each answer of the state of the server, at first Good.
     #[cfg(test)]
     answer: Quality,
+    /// The credentials and the one policy and mode of a server, set before it starts.
+    security: Option<(Credentials<'static>, Policy, Mode)>,
 }
 
 #[derive(Debug)]
@@ -117,6 +121,15 @@ pub(crate) enum Fixed {
     /// An array of two Doubles.
     Doubles,
 }
+
+/// What [`Variables::hooks`] gives.
+#[cfg(test)]
+type Limits = (
+    Option<u32>,
+    Option<Span>,
+    Option<(u32, f64)>,
+    Vec<Option<Fixed>>,
+);
 
 impl Variables {
     /// The variables at the node ids `nodes`, each with the value 0 and the status
@@ -159,6 +172,7 @@ impl Variables {
             states: 0,
             #[cfg(test)]
             answer: Quality::GOOD,
+            security: None,
         })))
     }
 
@@ -253,6 +267,18 @@ impl Variables {
         self.state().queues = Some((most, ms));
     }
 
+    /// Makes a server offer only `policy` in `mode`, and no endpoint in `None`, on the
+    /// certificate and key of `credentials`, and trust only their `trust`.
+    #[cfg(test)]
+    pub(crate) fn secure(
+        &self,
+        credentials: Credentials<'static>,
+        policy: Policy,
+        mode: Mode,
+    ) {
+        self.state().security = Some((credentials, policy, mode));
+    }
+
     /// Gives each later answer of the state of the server the status `quality`.
     #[cfg(test)]
     pub(crate) fn answer_states(&self, quality: Quality) {
@@ -266,13 +292,13 @@ impl Variables {
     }
 
     /// The most nodes of a Read of [`Variables::refuse_reads_past`], the timeout of
-    /// [`Variables::time_out_sessions`], and the value of [`Variables::fix`] of each
-    /// variable.
+    /// [`Variables::time_out_sessions`], the limits of [`Variables::limit_queues`], and
+    /// the value of [`Variables::fix`] of each variable.
     #[cfg(test)]
-    fn hooks(&self) -> (Option<u32>, Option<Span>, Vec<Option<Fixed>>) {
+    fn hooks(&self) -> Limits {
         let state = self.state();
         let fixed = state.variables.iter().map(|v| v.hooks.fixed).collect();
-        (state.most, state.session, fixed)
+        (state.most, state.session, state.queues, fixed)
     }
 
     /// Calls `change` on the variable of `text`.
@@ -389,27 +415,23 @@ pub async fn serve(
         .map(|variable| variable.node.clone())
         .collect();
     #[cfg(test)]
-    let (most, session, fixed) = variables.hooks();
-    #[cfg(test)]
-    let queues = variables.state().queues;
+    let (most, session, queues, fixed) = variables.hooks();
+    let security = variables.state().security;
     let add = |server: &mut Server| {
         server.cap_references(tree::REFERENCES);
         tree::add(server);
         #[cfg(test)]
-        if let Some(most) = most {
-            server.refuse_reads_past(most);
-        }
-        #[cfg(test)]
-        if let Some(most) = session {
-            server.set_session_timeout(most);
-        }
-        #[cfg(test)]
-        if let Some((most, ms)) = queues {
-            server.set_queues(most);
-            server.set_publishing(ms);
-        }
-        #[cfg(test)]
         {
+            if let Some(most) = most {
+                server.refuse_reads_past(most);
+            }
+            if let Some(most) = session {
+                server.set_session_timeout(most);
+            }
+            if let Some((most, ms)) = queues {
+                server.set_queues(most);
+                server.set_publishing(ms);
+            }
             let variables = Variables::clone(variables);
             server.set_source(&state_node(), move || {
                 let mut state = variables.state();
@@ -441,7 +463,12 @@ pub async fn serve(
             server.add_source(node, move || variables.read(index, clock.now(), wall()));
         }
     };
-    Server::serve(manager, SESSIONS, add, until.wait()).await
+    let secure = (security.as_ref()).map(|(credentials, policy, mode)| Secure {
+        credentials,
+        policies: std::slice::from_ref(policy),
+        modes: std::slice::from_ref(mode),
+    });
+    Server::serve(manager, SESSIONS, secure.as_ref(), add, until.wait()).await
 }
 
 /// Runs the [`serve`] that `serve` gives for a new token until `work` ends, then

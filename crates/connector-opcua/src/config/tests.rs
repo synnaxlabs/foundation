@@ -105,6 +105,7 @@ fn reads_the_address_the_rate_and_each_read() {
                 read("plant.spike", "ns=3;s=SpikeData"),
                 read("plant.dip", "ns=3;i=1001"),
             ],
+            security: None,
         })
     );
 }
@@ -119,6 +120,7 @@ fn reads_a_config_with_no_read() {
             rate: Rate::new(10, 1).expect("a rate"),
             polled: false,
             reads: Vec::new(),
+            security: None,
         })
     );
 }
@@ -441,13 +443,181 @@ fn refuses_each_key_and_block_it_does_not_take() {
                 "document.unknown-attribute",
                 60,
                 "`security` is not an attribute of the connector",
-                "Use `address`, `rate`, or `polled`, or remove it",
+                "Use `address`, `rate`, `polled`, `certificate`, `key`, `trust`, or \
+                 `unencrypted`, or remove it",
             ),
             refused(
                 "document.unknown-block",
                 40,
                 "the connector cannot hold the `subscribe` block",
                 "Use `read`, or remove it",
+            ),
+        ])
+    );
+}
+
+/// `file("<path>")`, with its name at `offset` and its argument one byte after.
+fn file(offset: u32, path: &str) -> Value {
+    Value::Call(document::value::Call {
+        function: "file".into(),
+        function_span: at(offset),
+        arguments: vec![document::value::Value {
+            kind: string(path),
+            span: at(offset + 1),
+        }],
+    })
+}
+
+/// The source `file("<path>")`.
+fn source(path: &str) -> secret::Source {
+    secret::Source::read(&document::value::Value {
+        kind: file(0, path),
+        span: None,
+    })
+    .expect("a source")
+}
+
+/// The config of the connector at [`ADDRESS`] with `attributes` added.
+fn plus(attributes: &[(u32, &str, Value)]) -> Document {
+    let mut config = config(string(ADDRESS), Vec::new());
+    let added = document(attributes, Vec::new()).attributes;
+    let attributes = config.attributes.iter().chain(added.iter()).cloned();
+    config.attributes = Map::new(attributes.collect()).expect("unique keys");
+    config
+}
+
+/// The paths of the sources of [`reads_the_security_of_each_subset_of_its_attributes`].
+const CERTIFICATE: &str = "/etc/opcua/node.der";
+const KEY: &str = "/etc/opcua/node-key.der";
+const TRUST: &str = "/etc/opcua/plc.der";
+
+/// What `parse` gives for the subset of `certificate`, `key`, `trust`, and
+/// `unencrypted = true` whose bits 0 to 3 `has` holds.
+fn expected(has: impl Fn(u8) -> bool) -> Result<Option<Security>, Vec<Diagnostic>> {
+    if !has(0) {
+        let refused = |at, key: &str| {
+            refused(
+                "document.missing-attribute",
+                at,
+                "the connector has no `certificate`",
+                &format!(
+                    "Add a `certificate` with the certificate of the node, or \
+                     remove `{key}`"
+                ),
+            )
+        };
+        let missing: Vec<_> =
+            [(1, 30, "key"), (2, 40, "trust"), (3, 50, "unencrypted")]
+                .into_iter()
+                .filter(|(bit, _, _)| has(*bit))
+                .map(|(_, at, key)| refused(at, key))
+                .collect();
+        if missing.is_empty() {
+            Ok(None)
+        } else {
+            Err(missing)
+        }
+    } else if has(1) && has(2) {
+        Ok(Some(Security {
+            certificate: source(CERTIFICATE),
+            key: source(KEY),
+            trust: source(TRUST),
+            mode: if has(3) {
+                client::Mode::Sign
+            } else {
+                client::Mode::SignAndEncrypt
+            },
+        }))
+    } else {
+        let mut missing = Vec::new();
+        if !has(1) {
+            missing.push(refused(
+                "document.missing-attribute",
+                20,
+                "the connector has no `key`",
+                "Add a `key` with the private key of the certificate, or remove \
+                 `certificate`",
+            ));
+        }
+        if !has(2) {
+            missing.push(refused(
+                "document.missing-attribute",
+                20,
+                "the connector has no `trust`",
+                "Add a `trust` with the certificate of the server or of its CA, or \
+                 remove `certificate`",
+            ));
+        }
+        Err(missing)
+    }
+}
+
+/// Each of the 16 subsets of `certificate`, `key`, `trust`, and `unencrypted = true`
+/// gives its security, or one diagnostic for each attribute that is missing or has no
+/// `certificate`.
+#[test]
+fn reads_the_security_of_each_subset_of_its_attributes() {
+    for subset in 0..16_u8 {
+        let has = |bit: u8| subset & (1 << bit) != 0;
+        let all = [
+            (20, "certificate", file(21, CERTIFICATE)),
+            (30, "key", file(31, KEY)),
+            (40, "trust", file(41, TRUST)),
+            (50, "unencrypted", Value::Bool(true)),
+        ];
+        let attributes: Vec<_> = (0..4)
+            .filter(|bit| has(*bit))
+            .map(|bit| all[usize::from(bit)].clone())
+            .collect();
+        let parsed = parse(&plus(&attributes)).map(|config| config.security);
+        let expected = expected(has);
+        assert_eq!(parsed, expected, "subset {subset:04b}");
+    }
+}
+
+#[test]
+fn reads_unencrypted_false_as_sign_and_encrypt() {
+    let config = plus(&[
+        (20, "certificate", file(21, "/c.der")),
+        (30, "key", file(31, "/k.der")),
+        (40, "trust", file(41, "/t.der")),
+        (50, "unencrypted", Value::Bool(false)),
+    ]);
+    let security = parse(&config).map(|config| config.security.map(|s| s.mode));
+    assert_eq!(security, Ok(Some(client::Mode::SignAndEncrypt)));
+}
+
+#[test]
+fn refuses_a_credential_that_is_not_a_source_and_an_unencrypted_that_is_no_bool() {
+    let config = plus(&[
+        (20, "certificate", file(21, "/c.der")),
+        (30, "key", string("-----BEGIN PRIVATE KEY-----")),
+        (40, "trust", file(41, "plc.der")),
+        (50, "unencrypted", string("true")),
+    ]);
+    assert_eq!(
+        parse(&config),
+        Err(vec![
+            refused(
+                "secret.source",
+                31,
+                "a secret takes where its value comes from, never the value",
+                "Write `env(\"NAME\")`, `file(\"/absolute/path\")`, or \
+                 `secret(\"name\")`",
+            ),
+            refused(
+                "secret.source",
+                41,
+                "the argument of `file` is not an absolute path with no `..` and no \
+                 NUL",
+                "Write the whole path from the root, such as \
+                 `file(\"/run/secrets/influx_token\")`",
+            ),
+            refused(
+                "opcua.bad-unencrypted",
+                51,
+                "`unencrypted` is a bool, not a string",
+                "Write `unencrypted = true`, or remove it",
             ),
         ])
     );

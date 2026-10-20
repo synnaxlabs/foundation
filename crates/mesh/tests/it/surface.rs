@@ -598,4 +598,13 @@ fn a_stop_names_its_cause() {
         "voters 00000000-0000-0000-0000-000000000002 answered removed: a committed \
          configuration lacks this node"
     );
+    assert_eq!(
+        Stopped::Removed {
+            by: [KEY, OTHER].into()
+        }
+        .to_string(),
+        "voters 00000000-0000-0000-0000-000000000001, \
+         00000000-0000-0000-0000-000000000002 answered removed: a committed \
+         configuration lacks this node"
+    );
 }

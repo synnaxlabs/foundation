@@ -109,6 +109,13 @@ def assert_stated(test: unittest.TestCase, value: object) -> None:
         test.assertTrue(conforms(found, hint), f"{name} is {found!r}, not {hint}")
 
 
+def registered(stub: type, module: type) -> list[type]:
+    """Each base of the class `stub` of the stub that the class `module` of the module
+    is not built on: an ABC that the module registers it with, which a type checker
+    reads only from the stub."""
+    return [base for base in stub.__bases__ if base not in module.__mro__]
+
+
 def public(name: str) -> bool:
     """Whether a program calls the item `name`: a name with no `_` first, or a special
     method."""
@@ -170,6 +177,14 @@ class StubTest(unittest.TestCase):
                 with self.subTest(name):
                     self.check_class(name, item)
 
+    def test_only_frame_has_a_base_that_the_module_registers(self) -> None:
+        found = {
+            name: [base.__name__ for base in registered(getattr(self.stub, name), item)]
+            for name, item in built(vars(_native)).items()
+            if isinstance(item, type) and registered(getattr(self.stub, name), item)
+        }
+        self.assertEqual(found, {"Frame": ["Mapping"]})
+
     def test_each_annotation_of_the_stub_names_a_type(self) -> None:
         for name in defined(self.tree.body):
             item = getattr(self.stub, name)
@@ -183,8 +198,15 @@ class StubTest(unittest.TestCase):
 
     def check_class(self, name: str, module: type) -> None:
         stub = getattr(self.stub, name)
+        added = registered(stub, module)
+        for base in added:
+            with self.subTest(base=base.__name__):
+                # Not by a hook of the ABC that reads the methods of the class.
+                self.assertIs(base.__subclasshook__(module), NotImplemented)
+                self.assertTrue(issubclass(module, base))
+        stated = [base.__name__ for base in stub.__bases__ if base not in added]
         bases = [base.__name__ for base in module.__bases__]
-        self.assertEqual([base.__name__ for base in stub.__bases__], bases)
+        self.assertEqual(stated or ["object"], bases)
         final = not module.__flags__ & BASETYPE
         self.assertEqual(getattr(stub, "__final__", False), final)
         self.assertEqual(doc(stub), doc(module))
@@ -206,4 +228,9 @@ class StubTest(unittest.TestCase):
 
     def check(self, stub: typing.Any, module: typing.Any, method: bool) -> None:
         self.assertEqual(parameters(stub, method), parameters(module, method))
-        self.assertEqual(doc(stub), doc(module))
+        if isinstance(module, types.WrapperDescriptorType):
+            # Python gives the doc of a slot, which the module cannot set and which
+            # changes between versions of Python.
+            self.assertIsNone(doc(stub))
+        else:
+            self.assertEqual(doc(stub), doc(module))

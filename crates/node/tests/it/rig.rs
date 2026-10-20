@@ -151,6 +151,13 @@ impl Rig {
         node.exit(&self.clock, PATIENCE, "the node exits at SIGTERM")
     }
 
+    /// Kills the node of [`Rig::start`] with SIGKILL, as a crash ends it, and waits
+    /// for it to exit. Panics when no node runs.
+    pub(crate) fn kill(&mut self) {
+        let mut node = self.node.take().expect("a node runs");
+        node.process.end();
+    }
+
     /// Only Linux: only tests on Linux call it. Starts `foundation` with `args` in
     /// [`Rig::dir`], with `stdout` as its standard output, no standard input, and its
     /// standard error on a pipe that [`Process::errors`] reads. Waits for nothing.
