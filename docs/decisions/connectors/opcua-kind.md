@@ -221,3 +221,26 @@
   https://github.com/synnaxlabs/foundation/issues/3269#issuecomment-6255400141), and the
   new check case at 2026-10-18T21:35:52Z:
   https://github.com/synnaxlabs/foundation/issues/3269#issuecomment-6255436768).
+  Secure channel: `opcua` takes `certificate`, `key`, and `trust`, each a secret source
+  (`file(...)` or `secret(...)`), and the bool `unencrypted`. With `certificate`, the
+  channel is `SignAndEncrypt`, or `Sign` with `unencrypted = true`. With no
+  `certificate`, the mode is None. Five codes split the refusals of the config:
+  `opcua.no-certificate` for each of `key`, `trust`, and `unencrypted` with no
+  `certificate`, `opcua.no-key` for a `certificate` with no `key`, `opcua.no-trust` for
+  a `certificate` with no `trust`, and `opcua.bad-unencrypted` for an `unencrypted` that
+  is not a bool. `opcua.no-trust` is its own code, as a code that names a key for a
+  missing trust tells the wrong cause. `run` and `browse` read the three sources through
+  `Context::secret` at their start, before the connect, so a missing file gives `Retry`
+  and the next run reads it. Lost: a read at `parse`, which is pure and keeps a stale
+  value until the config changes. When the client refuses a credential, a run or a
+  browse gives `Error::Config` with `opcua.credentials`, the text "{source}: {refusal}"
+  with the source of the credential that the refusal names, and a fix for that
+  credential. No production arm panics on a refusal (`laptop.architect-2`,
+  2026-10-17T06:46:05Z, the schema:
+  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6230838999;
+  2026-10-19T23:51:54Z, PR 2d:
+  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6279925761;
+  2026-10-20T01:01:49Z, item 1:
+  https://github.com/synnaxlabs/foundation/pull/3471#issuecomment-6280846885;
+  `laptop.director`, 2026-10-18T21:48:56Z, condition 3:
+  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6255562713).
