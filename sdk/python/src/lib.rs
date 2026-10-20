@@ -64,12 +64,12 @@ pyo3::create_exception!(
     foundation,
     DataLost,
     PyException,
-    "Samples were lost. A writer raises it when the node found no room for a live \
-     frame, so its samples are a gap in the log, and goes on, as a later frame can \
-     find room: `seqs` is a `dict` from the name of each channel of the frame to the \
-     `range` of the seqs of its lost samples, and `frame` is `None`. A reader raises \
-     it for a frame after a loss, and closes: `seqs` is `Frame.lost` of that frame, \
-     and `frame` is the frame."
+    "Samples were lost. A writer with `on_loss=\"raise\"` raises it when the node \
+     found no room for a live frame, so its samples are a gap in the log, and goes \
+     on, as a later frame can find room: `seqs` is a `dict` from the name of each \
+     channel of the frame to the `range` of the seqs of its lost samples, and `frame` \
+     is `None`. A reader with `on_loss=\"raise\"` raises it for a frame after a loss, \
+     and closes: `seqs` is `Frame.lost` of that frame, and `frame` is the frame."
 );
 
 #[pymodule]

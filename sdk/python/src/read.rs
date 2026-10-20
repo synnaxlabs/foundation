@@ -41,6 +41,17 @@ pub(crate) fn mode(mode: &str) -> PyResult<Mode> {
 /// own when the program cannot. A process that forks from the program does not own the
 /// reader: in it, each call but a close raises `RuntimeError`, and a close gives `None`
 /// and ends nothing.
+///
+/// `next(reader)` blocks until the next frame comes, with other Python threads running.
+/// It runs the signal handlers (Ctrl-C) at least each 100 ms while it waits for a
+/// frame, and none while a `next` of another thread holds the reader, so read a reader
+/// on one thread. It raises `StopIteration` after a close; `DataLost` for a frame after
+/// a loss with `on_loss="raise"`, after which the reader is closed; `Stopped` with
+/// `unknown` when a channel was removed; `ConnectionError` when the session failed, or
+/// a frame of the node does not decode or is over the read budget of the client;
+/// `RuntimeError` when the client closed or in a forked process; and `PanicException`
+/// when the client's thread panicked. After `Stopped`, `ConnectionError`, or
+/// `RuntimeError` of a closed client, each later call raises it again.
 #[pyclass(frozen, module = "foundation")]
 pub(crate) struct Reader {
     state: Mutex<Option<sdk::read::Reader>>,
@@ -238,19 +249,7 @@ impl Reader {
         this
     }
 
-    /// Blocks until the next frame comes, with other Python threads running. It runs
-    /// the signal handlers (Ctrl-C) at least each 100 ms while it waits for a frame,
-    /// and none while a `__next__` of another thread holds the reader, so read a reader
-    /// on one thread.
-    ///
-    /// Raises `StopIteration` after a close; `DataLost` for a frame after a loss with
-    /// `on_loss="raise"`, after which the reader is closed; `Stopped` with `unknown`
-    /// when a channel was removed; `ConnectionError` when the session failed, or a
-    /// frame of the node does not decode or is over the read budget of the client;
-    /// `RuntimeError` when the client closed or in a forked process; and
-    /// `PanicException` when the client's thread panicked. After `Stopped`,
-    /// `ConnectionError`, or `RuntimeError` of a closed client, each later call raises
-    /// it again.
+    // Python gives a slot its own doc, so the doc of `Reader` states this one.
     fn __next__(&self, py: Python<'_>) -> PyResult<Option<Py<Frame>>> {
         owned(self.process)?;
         self.copied(py)?
@@ -389,15 +388,15 @@ impl Frame {
         self.series.bind(py).call_method0("items")
     }
 
-    /// The series of `name`, or `default` when the frame has no series of it.
-    #[pyo3(signature = (name, default=None))]
+    /// The series of `key`, or `default` when the frame has no series of it.
+    #[pyo3(signature = (key, default=None))]
     fn get<'py>(
         &self,
         py: Python<'py>,
-        name: &Bound<'py, PyAny>,
+        key: &Bound<'py, PyAny>,
         default: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let series = self.series.bind(py).get_item(name)?;
+        let series = self.series.bind(py).get_item(key)?;
         Ok(series
             .or(default)
             .unwrap_or_else(|| py.None().into_bound(py)))
@@ -481,7 +480,7 @@ fn decoded<T, const N: usize>(bytes: &[u8], sample: impl Fn([u8; N]) -> T) -> Ve
     let (samples, rest) = bytes.as_chunks::<N>();
     assert!(
         rest.is_empty(),
-        "invariant: a series holds whole samples of {N} bytes, not {} bytes",
+        "invariant: a series holds whole samples of {N} bytes, but holds {} bytes",
         bytes.len()
     );
     samples.iter().map(|raw| sample(*raw)).collect()
