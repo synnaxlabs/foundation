@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
 use hub::serve;
-use transport::{Address, Code, Session};
+use transport::{Address, Code, Session, Transport};
 use types::authority::Authority;
 use types::frame::{Form, Path};
 use types::time::Span;
@@ -19,11 +19,12 @@ use wire::Protocol;
 use wire::header::MALFORMED;
 use wire::hub::client::write::{Open, Write};
 use wire::hub::client::{
-    CHANGED, Challenge, EXPIRED, Place, Places, REFUSED, Refusal, Signed, VIA, place,
+    BODY_BYTES_MAX, CHANGED, Challenge, EXPIRED, Place, Places, REFUSED, Refusal,
+    Signed, VIA, place,
 };
 use wire::hub::forward::{Forward, places};
 use wire::hub::write::{End, Head, Outcome, Reply, Time};
-use wire::hub::{FAILED, NOT_HOME, UNKNOWN};
+use wire::hub::{BUSY, FAILED, NOT_HOME, UNKNOWN};
 
 use super::region::OTHER;
 use super::write::{place as at, stored, taken};
@@ -38,9 +39,10 @@ const MESSAGE: usize = 1 << 16;
 /// How long the home waits to see that no message comes.
 const QUIET: Span = Span::from_nanos(100_000_000);
 
-/// The node of [`OTHER`], and the session that the member dialed it on.
+/// The node of [`OTHER`], its transport, and the session that the member dialed it on.
 struct Raw {
     node: sim::node::Node,
+    transport: Rc<Transport>,
     session: Session,
 }
 
@@ -183,7 +185,7 @@ where
 }
 
 /// As [`away`], where the home takes messages of at most `message` bytes, and runs
-/// `home` on the session that the member dialed.
+/// `home` on the session that the member dialed first.
 fn away_on<H, P>(
     seed: u64,
     message: usize,
@@ -221,9 +223,11 @@ where
     let main = move |tasks: env::tasks::Tasks| async move {
         let sizes = (message, 1 << 20);
         let transport = transport_sized(&node, &tasks, &own_pool(), PEER, sizes);
+        let transport = Rc::new(transport);
         let session = transport.accept().await.expect("a session");
         let raw = Raw {
             node: node.clone(),
+            transport: Rc::clone(&transport),
             session: session.clone(),
         };
         home(raw).await;
@@ -381,7 +385,7 @@ fn forwards_a_write_whose_home_is_another_node_as_it_came() {
 }
 
 /// A renewal that the member admits inside a frame reaches the home after the frame's
-/// last message, and one between frames at once.
+/// last message, and one while the program sends nothing reaches it at once.
 #[test]
 fn sends_the_home_each_renewal_between_frames() {
     let renewed = Arc::new(Mutex::new(Vec::new()));
@@ -393,9 +397,10 @@ fn sends_the_home_each_renewal_between_frames() {
             assert_eq!(home.messages(3).await, frame(10, 10));
             let mut nonces = vec![renewal(&home.messages(1).await[0])];
             home.reply(taken(1, 0, 1)).await;
-            nonces.push(renewal(&home.messages(1).await[0]));
             assert_eq!(home.messages(3).await, frame(20, 20));
             home.reply(taken(2, 1, 1)).await;
+            nonces.push(renewal(&home.messages(1).await[0]));
+            home.reply(stored(2)).await;
             assert_eq!(home.stream.recv().await, Ok(None));
             home.stream.sender.finish().expect("finishes");
             assert_eq!(*kept.lock().expect("not poisoned"), nonces);
@@ -407,9 +412,10 @@ fn sends_the_home_each_renewal_between_frames() {
             let challenge = renew(&mut agent, challenge, &renewed).await;
             send(&mut stream, &[ends, body]).await;
             assert_eq!(stream.reply().await, taken(1, 0, 1));
-            renew(&mut agent, challenge, &renewed).await;
             send(&mut stream, &frame(20, 20)).await;
             assert_eq!(stream.reply().await, taken(2, 1, 1));
+            renew(&mut agent, challenge, &renewed).await;
+            assert_eq!(stream.reply().await, stored(2));
             assert_eq!(end(&mut stream).await, []);
             super::read::finish(&mut agent).await;
         },
@@ -634,8 +640,79 @@ fn stops_the_write_as_failed_when_the_home_takes_smaller_messages() {
     assert_eq!(served, [Err(limit), Ok(Got::Ended)]);
 }
 
+/// A session to the home that closes with `Code(0)` before the places, as one that
+/// loses the tie-break does, gets another try.
+#[test]
+fn forwards_the_write_again_when_the_home_closes_the_session_with_code_0() {
+    let served = away_on(
+        16,
+        MESSAGE,
+        async |raw| {
+            super::remote::accept_hub(&raw.session)
+                .await
+                .expect("a stream");
+            raw.session.close(Code(0));
+            let session = raw.transport.accept().await.expect("a session");
+            let held = session.clone();
+            let home = Home::forwarded(Raw { session, ..raw }).await;
+            assert_eq!(home.run, [0]);
+            let node = home.node.clone();
+            home.stop(REFUSED);
+            // A session closes with its last handle, so hold it until the stop is read.
+            node.clock().sleep(QUIET).await;
+            drop(held);
+        },
+        |mut agent, _| async move {
+            let mut stream = agent.write(&["value"]).await;
+            assert_eq!(stream.recv().await, reset_with(REFUSED));
+            super::read::finish(&mut agent).await;
+        },
+    );
+    let forward = serve::Error::Forward {
+        home: OTHER,
+        refusal: Refusal::Refused,
+    };
+    assert_eq!(served, [Err(forward), Ok(Got::Ended)]);
+}
+
 /// With 64 frames that have no outcome, the member reads no more frames of the program
 /// until an outcome comes.
+/// The member holds 20 bytes for each channel of the open and for its index in the
+/// share of the subject until the forward ends. The open of `value` is 8 bytes and its
+/// names 21, so they fit where its ends do not.
+#[test]
+fn stops_a_forward_whose_ends_pass_the_share_as_busy() {
+    let served = away(
+        17,
+        |home| async move { home.stop(REFUSED) },
+        |mut agent, _| async move {
+            let held = agent.unfinished(BODY_BYTES_MAX - 39, &[]).await;
+            agent.sleep(Span::MILLISECOND).await;
+            let mut busy = agent.write(&["value"]).await;
+            assert_eq!(busy.recv().await, reset_with(BUSY));
+            drop(held);
+            agent.sleep(Span::MILLISECOND).await;
+            let mut stream = agent.write(&["value"]).await;
+            assert_eq!(stream.recv().await, reset_with(REFUSED));
+            super::read::finish(&mut agent).await;
+        },
+    );
+    let share = serve::Error::Share {
+        subject: name(SUBJECT),
+        length: 40,
+        held: BODY_BYTES_MAX - 39,
+    };
+    let forward = serve::Error::Forward {
+        home: OTHER,
+        refusal: Refusal::Refused,
+    };
+    let held = serve::Error::Stream(transport::Error::Reset { code: Code(0) });
+    assert_eq!(
+        served,
+        [Err(share), Err(held), Err(forward), Ok(Got::Ended)]
+    );
+}
+
 #[test]
 fn reads_no_more_of_the_program_while_64_frames_have_no_outcome() {
     let served = away(
