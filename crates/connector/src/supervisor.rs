@@ -590,13 +590,19 @@ mod tests {
         /// the span, reads [`TOKEN`] again, shows the error `s3cret-long s3cret n3w`,
         /// waits the span, then returns `Ok`.
         Reread(Span),
+        /// Reads [`TOKEN`], [`LONG`], and [`BYTES`], shows the error
+        /// `s3cret-n3w. s3cretcret-n3w. x\u{fffd}y`, waits the span, then returns
+        /// `Ok`.
+        Cover(Span),
     }
 
-    /// The secret `plant.token`, which [`supervise_with`] can write with the value
+    /// The secret `plant.token`, which [`supervise`] can write with the value
     /// `s3cret`.
     const TOKEN: &str = "plant.token";
-    /// A secret whose value starts with the value of [`TOKEN`].
+    /// A secret whose value overlaps the value of [`TOKEN`].
     const LONG: &str = "plant.long";
+    /// A secret whose value is not UTF-8.
+    const BYTES: &str = "plant.bytes";
 
     /// A note that shows the error `refused` on its context as it formats.
     struct Nested<'a>(&'a Context<bool>);
@@ -723,6 +729,7 @@ mod tests {
             Some(Step::Late { failed, cleared }) => show_late(lent, failed, cleared),
             Some(Step::Hide(span)) => hide(ctx, span).await,
             Some(Step::Reread(span)) => reread(ctx, span).await,
+            Some(Step::Cover(span)) => cover(ctx, span).await,
             Some(step) => note(lent, step).await,
             None => {
                 ctx.cancel().wait().await;
@@ -792,6 +799,16 @@ mod tests {
         ctx.secret(&token).await?;
         ctx.error(&"s3cret-long s3cret n3w");
         clock.sleep(span).await;
+        Ok(())
+    }
+
+    /// Runs [`Step::Cover`].
+    async fn cover(ctx: &Context<bool>, span: Span) -> Result<(), Error> {
+        for secret in [TOKEN, LONG, BYTES] {
+            ctx.secret(&secret::Source::Secret(name(secret))).await?;
+        }
+        ctx.error(&"s3cret-n3w. s3cretcret-n3w. x\u{fffd}y");
+        ctx.clock().sleep(span).await;
         Ok(())
     }
 
@@ -995,21 +1012,10 @@ mod tests {
     }
 
     /// Supervises one connector of [`Script`] with `steps` and `config` in a sim of
-    /// `seed`, and cancels it at `cancel`.
+    /// `seed`, and cancels it at `cancel`. It writes each of `secrets`, a name and a
+    /// value, to the store of the node at its span after the start, or before the
+    /// start at [`Span::ZERO`].
     fn supervise(
-        seed: u64,
-        kind: &'static str,
-        steps: Vec<Step>,
-        config: Document,
-        cancel: Cancel,
-    ) -> Outcome {
-        supervise_with(seed, kind, steps, config, cancel, &[])
-    }
-
-    /// [`supervise`] that writes each of `secrets`, a name and a value, to the store
-    /// of the node at its span after the start, or before the start at
-    /// [`Span::ZERO`].
-    fn supervise_with(
         seed: u64,
         kind: &'static str,
         steps: Vec<Step>,
@@ -1102,7 +1108,8 @@ mod tests {
 
     #[test]
     fn runs_once_and_returns_when_run_returns_ok() {
-        let out = supervise(0, "script", vec![Step::Done], config(), Cancel::Never);
+        let out =
+            supervise(0, "script", vec![Step::Done], config(), Cancel::Never, &[]);
         out.result.expect("ok");
         assert_eq!(out.runs, [(Span::ZERO, Some(Span::ZERO))]);
     }
@@ -1124,7 +1131,8 @@ mod tests {
     #[test]
     fn writes_the_status_of_each_start_and_end_after_a_device_error() {
         let steps = vec![Step::Device(ms(10))];
-        let out = supervise(0, "script", steps, config(), Cancel::After(ms(5_000)));
+        let out =
+            supervise(0, "script", steps, config(), Cancel::After(ms(5_000)), &[]);
         let [(_, Some(ended)), (again, _)] = out.runs[..] else {
             panic!("two runs, the first ended: {:?}", out.runs);
         };
@@ -1159,7 +1167,8 @@ mod tests {
     #[test]
     fn writes_the_error_text_and_the_backoff_after_a_device_error() {
         let steps = vec![Step::Device(ms(10))];
-        let out = supervise(0, "script", steps, config(), Cancel::After(ms(5_000)));
+        let out =
+            supervise(0, "script", steps, config(), Cancel::After(ms(5_000)), &[]);
         let [(_, Some(ended)), (again, _)] = out.runs[..] else {
             panic!("two runs, the first ended: {:?}", out.runs);
         };
@@ -1180,7 +1189,7 @@ mod tests {
     #[test]
     fn writes_the_error_that_a_run_shows_and_its_clear() {
         let steps = vec![Step::Show(ms(2_000))];
-        let out = supervise(0, "script", steps, config(), Cancel::Never);
+        let out = supervise(0, "script", steps, config(), Cancel::Never, &[]);
         let got: Vec<_> = (out.statuses.iter())
             .zip(states(&out.statuses))
             .map(|((at, _, text, _), state)| (*at, state, text.as_str()))
@@ -1199,7 +1208,7 @@ mod tests {
     #[test]
     fn writes_the_note_that_a_run_shows_beside_its_error_until_the_run_ends() {
         let steps = vec![Step::Note(ms(2_000))];
-        let out = supervise(0, "script", steps, config(), Cancel::Never);
+        let out = supervise(0, "script", steps, config(), Cancel::Never, &[]);
         let got: Vec<_> = (out.statuses.iter())
             .zip(states(&out.statuses))
             .map(|((at, _, text, note), state)| {
@@ -1219,7 +1228,7 @@ mod tests {
     #[test]
     fn cuts_a_long_note_that_a_run_shows_at_a_char_boundary() {
         let steps = vec![Step::NoteWide(ms(2_000))];
-        let out = supervise(0, "script", steps, config(), Cancel::Never);
+        let out = supervise(0, "script", steps, config(), Cancel::Never, &[]);
         let notes: Vec<_> = out.statuses.iter().map(|(.., note)| note.len()).collect();
         assert_eq!(notes, [0, 1_022, 0, 0]);
         assert_eq!(
@@ -1231,7 +1240,7 @@ mod tests {
     #[test]
     fn shows_a_note_whose_text_shows_an_error_as_it_formats() {
         let steps = vec![Step::NoteNested(ms(2_000))];
-        let out = supervise(0, "script", steps, config(), Cancel::Never);
+        let out = supervise(0, "script", steps, config(), Cancel::Never, &[]);
         let got: Vec<_> = (out.statuses.iter())
             .map(|(_, _, text, note)| (text.as_str(), note.as_str()))
             .collect();
@@ -1242,7 +1251,7 @@ mod tests {
     #[test]
     fn shows_a_note_whose_text_debugs_its_context() {
         let steps = vec![Step::NoteDebug(ms(2_000))];
-        let out = supervise(0, "script", steps, config(), Cancel::Never);
+        let out = supervise(0, "script", steps, config(), Cancel::Never, &[]);
         assert!(
             out.statuses[1].3.starts_with("Context {"),
             "{:?}",
@@ -1259,6 +1268,7 @@ mod tests {
             vec![Step::NoteLate],
             config(),
             Cancel::After(ms(500)),
+            &[],
         );
         out.result.expect("ok after a cancel");
         let got: Vec<_> = (out.statuses.iter())
@@ -1275,7 +1285,7 @@ mod tests {
         each_seed("restart before the cancel", |seed| {
             let steps = vec![Step::ShowEnd];
             let cancel = Cancel::After(ms(500));
-            let out = supervise(seed, "script", steps, config(), cancel);
+            let out = supervise(seed, "script", steps, config(), cancel, &[]);
             let errors = errors(&out.statuses);
             let texts: Vec<_> = errors.iter().map(|(_, t)| *t).collect();
             let classes: Vec<_> = states(&out.statuses).iter().map(|s| s.1).collect();
@@ -1307,7 +1317,7 @@ mod tests {
         let steps = vec![Step::Hide(ms(2_000))];
         let secrets: &[(Span, &str, &[u8])] = &[(Span::ZERO, TOKEN, b"s3cret")];
         let cancel = Cancel::After(ms(4_500));
-        let out = supervise_with(0, "script", steps, config(), cancel, secrets);
+        let out = supervise(0, "script", steps, config(), cancel, secrets);
         out.result.expect("ok after a cancel");
         let mut got: Vec<_> = (out.statuses.iter())
             .map(|(_, _, text, note)| (text.as_str(), note.as_str()))
@@ -1332,7 +1342,7 @@ mod tests {
             (Span::SECOND, TOKEN, b"n3w"),
         ];
         let cancel = Cancel::After(ms(4_500));
-        let out = supervise_with(0, "script", steps, config(), cancel, secrets);
+        let out = supervise(0, "script", steps, config(), cancel, secrets);
         out.result.expect("ok after a cancel");
         let mut got: Vec<_> = (out.statuses.iter())
             .map(|(_, _, text, _)| text.as_str())
@@ -1343,9 +1353,28 @@ mod tests {
     }
 
     #[test]
+    fn shows_one_mark_for_values_that_overlap_and_for_a_value_that_is_not_utf_8() {
+        let steps = vec![Step::Cover(ms(2_000))];
+        let secrets: &[(Span, &str, &[u8])] = &[
+            (Span::ZERO, TOKEN, b"s3cret"),
+            (Span::ZERO, LONG, b"cret-n3w"),
+            (Span::ZERO, BYTES, b"x\xffy"),
+        ];
+        let cancel = Cancel::After(ms(3_000));
+        let out = supervise(0, "script", steps, config(), cancel, secrets);
+        out.result.expect("ok after a cancel");
+        let mut got: Vec<_> = (out.statuses.iter())
+            .map(|(_, _, text, _)| text.as_str())
+            .collect();
+        got.dedup();
+        let want = ["", "<secret>. <secret>. <secret>"];
+        assert_eq!(got[..2], want, "{got:?}");
+    }
+
+    #[test]
     fn writes_the_error_that_a_restart_shows_again() {
         let steps = vec![Step::ShowEnd, Step::Show(ms(2_000))];
-        let out = supervise(0, "script", steps, config(), Cancel::Never);
+        let out = supervise(0, "script", steps, config(), Cancel::Never, &[]);
         let texts: Vec<_> = errors(&out.statuses).into_iter().map(|(_, t)| t).collect();
         let want = [
             "", "no reply", "no reply", "no reply", "refused", "", "", "",
@@ -1356,7 +1385,7 @@ mod tests {
     #[test]
     fn cuts_the_middle_of_a_long_error_that_a_run_shows() {
         let steps = vec![Step::ShowWide(ms(2_000))];
-        let out = supervise(0, "script", steps, config(), Cancel::Never);
+        let out = supervise(0, "script", steps, config(), Cancel::Never, &[]);
         let got: Vec<_> = (states(&out.statuses).into_iter())
             .zip(&out.statuses)
             .map(|(state, (_, _, text, _))| (state, text.as_str()))
@@ -1368,7 +1397,7 @@ mod tests {
     #[test]
     fn writes_a_clear_status_when_a_restart_clears_the_end_before_it() {
         let steps = vec![Step::ShowEnd, Step::Clear(ms(2_000))];
-        let out = supervise(0, "script", steps, config(), Cancel::Never);
+        let out = supervise(0, "script", steps, config(), Cancel::Never, &[]);
         let got: Vec<_> = (states(&out.statuses).into_iter())
             .zip(&out.statuses)
             .map(|(state, (at, _, text, _))| (*at, state, text.as_str()))
@@ -1382,7 +1411,14 @@ mod tests {
     /// The state, the class, and the text of each status that a run of `late`, a
     /// [`Step::Late`], gives, cancelled at `cancel`.
     fn supervise_late(late: Step, cancel: Span) -> Vec<((i64, i64, i64), String)> {
-        let out = supervise(0, "script", vec![late], config(), Cancel::After(cancel));
+        let out = supervise(
+            0,
+            "script",
+            vec![late],
+            config(),
+            Cancel::After(cancel),
+            &[],
+        );
         out.result.expect("ok after a cancel");
         (out.statuses.iter())
             .zip(states(&out.statuses))
@@ -1456,6 +1492,7 @@ mod tests {
             vec![Step::Retry, Step::Done],
             config(),
             Cancel::Never,
+            &[],
         );
         let texts: Vec<_> = errors(&out.statuses).into_iter().map(|(_, t)| t).collect();
         assert_eq!(texts, ["", "busy", "busy", "busy", "", ""]);
@@ -1592,7 +1629,14 @@ mod tests {
 
     #[test]
     fn writes_the_text_of_a_config_error() {
-        let out = supervise(0, "script", vec![Step::Config], config(), Cancel::Never);
+        let out = supervise(
+            0,
+            "script",
+            vec![Step::Config],
+            config(),
+            Cancel::Never,
+            &[],
+        );
         let text = bad().to_string();
         let want = [(Span::ZERO, ""), (Span::ZERO, &*text), (Span::ZERO, &*text)];
         assert_eq!(errors(&out.statuses), want);
@@ -1600,7 +1644,14 @@ mod tests {
 
     #[test]
     fn joins_the_texts_of_the_diagnostics_of_a_config_error() {
-        let out = supervise(0, "script", vec![Step::Configs], config(), Cancel::Never);
+        let out = supervise(
+            0,
+            "script",
+            vec![Step::Configs],
+            config(),
+            Cancel::Never,
+            &[],
+        );
         let text = format!("{}; {}", bad(), worse());
         assert_eq!(out.statuses[1].2, text);
     }
@@ -1614,6 +1665,7 @@ mod tests {
             steps,
             config(),
             Cancel::After(Span::from_nanos(1)),
+            &[],
         );
         let states: Vec<_> = out.statuses.iter().map(|(_, s, ..)| s[0]).collect();
         assert_eq!(states, [0, 3, 1, 2], "a cancel in the wait");
@@ -1629,6 +1681,7 @@ mod tests {
             vec![Step::Wide],
             config(),
             Cancel::After(ms(5_000)),
+            &[],
         );
         assert_eq!(out.statuses[1].2, format!("{0}…{0}", "a".repeat(510)));
     }
@@ -1643,6 +1696,7 @@ mod tests {
             vec![Step::Long],
             config(),
             Cancel::After(ms(5_000)),
+            &[],
         );
         let cut = format!("a{}…{}", "é".repeat(254), "é".repeat(255));
         assert_eq!(out.statuses[1].2, cut);
@@ -1793,6 +1847,7 @@ mod tests {
             vec![Step::Retry, Step::Done],
             config(),
             Cancel::Never,
+            &[],
         );
         let want = [
             (0, 0, 0),
@@ -1845,12 +1900,12 @@ mod tests {
         ];
         for (text, step) in retries {
             let steps = vec![step, Step::Done];
-            let out = supervise(0, "script", steps, config(), Cancel::Never);
+            let out = supervise(0, "script", steps, config(), Cancel::Never, &[]);
             assert_eq!(states(&out.statuses), retry, "{text}");
             assert_eq!(errors(&out.statuses)[1], (Span::ZERO, text.as_str()));
         }
         let (_, large) = failed(Failure::Home(Home::Large));
-        let out = supervise(0, "script", vec![large], config(), Cancel::Never);
+        let out = supervise(0, "script", vec![large], config(), Cancel::Never, &[]);
         assert_eq!(states(&out.statuses), [(0, 0, 0), (3, 1, 0), (2, 1, 0)]);
         let text = "the frame is too large for one write: split it. Give the connector \
                     fewer channels";
@@ -1865,7 +1920,7 @@ mod tests {
             requested: 16,
             largest: 8,
         });
-        let out = supervise(0, "script", vec![large], config(), Cancel::Never);
+        let out = supervise(0, "script", vec![large], config(), Cancel::Never, &[]);
         assert_eq!(states(&out.statuses), [(0, 0, 0), (3, 1, 0), (2, 1, 0)]);
         let text = "no block for the frame: block of 16 bytes is above the largest \
                     block of 8 bytes. Give the connector fewer channels";
@@ -1895,6 +1950,7 @@ mod tests {
             vec![Step::Draft(error)],
             config(),
             Cancel::Never,
+            &[],
         );
     }
 
@@ -1909,6 +1965,7 @@ mod tests {
             vec![Step::Draft(error)],
             config(),
             Cancel::Never,
+            &[],
         );
     }
 
@@ -1923,6 +1980,7 @@ mod tests {
             vec![Step::Draft(error)],
             config(),
             Cancel::Never,
+            &[],
         );
     }
 
@@ -1938,24 +1996,33 @@ mod tests {
             vec![Step::Draft(error)],
             config(),
             Cancel::Never,
+            &[],
         );
     }
 
     #[test]
     fn writes_stopped_after_a_config_error_from_run() {
-        let out = supervise(0, "script", vec![Step::Config], config(), Cancel::Never);
+        let out = supervise(
+            0,
+            "script",
+            vec![Step::Config],
+            config(),
+            Cancel::Never,
+            &[],
+        );
         assert_eq!(states(&out.statuses), [(0, 0, 0), (3, 1, 0), (2, 1, 0)]);
     }
 
     #[test]
     fn writes_stopped_after_a_run_returns_ok() {
-        let out = supervise(0, "script", vec![Step::Done], config(), Cancel::Never);
+        let out =
+            supervise(0, "script", vec![Step::Done], config(), Cancel::Never, &[]);
         assert_eq!(states(&out.statuses), [(0, 0, 0), (3, 0, 0), (2, 0, 0)]);
     }
 
     #[test]
     fn writes_only_stopped_when_cancelled_before_the_call() {
-        let out = supervise(0, "script", vec![Step::Done], config(), Cancel::Now);
+        let out = supervise(0, "script", vec![Step::Done], config(), Cancel::Now, &[]);
         assert_eq!(states(&out.statuses), [(2, 0, 0)]);
     }
 
@@ -1968,6 +2035,7 @@ mod tests {
             steps,
             config(),
             Cancel::After(Span::from_nanos(1)),
+            &[],
         );
         let want = [(0, 0, 0), (3, 2, 0), (1, 2, 0), (2, 2, 0)];
         assert_eq!(states(&out.statuses), want);
@@ -1976,7 +2044,7 @@ mod tests {
     #[test]
     fn writes_no_waiting_after_a_cancel() {
         let steps = vec![Step::Linger(ms(30))];
-        let out = supervise(0, "script", steps, config(), Cancel::After(ms(50)));
+        let out = supervise(0, "script", steps, config(), Cancel::After(ms(50)), &[]);
         let want = [(0, 0, 0), (3, 2, 0), (2, 2, 0)];
         assert_eq!(states(&out.statuses), want);
     }
@@ -1984,7 +2052,7 @@ mod tests {
     #[test]
     fn writes_ending_until_the_tasks_of_a_run_end() {
         let steps = vec![Step::Hold(ms(2_000)), Step::Done];
-        let out = supervise(0, "script", steps, config(), Cancel::Never);
+        let out = supervise(0, "script", steps, config(), Cancel::Never, &[]);
         let at = |i: usize| out.statuses[i].0;
         let want = [
             (0, 0, 0),
@@ -2665,7 +2733,8 @@ mod tests {
 
     #[test]
     fn writes_no_status_for_a_config_that_does_not_parse() {
-        let out = supervise(0, "modbus", vec![Step::Done], config(), Cancel::Never);
+        let out =
+            supervise(0, "modbus", vec![Step::Done], config(), Cancel::Never, &[]);
         assert!(out.statuses.is_empty(), "{:?}", out.statuses);
     }
 
@@ -2677,7 +2746,7 @@ mod tests {
             Step::Device(ms(10)),
             Step::Done,
         ];
-        let out = supervise(0, "script", steps, config(), Cancel::Never);
+        let out = supervise(0, "script", steps, config(), Cancel::Never, &[]);
         out.result.expect("ok");
         assert_eq!(out.runs.len(), 4);
         let ceilings = [Span::SECOND, ms(2000), ms(4000)];
@@ -2698,6 +2767,7 @@ mod tests {
             vec![Step::Retry, Step::Done],
             config(),
             Cancel::Never,
+            &[],
         );
         out.result.expect("ok");
         assert_eq!(out.runs.len(), 2);
@@ -2711,6 +2781,7 @@ mod tests {
             vec![Step::Abort, Step::Done],
             config(),
             Cancel::Never,
+            &[],
         );
         out.result.expect("ok");
         assert_eq!(out.runs.len(), 2, "the run's token is not the caller's");
@@ -2720,7 +2791,7 @@ mod tests {
     fn grows_the_waits_after_short_runs() {
         let mut steps = vec![Step::Device(Span::ZERO); 12];
         steps.push(Step::Done);
-        let out = supervise(0, "script", steps, config(), Cancel::Never);
+        let out = supervise(0, "script", steps, config(), Cancel::Never, &[]);
         out.result.expect("ok");
         let last = out.runs.last().expect("13 runs").0;
         // With no growth, twelve waits of at most 1 s each.
@@ -2730,7 +2801,7 @@ mod tests {
     #[test]
     fn returns_a_config_error_from_run_without_a_restart() {
         let steps = vec![Step::Config, Step::Done];
-        let out = supervise(0, "script", steps, config(), Cancel::Never);
+        let out = supervise(0, "script", steps, config(), Cancel::Never, &[]);
         assert_eq!(config_errors(out.result), [bad()]);
         assert_eq!(out.runs.len(), 1);
     }
@@ -2749,7 +2820,7 @@ mod tests {
             attributes: Map::new(vec![n]).expect("one key"),
             blocks: Vec::new(),
         };
-        let out = supervise(0, "script", vec![Step::Done], config, Cancel::Never);
+        let out = supervise(0, "script", vec![Step::Done], config, Cancel::Never, &[]);
         assert_eq!(config_errors(out.result), [bad()]);
         assert!(out.runs.is_empty());
     }
@@ -2768,7 +2839,7 @@ mod tests {
             .expect("one key"),
             blocks: Vec::new(),
         };
-        let out = supervise(0, "script", vec![Step::Done], config, Cancel::Never);
+        let out = supervise(0, "script", vec![Step::Done], config, Cancel::Never, &[]);
         assert_eq!(config_errors(out.result), [worse()]);
         assert!(out.runs.is_empty());
         assert!(out.statuses.is_empty(), "{:?}", out.statuses);
@@ -2776,7 +2847,8 @@ mod tests {
 
     #[test]
     fn returns_an_unknown_kind_as_a_config_error() {
-        let out = supervise(0, "modbus", vec![Step::Done], config(), Cancel::Never);
+        let out =
+            supervise(0, "modbus", vec![Step::Done], config(), Cancel::Never, &[]);
         let codes: Vec<_> = config_errors(out.result).iter().map(|d| d.code).collect();
         assert_eq!(codes, [Code::new("connector.unknown-kind")]);
         assert!(out.runs.is_empty());
@@ -2785,7 +2857,7 @@ mod tests {
     #[test]
     fn waits_for_the_run_to_return_after_a_cancel() {
         let steps = vec![Step::Linger(ms(30))];
-        let out = supervise(0, "script", steps, config(), Cancel::After(ms(50)));
+        let out = supervise(0, "script", steps, config(), Cancel::After(ms(50)), &[]);
         out.result.expect("ok after a cancel");
         assert_eq!(out.runs, [(Span::ZERO, Some(ms(80)))]);
         assert_eq!(out.returned, ms(80), "after the run returned, never before");
@@ -2800,6 +2872,7 @@ mod tests {
             steps,
             config(),
             Cancel::After(Span::from_nanos(1)),
+            &[],
         );
         out.result.expect("ok after a cancel");
         assert_eq!(out.runs, [(Span::ZERO, Some(Span::ZERO))]);
@@ -2808,7 +2881,7 @@ mod tests {
 
     #[test]
     fn starts_no_run_when_cancelled_before_the_call() {
-        let out = supervise(0, "script", vec![Step::Done], config(), Cancel::Now);
+        let out = supervise(0, "script", vec![Step::Done], config(), Cancel::Now, &[]);
         out.result.expect("ok after a cancel");
         assert!(out.runs.is_empty(), "a run started after the cancel");
     }
@@ -2819,7 +2892,7 @@ mod tests {
         steps.push(Step::Device(Span::MINUTE));
         steps.extend(std::iter::repeat_n(Step::Device(Span::ZERO), 3));
         steps.push(Step::Done);
-        let out = supervise(0, "script", steps, config(), Cancel::Never);
+        let out = supervise(0, "script", steps, config(), Cancel::Never, &[]);
         out.result.expect("ok");
         let after = out.runs.get(9..).expect("13 runs");
         let first = out.runs.get(8).and_then(|run| run.1).expect("run 8 ended");
@@ -2836,7 +2909,7 @@ mod tests {
         steps.push(Step::Hold(ms(61_000)));
         steps.extend(std::iter::repeat_n(Step::Device(Span::ZERO), 3));
         steps.push(Step::Done);
-        let out = supervise(0, "script", steps, config(), Cancel::Never);
+        let out = supervise(0, "script", steps, config(), Cancel::Never, &[]);
         out.result.expect("ok");
         let held = out.runs.get(8).and_then(|run| run.1).expect("run 8 ended");
         let last = out.runs.last().expect("13 runs").0;
@@ -3084,6 +3157,7 @@ mod tests {
             vec![Step::Refuse(ms(2_000))],
             config(),
             Cancel::Never,
+            &[],
         );
         assert_eq!(config_errors(out.result), [bad()]);
         assert_eq!(out.returned, ms(2_000));
