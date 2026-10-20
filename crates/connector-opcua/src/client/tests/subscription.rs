@@ -8,7 +8,7 @@ use std::rc::Rc;
 use types::quality::Quality;
 use types::time::Span;
 
-use super::common::is;
+use super::common::{is, set_result};
 use super::{
     Peer, READS, RELAY, Relay, drop_reads, numbered, recount_of, relayed, run, serve,
 };
@@ -215,7 +215,7 @@ fn rewritten(
 fn called_again(kind: [u8; 4]) -> Result<Revised, Status> {
     rewritten(move |message| {
         if is(message, kind) {
-            message[40..44].copy_from_slice(&GOOD_CALL_AGAIN.0.to_le_bytes());
+            set_result(message, GOOD_CALL_AGAIN);
             if kind == MONITOR_RESPONSE {
                 recount_of(message, 0);
             }
@@ -246,8 +246,7 @@ fn a_deleted_subscription_ends_with_bad_no_subscription() {
             let armed = Cell::new(false);
             let rewrite = |message: &mut Vec<u8>| {
                 if armed.get() && is(message, PUBLISH_RESPONSE) {
-                    let status = Status::BAD_SESSION_CLOSED.0.to_le_bytes();
-                    message[40..44].copy_from_slice(&status);
+                    set_result(message, Status::BAD_SESSION_CLOSED);
                 }
             };
             relayed(&node, &Relay::default(), rewrite, async {
@@ -300,8 +299,7 @@ fn refused(
             let rewrite = |message: &mut Vec<u8>| {
                 if left.get() > 0 && is(message, PUBLISH_RESPONSE) {
                     left.set(left.get() - 1);
-                    let status = TOO_MANY.0.to_le_bytes();
-                    message[40..44].copy_from_slice(&status);
+                    set_result(message, TOO_MANY);
                 }
             };
             relayed(&node, &Relay::default(), rewrite, async {
