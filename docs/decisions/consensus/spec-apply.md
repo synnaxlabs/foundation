@@ -63,11 +63,10 @@
   https://github.com/synnaxlabs/foundation/pull/3399#issuecomment-6273716895). The
   redial on code 0 and its bound: `laptop.architect`, 2026-10-20T10:43:31Z:
   https://github.com/synnaxlabs/foundation/pull/3568#issuecomment-6289097402, approved
-  at https://github.com/synnaxlabs/foundation/pull/3568#issuecomment-6289266030, and
-  `laptop.monitor`, 2026-10-20 (kind 9). A miss gives the cause of the last attempt. A
-  voter whose chunks each got `Stored` is a holder, also when the end of its stream
-  fails or passes `peer::DEADLINE`, and the put dials it no more (`laptop.architect`,
-  2026-10-20T10:26:52Z:
+  at https://github.com/synnaxlabs/foundation/pull/3568#issuecomment-6289266030. A
+  miss gives the cause of the last attempt. A voter whose chunks each got `Stored` is
+  a holder, also when the end of its stream fails or passes `peer::DEADLINE`, and the
+  put dials it no more (`laptop.architect`, 2026-10-20T10:26:52Z:
   https://github.com/synnaxlabs/foundation/pull/3568#issuecomment-6288829862).
   The put still waits for that end: a normal end takes one round trip, a drop of the
   `Push` at the last `Stored` resets each stream at the peer, and an end on `tasks`
