@@ -117,13 +117,16 @@
   the founding that the open is given. Each read of the founding file refuses a body
   over `FOUNDING_BYTES_MAX` with `Error::Unfounded`, with no read. A file that a first
   open wrote is never over it, so a node with a stored founding still always opens. No
-  build makes `FOUNDING_BYTES_MAX` smaller.
+  build makes `FOUNDING_BYTES_MAX` smaller (`laptop.architect`, 2026-10-20T12:03:22Z,
+  https://github.com/synnaxlabs/foundation/pull/3571#issuecomment-6290402091).
   `Config::time` gives the mesh time of the stamp, and a voter with no such time answers
-  `Unsynced` (same ruling). `stamp` gives the `Refusal` of the answer, so `Unstamped` is
-  gone, and `Unstamped::Stopped` above is `Refusal::Stopped`, which holds no cause: the
-  cause is a fault inside the voter, and the joining node is not a member yet, so it
-  must not read it. Each later call on this node gives `Error::Stopped` with the cause
-  (`laptop.architect`, 2026-10-19T11:58:22Z, item 2 of
+  `Unsynced` (`laptop.architect`, 2026-10-19T00:03:42Z, item 2 of
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6256819172). `stamp`
+  gives the `Refusal` of the answer, so `Unstamped` is gone, and `Unstamped::Stopped`
+  above is `Refusal::Stopped`, which holds no cause: the cause is a fault inside the
+  voter, and the joining node is not a member yet, so it must not read it. Each later
+  call on this node gives `Error::Stopped` with the cause (`laptop.architect`,
+  2026-10-19T11:58:22Z, item 2 of
   https://github.com/synnaxlabs/foundation/pull/3335#issuecomment-6266662803, which
   supersedes "with the first cause" of
   https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6040088128). The
@@ -203,10 +206,10 @@
   surface and its condition 1: 2026-10-20T09:51:13Z,
   https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6288239430).
   Amended (2026-10-20, round 1 of PR 5e of #336): when a round ends with no voter that
-  admits the stored request and with one that refuses it for its card, its ticket, or
-  its status, `ask` writes the request of its card and status over it, at most once in a
-  call and durable before the first send, and asks the next round with it, at once. That
-  round is one of the 8, so `bound` holds. This supersedes item 3 of
+  admits the stored request and with one that refuses it, `ask` writes the request of
+  its card and status over it, at most once in a call and durable before the first send,
+  and asks the next round with it, at once. That round is one of the 8, so `bound`
+  holds. This supersedes item 3 of
   https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6286140973 for that
   case, because a node that can never join by its ticket is the worse failure. A voter
   that applied the join admits only the stored request, so the case left is a round in
