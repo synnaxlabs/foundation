@@ -156,6 +156,25 @@ fn takes_the_begin_mark_that_ssh_key_takes() {
     );
 }
 
+/// `ssh-key` 0.6.7 refuses a NUL in the text before the begin mark.
+#[test]
+fn refuses_a_nul_before_the_begin_mark() {
+    for before in ["x\0\n", "\0\n", "\0x\n-----END x\n"] {
+        for end in ["\n", "\r\n"] {
+            let text = format!("{before}{KEYGEN}").replace('\n', end);
+            assert_eq!(
+                unreadable(&text),
+                (
+                    Unreadable::Format,
+                    "the file is not an OpenSSH private key as `ssh-keygen` writes it"
+                        .into()
+                ),
+                "{text:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn refuses_a_key_file_with_no_end_mark() {
     let text = KEYGEN.replace("-----END OPENSSH PRIVATE KEY-----\n", "");

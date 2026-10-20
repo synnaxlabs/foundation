@@ -173,9 +173,10 @@ pub fn line(key: PublicKey) -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unreadable {
     /// It is not an OpenSSH private key file as `ssh-keygen` writes it: its first line
-    /// that starts `-----BEGIN ` is not `-----BEGIN OPENSSH PRIVATE KEY-----`, no end
-    /// mark follows that line, or it breaks the format in a way that OpenSSH reads, as
-    /// [`private_key`] says.
+    /// that starts `-----BEGIN ` at the start of the text or after a `\n` is not
+    /// `-----BEGIN OPENSSH PRIVATE KEY-----`, the text before that line holds a NUL, no
+    /// end mark follows that line, or it breaks the format in a way that OpenSSH reads,
+    /// as [`private_key`] says.
     Format,
     /// The key is of another algorithm: its name, or `ECDSA` for an ECDSA key.
     Algorithm(&'static str),
@@ -264,16 +265,19 @@ pub fn private_key(text: &str) -> Result<PrivateKey, Unreadable> {
 /// `text` from its begin mark to its end mark as `ssh-key` takes it: the body with no
 /// white space, in lines of 70 characters, and each line end (`\n`, `\r\n`, or `\r`)
 /// as `\n`. `ssh-key` 0.6.7 takes a begin mark only at the start of the text or after
-/// a `\n`, skips the text before it, and reads only lines of 70, as `ssh-keygen` writes
-/// them. OpenSSH reads any width, skips white space in the body as C `isspace` finds
-/// it, and skips the text after the end mark. `None` when no end mark follows a begin
-/// mark.
+/// a `\n`, skips the text before it when it holds no NUL, and reads only lines of 70,
+/// as `ssh-keygen` writes them. OpenSSH reads any width, skips white space in the body
+/// as C `isspace` finds it, and skips the text after the end mark. `None` when the text
+/// before the begin mark holds a NUL, or no end mark follows a begin mark.
 fn lines(text: &str) -> Option<String> {
     let start = if text.starts_with("-----BEGIN ") {
         0
     } else {
         text.find("\n-----BEGIN ")? + 1
     };
+    if text[..start].contains('\0') {
+        return None;
+    }
     let mut lines = text[start..].split(['\n', '\r']);
     let begin = lines.next()?;
     let space = |c: &char| c.is_ascii_whitespace() || *c == '\x0b';
