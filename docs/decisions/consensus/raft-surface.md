@@ -185,10 +185,27 @@
   lost `hard` held. The caller writes `hard` and `entries` in any order, with no atomic
   write. Lost: the `Ready` doc requires `hard` before `entries`, a patch that each
   caller must keep and that shows only at a restart. The person decided on 2026-10-05
-  ("I approve long term fix on 522"), #522. `Raft::removed` says whether a committed
-  configuration removed a node: the configuration before the entries or a committed
-  `Voters` entry held it, and the last committed configuration lacks it. `mesh` is to
-  ask it at a refusal and keeps no copy of the configurations (#1105, #1762).
+  ("I approve long term fix on 522"), #522. `Raft::admission(&Message) -> Admission`
+  says how `mesh` takes a message from another node: `Admitted` for a reply or a
+  request of a voter of the newest configuration, `Removed` for a `PreVote` or a `Vote`
+  whose last index is at or below the commit, or whose last term is below the term at
+  the commit (`laptop.architect`, 2026-10-19T18:56:00Z:
+  https://github.com/synnaxlabs/foundation/pull/3407#issuecomment-6274855859), from a
+  node that a committed configuration removed (the configuration before the entries or a
+  committed `Voters` entry held it, and the last committed configuration lacks it), and
+  `NotVoter` for each other request. `mesh` keeps no copy of the configurations (#1105,
+  #1762). It replaces `Raft::removed` (decided by `laptop.architect`,
+  2026-10-19T12:57:24Z:
+  https://github.com/synnaxlabs/foundation/issues/1107#issuecomment-6267749373).
+  `Raft::removed_by(by) -> Option<BTreeSet<node::Key>>` takes a `removed` answer from
+  voter `by`, and gives each voter whose answer counts once they are a majority of the
+  other voters of the incoming half of the newest configuration in the log. An answer
+  counts for `2 × election_ticks` ticks, and the answers clear when the configuration
+  in force changes. An answer from any other node changes nothing (decided by
+  `laptop.architect`, 2026-10-19T18:47:21Z:
+  https://github.com/synnaxlabs/foundation/pull/3407#issuecomment-6274691760; the text,
+  2026-10-19T21:47:53Z:
+  https://github.com/synnaxlabs/foundation/pull/3407#issuecomment-6278129919).
   `Voters::contains` and `Voters::nodes` are public. Decided by `laptop.architect`,
   2026-10-08T03:04:33Z:
   https://github.com/synnaxlabs/foundation/pull/1762#issuecomment-6051316777. After
@@ -223,10 +240,10 @@
   the deferral of #2471.
   `Raft::set_learners` sets the nodes that get the log and have no vote. `raft` keeps
   the set apart from the configuration: a key that the configuration in force holds as
-  a voter is a voter. A leader sends each learner heartbeats and appends as it does a
-  voter, and never counts its answer toward a commit, an election, or the quorum
-  check. A learner stays until a later call leaves it out: neither the quorum check
-  nor a change of the configuration releases it. A node that a call leaves out and
+  a voter is a voter. A leader sends each learner the log and the commit index, and
+  never counts its answer toward a commit, an election, or the quorum check. A
+  learner stays until a later call leaves it out: neither the quorum check nor a
+  change of the configuration releases it. A node that a call leaves out and
   that no configuration in force holds is released as a removed node is. A node never
   sends a learner of its set a PreVote or a Vote. Each node keeps the set, so a new
   leader has it. `mesh` is to set it from the members of its applied state, PR 2 of
@@ -236,3 +253,55 @@
   (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6268881124), and
   the surface, 2026-10-19T14:40:23Z
   (https://github.com/synnaxlabs/foundation/issues/3375#issuecomment-6269894725).
+  A leader keeps at most one append in flight to a learner (8 to a voter). A heartbeat
+  reply frees no slot of a learner. When a learner answers this leader during a whole
+  quorum check, but answers no append, the leader sends to it again from its accepted
+  index, or sends its probe again, so a lost append goes again within two quorum checks,
+  also when no new entry comes. A learner that answers nothing keeps its window and gets
+  no resend. A learner whose append takes longer than a quorum check can get the same
+  entries again about each second check. A leader sends each learner a message at least
+  once each `election_ticks` of its own ticks: a heartbeat at each quorum check, not
+  each `heartbeat_ticks`. A learner never votes or campaigns, so it needs no heartbeat
+  at the rate of an election. A leader sends a learner the commit index at the next tick
+  after the commit index that it can take moves: in its next append with entries, or
+  else in a heartbeat. A leader sends a learner that a call adds an append at once,
+  unless an append to it is in flight or the learner holds the whole log, so its
+  catch-up does not wait for a quorum check. Decided by `laptop.architect`,
+  2026-10-19T19:01:39Z
+  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6274961164), for
+  the cost of 127 learners; the resend and the append at once to a learner that a call
+  adds, 2026-10-19T19:48:34Z
+  (https://github.com/synnaxlabs/foundation/pull/3415#issuecomment-6275865221) and
+  2026-10-19T19:51:09Z
+  (https://github.com/synnaxlabs/foundation/pull/3415#issuecomment-6275912627); the
+  exceptions of an append in flight and of a learner that holds the whole log,
+  2026-10-19T21:41:27Z
+  (https://github.com/synnaxlabs/foundation/pull/3415#issuecomment-6278021695); the
+  resend of an expired probe at its `next`, 2026-10-19T20:07:40Z
+  (https://github.com/synnaxlabs/foundation/pull/3415#issuecomment-6276219408); the
+  message each `election_ticks` and the commit, 2026-10-19T19:46:05Z
+  (https://github.com/synnaxlabs/foundation/pull/3415#issuecomment-6275819044). A bound
+  that does not grow with the learners (entries that the queues share, not copy) is
+  deferred. Trigger: before `MEMBERS_MAX` grows past 128. Supersedes the pace of a
+  learner "as it does a voter" of the surface, 2026-10-19T14:40:23Z
+  (https://github.com/synnaxlabs/foundation/issues/3375#issuecomment-6269894725).
+  `Message::replaces(&self, older)` tells the caller that `older`, a message that has
+  not gone yet, can drop when this one goes after it. Both have the same sender and the
+  same receiver, and one of these holds: `older` has a lower term, and this one is not a
+  `PreVote` or a `PreVoteReply`, whose term can differ from the sender's own; or both
+  are a `Heartbeat`, both a `PreVote`, both a `Vote`, both a `HeartbeatReply`, or both a
+  `PreVoteReply` with the same answer, and `older` has the same term or a lower one.
+  `raft` owns the rule, and the caller's queue applies it, so the queue of a node that
+  does not read holds one heartbeat, not one for each tick, and a message of a term that
+  its sender left drops when the sender sends that node a message of a later term. Lost:
+  a receiver still at the lower term can apply later, when the commit index that `older`
+  named comes in an append of the new term. Decided by `laptop.architect`,
+  2026-10-19T19:31:21Z
+  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6275544916), for
+  the lower term and the requests of a vote, 2026-10-19T19:53:12Z
+  (https://github.com/synnaxlabs/foundation/pull/3417#issuecomment-6275950285), and for
+  the replies to a heartbeat and a pre-vote, 2026-10-19T20:33:44Z
+  (https://github.com/synnaxlabs/foundation/pull/3417#issuecomment-6276712034), and for
+  its cost, 2026-10-19T19:56:42Z
+  (https://github.com/synnaxlabs/foundation/pull/3417#issuecomment-6276015270, finding
+  3).

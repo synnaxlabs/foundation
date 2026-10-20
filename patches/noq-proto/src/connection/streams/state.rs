@@ -345,13 +345,15 @@ impl StreamsState {
             self.events.push_back(StreamEvent::Readable { id });
         }
 
+        // A stopped stream already issued credit for all data up to `end`
+        let credited = if stopped { end } else { bytes_read };
         // Update connection-level flow control
-        Ok(if bytes_read != final_offset.into_inner() {
-            // bytes_read is always <= end, so this won't underflow.
+        Ok(if credited != final_offset.into_inner() {
+            // credited is always <= end, so this won't underflow.
             self.data_recvd = self
                 .data_recvd
                 .saturating_add(u64::from(final_offset) - end);
-            self.add_read_credits(u64::from(final_offset) - bytes_read)
+            self.add_read_credits(u64::from(final_offset) - credited)
         } else {
             ShouldTransmit(false)
         })
@@ -1164,6 +1166,77 @@ mod tests {
             ShouldTransmit(false)
         );
         assert_eq!(client.data_recvd, 4096);
+    }
+
+    #[test]
+    fn duplicate_reset_near_the_window() {
+        let mut server = make(Side::Server);
+        let window = server.local_max_data;
+        let a = StreamId::new(Side::Client, Dir::Uni, 0);
+        let b = StreamId::new(Side::Client, Dir::Uni, 1);
+        let data = Bytes::from(vec![0; usize::try_from(window - 1).unwrap()]);
+        let len = data.len();
+        assert_eq!(
+            server
+                .received(
+                    frame::Stream {
+                        id: a,
+                        offset: 0,
+                        fin: false,
+                        data,
+                    },
+                    len,
+                )
+                .unwrap(),
+            ShouldTransmit(false)
+        );
+        let reset = frame::ResetStream {
+            id: b,
+            error_code: 0u32.into(),
+            final_offset: 1u32.into(),
+        };
+        assert_eq!(
+            server.received_reset(reset).unwrap(),
+            ShouldTransmit(false)
+        );
+        let data = Bytes::from_static(&[0]);
+        assert_eq!(
+            server
+                .received(
+                    frame::Stream {
+                        id: a,
+                        offset: window - 1,
+                        fin: false,
+                        data,
+                    },
+                    1,
+                )
+                .unwrap(),
+            ShouldTransmit(false)
+        );
+        assert_eq!(
+            server.received_reset(reset).map_err(|e| e.code),
+            Ok(ShouldTransmit(false))
+        );
+    }
+
+    #[test]
+    fn duplicate_reset_with_another_final_size() {
+        let mut server = make(Side::Server);
+        let id = StreamId::new(Side::Client, Dir::Uni, 0);
+        let reset = |final_offset: u32| frame::ResetStream {
+            id,
+            error_code: 0u32.into(),
+            final_offset: final_offset.into(),
+        };
+        assert_eq!(
+            server.received_reset(reset(1)).map_err(|e| e.code),
+            Ok(ShouldTransmit(false))
+        );
+        assert_eq!(
+            server.received_reset(reset(2)).map_err(|e| e.code),
+            Err(TransportErrorCode::FINAL_SIZE_ERROR)
+        );
     }
 
     #[test]

@@ -36,10 +36,13 @@
   Place order: place `n` of `write` and `write_series` is `Config::channels[n]`, and
   the index is at its own place when `channels` names it, else at place
   `channels.len()`. `Writer::places` gives the places in that order, and
-  `Writer::index` gives the place of the index. Lost: the stamp as an argument of each
-  call (a caller who names the index gets a new error at the open, and each call of the
-  common case carries a `None`). Decided by `laptop.architect-2` on
-  2026-10-18T22:10:54Z
+  `Writer::index` gives the place of the index. Each place gives in `index` the first
+  place of the index in that order, also a repeat of the index (`laptop.architect-2`,
+  2026-10-19T18:33:43Z,
+  https://github.com/synnaxlabs/foundation/pull/3365#issuecomment-6274422348). Lost:
+  the stamp as an argument of each call (a caller who names the index gets a new error
+  at the open, and each call of the common case carries a `None`). Decided by
+  `laptop.architect-2` on 2026-10-18T22:10:54Z
   (https://github.com/synnaxlabs/foundation/pull/3275#issuecomment-6255774922, items 1
   and 2) and held on 2026-10-18T22:20:44Z
   (https://github.com/synnaxlabs/foundation/pull/3275#issuecomment-6255869839, item

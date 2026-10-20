@@ -26,7 +26,7 @@ pub use gate::{Gate, Key, Permit};
 pub struct Writer {
     /// The subject that opened the writer.
     pub subject: Name,
-    /// The writer's authority, already capped by access.
+    /// The writer's authority. Nothing caps it by access yet.
     pub authority: Authority,
     /// The node whose program opened the writer, or this node for a writer opened
     /// here. The home records it with each handoff. The gate never compares it to

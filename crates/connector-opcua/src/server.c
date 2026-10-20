@@ -334,8 +334,10 @@ void shim_arena_free(PublishArena *arena) {
     arena->blocks = NULL;
 }
 
-/* Takes nelem * elsize bytes of the Publish decode memory of `client`. */
+/* Takes nelem * elsize bytes of the Publish decode memory of `client`, with no
+ * limit of an answer. */
 void *shim_client_calloc(UA_Client *client, size_t nelem, size_t elsize) {
+    client->publishArena.left = SIZE_MAX;
     return __Client_PublishArena_calloc(&client->publishArena, nelem, elsize);
 }
 

@@ -888,7 +888,10 @@ typedef enum {
     SHIM_REFUSAL_TIME,
     SHIM_REFUSAL_EMPTY,
     SHIM_REFUSAL_INVALID,
-    SHIM_REFUSAL_TRAILING
+    SHIM_REFUSAL_TRAILING,
+    SHIM_REFUSAL_TRUST_LINE,
+    SHIM_REFUSAL_CERTIFICATE_LINE,
+    SHIM_REFUSAL_KEY_LINE
 } shim_refusal_kind;
 
 typedef struct {
@@ -899,7 +902,7 @@ typedef struct {
 _Static_assert(sizeof(shim_refusal_kind) == sizeof(int) &&
                    offsetof(shim_refusal, number) == sizeof(size_t) &&
                    sizeof(shim_refusal) == 2 * sizeof(size_t) &&
-                   SHIM_REFUSAL_TRAILING == 8,
+                   SHIM_REFUSAL_KEY_LINE == 11,
                "shim_refusal changed");
 
 /* Writes `kind` and `number` to `refusal` and gives `status`. */
@@ -922,7 +925,8 @@ static shim_refusal_kind policy_refusal(UA_StatusCode status) {
  * the certificate and key of `security`, with the application URI of the certificate,
  * and trust only the certificates of `security`. With no policy URI, open62541 takes
  * the endpoint of the highest security level that the server offers in `mode`.
- * Refuses, in order, a certificate that does not parse or holds no RSA key, a key that
+ * Refuses, in order, a PEM line of the certificate and then of the key that targets
+ * read in two ways, a certificate that does not parse or holds no RSA key, a key that
  * does not parse, a key of another certificate, a time of the loop of `client`
  * outside the validity window of the certificate, a trust that does not load, and a
  * certificate with no URI. Writes the refusal to `refusal`, else `SHIM_REFUSAL_NONE`,
@@ -935,6 +939,14 @@ UA_StatusCode shim_client_secure(UA_Client *client, UA_MessageSecurityMode mode,
                                  const shim_security *security,
                                  shim_refusal *refusal) {
     *refusal = (shim_refusal){SHIM_REFUSAL_NONE, 0};
+    size_t number = UA_CertificateUtils_certificateLine(&security->certificate);
+    if(number > 0)
+        return refuse_with(refusal, SHIM_REFUSAL_CERTIFICATE_LINE, number,
+                           UA_STATUSCODE_BADCERTIFICATEINVALID);
+    number = UA_CertificateUtils_keyLine(&security->key);
+    if(number > 0)
+        return refuse_with(refusal, SHIM_REFUSAL_KEY_LINE, number,
+                           UA_STATUSCODE_BADINVALIDARGUMENT);
     UA_ClientConfig *config = UA_Client_getConfig(client);
     UA_StatusCode status = shim_add_policies(&config->securityPolicies,
                                              &config->securityPoliciesSize, security,
@@ -953,7 +965,6 @@ UA_StatusCode shim_client_secure(UA_Client *client, UA_MessageSecurityMode mode,
         return refuse_with(refusal, SHIM_REFUSAL_TIME, 0, status);
     if(status != UA_STATUSCODE_GOOD)
         return status;
-    size_t number = 0;
     switch(UA_CertificateUtils_checkTrust(&security->trust, &number)) {
     case UA_TRUSTLOAD_GOOD:
         break;
@@ -965,6 +976,9 @@ UA_StatusCode shim_client_secure(UA_Client *client, UA_MessageSecurityMode mode,
                            UA_STATUSCODE_BADINTERNALERROR);
     case UA_TRUSTLOAD_TRAILING:
         return refuse_with(refusal, SHIM_REFUSAL_TRAILING, number,
+                           UA_STATUSCODE_BADINTERNALERROR);
+    case UA_TRUSTLOAD_LINE:
+        return refuse_with(refusal, SHIM_REFUSAL_TRUST_LINE, number,
                            UA_STATUSCODE_BADINTERNALERROR);
     case UA_TRUSTLOAD_NOMEMORY:
         return UA_STATUSCODE_BADOUTOFMEMORY;

@@ -31,6 +31,10 @@ clientHouseKeeping(UA_Client *client, void *_);
 /* The offset of the memory of a block, aligned to 16 bytes */
 #define PUBLISH_HEADER ((sizeof(PublishBlock) + 15) & ~(size_t)15)
 
+/* The most decode memory for each byte of an answer: the bound of the array check
+ * of the decoder, whose worst known case is an empty DataValue (80 bytes from 1) */
+#define PUBLISH_EXPANSION 128
+
 static PublishBlock *
 PublishBlock_new(size_t size, PublishBlock *next) {
     if(size > SIZE_MAX - PUBLISH_HEADER)
@@ -50,6 +54,8 @@ __Client_PublishArena_calloc(void *context, size_t nelem, size_t elsize) {
     if(elsize && nelem > (SIZE_MAX - 15) / elsize)
         return NULL;
     size_t size = (nelem * elsize + 15) & ~(size_t)15;
+    if(size > arena->left)
+        return NULL;
     PublishBlock *block = arena->blocks;
     if(!block || block->size - block->used < size) {
         size_t grown = (block && block->size > size) ? block->size : size;
@@ -60,6 +66,7 @@ __Client_PublishArena_calloc(void *context, size_t nelem, size_t elsize) {
     }
     void *p = (UA_Byte*)block + PUBLISH_HEADER + block->used;
     block->used += size;
+    arena->left -= size;
     memset(p, 0, size);
     return p;
 }
@@ -656,6 +663,9 @@ processMSGResponse(UA_Client *client, UA_UInt32 requestId,
     opt.customTypes = config->customDataTypes;
     opt.namespaceMapping = client->channel.namespaceMapping;
     if(arena) {
+        size_t length = msg->length - offset;
+        client->publishArena.left = length > SIZE_MAX / PUBLISH_EXPANSION ?
+            SIZE_MAX : length * PUBLISH_EXPANSION;
         opt.calloc = __Client_PublishArena_calloc;
         opt.callocContext = &client->publishArena;
     }

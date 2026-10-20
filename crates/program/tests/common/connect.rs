@@ -63,7 +63,8 @@ pub(crate) async fn connect_receiving(
         entropy: node.entropy(),
         tasks,
         pool,
-        frames,
+        frames: Rc::clone(&frames),
+        reads: frames,
     };
     Session::connect(&transport, config).await
 }

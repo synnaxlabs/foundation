@@ -363,6 +363,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "wire_hub_forward"
+path = "fuzz_targets/wire_hub_forward.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "wire_blob"
 path = "fuzz_targets/wire_blob.rs"
 test = false
