@@ -567,9 +567,12 @@ pub async fn name(
 pub async fn public_key(
     files: &env::files::Files,
 ) -> Result<types::ed25519::PublicKey, Error> {
+    // A first start makes `node.key` durable before it makes `mesh`, so a concurrent
+    // start between the two reads gives the key or `Unstarted`, never `NoCard`.
+    let meshed = directory::meshed(files).await?;
     match identity::public_key(files).await? {
         Some(public_key) => Ok(public_key),
-        None if directory::meshed(files).await? => Err(Error::NoCard),
+        None if meshed => Err(Error::NoCard),
         None => Err(Error::Unstarted),
     }
 }
