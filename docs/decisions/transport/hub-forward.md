@@ -72,17 +72,21 @@
   At the member (#3104 PR 4a), a program's write whose one index has a home on another
   node of the region goes to `serve::client::write::away`. A write on more than one
   index with a home on another node still stops with `NOT_HOME` until PR 4b
-  (`laptop.monitor`, key choice 8). It reserves the ends and counts of the open and the
-  encoded open, `Write::length`, in the subject's share, and encodes the open again from
-  its decoded fields. Each field of the wire `Open` has one encoding, so these are the
-  bytes that the program signed, and the member holds the names once while it waits for
-  the home. Lost: keeping the program's body, which holds the names twice during that
-  wait. `hub::dial` dials the home and retries a session that closes with `Code(0)`
-  before the places, as the remote reader does. A home whose stream takes messages under
-  the member transport's `message_bytes_max` gets `FAILED` at the open, before the
-  places, so a mesh whose limits differ fails at its first forwarded write. The member
-  gives `serve::Error::Limit`, whose text names both limits and tells the user to give
-  each node of the mesh the same limit (condition of `laptop.monitor` on key choice 8).
+  (`laptop.monitor`, key choice 1, 2026-10-20T06:26Z:
+  https://github.com/synnaxlabs/foundation/pull/3546#issuecomment-6286607969). It
+  reserves the ends and counts of the open and the encoded open, `Write::length`, in the
+  subject's share, and encodes the open again from its decoded fields. Each field of the
+  wire `Open` has one encoding, so these are the bytes that the program signed, and the
+  member holds the names once while it waits for the home. Lost: keeping the program's
+  body, which holds the names twice during that wait. `hub::dial` dials the home and
+  retries a session that closes with `Code(0)` before the places, as the remote reader
+  does. A forward to a home whose stream takes messages under the member transport's
+  `message_bytes_max` gives the program `FAILED` at the open, before the places, so a
+  mesh whose limits differ fails at its first forwarded write. The member gives
+  `serve::Error::Limit`, whose text names both limits and tells the user to give each
+  node of the mesh the same limit (condition of `laptop.monitor` on key choice 3,
+  2026-10-20T06:33Z:
+  https://github.com/synnaxlabs/foundation/pull/3546#issuecomment-6286607969).
   A reply before the places that `Opening` refuses, or a count of places over the
   channels of the open plus one, gives `FAILED` to the program and `MALFORMED` to the
   home. The member holds the places in the subject's share until it sends them to the
