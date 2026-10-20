@@ -8,12 +8,15 @@ use std::num::NonZeroUsize;
 use std::pin::pin;
 use std::ptr::NonNull;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use env::clock::Clock;
 use env::net::{Net, Tcp, tcp};
 use env::rng::Rng;
-use sim::{Sim, node};
+use env::shards;
+use sim::{Crash, Sim, node};
 use types::quality::Quality;
 use types::time::{Span, Stamp};
 
@@ -30,7 +33,7 @@ use crate::ffi::{self, Status};
 use crate::gate::Gate;
 use crate::node::{Key, Name, Node};
 use crate::secure::Policy;
-use crate::server::{Limits, Server};
+use crate::server::{Limits, Secure, Server};
 use crate::unwind::caught;
 use crate::value::{self, Fault, Value};
 
@@ -239,8 +242,9 @@ async fn serve<T>(
     serve_on(node, sessions, time, None, body).await
 }
 
-/// [`serve`], on a loop that reads `time`, with an endpoint of each policy of
-/// `security`, in its order, on its credentials, when it is given.
+/// [`serve`], on a loop that reads `time`, with an endpoint in `Sign` and in
+/// `SignAndEncrypt` of each policy of `security`, in its order, on its credentials,
+/// and none in `None`, when it is given.
 async fn serve_on<T>(
     node: &node::Node,
     sessions: u16,
@@ -255,7 +259,13 @@ async fn serve_on<T>(
     let server = match security {
         // SAFETY: the close below deletes the server before the manager drops.
         Some((credentials, policies)) => unsafe {
-            Server::start_secure(&manager, c"", sessions, credentials, policies)
+            let modes = [Mode::Sign, Mode::SignAndEncrypt];
+            let secure = Secure {
+                credentials,
+                policies,
+                modes: &modes,
+            };
+            Server::start_secure(&manager, c"", sessions, &secure)
         },
         // SAFETY: as above.
         None => unsafe { Server::start(&manager, c"", sessions) },
@@ -982,6 +992,54 @@ fn a_close_frees_the_session_on_the_server_and_a_drop_does_not() {
         .await
     });
     assert_eq!(connects, Some(Status::BAD_TOO_MANY_SESSIONS));
+}
+
+/// A crash of the node drops a connected client off the threads of the sim, as a
+/// failed scenario does, and the drop does not abort the process. The server runs on
+/// another node, which closes it after the crash, so that it does not leak.
+#[test]
+fn a_crash_drops_a_connected_client_off_the_threads_of_the_sim() {
+    let mut sim = Sim::new(sim::Config::default());
+    let host = sim.node(node::Config::default());
+    let node = sim.node(node::Config::default());
+    let local = SocketAddr::new(host.addresses()[0], PORT);
+    let url = CString::new(format!("opc.tcp://{local}")).expect("no NUL");
+    let (connected, crashed) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let (own, ended) = (host.clone(), Arc::clone(&crashed));
+    let config = |name: &str| shards::Config {
+        name: name.into(),
+        core: None,
+    };
+    let served = host.shards().start(config("server"), move |_| async move {
+        serve(&own, 4, async |peer| {
+            while !ended.load(Ordering::Relaxed) {
+                peer.clock.sleep(Span::from_nanos(10_000_000)).await;
+            }
+        })
+        .await;
+    });
+    drop(served.expect("a shard with no core gets no fault"));
+    let (own, on) = (node.clone(), Arc::clone(&connected));
+    let start = node.shards().start(config("client"), move |_| async move {
+        let time = event::Time::monotonic(own.clock());
+        let mut rng = own.entropy().rng();
+        let _client = open(time, own.net(), &mut rng, &url)
+            .await
+            .expect("the client connects");
+        on.store(true, Ordering::Relaxed);
+        future::pending::<()>().await;
+    });
+    drop(start.expect("a shard with no core gets no fault"));
+    sim.run_for(Span::from_nanos(10_000_000_000))
+        .expect("the run goes on");
+    assert!(connected.load(Ordering::Relaxed));
+    sim.crash(&node, Crash::Process);
+    crashed.store(true, Ordering::Relaxed);
+    sim.run_for(Span::from_nanos(1_000_000_000))
+        .expect("the server closes");
 }
 
 /// Connects to a listener on `node` that gives `accepted` each stream it accepts, and
@@ -1979,6 +2037,17 @@ pub(crate) async fn relayed_up<T>(
     body: impl Future<Output = T>,
 ) -> T {
     beside(relay(node, &Relay::default(), up, |_| {}), body).await
+}
+
+/// Runs `body` while [`relay`] runs on `node`, and gives each message of the client to
+/// `up` and each message of the server to `down`.
+pub(crate) async fn relayed_both<T>(
+    node: &node::Node,
+    up: impl FnMut(&mut Vec<u8>),
+    down: impl FnMut(&mut Vec<u8>),
+    body: impl Future<Output = T>,
+) -> T {
+    beside(relay(node, &Relay::default(), up, down), body).await
 }
 
 /// Runs `body` while `relay` runs.

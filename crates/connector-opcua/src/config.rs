@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::ffi::CString;
 
-use connector::kind;
+use connector::{kind, secret};
 use document::diagnostic::{Code, Diagnostic, Note};
 use document::schema::{self, Body, Presence};
 use document::value::Value;
@@ -20,6 +20,8 @@ mod tests;
 
 const BAD_ADDRESS: Code = Code::new("opcua.bad-address");
 const BAD_NODE_ID: Code = Code::new("opcua.bad-node-id");
+const BAD_POLLED: Code = Code::new("opcua.bad-polled");
+const BAD_UNENCRYPTED: Code = Code::new("opcua.bad-unencrypted");
 const REPEATED_CHANNEL: Code = Code::new("opcua.repeated-channel");
 
 /// The scheme of each address.
@@ -34,13 +36,27 @@ pub struct Config {
     /// path.
     pub(crate) address: CString,
     pub(crate) rate: Rate,
+    /// Whether the run reads each node once per tick, in place of a subscription.
+    pub(crate) polled: bool,
     /// Each of another channel. None until an import adds them.
     pub(crate) reads: Vec<Read>,
+    /// With no `certificate`, `None`, and the channel has the mode `None`.
+    pub(crate) security: Option<Security>,
+}
+
+/// The sources of the credentials of a secure channel, and its mode.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Security {
+    pub(crate) certificate: secret::Source,
+    pub(crate) key: secret::Source,
+    pub(crate) trust: secret::Source,
+    /// `Sign` with `unencrypted = true`, else `SignAndEncrypt`.
+    pub(crate) mode: client::Mode,
 }
 
 /// The body of the config.
 pub(crate) const BODY: Body = Body {
-    summary: "Polls the nodes of an OPC UA server at a rate.",
+    summary: "Subscribes to the nodes of an OPC UA server, or polls them at a rate.",
     attributes: &[
         schema::Attribute {
             name: "address",
@@ -52,7 +68,48 @@ pub(crate) const BODY: Body = Body {
             name: "rate",
             value: "a rate, such as \"10Hz\"",
             presence: Presence::Required,
-            summary: "The reads per second.",
+            summary: "The most samples per second of each node.",
+        },
+        schema::Attribute {
+            name: "polled",
+            value: "a bool",
+            presence: Presence::Optional,
+            summary: "Reads each node once per tick of the rate, in place of a \
+                      subscription. A subscription writes a node only at its first \
+                      value and at each change, so a reader that opens later gets no \
+                      sample of a node until it changes. Default false.",
+        },
+        schema::Attribute {
+            name: "certificate",
+            value: "a secret",
+            presence: Presence::When(&["key", "trust", "unencrypted"]),
+            summary: "The DER or PEM certificate of the node, with an RSA key and its \
+                      application URI in the subject alternative name. With it, the \
+                      channel signs and encrypts. Without it, the channel neither \
+                      signs nor encrypts.",
+        },
+        schema::Attribute {
+            name: "key",
+            value: "a secret",
+            presence: Presence::When(&["certificate"]),
+            summary: "The DER or PEM private key of `certificate`, with no password. \
+                      A connector with `certificate` needs it.",
+        },
+        schema::Attribute {
+            name: "trust",
+            value: "a secret",
+            presence: Presence::When(&["certificate"]),
+            summary: "The DER certificate, or one or more PEM certificates, of the \
+                      server or of the CA that issued it. A connector with \
+                      `certificate` needs it.",
+        },
+        schema::Attribute {
+            name: "unencrypted",
+            value: "a bool",
+            presence: Presence::Default("false"),
+            summary: "With `true`, the channel signs and does not encrypt, for a \
+                      server with no encrypted endpoint. Only a connector with \
+                      `certificate` takes it.",
         },
     ],
     blocks: &[schema::Block {
@@ -60,7 +117,7 @@ pub(crate) const BODY: Body = Body {
         label: Some("the channel"),
         forms: &[READ],
     }],
-    examples: &[EXAMPLE],
+    examples: &[EXAMPLE, POLLED, SECURE, SIGNED],
 };
 
 /// A connector to one server.
@@ -71,6 +128,36 @@ rate    = \"10Hz\"
 read \"plant.pressure\" {
   node_id = \"ns=3;s=Pressure\"
 }
+";
+
+/// A connector that reads each node at each tick.
+const POLLED: &str = "\
+address = \"opc.tcp://plc:4840\"
+rate    = \"10Hz\"
+polled  = true
+
+read \"plant.pressure\" {
+  node_id = \"ns=3;s=Pressure\"
+}
+";
+
+/// A connector over a channel that signs and encrypts.
+const SECURE: &str = "\
+address     = \"opc.tcp://plc:4840\"
+rate        = \"10Hz\"
+certificate = file(\"/etc/foundation/opcua/node.der\")
+key         = secret(\"plant.opcua_key\")
+trust       = file(\"/etc/foundation/opcua/plc.der\")
+";
+
+/// A connector over a channel that signs and does not encrypt.
+const SIGNED: &str = "\
+address     = \"opc.tcp://plc:4840\"
+rate        = \"10Hz\"
+certificate = file(\"/etc/foundation/opcua/node.der\")
+key         = secret(\"plant.opcua_key\")
+trust       = file(\"/etc/foundation/opcua/plc.der\")
+unencrypted = true
 ";
 
 /// The body of a `read` block.
@@ -93,7 +180,8 @@ pub(crate) struct Read {
     pub(crate) node: Node,
 }
 
-/// Reads `address`, `rate`, and zero or more `read` blocks, and no other key or block.
+/// Reads `address`, `rate`, an optional `polled`, the attributes of [`security`],
+/// and zero or more `read` blocks, and no other key or block.
 pub(crate) fn parse(config: &Document) -> Result<Config, Vec<Diagnostic>> {
     let mut diagnostics = Vec::new();
     let address = endpoint(config);
@@ -107,15 +195,122 @@ pub(crate) fn parse(config: &Document) -> Result<Config, Vec<Diagnostic>> {
     );
     let address = address.map_err(|error| diagnostics.push(error));
     let rate = rate.map_err(|error| diagnostics.push(error));
+    let polled = config
+        .attributes
+        .get("polled")
+        .map(|polled| flag(&polled.value));
+    let polled = polled.unwrap_or(Ok(false));
+    let polled = polled.map_err(|error| diagnostics.push(error));
     let reads = reads(config, &mut diagnostics);
+    let security = security(config).map_err(|errors| diagnostics.extend(errors));
     diagnostics.extend(read::unknown(config, kind::NOUN, &BODY));
-    match (address, rate) {
-        (Ok(address), Ok(rate)) if diagnostics.is_empty() => Ok(Config {
-            address,
-            rate,
-            reads,
-        }),
+    match (address, rate, polled, security) {
+        (Ok(address), Ok(rate), Ok(polled), Ok(security)) if diagnostics.is_empty() => {
+            Ok(Config {
+                address,
+                rate,
+                polled,
+                reads,
+                security,
+            })
+        }
         _ => Err(diagnostics),
+    }
+}
+
+/// Reads `certificate`, `key`, and `trust`, each a source that
+/// [`secret::Source::read`] takes, and the bool `unencrypted`. Gives `None` with none
+/// of them.
+///
+/// # Errors
+///
+/// Each diagnostic of a source, `opcua.bad-unencrypted` for an `unencrypted` that is
+/// not a bool, a `document.missing-attribute` for `certificate` at each of `key`,
+/// `trust`, and `unencrypted` with no `certificate`, and one at `certificate` for each
+/// of `key` and `trust` that it lacks.
+pub(crate) fn security(config: &Document) -> Result<Option<Security>, Vec<Diagnostic>> {
+    let mut diagnostics = Vec::new();
+    let attributes = &config.attributes;
+    let mut source = |key| {
+        let attribute = attributes.get(key)?;
+        let read = secret::Source::read(&attribute.value);
+        Some(read.map_err(|error| diagnostics.push(error)))
+    };
+    let certificate = source("certificate");
+    let key = source("key");
+    let trust = source("trust");
+    let unencrypted = attributes.get("unencrypted").map(|attribute| {
+        unencrypted(&attribute.value).map_err(|error| diagnostics.push(error))
+    });
+    let Some(certificate) = certificate else {
+        diagnostics.extend(no_certificate(attributes));
+        return if diagnostics.is_empty() {
+            Ok(None)
+        } else {
+            Err(diagnostics)
+        };
+    };
+    let at = attributes
+        .get("certificate")
+        .and_then(|attribute| attribute.key_span);
+    let needs = [
+        (key.is_none(), "key", "the private key of the certificate"),
+        (
+            trust.is_none(),
+            "trust",
+            "the certificate of the server or of its CA",
+        ),
+    ];
+    for (missing, name, what) in needs {
+        if missing {
+            let fix = format!("Add a `{name}` with {what}, or remove `certificate`");
+            diagnostics.push(read::missing(kind::NOUN, at, &[name], fix));
+        }
+    }
+    match (certificate, key, trust, unencrypted.unwrap_or(Ok(false))) {
+        (Ok(certificate), Some(Ok(key)), Some(Ok(trust)), Ok(unencrypted)) => {
+            let mode = if unencrypted {
+                client::Mode::Sign
+            } else {
+                client::Mode::SignAndEncrypt
+            };
+            Ok(Some(Security {
+                certificate,
+                key,
+                trust,
+                mode,
+            }))
+        }
+        _ => Err(diagnostics),
+    }
+}
+
+/// The `document.missing-attribute` for `certificate` at each of `key`, `trust`, and
+/// `unencrypted` in `attributes`.
+fn no_certificate(attributes: &Map) -> Vec<Diagnostic> {
+    let present = ["key", "trust", "unencrypted"]
+        .into_iter()
+        .filter_map(|name| Some((name, attributes.get(name)?)));
+    present
+        .map(|(name, attribute)| {
+            let fix = format!(
+                "Add a `certificate` with the certificate of the node, or remove `{name}`"
+            );
+            read::missing(kind::NOUN, attribute.key_span, &["certificate"], fix)
+        })
+        .collect()
+}
+
+/// Reads the bool of `unencrypted`.
+fn unencrypted(value: &Value) -> Result<bool, Diagnostic> {
+    match value.kind {
+        document::value::Kind::Bool(unencrypted) => Ok(unencrypted),
+        ref kind => Err(Diagnostic::new(
+            BAD_UNENCRYPTED,
+            value.span,
+            format!("`unencrypted` is a bool, not {}", kind.noun()),
+            "Write `unencrypted = true`, or remove it".into(),
+        )),
     }
 }
 
@@ -162,6 +357,19 @@ fn address(value: &Value) -> Result<CString, Diagnostic> {
     }
     CString::new(text.as_bytes())
         .map_err(|_nul| refused("the address holds a NUL".into()))
+}
+
+/// Reads `polled`, a bool.
+fn flag(value: &Value) -> Result<bool, Diagnostic> {
+    match value.kind {
+        document::value::Kind::Bool(polled) => Ok(polled),
+        ref kind => Err(Diagnostic::new(
+            BAD_POLLED,
+            value.span,
+            format!("`polled` is a bool, not {}", kind.noun()),
+            "Write `polled = true` or `polled = false`".into(),
+        )),
+    }
 }
 
 /// Reads the `read` blocks of `config`, and adds each problem to `diagnostics`.

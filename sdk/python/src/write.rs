@@ -24,32 +24,7 @@ use types::sample::{Scalar, Type, Value};
 use types::time::{Span, Stamp};
 use types::{frame, hash};
 
-use crate::{DataLost, Rejected, error, owned, stop};
-
-/// What a write does with a frame that the node took no room for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Loss {
-    /// Log a warning on the `foundation` logger.
-    Warn,
-    /// Raise `DataLost`.
-    Raise,
-    /// Do nothing.
-    Ignore,
-}
-
-impl Loss {
-    /// The loss of the argument `on_loss`.
-    pub(crate) fn parse(on_loss: &str) -> PyResult<Self> {
-        match on_loss {
-            "warn" => Ok(Self::Warn),
-            "raise" => Ok(Self::Raise),
-            "ignore" => Ok(Self::Ignore),
-            other => Err(PyValueError::new_err(format!(
-                "on_loss is {other:?}, not \"warn\", \"raise\", or \"ignore\""
-            ))),
-        }
-    }
-}
+use crate::{Loss, Rejected, error, owned, stop};
 
 /// A writer of channels of one index at its home, which `Client.open_writer` opens. A
 /// `with` block closes it at its end. Its calls take turns to send: a call waits, with
@@ -247,34 +222,15 @@ impl Writer {
         range: frame::Range,
         mut places: Vec<usize>,
     ) -> PyResult<()> {
-        if self.loss == Loss::Ignore {
-            return Ok(());
-        }
         places.sort_unstable();
         places.dedup();
-        let names: Vec<_> = places
+        let seqs =
+            u128::from(range.seq)..u128::from(range.seq) + u128::from(range.count);
+        let lost = places
             .iter()
-            .map(|&place| format!("{} ({})", self.places[place].name, range.count))
-            .collect();
-        let text = format!("samples were lost: {}", names.join(", "));
-        if self.loss == Loss::Warn {
-            py.import("logging")?
-                .call_method1("getLogger", ("foundation",))?
-                .call_method1("warning", (text,))?;
-            return Ok(());
-        }
-        let end = u128::from(range.seq) + u128::from(range.count);
-        let seqs = py
-            .import("builtins")?
-            .getattr("range")?
-            .call1((range.seq, end))?;
-        let lost = PyDict::new(py);
-        for place in places {
-            lost.set_item(self.places[place].name.as_str(), &seqs)?;
-        }
-        let raised = DataLost::new_err(text);
-        raised.value(py).setattr("seqs", lost)?;
-        Err(raised)
+            .map(|&place| (self.places[place].name.as_str(), seqs.clone()));
+        self.loss
+            .act(py, "samples were lost", lost, py.None().bind(py))
     }
 }
 
@@ -284,11 +240,7 @@ impl Writer {
     /// writes it (`f64`, `timestamp`).
     #[getter]
     fn places<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-        let places = self
-            .places
-            .iter()
-            .map(|place| (place.name.as_str(), place.data_type.to_string()));
-        PyTuple::new(py, places)
+        crate::places(py, &self.places)
     }
 
     /// The place of the index, whose samples are the stamps of each frame.
@@ -580,13 +532,10 @@ fn value(place: &Place, object: &Bound<'_, PyAny>) -> PyResult<Value> {
                 Value::F32(narrow)
             }
         }
-        Scalar::Uuid => {
-            let uuid = object.py().import("uuid")?.getattr("UUID")?;
-            if !object.is_instance(&uuid)? {
-                return Err(wrong(place, object)?);
-            }
-            Value::Uuid(object.getattr("int")?.extract::<u128>()?.to_be_bytes())
-        }
+        Scalar::Uuid => match crate::uuid_sample(object)? {
+            Some(sample) => Value::Uuid(sample),
+            None => return Err(wrong(place, object)?),
+        },
         Scalar::Bool => unreachable!("a bool returns above"),
     })
 }

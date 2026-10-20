@@ -1,5 +1,8 @@
 //! The readers of the Rust SDK against a node process.
 
+use std::sync::mpsc;
+use std::time::Duration;
+
 use env::tasks::{Group, Tasks};
 use program::Refusal;
 use sdk::read::{self, Frame, Mode, Reader};
@@ -215,6 +218,30 @@ fn a_close_of_a_client_with_a_live_reader_returns_and_ends_the_reader() {
     assert_eq!(client.close(), Ok(()));
     assert_eq!(reader.next().map(drop), Err(Error::Closed));
     assert_eq!(reader.next().map(drop), Err(Error::Closed));
+    rig.stop();
+}
+
+/// A drop of a reader whose call of `next_within` is out ends its stream, so a client
+/// opens more readers one after another than a session holds streams.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the opens run on a thread of their own, which `wait` bounds in real time"
+)]
+fn a_drop_of_a_reader_whose_call_is_out_ends_its_stream() {
+    let (mut rig, node, subject) = planted();
+    let client = Client::connect(&node, subject).unwrap();
+    let streams = node::Settings::default().streams_max.get();
+    let (sender, opened) = mpsc::channel();
+    std::thread::spawn(move || {
+        for _ in 0..=streams {
+            let mut reader = reader(&client, &["plant.a"], Mode::Complete);
+            let next = reader.next_within(Duration::from_millis(1));
+            assert_eq!(next.map(|frame| frame.is_none()), Ok(true));
+        }
+        sender.send(client).unwrap();
+    });
+    assert_eq!(wait(&opened).close(), Ok(()));
     rig.stop();
 }
 

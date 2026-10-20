@@ -157,7 +157,8 @@ impl Server {
             }
         };
         let body = caught(async { body(&this).await });
-        let value = crate::server::Server::serve(manager, SESSIONS, add, body).await;
+        let value =
+            crate::server::Server::serve(manager, SESSIONS, None, add, body).await;
         let value = value.expect("the listener of a bench does not fail");
         value.unwrap_or_else(|panic| panic::resume_unwind(panic))
     }
@@ -308,7 +309,7 @@ impl Client {
     /// If the subscription or an item fails, with its status, or on a second call.
     pub async fn subscribe(&mut self, count: usize) {
         let nodes: Vec<Node> = (0..count).map(counter).collect();
-        match self.session.subscribe(&nodes, SAMPLING).await {
+        match self.session.subscribe(&nodes, SAMPLING, Span::ZERO).await {
             Ok(revised) => {
                 for item in revised.items {
                     item.unwrap_or_else(|status| panic!("an item failed: {status:?}"));

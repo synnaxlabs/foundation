@@ -15,12 +15,13 @@ use crate::client::browse::{
     Base, Cause, Class, Description, Foreign, Page, Reference, Unit,
 };
 use crate::client::subscription::Change;
-use crate::client::{self, Client};
+use crate::client::{self, Client, Credentials, Mode};
 use crate::connection::OPTIONS;
 use crate::event;
 use crate::ffi::Status;
 use crate::node::Node;
 use crate::node::ns0::{self, HAS_COMPONENT, ORGANIZES};
+use crate::secure::{CLIENT, Policy, SERVER, START};
 use crate::value::{Fault, Type, Value};
 
 const SPIKE: &str = "ns=3;s=SpikeData";
@@ -29,6 +30,7 @@ const BAD: Quality = Quality(0x8000_0000);
 const CLAMPED: Quality = Quality(0x0030_0000);
 const UNCERTAIN: Quality = Quality(0x4090_0000);
 const BAD_USER_ACCESS_DENIED: Status = Status(0x801F_0000);
+const BAD_IDENTITY_TOKEN_REJECTED: Status = Status(0x8021_0000);
 const QUALITIES: [Quality; 4] = [Quality::GOOD, CLAMPED, UNCERTAIN, BAD];
 /// The reads of a variable with each of [`QUALITIES`] in turn.
 const READS: [Result<Value, Fault>; 4] = [
@@ -871,7 +873,7 @@ fn on_spike<T: Send + 'static>(
 /// Subscribes `client` to [`SPIKE`], and gives its first changes.
 async fn subscribe_spike(client: &mut Client) -> Vec<Change> {
     let spike = SPIKE.parse::<Node>().expect("a node");
-    let revised = client.subscribe(&[spike], Span::SECOND).await;
+    let revised = client.subscribe(&[spike], Span::SECOND, Span::ZERO).await;
     assert!(revised.is_ok(), "{revised:?}");
     client
         .changes(future::pending())
@@ -944,4 +946,76 @@ fn each_read_of_a_value_gives_the_source_timestamp_of_the_first() {
         late - early >= Span::from_nanos(3 * Span::SECOND.nanos()),
         "{early} then {late}"
     );
+}
+
+/// A connect with no security, in `Sign`, then in `SignAndEncrypt`, to a server that
+/// offers only [`Policy::Basic256Sha256`] in `SignAndEncrypt`.
+fn secure_connects() -> (Option<Status>, Option<client::Error>, Result<Value, Fault>) {
+    let mut sim = Sim::new(::sim::Config::default());
+    let node = sim.node(node::Config::default());
+    sim.run_on(&node, move |node, _| async move {
+        let listener = listen(&node);
+        let url =
+            CString::new(format!("opc.tcp://{}", listener.local())).expect("no NUL");
+        let mut rng = node.entropy().rng();
+        let variables = Variables::new(&[SPIKE]);
+        let served = Credentials {
+            certificate: SERVER.certificate,
+            key: SERVER.key,
+            trust: CLIENT.certificate,
+        };
+        variables.secure(served, Policy::Basic256Sha256, Mode::SignAndEncrypt);
+        let own = Credentials {
+            certificate: CLIENT.certificate,
+            key: CLIENT.key,
+            trust: SERVER.certificate,
+        };
+        let mut out = (None, None, Ok(Value::I32(0)));
+        let until = async {
+            out.0 = connect(&node, &mut rng, &url).await.err();
+            let mut secure = async |mode| {
+                Client::connect(
+                    event::Time::since(node.clock(), START),
+                    tracing::Span::none(),
+                    node.net(),
+                    &mut rng,
+                    &url,
+                    Some((&own, mode)),
+                    future::pending(),
+                )
+                .await
+                .map(|client| client.expect("a pending wait never ends"))
+            };
+            out.1 = secure(Mode::Sign).await.err();
+            let mut client = secure(Mode::SignAndEncrypt).await.expect("connect");
+            out.2 = client.read_one(&SPIKE.parse().expect("a node")).await;
+            client.close().await;
+        };
+        let mut rng = node.entropy().rng();
+        let serving = |stop| {
+            serve(
+                node.clock(),
+                || START,
+                node.net(),
+                listener,
+                &mut rng,
+                &variables,
+                stop,
+            )
+        };
+        during(serving, until).await;
+        out
+    })
+    .expect("the run ends")
+}
+
+#[test]
+fn a_secure_server_offers_only_its_policy_in_its_mode() {
+    let (none, sign, read) = secure_connects();
+    assert_eq!(none, Some(BAD_IDENTITY_TOKEN_REJECTED));
+    assert_eq!(
+        sign,
+        Some(client::Error::Failed(BAD_IDENTITY_TOKEN_REJECTED))
+    );
+    assert_eq!(read, Ok(Value::F64(0.0)));
 }

@@ -4574,7 +4574,9 @@ impl Connection {
             if self
                 .paths
                 .get(&path_id)
-                .map(|p| p.data.validated && p.data.network_path == network_path)
+                .map(|p| {
+                    p.data.validated && p.data.network_path.is_probably_same_path(&network_path)
+                })
                 .unwrap_or(false)
             {
                 self.connection_close_pending = true;
@@ -6758,6 +6760,13 @@ impl Connection {
         self.idle_timeout =
             negotiate_max_idle_timeout(self.config.max_idle_timeout, Some(params.max_idle_timeout));
         trace!("negotiated max idle timeout {:?}", self.idle_timeout);
+        // Foundation patch: before the first round-trip sample, 3 PTO fit in the
+        // negotiated idle timeout from 5 ms, also when the local one is longer.
+        if let Some(idle) = self.idle_timeout {
+            let rtt = &mut self.path_data_mut(PathId::ZERO).rtt;
+            let initial = rtt.get().min(idle / 10);
+            rtt.reset_initial_rtt(initial);
+        }
 
         if let Some(ref info) = params.preferred_address {
             // During the handshake PathId::ZERO exists.
