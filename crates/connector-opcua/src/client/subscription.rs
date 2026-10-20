@@ -68,6 +68,8 @@ pub(super) struct Subscription {
     most: usize,
     /// The sum of the queues that the server gave its items, each at least 1.
     queued: usize,
+    /// Each node of the subscribe whose item the server did not make, with its index.
+    unwatched: Vec<(usize, Node)>,
 }
 
 /// The shortest publishing interval of a subscription.
@@ -165,8 +167,7 @@ impl Client {
     ///
     /// The error of the read of `MaxMonitoredItemsPerCall`, or of a service request, as
     /// [`Client::serve`] gives it, of the `CreateSubscription` or of a
-    /// `CreateMonitoredItems` call, also a service result that is not Good. Such a
-    /// result of a `CreateMonitoredItems` call goes to each item of that call, also the
+    /// `CreateMonitoredItems` call, also a service result that is not Good, such as the
     /// `BadInternalError` that open62541 gives when the answer has more or fewer
     /// results than the call. `BadRequestTooLarge` goes to a node that does not fit
     /// one call. `BadOutOfRange` when the publishing interval that the server gives is
@@ -223,9 +224,10 @@ impl Client {
             per_call,
             most,
             queued: 0,
+            unwatched: Vec::new(),
         });
-        let indexes: Vec<usize> = (0..nodes.len()).collect();
-        let (items, large) = self.create(nodes, &indexes).await?;
+        let chosen: Vec<(usize, &Node)> = nodes.iter().enumerate().collect();
+        let (items, large) = self.create(&chosen).await?;
         Ok(Revised {
             interval: span(interval),
             items,
@@ -233,39 +235,58 @@ impl Client {
         })
     }
 
-    /// Creates a monitored item on the subscription of [`Client::subscribe`] for the
-    /// node at each index of `indexes` in `nodes`, the list of the subscribe, as the
-    /// subscribe makes its items: with the same sampling and queue, and changes that
-    /// give the index of the node. It sends them in `CreateMonitoredItems` calls as the
-    /// subscribe does, and reserves the memory of the changes of their queues. Gives
-    /// the item, or the status of its create result, for each index in order.
+    /// Asks the server again to watch each node of [`Client::subscribe`] whose item it
+    /// did not make, with the same sampling and queue, and changes that give the index
+    /// of the node. It sends them in `CreateMonitoredItems` calls as the subscribe
+    /// does, and reserves the memory of the changes of the queues of the new items.
+    /// Gives each node whose item the server still did not make: its index and the
+    /// status of its result, in order. Gives none, and sends no call, when no node is
+    /// left or no subscribe made a subscription.
     ///
     /// # Errors
     ///
-    /// As the `CreateMonitoredItems` calls of [`Client::subscribe`].
-    ///
-    /// # Panics
-    ///
-    /// When no [`Client::subscribe`] made a subscription before it, or an index is
-    /// not in `nodes`.
+    /// As the `CreateMonitoredItems` calls of [`Client::subscribe`]. After an error,
+    /// no node is left.
     ///
     /// # Aborts
     ///
     /// As [`Client::subscribe`].
-    pub(crate) async fn watch(
-        &mut self,
-        nodes: &[Node],
-        indexes: &[usize],
-    ) -> Result<Vec<Result<Sampled, Status>>, Status> {
-        Ok(self.create(nodes, indexes).await?.0)
+    pub(crate) async fn watch(&mut self) -> Result<Vec<(usize, Status)>, Status> {
+        let Some(subscription) = self.subscription.as_mut() else {
+            return Ok(Vec::new());
+        };
+        let unwatched = mem::take(&mut subscription.unwatched);
+        if unwatched.is_empty() {
+            return Ok(Vec::new());
+        }
+        let chosen: Vec<(usize, &Node)> = unwatched
+            .iter()
+            .map(|(index, node)| (*index, node))
+            .collect();
+        let (items, _) = self.create(&chosen).await?;
+        Ok(chosen
+            .into_iter()
+            .zip(items)
+            .filter_map(|((index, _), item)| Some((index, item.err()?)))
+            .collect())
     }
 
-    /// Creates the items of [`Client::watch`], and gives each node whose call alone is
-    /// past one message as a [`Large`] at its place in `indexes`.
+    /// Creates an item of the subscription for each node of `chosen`, whose client
+    /// handle is the index with it, and keeps each node whose item the server did not
+    /// make. Gives the item or the status of its result for each node, in order, and
+    /// each node whose call alone is past one message as a [`Large`] at its place in
+    /// `chosen`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::watch`].
+    ///
+    /// # Panics
+    ///
+    /// When no [`Client::subscribe`] made a subscription.
     async fn create(
         &mut self,
-        nodes: &[Node],
-        indexes: &[usize],
+        chosen: &[(usize, &Node)],
     ) -> Result<(Vec<Result<Sampled, Status>>, Vec<Large>), Status> {
         let &Subscription {
             id,
@@ -273,45 +294,44 @@ impl Client {
             queue,
             per_call,
             ..
-        } = (self.subscription.as_ref())
-            .expect("invariant: a watch comes after a subscribe");
-        // `sizes` builds requests of at most one node.
+        } = (self.subscription.as_ref()).expect("invariant: a subscribe made it");
         let build = |nodes: &[ffi::Node<'_>]| {
-            Request::monitor(id, nodes, &[0][..nodes.len()], sampling, queue)
+            let items: Vec<ffi::Item<'_>> = (nodes.iter())
+                .map(|&node| ffi::Item { node, handle: 0 })
+                .collect();
+            Request::monitor(id, &items, sampling, queue)
         };
         let sizes = self.sizes(build, Item::Created.bytes());
-        let split = self.split(indexes.len(), per_call, &sizes, |at| {
-            id_bytes(&nodes[indexes[at]])
-        });
-        let mut items = vec![Err(Status::BAD_REQUEST_TOO_LARGE); indexes.len()];
+        let split =
+            self.split(chosen.len(), per_call, &sizes, |at| id_bytes(chosen[at].1));
+        let mut items = vec![Err(Status::BAD_REQUEST_TOO_LARGE); chosen.len()];
         for range in split.ranges {
-            let chosen = &indexes[range.clone()];
-            let raw: Vec<ffi::Node<'_>> =
-                chosen.iter().map(|&index| (&nodes[index]).into()).collect();
-            let handles: Vec<u32> = (chosen.iter())
-                .map(|&index| {
-                    u32::try_from(index)
-                        .expect("invariant: a list holds fewer than 2^32 nodes")
+            let raw: Vec<ffi::Item<'_>> = (chosen[range.clone()].iter())
+                .map(|&(index, node)| ffi::Item {
+                    node: node.into(),
+                    handle: u32::try_from(index)
+                        .expect("invariant: a list holds fewer than 2^32 nodes"),
                 })
                 .collect();
-            let request = Request::monitor(id, &raw, &handles, sampling, queue);
-            let answer = self.exchange(&request).await?;
-            let result = answer.result();
+            let answer =
+                (self.exchange(&Request::monitor(id, &raw, sampling, queue))).await?;
+            answer.result()?;
             for (offset, item) in items[range].iter_mut().enumerate() {
-                *item = result.and_then(|()| answer.created(offset)).map(
-                    |(sampling, queue)| Sampled {
-                        sampling: span(sampling),
-                        queue,
-                    },
-                );
+                *item = answer.created(offset).map(|(sampling, queue)| Sampled {
+                    sampling: span(sampling),
+                    queue,
+                });
             }
         }
         let queued = (items.iter().flatten())
             .map(|item| usize::try_from(item.queue.max(1)).unwrap_or(usize::MAX))
             .fold(0, usize::saturating_add);
-        let subscription = (self.subscription.as_mut())
-            .expect("invariant: a watch comes after a subscribe");
+        let subscription =
+            (self.subscription.as_mut()).expect("invariant: a subscribe made it");
         subscription.queued = subscription.queued.saturating_add(queued);
+        let unwatched = chosen.iter().zip(&items).filter(|(_, item)| item.is_err());
+        (subscription.unwatched)
+            .extend(unwatched.map(|(&(index, node), _)| (index, node.clone())));
         let each = subscription.most.min(subscription.queued);
         (self.calls.changes).reserve(&mut self.changes, each);
         // SAFETY: the client lives, and decodes no answer between drives.

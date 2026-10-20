@@ -798,9 +798,8 @@ mod tests {
                     ids
                 };
                 let rng = Rng::from_seed(start);
-                ids.push(
-                    Server::scope(node.clock(), node.net(), address, rng, body).await,
-                );
+                let scope = Server::scope(node.clock(), node.net(), address, rng, body);
+                ids.push(Box::pin(scope).await);
             }
             ids
         })

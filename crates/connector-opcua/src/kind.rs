@@ -881,7 +881,7 @@ impl Note {
                 format!("polls: the server has no subscriptions ({status:?})")
             }
             Lead::Unwatched(at, status) => {
-                unwatched(&ctx.config().reads[at], status).to_string()
+                Failure::unwatched(&ctx.config().reads[at], status).to_string()
             }
         });
         let lead = lead.as_deref().unwrap_or_default();
@@ -1068,18 +1068,19 @@ impl fmt::Display for Failure {
 
 impl std::error::Error for Failure {}
 
-pub(crate) fn device(failure: Failure) -> Error {
-    Error::Device(Box::new(failure))
+impl Failure {
+    /// The [`Failure::Unwatched`] of the node of `read`, with `status`.
+    fn unwatched(read: &Read, status: Status) -> Self {
+        Self::Unwatched {
+            node: read.node.to_string(),
+            channel: read.channel.to_string(),
+            status,
+        }
+    }
 }
 
-/// The [`Failure`] of the node of `read`, which the server does not watch, with
-/// `status`.
-fn unwatched(read: &Read, status: Status) -> Failure {
-    Failure::Unwatched {
-        node: read.node.to_string(),
-        channel: read.channel.to_string(),
-        status,
-    }
+pub(crate) fn device(failure: Failure) -> Error {
+    Error::Device(Box::new(failure))
 }
 
 /// The [`Error::Device`] of `call` to the server at `address` that failed with

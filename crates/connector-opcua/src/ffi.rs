@@ -11,6 +11,7 @@ use std::ptr;
 
 /// `shim_node`: a node that borrows its name from a [`crate::node::Node`].
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub(crate) struct Node<'a> {
     namespace: u16,
     number: u32,
@@ -36,6 +37,14 @@ impl<'a> From<&'a crate::node::Node> for Node<'a> {
             borrowed: PhantomData,
         }
     }
+}
+
+/// `shim_item`: an item of a `CreateMonitoredItems` request.
+#[repr(C)]
+pub(crate) struct Item<'a> {
+    pub(crate) node: Node<'a>,
+    /// The client handle of the item.
+    pub(crate) handle: u32,
 }
 
 impl Node<'_> {
@@ -147,6 +156,11 @@ impl Status {
     pub(crate) const BAD_SECURITY_MODE_REJECTED: Self = Self(0x8054_0000);
     #[cfg(test)]
     pub(crate) const BAD_DECODING_ERROR: Self = Self(0x8007_0000);
+
+    /// Whether the severity of the status is Bad.
+    pub(crate) fn bad(self) -> bool {
+        self.0 >> 31 == 1
+    }
 
     /// Whether the code is of the severity Uncertain.
     pub(crate) fn uncertain(self) -> bool {
@@ -346,6 +360,8 @@ const _: () = {
     );
     assert!(size_of::<Node<'_>>() == 24, "shim_node changed");
     assert!(offset_of!(Node<'_>, name) == 8, "shim_node.name moved");
+    assert!(size_of::<Item<'_>>() == 32, "shim_item changed");
+    assert!(offset_of!(Item<'_>, handle) == 24, "shim_item.handle moved");
     assert!(size_of::<Scalar>() == 8, "shim_scalar changed");
     assert!(size_of::<Reference>() == 88, "shim_reference changed");
     assert!(
@@ -967,9 +983,8 @@ unsafe extern "C" {
     ) -> *mut c_void;
     pub(crate) fn shim_monitor_new(
         subscription: u32,
-        nodes: *const Node<'_>,
+        items: *const Item<'_>,
         count: usize,
-        handles: *const u32,
         sampling: f64,
         queue: u32,
     ) -> *mut c_void;

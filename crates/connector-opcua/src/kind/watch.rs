@@ -6,9 +6,9 @@ use connector::stamp::{Fit, Fitted};
 use document::diagnostic::{Code, Diagnostic};
 use types::time::{Interval, Monotonic, Span, Stamp};
 
-use super::{Call, Failure, Frames, Why, failed, too_large, unwatched};
+use super::{Call, Failure, Frames, Why, failed, too_large};
 use crate::client::Client;
-use crate::client::subscription::{Change, Sampled};
+use crate::client::subscription::Change;
 use crate::config::{Config, Read};
 use crate::ffi::Status;
 use crate::node::Node;
@@ -38,7 +38,8 @@ const OFFSET: i64 = 1 << 62;
 ///
 /// [`Error::Device`] when a read of the current time, the subscribe, or a call to
 /// watch a node again fails, when the server has no room to watch a node
-/// (`BadTooManyMonitoredItems`), and when the subscription ends.
+/// (`BadTooManyMonitoredItems`) or gives an item a status that is not Bad, and when
+/// the subscription ends.
 /// [`Error::Config`] with `opcua.no-timestamp` for a Good change with no timestamp that
 /// maps to mesh time, and with `opcua.large-watch` for a node whose
 /// `CreateMonitoredItems` call alone is past one message of the server. The errors of
@@ -66,10 +67,6 @@ pub(super) async fn run(
             revised.map_err(|status| failed(client.url(), Call::Subscribe, status))?
         }
     };
-    let mut statuses = revised.items.iter().filter_map(|item| item.as_ref().err());
-    if let Some(&status) = statuses.find(|&&status| unsupported(status)) {
-        return Ok(Some(status));
-    }
     if let Some(large) = revised.large.first() {
         return Err(too_large(
             LARGE_WATCH,
@@ -78,8 +75,10 @@ pub(super) async fn run(
             large,
         ));
     }
-    let mut unwatched: Vec<usize> = (0..reads.len()).collect();
-    refused(frames, reads, &mut unwatched, &revised.items)?;
+    let unwatched: Vec<(usize, Status)> = (revised.items.iter().enumerate())
+        .filter_map(|(at, item)| Some((at, *item.as_ref().err()?)))
+        .collect();
+    refused(frames, reads, &unwatched)?;
     ctx.clear_error();
     let missed = ctx.count("missed");
     let mut drive = Drive::new(reads.len());
@@ -105,11 +104,12 @@ pub(super) async fn run(
             };
             read?;
             due = ctx.clock().now() + READ;
-            let watch = watch(ctx, client, &nodes, frames, &mut unwatched);
-            let Some(watched) = ctx.cancel().race(watch).await else {
+            let Some(unwatched) = ctx.cancel().race(client.watch()).await else {
                 break;
             };
-            watched?;
+            let unwatched = unwatched
+                .map_err(|status| failed(client.url(), Call::Subscribe, status))?;
+            refused(frames, reads, &unwatched)?;
         }
         drive.write(frames, &server.fit, reads)?;
     }
@@ -202,59 +202,28 @@ impl Server {
     }
 }
 
-/// Asks the server to watch the node of each read of `unwatched` again, when it is
-/// not empty, and keeps in it each read that the server refused, as [`refused`] does.
+/// Counts each read of `unwatched`, whose node the server does not watch, with the
+/// status of its item, as `bad`, and names the first in the note of `frames`.
 ///
 /// # Errors
 ///
-/// [`Error::Device`] when the call fails, and the errors of [`refused`].
-async fn watch(
-    ctx: &Context<Config>,
-    client: &mut Client,
-    nodes: &[Node],
-    frames: &mut Frames<'_>,
-    unwatched: &mut Vec<usize>,
-) -> Result<(), Error> {
-    if unwatched.is_empty() {
-        return Ok(());
-    }
-    let items = client
-        .watch(nodes, unwatched)
-        .await
-        .map_err(|status| failed(client.url(), Call::Subscribe, status))?;
-    refused(frames, &ctx.config().reads, unwatched, &items)
-}
-
-/// Keeps in `tried` each read of it whose item of `items`, in the same order, the
-/// server refused, counts each as `bad`, and names the first in the note of `frames`.
-///
-/// # Errors
-///
-/// [`Error::Device`] for the first item that the server refused with
-/// `BadTooManyMonitoredItems`, as it has no room for it.
+/// [`Error::Device`] for the first read whose status is `BadTooManyMonitoredItems`, as
+/// the server has no room for it, or is not Bad, as the server can hold its item and a
+/// try would make another.
 fn refused(
     frames: &mut Frames<'_>,
     reads: &[Read],
-    tried: &mut Vec<usize>,
-    items: &[Result<Sampled, Status>],
+    unwatched: &[(usize, Status)],
 ) -> Result<(), Error> {
-    let (mut first, mut kept) = (None, 0);
-    for (index, item) in items.iter().enumerate() {
-        let (at, &Err(status)) = (tried[index], item) else {
-            continue;
-        };
-        if status == Status::BAD_TOO_MANY_MONITORED_ITEMS {
-            return Err(super::device(unwatched(&reads[at], status)));
-        }
-        first = first.or(Some((at, status)));
-        tried[kept] = at;
-        kept += 1;
+    let ends = |&&(_, status): &&(usize, Status)| {
+        !status.bad() || status == Status::BAD_TOO_MANY_MONITORED_ITEMS
+    };
+    if let Some(&(at, status)) = unwatched.iter().find(ends) {
+        return Err(super::device(Failure::unwatched(&reads[at], status)));
     }
-    tried.truncate(kept);
-    frames
-        .left
-        .add(u64::try_from(kept).unwrap_or(u64::MAX), 0, 0);
-    frames.unwatched(first);
+    let count = u64::try_from(unwatched.len()).unwrap_or(u64::MAX);
+    frames.left.add(count, 0, 0);
+    frames.unwatched(unwatched.first().copied());
     Ok(())
 }
 
