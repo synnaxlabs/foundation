@@ -522,6 +522,45 @@ fn a_lost_ack_of_a_handshake_times_out_the_accept_and_leaves_the_backlog() {
     assert_eq!(take(&server), at(&a, 49_153));
 }
 
+/// Gives the port of the peer of the accept after the last ACK of a handshake is lost
+/// from its send until `heal` seconds, and a second connect at 64 s, which a full
+/// backlog refuses.
+fn accept_after_a_lost_handshake_ack(heal: i64) -> u16 {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let listen = tcp::Listen {
+        local: at(&b, 4433),
+        backlog: 0,
+        options: options(),
+    };
+    let mut listener = b.net().listen(&listen).unwrap();
+    let remote = at(&b, 4433);
+    let _first = start(&a, "first", move |node| async move {
+        connect(&node, remote, options()).await.unwrap()
+    });
+    sim.run_for(Span::from_nanos(3 * delay().nanos() / 2))
+        .unwrap();
+    sim.link(&a, &b, cut());
+    sim.run_for(secs(heal)).unwrap();
+    sim.link(&a, &b, link::Config::default());
+    sim.run_for(secs(64 - heal)).unwrap();
+    let server = start(&b, "server", move |_| async move {
+        accept(&mut listener).await.peer()
+    });
+    let _second = start(&a, "second", move |node| async move {
+        connect(&node, remote, options()).await.ok()
+    });
+    sim.run().unwrap();
+    take(&server).port()
+}
+
+#[test]
+fn a_lost_ack_of_a_handshake_goes_again_at_31_s_and_leaves_the_backlog_at_63_s() {
+    // The ACK goes at the RTO of a SYN-ACK: at 1, 3, 7, 15, and 31 s, and the accepting
+    // end times out at 63 s.
+    assert_eq!(accept_after_a_lost_handshake_ack(30), 49_152);
+    assert_eq!(accept_after_a_lost_handshake_ack(32), 49_153);
+}
+
 #[test]
 fn a_held_byte_times_out_by_the_time_it_was_held_not_the_time_it_went() {
     let (mut sim, a, b) = pair(0, link::Config::default());
