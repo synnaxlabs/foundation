@@ -12,8 +12,9 @@
   it names in its place; `When`, required when the body holds any attribute that it
   names; `Default`, whose absence gives a value; or `Optional`, whose absence gives
   none, and a rule that needs it when the body holds another attribute is `When`. The
-  summary of the body states each other rule that ties it to other attributes, such as a
-  `placement` that names at least one of `home`, `standby`, and `copies`.
+  summary of the body states each other rule that ties an `Optional` attribute to other
+  attributes, such as a `placement` that names at least one of `home`, `standby`, and
+  `copies`.
   `Presence::needed` states, from the attributes of a body, when it needs it. Each form
   of `config::SCHEMA` holds examples, which pin which attributes it takes and which it
   needs: the check takes each with no diagnostic, still with an attribute removed that

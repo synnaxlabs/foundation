@@ -62,8 +62,7 @@ pub enum Presence {
     Default(&'static str),
     /// A body can leave it out, which gives no value. A rule that needs it when the
     /// body holds another attribute is `When`. The summary of the body states each
-    /// other rule that ties it to other attributes, such as a `placement` that names at
-    /// least one of `home`, `standby`, and `copies`.
+    /// other rule that ties it to other attributes.
     Optional,
 }
 
