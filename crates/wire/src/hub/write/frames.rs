@@ -187,10 +187,10 @@ impl Frames {
         self.drafted()
     }
 
-    /// Takes no draft for the frame whose draft is due, when the pool of the home has
-    /// no block for it. The frame's body, when it has one, then comes as
-    /// [`Due::Message`], and [`Frames::decode`] checks each message, drops it, and
-    /// gives [`Step::More`].
+    /// Takes no draft for the frame whose draft is due: the pool of the home has no
+    /// block for it, or the node sends the frame on unchanged. The frame's body, when
+    /// it has one, then comes as [`Due::Message`], and [`Frames::decode`] checks each
+    /// message, drops it, and gives [`Step::More`].
     ///
     /// # Panics
     ///
