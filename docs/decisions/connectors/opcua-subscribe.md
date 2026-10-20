@@ -47,7 +47,8 @@
   grew after the connect (`laptop.architect-2`, item 2 of 6279727836).
   `Writer::write` never waits, so the longest wait of a drive, while a change waits in
   the client and no Publish request goes out, is the 5 s timeout of the `CurrentTime`
-  read. The client asks for a keep-alive of 1 min, and the lifetime of a subscription
+  read, and 5 s more for each `CreateMonitoredItems` call of the try after it. The
+  client asks for a keep-alive of 1 min, and the lifetime of a subscription
   is at least three keep-alives, so it passes only when no Publish request reaches the
   server for about 3 min. The values that the server samples past the queue in such a
   gap are lost with no count, as the polled mode loses the reads of a link that is
@@ -70,11 +71,17 @@
   the note of a node of another type. After each read of `CurrentTime`, the run asks
   the server to watch those nodes in one `CreateMonitoredItems` call, or more past
   `MaxMonitoredItemsPerCall` or one message. A node that the server then watches
-  writes its first value, and its note goes. `BadTooManyMonitoredItems`, at the
-  subscribe or at a try, ends the run with `kind::Error::Device`, as the server can
-  have room at the next connect (`laptop.architect-2`, 2026-10-20T04:52:46Z, the
-  design of https://github.com/synnaxlabs/foundation/issues/3509, and the plan,
-  https://github.com/synnaxlabs/foundation/issues/3509#issuecomment-6299268355). A
+  writes its first value, and its note goes. At the subscribe or at a try, an item
+  status of `BadTooManyMonitoredItems` ends the run with `kind::Error::Device`, as the
+  server can have room at the next connect. So does an item status that is not Bad,
+  such as `GoodOverload`: the server holds the item, and open62541 keeps none, so a
+  try would make another. So does a `CreateMonitoredItems` call whose service result
+  is not Good, other than at the subscribe as below (`laptop.architect-2`,
+  2026-10-20T04:52:46Z, the design of
+  https://github.com/synnaxlabs/foundation/issues/3509; `laptop.monitor`,
+  2026-10-20T19:20:29Z,
+  https://github.com/synnaxlabs/foundation/issues/3509#issuecomment-6299274721, of the
+  plan https://github.com/synnaxlabs/foundation/issues/3509#issuecomment-6299268355). A
   node whose CreateMonitoredItems call alone is past one message of the server ends
   the run with `kind::Error::Config` and `opcua.large-watch`, as `opcua.large-read`
   does for a Read, unless an answer of the subscribe is `BadServiceUnsupported` or
