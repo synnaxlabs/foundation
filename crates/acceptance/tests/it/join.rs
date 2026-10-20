@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::lab::Lab;
 
 #[test]
-#[ignore = "waits on #336, #1157, #1231"]
+#[ignore = "waits on #336, #1157"]
 fn two_nodes_join_by_ticket_and_agree_on_the_spec() {
     let mut lab = Lab::new(1);
     let cloud = lab.start("cloud");
