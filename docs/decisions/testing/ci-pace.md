@@ -76,3 +76,9 @@
   `--exact --skip`. In queue run 39308250221, `check` took 32 min, `macos` 35 min,
   `windows` 28 min, and the `test` of ARM 22 min, and on Linux `cargo test` ran 173 test
   binaries and 40 doc-test sets one after another.
+  Amended (`laptop.monitor`, factory message `54cd29e1`, 2026-10-19, through #3448):
+  ARM runs the two parts at the same time. The matrix job `parts` of `arm.yaml` runs
+  `cargo xtask test nextest` and `cargo xtask test serial` on two runners, and the
+  job `test` gives the required check `test`, which passes when both parts passed. Both
+  skip when the filter found no change of code. In run 39335833233 the one job took
+  21 min.
