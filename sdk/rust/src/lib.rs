@@ -103,8 +103,10 @@ impl Node {
 
     /// The node that answers first at `addresses`, dialed in this order with a
     /// stagger, with the public key that it proves. Blocks until a node answers or
-    /// each address fails. Trust on first use: nothing proves that it is the node the
-    /// caller means, so the caller pins the result and gives it to each later
+    /// each address fails, then until the transport drains the close of each session
+    /// (up to 3 s), which goes out again for each packet that comes before the end of
+    /// its drain. Trust on first use: nothing proves that it is the node the caller
+    /// means, so the caller pins the result and gives it to each later
     /// [`Client::connect`]. It sends no hello, so it needs no subject.
     ///
     /// # Errors
@@ -128,7 +130,7 @@ impl Node {
         let (sender, key) = mpsc::channel();
         let shard = shard(move |tasks| async move {
             sender
-                .send(answered(&dialed, tasks).await)
+                .send(answered(&dialed, on_os(tasks)).await)
                 .expect("invariant: `answering` keeps the receiver");
         })?;
         shard.join().map_err(|_panicked| Error::Panicked)?;
@@ -142,28 +144,39 @@ impl Node {
     }
 }
 
-/// The public key of the node that answers first at `addresses`, on the drivers of
-/// `os` and `tasks`. Closes the session with code 0 and waits for its end. The close
-/// goes out once, so the node waits out its idle timeout only when the close is lost.
-async fn answered(
-    addresses: &[transport::Address],
-    tasks: Tasks,
-) -> Result<PublicKey, Error> {
-    let transport = transport::Client::new(transport::client::Config {
+/// The config of a transport of the program on the drivers of `os` and `tasks`.
+fn on_os(tasks: Tasks) -> transport::client::Config {
+    transport::client::Config {
         net: os::net(),
         clock: os::clock(),
         entropy: os::entropy(),
         tasks,
         pool: Rc::new(block::Pool::heap(POOL)),
-    })
-    .map_err(Error::Bind)?;
+    }
+}
+
+/// The public key of the node that answers first at `addresses`, on a transport of
+/// `config`. Closes the session with code 0 and waits until the close drains, so
+/// that the close goes out again for each packet of the node that comes before its
+/// end.
+async fn answered(
+    addresses: &[transport::Address],
+    config: transport::client::Config,
+) -> Result<PublicKey, Error> {
+    let group = Group::new(config.tasks);
+    let config = transport::client::Config {
+        tasks: group.tasks().clone(),
+        ..config
+    };
+    let transport = transport::Client::new(config).map_err(Error::Bind)?;
     let session = transport.dial_any(addresses).await;
     let session = session.map_err(|e| Error::Session(program::Error::Transport(e)))?;
     let transport::Peer::Node(public_key) = session.peer() else {
         unreachable!("invariant: the dialed side always proves a node key");
     };
     session.close(transport::Code(0));
-    session.closed().await;
+    drop((session, transport));
+    group.ended().await;
     Ok(public_key)
 }
 
