@@ -11,7 +11,10 @@
   `|offset| <= BOUND`, the 1 s target of the MVP (the target). A wider window shows a
   read too slow for the target, and no stamp rule meets it with one request. Read 0
   takes only the hold, since its window holds the start of the node. In each of the
-  three tests, sample `k` stored has the value of read `k`, and read `k` is Good. A
+  three tests, sample `k` stored has the value of read `k`, and read `k` is Good. The
+  three tests run the `opcua` kind with `polled = true`, which writes a sample of each
+  read (`laptop.monitor`, kinds d and g of #3507, quoted at 2026-10-20T06:49:37Z in
+  https://github.com/synnaxlabs/foundation/pull/3507#issuecomment-6285161214). A
   failure gives the offset and window of each checked sample. After #2627, the hold
   takes the error that the node writes for the sample in place of `W_k / 2`. A clock
   stall at the start of the node gets its own issue when a failure shows it, with its

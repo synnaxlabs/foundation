@@ -11,7 +11,7 @@ use std::task::Poll;
 use types::time::{Span, Stamp};
 
 use super::service::{Item, Request};
-use super::{Calls, Client, PUBLISHES, READS, id_bytes};
+use super::{Calls, Client, Large, PUBLISHES, READS, id_bytes};
 use crate::alloc;
 use crate::ffi::{self, Status};
 use crate::node::Node;
@@ -40,6 +40,9 @@ pub(crate) struct Revised {
     pub(crate) interval: Span,
     /// For each node, in order, its item, or the status of its create result.
     pub(crate) items: Vec<Result<Sampled, Status>>,
+    /// Each node whose call alone is past one message, in order. Its item is
+    /// `BadRequestTooLarge`.
+    pub(crate) large: Vec<Large>,
 }
 
 /// A monitored item that the server made.
@@ -124,17 +127,17 @@ impl Client {
     /// Creates a subscription, and a monitored item for each node of `nodes` that
     /// samples at `sampling`. It asks for a publishing interval of `sampling`, at
     /// least 100 ms and at most 1 min, and a keep-alive count of the publishing
-    /// intervals in 1 min. Each item queues the values that it samples in two
-    /// publishing intervals that the server gives, the oldest dropped first. Each item
-    /// asks for both timestamps and a change of the status or the value. It reads the
-    /// `MaxMonitoredItemsPerCall` of the server, and sends the items in
-    /// `CreateMonitoredItems` calls of at most that many. Each answer of a Publish fits
-    /// the receive limit of the client, for items of a scalar of at most 8 bytes. Once
-    /// the server makes the subscription, the client keeps [`PUBLISHES`] Publish
-    /// requests in flight, or fewer after a server refuses one, and [`Client::read`]
-    /// and the services send fewer to keep the sum from the call. Each change that
-    /// comes, also while the client reads or serves, stays in the client until
-    /// [`Client::changes`] gives it, with no drop.
+    /// intervals in 1 min. Each item queues the values that it samples in the larger
+    /// of two publishing intervals that the server gives and two of `round_trip`, the
+    /// oldest dropped first. Each item asks for both timestamps and a change of the
+    /// status or the value. It reads the `MaxMonitoredItemsPerCall` of the server, and
+    /// sends the items in `CreateMonitoredItems` calls of at most that many. Each
+    /// answer of a Publish fits the receive limit of the client, for items of a scalar
+    /// of at most 8 bytes. Once the server makes the subscription, the client keeps
+    /// [`PUBLISHES`] Publish requests in flight, or fewer after a server refuses one,
+    /// and [`Client::read`] and the services send fewer to keep the sum from the call.
+    /// Each change that comes, also while the client reads or serves, stays in the
+    /// client until [`Client::changes`] gives it, with no drop.
     /// While a change waits, the client sends no Publish request, so at most the
     /// answers of the [`PUBLISHES`] requests in flight wait, and later values wait in
     /// the queues of the server. It reserves the memory of the changes of
@@ -164,14 +167,11 @@ impl Client {
     ///
     /// When the client cannot reserve the memory of the decode of a Publish answer:
     /// the process stops as the Rust allocator does when it has no memory.
-    #[cfg_attr(
-        not(any(test, feature = "sim")),
-        expect(dead_code, reason = "PR 5 of #2622 calls it")
-    )]
     pub(crate) async fn subscribe(
         &mut self,
         nodes: &[Node],
         sampling: Span,
+        round_trip: Span,
     ) -> Result<Revised, Status> {
         assert!(
             sampling > Span::ZERO,
@@ -200,7 +200,7 @@ impl Client {
         // SAFETY: the client lives.
         unsafe { ffi::shim_client_publish_resume(self.raw.as_ptr()) };
         let sampling = ms(sampling);
-        let queue = queue(interval, sampling);
+        let queue = queue(interval.max(ms(round_trip)), sampling);
         let build =
             |nodes: &[ffi::Node<'_>]| Request::monitor(id, nodes, 0, sampling, queue);
         let sizes = self.sizes(build, Item::Created.bytes());
@@ -239,6 +239,7 @@ impl Client {
         Ok(Revised {
             interval: span(interval),
             items,
+            large: split.large,
         })
     }
 
@@ -253,10 +254,6 @@ impl Client {
     /// `GoodSubscriptionTransferred`, `BadTooManyPublishRequests` when the server
     /// refuses a Publish request while the client keeps 1 in flight, or
     /// `BadNoSubscription` when open62541 deleted it with no status change.
-    #[cfg_attr(
-        not(any(test, feature = "sim")),
-        expect(dead_code, reason = "PR 5 of #2622 calls it")
-    )]
     pub(crate) async fn changes(
         &mut self,
         until: impl Future<Output = ()>,
@@ -300,15 +297,15 @@ fn span(ms: f64) -> Span {
     Span::from_nanos((ms * 1e6) as i64)
 }
 
-/// Gives the size of a queue that holds the values sampled every `sampling` ms in two
-/// publishing intervals of `interval` ms: 0 for NaN, and `u32::MAX` when it is past.
+/// Gives the size of a queue that holds the values sampled every `sampling` ms in
+/// twice `span` ms: 0 for NaN, and `u32::MAX` when it is past.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     reason = "the cast saturates, as the doc says"
 )]
-fn queue(interval: f64, sampling: f64) -> u32 {
-    (2.0 * (interval / sampling).ceil()) as u32
+fn queue(span: f64, sampling: f64) -> u32 {
+    (2.0 * (span / sampling).ceil()) as u32
 }
 
 /// Gives `count`, or `u32::MAX` when it is past.

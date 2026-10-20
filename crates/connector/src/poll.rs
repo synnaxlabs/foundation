@@ -1,4 +1,5 @@
-//! The frames of a kind that polls: one value of each channel per request.
+//! The frames of a kind that reads values: one value of each channel that a frame
+//! keeps, at the stamp of a request or of a sample.
 
 use std::mem;
 
@@ -9,7 +10,7 @@ use types::authority::Authority;
 use types::frame::{self, Draft, Form, Label, Path, key_set};
 use types::name::Name;
 use types::sample::{Scalar, Type, Value};
-use types::time::Stamp;
+use types::time::{Interval, Span, Stamp};
 
 use crate::kind::{Context, Error};
 use crate::stamp::Stamps;
@@ -25,10 +26,10 @@ pub const COUNTS: [&str; 2] = ["in", "lost"];
 
 const INDEX: Code = Code::new("connector.index");
 
-/// The frames of a kind that reads one value of each channel per request: each frame
-/// has one sample of each channel that it keeps, and the stamp of the request in each
-/// index. It counts the samples that the home applied as `in`, and the samples that a
-/// frame lost as `lost`. No write allocates after the first.
+/// The frames of a kind that reads values: each frame has one sample of each channel
+/// that it keeps, and the stamp of the request or of the sample in each index. It
+/// counts the samples that the home applied as `in`, and the samples that a frame lost
+/// as `lost`. No write allocates after the first.
 #[derive(Debug)]
 pub struct Writer {
     hub: hub::writer::Writer,
@@ -207,6 +208,18 @@ impl Writer {
     /// of the mesh times before and after it, or 1 ns after the last stamp.
     pub async fn request<T>(&mut self, request: impl Future<Output = T>) -> (T, Stamp) {
         self.stamps.request(&self.hub, request).await
+    }
+
+    /// Gives the stamp of a frame of samples whose true mesh time is within `time`, and
+    /// whose values hold until at least `held`, with its error, as [`Stamps::sample`]
+    /// gives them. Each stamp is after the stamp of each frame that this writer wrote
+    /// or stamped before.
+    ///
+    /// # Panics
+    ///
+    /// When the last stamp is `i64::MAX` ns.
+    pub fn sample(&mut self, time: Interval, held: Stamp) -> (Stamp, Span) {
+        self.stamps.sample(time, held)
     }
 
     /// Writes one frame at `stamp` with the value of each channel that `values` gives,
