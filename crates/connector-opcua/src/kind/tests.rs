@@ -3322,17 +3322,17 @@ fn rejected(mode: client::Mode) -> String {
     match mode {
         client::Mode::SignAndEncrypt => format!(
             "{UNOFFERED} SignAndEncrypt {POLICIES} that lets in a user name and \
-             password with a token in the policy None or one of these, or it {REFUSED}. \
-             For a server with only Sign endpoints, set `unencrypted = true`; else turn \
-             on one of these policies with a user name token in the policy None or one \
-             of these on the server"
+             password with a token in the policy None or one of these, or it \
+             {REFUSED}. For a server with only Sign endpoints, set `unencrypted = \
+             true`; else turn on one of these policies with a user name token in the \
+             policy None or one of these on the server"
         ),
         client::Mode::Sign => format!(
             "{UNOFFERED} Sign {POLICIES} that lets in a user name and password with a \
              token in one of these policies, since a token in the policy None would \
-             send the password in clear, or it {REFUSED}. Turn on one of these policies \
-             in the mode Sign with a user name token in one of these policies on the \
-             server"
+             send the password in clear, or it {REFUSED}. Turn on one of these \
+             policies in the mode Sign with a user name token in one of these \
+             policies on the server"
         ),
     }
 }
@@ -3357,8 +3357,8 @@ fn an_invalid_token_names_both_causes() {
     };
     let cause = "the server could not read the user token (its policy or its \
                  encryption), or refused the user \"operator\" with the password \
-                 secret(\"plant.opcua_password\"). Check the user token policies of the \
-                 server, `user`, and the password secret(\"plant.opcua_password\")";
+                 secret(\"plant.opcua_password\"). Check the user token policies of \
+                 the server, `user`, and the password secret(\"plant.opcua_password\")";
     connect_fails(secure, "BadIdentityTokenInvalid", cause);
 }
 
