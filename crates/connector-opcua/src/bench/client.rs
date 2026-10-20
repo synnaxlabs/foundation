@@ -324,12 +324,14 @@ impl Client {
     /// # Panics
     ///
     /// If the subscription ends, with its status, or a change is not the Double of a
-    /// counter.
+    /// counter, which is at least 1.
     pub async fn changes(&mut self) -> usize {
         match self.session.changes(future::pending()).await {
             Ok(changes) => {
                 for change in changes {
-                    assert!(matches!(change.value, Ok(Value::F64(_))), "{change:?}");
+                    let counted =
+                        matches!(change.value, Ok(Value::F64(value)) if value >= 1.0);
+                    assert!(counted, "{change:?}");
                 }
                 changes.len()
             }
