@@ -977,10 +977,13 @@
   file to panic with its name and abort, and a test calls each one. A test fails on
   another policy file in `sources.txt`. A test fails when the production code names a
   policy or a certificate group, or a function `UA_CertificateUtils_*`, other than the
-  three policies in `POLICIES` of `shim.c`, `UA_CertificateGroup_Memorystore`,
-  `UA_CertificateUtils_checkKeyPair`, `UA_CertificateUtils_getApplicationUri`, and the
-  stubs of `shim.c` (`laptop.architect-2`, 2026-10-18 21:39 UTC,
-  https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255470380, item 1).
+  three policies in `POLICIES` of `shim.c`, `UA_CertificateGroup_Memorystore`, the
+  functions `UA_CertificateUtils_certificateLine`, `checkKeyPair`, `checkTime`,
+  `checkTrust`, `getApplicationUri`, `getSubjectName`, `getThumbprint`, and `keyLine`,
+  and the stubs of `shim.c` (`laptop.architect-2`, 2026-10-18 21:39 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255470380, item 1;
+  the full list, 2026-10-20,
+  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6285738820).
   A test fails when the objects of `shim.c` or `server.c` name aws-lc or a symbol of
   `PLUGINS`. `UA_Openssl_Init` of `securitypolicy_common.c` keeps
   no state: the copy removes its `static` flag, which it wrote with no lock and which
@@ -1244,7 +1247,11 @@
   PR 2e of #2934 names the certificate that a server does not trust by its SHA-1
   thumbprint and its subject, from `UA_CertificateUtils_getThumbprint` and
   `UA_CertificateUtils_getSubjectName` of the copy, through `shim_certificate_names`.
-  The test of the names that the production code calls takes these two. Lost: a parse
-  of the certificate in Rust, a second parser, and a hash of the DER in Rust, which
-  needs its own PEM read for a PEM certificate
+  The test of the names that the production code calls takes these two, as item 1 of
+  the ruling above states. `getSubjectName` gives `Good` and an empty subject when its
+  copy runs out of memory, so the shim gives `BadOutOfMemory` for an empty subject, and
+  the text names only the source (`laptop.architect-2`, condition 2,
+  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6285738820).
+  Lost: a parse of the certificate in Rust, a second parser, and a hash of the DER in
+  Rust, which needs its own PEM read for a PEM certificate
   (https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6285525305).

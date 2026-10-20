@@ -153,7 +153,8 @@ pub(crate) struct Names {
     pub(crate) subject: String,
 }
 
-/// The [`Names`] of `certificate`, DER or PEM, or `None` when it does not parse.
+/// The [`Names`] of `certificate`, DER or PEM, or `None` when it does not parse, its
+/// subject is empty, or memory runs out.
 pub(crate) fn names(certificate: &[u8]) -> Option<Names> {
     let raw = ffi::Bytes::of(certificate);
     let (mut thumbprint, mut subject) = ([0; 40], ffi::Bytes::default());

@@ -19,8 +19,8 @@ use crate::ffi::{self, Status};
 use crate::secure::{
     ANONYMOUS, BROKEN_TRUST, CLIENT, CLIENT_ONLY_SERVER, CLIENT_PEM, EC, EMPTY_URI,
     END, HEADED_TRUST, HIGH_PEM, Identity, LASTING, LINE_TRUST, LONG_BLOCK_TRUST,
-    LONG_KEY, ONE_BLOCK_TRUST, OTHER, Policy, REJECTED_SERVER, SERVER, START, TRUST,
-    TWO_URIS, UNNAMED,
+    LONG_KEY, NAMELESS, ONE_BLOCK_TRUST, OTHER, Policy, REJECTED_SERVER, SERVER, START,
+    TRUST, TWO_URIS, UNNAMED,
 };
 use crate::server::Limits;
 use crate::value::{Fault, Value};
@@ -1270,6 +1270,7 @@ fn names_give_the_thumbprint_and_subject_of_a_der_or_pem_certificate() {
         subject: "/CN=server".into(),
     };
     assert_eq!(names(SERVER.certificate), Some(server));
+    assert_eq!(names(NAMELESS), None);
     assert_eq!(names(b"no certificate"), None);
     assert_eq!(names(b""), None);
 }

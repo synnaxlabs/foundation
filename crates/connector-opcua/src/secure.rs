@@ -39,6 +39,9 @@ pub(crate) const UNNAMED: Identity = Identity {
     key: CLIENT.key,
 };
 
+/// A certificate on the key of [`CLIENT`] with an empty subject.
+pub(crate) const NAMELESS: &[u8] = include_bytes!("secure/nameless.der");
+
 /// A client on the key of [`CLIENT`] whose first URI is empty.
 pub(crate) const EMPTY_URI: Identity = Identity {
     certificate: include_bytes!("secure/empty-uri.der"),
