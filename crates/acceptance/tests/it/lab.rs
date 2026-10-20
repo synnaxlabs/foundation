@@ -863,19 +863,19 @@ impl Lab {
                 "params": { "name": tool, "arguments": arguments },
             }),
         ];
-        // `reach` ignores `--data`, which names an empty folder of the host (#3647).
+        // `reach` ignores `--data`, which names no folder there (#3647).
         let args = ["mcp", "--files", FILES, "--data", "/data"];
         let output = self.cli(node, &args, &messages.map(|m| format!("{m}\n")));
         let last = output.trim_ascii_end().rsplit(|&byte| byte == b'\n').next();
         let reply: serde_json::Value = serde_json::from_slice(last.unwrap_or_default())
             .expect("lab failure: a JSON reply");
-        let result = &reply["result"];
-        if let Some(content) = result.get("structuredContent") {
-            return content.clone();
+        let (error, result) = (&reply["error"], &reply["result"]);
+        if !error.is_null() || result["isError"] == true {
+            let text = result["content"][0]["text"].as_str();
+            let error = text.map_or_else(|| error.to_string(), str::to_owned);
+            panic!("lab failure: the MCP tool {tool} gave {error}");
         }
-        let text = result["content"][0]["text"].as_str();
-        let error = text.map_or_else(|| reply["error"].to_string(), str::to_owned);
-        panic!("lab failure: the MCP tool {tool} gave {error}");
+        result["structuredContent"].clone()
     }
 
     /// Runs `foundation` with `args` on the host of `node`, as the first admin, once
