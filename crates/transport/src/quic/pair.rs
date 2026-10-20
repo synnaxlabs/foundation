@@ -338,7 +338,8 @@ impl Side {
 }
 
 /// A peer that runs noq-proto with no [`Endpoint`] above it, so a test writes its
-/// streams, its hello too. It speaks the TLS of a node with [`FOREIGN_KEY`].
+/// streams, its hello too. It speaks the TLS of a node with [`FOREIGN_KEY`], or the TLS
+/// of [`Foreign::proving`].
 pub(super) struct Foreign {
     /// The instant at the start of a run.
     epoch: Instant,
