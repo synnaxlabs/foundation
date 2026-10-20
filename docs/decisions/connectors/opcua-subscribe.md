@@ -29,7 +29,10 @@
   is at least three keep-alives, so it passes only when no Publish request reaches the
   server for about 3 min. The values that the server samples past the queue in such a
   gap are lost with no count, as the polled mode loses the reads of a link that is
-  down, and the Device text is the sign (`laptop.architect-2`, item 3 of 6279727836).
+  down (`laptop.architect-2`, item 3 of 6279727836). The end is not silent: the run
+  ends with the Device error "the subscription to {address} ended with {status}", which
+  the `error` status channel holds at the time of the end, and `restarts` counts it
+  (`laptop.monitor`, the condition on the lifetime end of the PR 5 key choices).
   A subscription that ends, or a node that the server does not watch, ends the run with
   `kind::Error::Device`. The run closes its session, the supervisor connects again with
   its backoff, and the next run subscribes again, so data starts again after a server
