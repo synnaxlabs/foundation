@@ -18,6 +18,7 @@ import numpy as np
 
 import foundation
 from test_client import PATIENCE, Node, fork
+from test_stubs import assert_stated, called
 from test_writer import CHANNELS, UNKNOWN, planted
 
 # A channel of each other type on the index of `plant.a`.
@@ -95,7 +96,8 @@ class ReaderTest(unittest.TestCase):
             self.assertIsNone(reader.close())
 
     def test_a_reader_gives_its_places_and_a_name_given_twice_once(self) -> None:
-        reader = self.client.open_reader(["plant.b", "plant.a", "plant.b"])
+        channels = ["plant.b", "plant.a", "plant.b"]
+        reader = called(self, self.client.open_reader, channels)
         self.addCleanup(reader.close)
         self.assertEqual(
             reader.places,
@@ -108,18 +110,21 @@ class ReaderTest(unittest.TestCase):
         both, one = self.read(reader, 2)
         self.assertIsInstance(both, collections.abc.Mapping)
         self.assertEqual(list(both), ["plant.b", "plant.a", "plant.time"])
-        self.assertEqual(len(both), 3)
+        self.assertEqual(called(self, both.__len__), 3)
         self.assertEqual(both["plant.b"].tolist(), [7])
-        self.assertEqual(list(both.keys()), ["plant.b", "plant.a", "plant.time"])
-        values = [series.tolist() for series in both.values()]
+        keys = called(self, both.keys)
+        self.assertEqual(list(keys), ["plant.b", "plant.a", "plant.time"])
+        values = [series.tolist() for series in called(self, both.values)]
         self.assertEqual(values[:2], [[7], [1.5]])
-        self.assertEqual([name for name, _ in both.items()], list(both))
+        self.assertEqual([name for name, _ in called(self, both.items)], list(both))
+        self.assertEqual(list(called(self, both.__iter__)), list(both))
         self.assertEqual(list(one), ["plant.a", "plant.time"])
         self.assertNotIn("plant.b", one)
-        self.assertIn("plant.a", one)
-        self.assertIsNone(one.get("plant.b"))
-        self.assertEqual(one.get("plant.b", 5), 5)
-        self.assertEqual(one.get("plant.a").tolist(), [2.5])
+        self.assertTrue(called(self, one.__contains__, "plant.a"))
+        self.assertIsNone(called(self, one.get, "plant.b"))
+        self.assertEqual(called(self, one.get, "plant.b", 5), 5)
+        self.assertEqual(called(self, one.get, "plant.a").tolist(), [2.5])
+        self.assertEqual(called(self, one.__getitem__, "plant.a").tolist(), [2.5])
         with self.assertRaises(KeyError) as raised:
             one["plant.b"]
         self.assertEqual(raised.exception.args, ("plant.b",))
@@ -243,7 +248,7 @@ class ReaderTest(unittest.TestCase):
                 writer.write_series({
                     "plant.a": np.full(4, value), "plant.time": stamps.take(4)
                 })
-        first = next(reader)["plant.a"]
+        first = called(self, reader.__next__)["plant.a"]
         second = next(reader)["plant.a"]
         self.assertEqual(first.tolist(), [1.0] * 4)
         self.assertEqual(second.tolist(), [2.0] * 4)
@@ -341,6 +346,7 @@ class ReaderTest(unittest.TestCase):
     ) -> None:
         reader, raised = self.lost("raise")
         self.assertIsInstance(raised, foundation.DataLost)
+        assert_stated(self, raised)
         frame = raised.frame
         self.assertIsInstance(frame, foundation.Frame)
         text = self.assert_lost(frame.lost)
@@ -495,6 +501,12 @@ class ReaderTest(unittest.TestCase):
             pass
         with self.assertRaises(StopIteration):
             next(reader)
+        reader = called(self, self.client.open_reader, "plant.a", mode="latest",
+                        on_loss="raise")
+        self.assertIs(called(self, reader.__enter__), reader)
+        self.assertIs(called(self, reader.__iter__), reader)
+        called(self, reader.__exit__, None, None, None)
+        called(self, reader.close)
         with self.assertRaises(ValueError):
             with self.client.open_reader("plant.a") as reader:
                 raise ValueError("the block")
