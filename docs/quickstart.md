@@ -55,7 +55,8 @@ channel "plant.trend" {
   index     = "plant.time"
 }
 
-# On node "edge", reads three values from the OPC UA server 10 times a second.
+# On node "edge", subscribes to three values of the OPC UA server, which samples each
+# 10 times a second.
 connector "plc" {
   kind    = "opcua"
   node    = "edge"
@@ -79,7 +80,13 @@ connector "influx" {
 
 A `channel` block makes a channel. An index channel holds the time of each sample,
 and each data channel points at its index. A `connector` block runs on the node that
-`node` names. The `rate` of the `opcua` connector sets how often it reads.
+`node` names. The `opcua` connector subscribes to each node of its reads: the server
+samples each node at the `rate`, and the node stores a sample of a node at its first
+value and at each change. The server sees only the value at each of its samples, so a
+change that a later change replaces before the next sample is not stored. Set the `rate`
+faster than the values change. A reader that opens later gets no sample of a node until
+it changes. With `polled = true`, the connector reads each node at each tick of the
+`rate` in place of a subscription.
 
 ## 3. Start the node
 
@@ -176,7 +183,9 @@ influx     influx  running  http://localhost:8086      confirmed=1517 lost=0 ove
 plc        opcua   running  opc.tcp://localhost:50000  bad=0 in=1520 lost=0 missed=0 mistyped=0 uncertain=0
 ```
 
-`in` counts the samples that the connector read from the server and the node stored.
+`in` counts the samples that the server sent for each change and the node stored.
+`missed` counts each time the server dropped changes because the node did not take
+them in time.
 `confirmed` counts the samples that InfluxDB confirmed, and `lost` the sample times that
 the node lost before InfluxDB got them, not the lines of only NaN or infinite values
 that the run leaves out. A gap that the node reports again after a restart counts again.
