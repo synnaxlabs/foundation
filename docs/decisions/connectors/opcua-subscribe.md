@@ -25,6 +25,12 @@
   change. Lost, a simple version first: the true time of the values on one side of a
   clock step inside one drive. A fit for each side of the step keeps it
   (https://github.com/synnaxlabs/foundation/issues/3514).
+  A subscription writes a node only at its first value and at each change, so a reader
+  that opens later gets no sample of a node until it changes. A complete reader with
+  no recorded position opens at the live tail (HOME NAMED READERS), and a latest reader
+  gets the newest frame of the index (B4), which holds only the nodes that changed at
+  its device time (`laptop.architect-2`, 2026-10-20T06:41:10Z, item 1 of
+  https://github.com/synnaxlabs/foundation/pull/3507#issuecomment-6285045565).
   Lost, a simple version first: a drive writes one frame of each channel for each
   device time, so a drive of k device times costs O(k × channels): 4.1 ms for 1000
   nodes with a device time for each change (AWS c7i.8xlarge). A sparse write of the
@@ -82,5 +88,9 @@
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6157622562. Lost: a
   Device error (it never ends); a Config error that asks for `polled = true`; a read of
   `ServerProfileArray` first. The opcua conformance suite runs the subscribed path,
-  and only crate tests run the polled path (`laptop.architect-2`, item 4 of
-  6279727836).
+  and crate tests run the polled path (`laptop.architect-2`, item 4 of 6279727836).
+  The ONE NODE tests whose plant `create_plant` or `create_token_plant` builds, and
+  those of EXIT TIME CHECK, run the polled path. The others, with
+  `a_subscribed_plant_stores_each_change_at_its_read`, run the subscribed path end to
+  end (`laptop.monitor`, kinds d and g of #3507,
+  https://github.com/synnaxlabs/foundation/pull/3507#issuecomment-6285161214).

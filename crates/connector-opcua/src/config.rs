@@ -62,7 +62,9 @@ pub(crate) const BODY: Body = Body {
             value: "a bool",
             presence: Presence::Optional,
             summary: "Reads each node once per tick of the rate, in place of a \
-                      subscription. Default false.",
+                      subscription. A subscription writes a node only at its first \
+                      value and at each change, so a reader that opens later gets no \
+                      sample of a node until it changes. Default false.",
         },
     ],
     blocks: &[schema::Block {
