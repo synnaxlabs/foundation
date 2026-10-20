@@ -85,10 +85,11 @@
   (`node::Error::Unstarted`) gives `node.unstarted` with the fix "Start the node once
   with `foundation start --data=<dir>`, with `--name <name>`", and a `<dir>` or
   `<dir>/data` that is a file gives `node.unstarted` with the fix "Give `--data` the
-  data directory of a node that has started once". A file that this user cannot read
-  gives `node.unreadable`. A `node.key` that a node did not write (`node::Error::Key`),
-  and a data directory with the directory of a mesh and no `node.key`, whose key is lost
-  (`node::Error::NoCard`, as at a start), give `node.failed`. `<address>` is where the
+  data directory of a node that has started once". A file or directory of the data
+  directory that this user cannot read gives `node.unreadable`. A `node.key` that a
+  node did not write (`node::Error::Key`), and a data directory with the directory of a
+  mesh and no `node.key`, whose key is lost (`node::Error::NoCard`, as at a start),
+  give `node.failed`. `<address>` is where the
   program dials the node: an unspecified IP or port 0 gives `ops.argument`. The output
   is the block as HCL, which `config_hcl::write` gives, or with `--json` one line
   `{"address": "<ip:port>", "public_key": "<the line of an OpenSSH .pub file>"}`, a
@@ -100,7 +101,11 @@
   https://github.com/synnaxlabs/foundation/pull/3479#issuecomment-6281210000
   (2026-10-20T01:31:13Z) and
   https://github.com/synnaxlabs/foundation/pull/3479#issuecomment-6281253212
-  (2026-10-20T01:34:49Z). Lost: a read of the file `address` through
+  (2026-10-20T01:34:49Z), and the `--json` object as a format of kind (f), the
+  `node.failed` of `node::Error::NoCard`, and the `node.unstarted` of a `<dir>` or
+  `<dir>/data` that is a file in
+  https://github.com/synnaxlabs/foundation/pull/3479#issuecomment-6282278441
+  (2026-10-20T02:57:43Z). Lost: a read of the file `address` through
   `sector::local::read`, which refuses a node that stopped; the `hcl` front end of
   `FrontEnds` as the writer, which keeps the format of a file that `ops` writes in
   `node`'s table; and a `Run::Profile` that `node` writes, which gives a second output
