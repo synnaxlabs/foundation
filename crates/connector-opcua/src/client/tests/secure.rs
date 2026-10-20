@@ -347,6 +347,21 @@ fn a_damaged_block_before_each_certificate_names_none() {
 }
 
 #[test]
+fn an_encrypted_certificate_of_the_trust_does_not_parse() {
+    let (other, _) = blocks();
+    let encrypted = include_str!("../../pem/encrypted-certificate.pem");
+    assert_eq!(trusting(encrypted), Err(invalid(1)));
+    assert_eq!(trusting(format!("{other}{encrypted}")), Err(invalid(2)));
+}
+
+#[test]
+fn a_certificate_block_with_a_header_does_not_parse() {
+    let (other, server) = blocks();
+    let server = server.replacen('\n', "\nComment: server\n\n", 1);
+    assert_eq!(trusting(format!("{other}{server}")), Err(invalid(2)));
+}
+
+#[test]
 fn a_trust_whose_begin_line_starts_no_block_drops_it() {
     let (other, server) = blocks();
     for begin in [
@@ -703,7 +718,7 @@ fn a_refusal_names_the_part_that_fails() {
         ),
         (
             Refusal::Damaged { after: 0 },
-            "a PEM block of the trust before its first certificate is damaged",
+            "a PEM block of the trust is damaged, with no certificate before it",
         ),
         (
             Refusal::Trailing { number: 3 },

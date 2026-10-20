@@ -96,8 +96,8 @@ pub(crate) unsafe fn unconnected(el: *mut ffi::EventLoop) -> NonNull<ffi::Client
 /// The certificate and private key of a peer, each DER or PEM, and its `trust`: DER
 /// certificates back to back, or PEM. In PEM, a client trusts each block of
 /// `CERTIFICATE`, `X509 CERTIFICATE`, or `TRUSTED CERTIFICATE`, each with one DER
-/// certificate and no byte after it, as `PEM_bytes_read_bio` of aws-lc reads the
-/// blocks. It skips DER bytes and what that reader skips, such as text and a block
+/// certificate, no header, and no byte after it, as `PEM_read_bio` of aws-lc reads
+/// the blocks. It skips DER bytes and what that reader skips, such as text and a block
 /// of another label, but a block of any label that the reader cannot read refuses
 /// the trust. It does not trust a certificate in a skipped part, so the connect to its
 /// server gives `BadCertificateUntrusted`. A client offers each of the three policies
@@ -150,8 +150,9 @@ pub(crate) enum Refusal {
     Time,
     /// `trust` holds no certificate in DER or PEM.
     Empty,
-    /// The certificate `number`, from 1, of `trust` does not parse. In DER, bytes
-    /// after the last certificate are one more.
+    /// The certificate `number`, from 1, of `trust` does not parse, or its PEM block
+    /// has a header, such as of encryption. In DER, bytes after the last certificate
+    /// are one more.
     Invalid { number: usize },
     /// A PEM block of any label of `trust` that aws-lc cannot read, such as an empty
     /// one, damaged base64, or one with no `END` line of its label, comes after
@@ -220,7 +221,7 @@ impl fmt::Display for Refusal {
                 write!(f, "certificate {number} of the trust does not parse")
             }
             Self::Damaged { after: 0 } => f.write_str(
-                "a PEM block of the trust before its first certificate is damaged",
+                "a PEM block of the trust is damaged, with no certificate before it",
             ),
             Self::Damaged { after } => write!(
                 f,

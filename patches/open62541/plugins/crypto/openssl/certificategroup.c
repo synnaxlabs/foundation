@@ -431,6 +431,14 @@ openSSLPushCertificate(const UA_Byte **at, const UA_Byte *end, STACK_OF(X509) *s
     return UA_TRUSTLOAD_GOOD;
 }
 
+/* Is `name` a PEM label of a certificate, as `PEM_STRING_X509_TRUSTED` reads it? */
+static UA_Boolean
+openSSLCertificateLabel(const char *name) {
+    return strcmp(name, PEM_STRING_X509) == 0 ||
+           strcmp(name, PEM_STRING_X509_OLD) == 0 ||
+           strcmp(name, PEM_STRING_X509_TRUSTED) == 0;
+}
+
 /* Pushes each certificate of the bytestring onto the stack, and gives why it does
  * not load, with the number from 1 of the certificate that fails in `number`, of the
  * line for `UA_TRUSTLOAD_LINE`, or of the certificates before the block for
@@ -441,9 +449,10 @@ openSSLPushCertificate(const UA_Byte **at, const UA_Byte *end, STACK_OF(X509) *s
  * piece that each target reads in another way. aws-lc skips other text and a block
  * of another label, but fails on a block of any label that it cannot read, such as
  * an empty one, damaged base64, or an `END` line that does not name its label,
- * which gives `UA_TRUSTLOAD_DAMAGED`. A block with any byte after its certificate
- * fails, also trust settings, which the verify of the group does not apply. Clears
- * the error queue of the thread.
+ * which gives `UA_TRUSTLOAD_DAMAGED`. A certificate block with a header, such as of
+ * encryption, is `UA_TRUSTLOAD_INVALID`, as no password reads it. A block with any
+ * byte after its certificate fails, also trust settings, which the verify of the
+ * group does not apply. Clears the error queue of the thread.
  */
 static UA_TrustLoad
 openSSLLoadEachCertificate(const UA_ByteString cert, STACK_OF(X509) *stack,
@@ -466,19 +475,26 @@ openSSLLoadEachCertificate(const UA_ByteString cert, STACK_OF(X509) *stack,
         return *number > 0 ? UA_TRUSTLOAD_LINE : UA_TRUSTLOAD_NOMEMORY;
     }
     load = UA_TRUSTLOAD_GOOD;
+    char *name;
+    char *header;
     unsigned char *der;
     long length;
-    char *name;
     while(load == UA_TRUSTLOAD_GOOD &&
-          PEM_bytes_read_bio(&der, &length, &name, PEM_STRING_X509_TRUSTED, bio,
-                             UA_OpenSSL_refusePassword, NULL)) {
-        (*number)++;
-        at = der;
-        load = openSSLPushCertificate(&at, der + length, stack);
-        if(load == UA_TRUSTLOAD_GOOD && at != der + length)
-            load = UA_TRUSTLOAD_TRAILING;
-        OPENSSL_free(der);
+          PEM_read_bio(bio, &name, &header, &der, &length)) {
+        if(openSSLCertificateLabel(name)) {
+            (*number)++;
+            at = der;
+            /* aws-lc reads a header only as a Proc-Type that needs a password */
+            if(header[0] != '\0')
+                load = UA_TRUSTLOAD_INVALID;
+            else
+                load = openSSLPushCertificate(&at, der + length, stack);
+            if(load == UA_TRUSTLOAD_GOOD && at != der + length)
+                load = UA_TRUSTLOAD_TRAILING;
+        }
         OPENSSL_free(name);
+        OPENSSL_free(header);
+        OPENSSL_free(der);
     }
     BIO_free(bio);
     uint32_t error = ERR_peek_last_error();

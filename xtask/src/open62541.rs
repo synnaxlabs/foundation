@@ -497,7 +497,7 @@ const AWS_LC: [&str; 145] = [
     "EVP_sha256", "EVP_sha384", "GENERAL_NAME_free", "HMAC", "OBJ_txt2nid",
     "OPENSSL_cleanse", "OPENSSL_free", "OPENSSL_sk_free", "OPENSSL_sk_new_null",
     "OPENSSL_sk_num", "OPENSSL_sk_pop_free_ex", "OPENSSL_sk_push", "OPENSSL_sk_value",
-    "PEM_bytes_read_bio", "PEM_read_bio_PrivateKey", "PEM_read_bio_X509",
+    "PEM_read_bio", "PEM_read_bio_PrivateKey", "PEM_read_bio_X509",
     "PEM_read_bio_X509_CRL", "PEM_read_bio_X509_REQ", "RSA_free", "RSA_new", "RSA_size",
     "X509V3_EXT_conf_nid", "X509_CRL_digest", "X509_CRL_free", "X509_CRL_get_REVOKED",
     "X509_CRL_get_issuer", "X509_EXTENSION_free", "X509_NAME_add_entry_by_txt",

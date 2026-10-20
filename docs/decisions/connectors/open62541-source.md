@@ -1032,12 +1032,12 @@
   when `d2i_X509` reads its first certificate, or else PEM certificates. The copy loads
   each certificate of each trust entry, and refuses an entry whose load stops before its
   end, and the constructor of the group gives that status (ruling A). PEM is read by the
-  loop of `PEM_bytes_read_bio` of aws-lc on a BIO of the full length, which takes
-  `CERTIFICATE`, `X509 CERTIFICATE`, and `TRUSTED CERTIFICATE` blocks and skips the text
-  outside them, then `d2i_X509` on the bytes of each block, not by the leaf loader of
-  the copy, which drops a block that does not start with the exact line `-----BEGIN
-  CERTIFICATE-----` (round 2 of review of #3271). `d2i_X509` is the one step of the DER
-  path (#3288 item 4, OK of `laptop.architect-2`,
+  loop of `PEM_read_bio` of aws-lc on a BIO of the full length, which takes
+  `CERTIFICATE`, `X509 CERTIFICATE`, and `TRUSTED CERTIFICATE` blocks with no header
+  and skips the text outside them, then `d2i_X509` on the bytes of each block, not by
+  the leaf loader of the copy, which drops a block that does not start with the exact
+  line `-----BEGIN CERTIFICATE-----` (round 2 of review of #3271). `d2i_X509` is the
+  one step of the DER path (#3288 item 4, OK of `laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6266776077). This
   supersedes item 1 of
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255744593. A DER
@@ -1170,8 +1170,9 @@
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6267044406). PR 2b
   of #2934 refuses the credentials before the dial with the cause as data:
   `client::Error::Refused` with a `client::Refusal`, which names the part that fails and
-  the number from 1 of a trust certificate that does not load. The copy gives the cause
-  through `UA_CertificateUtils_checkTrust` and `UA_CertificateUtils_checkTime`, and
+  the number from 1 of a trust certificate that does not load, or the count of the
+  certificates before a damaged PEM block. The copy gives the cause through
+  `UA_CertificateUtils_checkTrust` and `UA_CertificateUtils_checkTime`, and
   `shim_client_secure` is the one place that turns a cause into a kind. It checks the
   policies, the key pair, the window, the trust, then the URI: the config takes the URI
   that its check allocates, so no refusal comes after that allocation. A check refuses
@@ -1182,8 +1183,10 @@
   `UA_OpenSSL_LoadCertificate` gives NULL, `BadInvalidArgument` of the policies when
   `i2d_X509` fails, the key pair check, the URI check when `X509_get_ext_d2i` gives
   NULL, and the trust load when `d2i_X509` fails, which gives `Invalid`, or `Empty` at
-  the first DER certificate, or `PEM_bytes_read_bio` fails, which gives `Damaged`, as
-  the load does not read the `ERR_R_MALLOC_FAILURE` of aws-lc, #3391), the refusal
+  the first DER certificate, or `PEM_read_bio` fails, which gives `Damaged` (the
+  split: `laptop.architect-2`, 2026-10-19 18:26 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3371#issuecomment-6274275532, item 1),
+  as the load does not read the `ERR_R_MALLOC_FAILURE` of aws-lc, #3483), the refusal
   names the cause, and the time check gives `Failed(BadCertificateInvalid)` when its
   load of the certificate fails
   (`laptop.monitor`, 2026-10-19 14:46 UTC,
