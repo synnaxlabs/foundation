@@ -949,6 +949,69 @@ fn joined_cluster(seed: u64) -> (Cluster, sim::node::Node, u8) {
     (cluster, joiner, leader)
 }
 
+// The node becomes a voter when it appends the voters entry, before it applies its
+// own join. The node calls each millisecond while it is not a voter, so a call comes
+// in that gap: it waits until the join applies, then proposes the card of the join
+// with the new addresses.
+#[test]
+fn a_node_that_joins_and_becomes_a_voter_sets_its_addresses() {
+    for seed in 0..4 {
+        let mut cluster = recorded_cluster(seed, &IDS, &[]);
+        let at = SocketAddr::new(Ipv4Addr::new(10, 0, 9, JOINER).into(), PORT);
+        let addresses = card::addresses::Addresses::new(vec![Address::Udp(at)]);
+        let addresses = addresses.unwrap();
+        let joiner = cluster.sim.node(sim::node::Config::default());
+        let (node, moving) = (joiner.clone(), addresses.clone());
+        let moved = Arc::new(Mutex::new(None));
+        let slot = Arc::clone(&moved);
+        let board = Arc::clone(&cluster.board);
+        let main = move |tasks: Tasks| async move {
+            let base =
+                config_at(&node, &tasks, JOINER, PORT, BYTES_MAX, &[], &[]).await;
+            let transport = Rc::clone(&base.transport);
+            let asking =
+                config_of(&node, Rc::clone(&transport), ticket_to(TICKET, &IDS));
+            let founding = join::ask(asking).await.unwrap();
+            let mesh = Mesh::open(Config { founding, ..base }).await.unwrap();
+            let (serving, streams) = (mesh.clone(), tasks.clone());
+            tasks.spawn(async move {
+                accept(serving, transport, streams, JOINER, board).await;
+            });
+            let result = loop {
+                match mesh.set_addresses(moving.clone()).await {
+                    Err(Error::NoVote) => node.clock().sleep(Span::MILLISECOND).await,
+                    result => break result,
+                }
+            };
+            let card = mesh.member(key(JOINER)).unwrap().card.card().clone();
+            *slot.lock().unwrap() = Some((result, card));
+            std::future::pending::<()>().await;
+        };
+        let config = env::shards::Config {
+            name: "joiner".into(),
+            core: None,
+        };
+        drop(joiner.shards().start(config, main).unwrap());
+        cluster.run(seconds(10));
+        let leader = *cluster.board.lock().unwrap().led.last().unwrap();
+        let voters = [1, 2, 3, JOINER].into();
+        cluster
+            .board
+            .lock()
+            .unwrap()
+            .configurations
+            .insert(leader, voters);
+        cluster.run(seconds(10));
+        let card = card::Card {
+            addresses,
+            version: 2,
+            ..common::member(JOINER).card.card().clone()
+        };
+        let moved = moved.lock().unwrap().take();
+        assert_eq!(moved, Some((Ok(()), card)), "run {seed}");
+    }
+}
+
 // No leader can dial the node, so it dials the voters in turn until it reaches the
 // one that leads.
 #[test]
