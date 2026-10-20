@@ -517,7 +517,10 @@ pub(crate) fn answer(
         value.setattr("unwritten", PyTuple::new(py, unwritten)?)?;
         value.setattr("lost", crate::seqs(py, gone())?)?;
         if loss == Loss::Warn && gone().next().is_some() {
-            loss.act(py, LOST, gone(), py.None().bind(py))?;
+            // A logging handler that raises must not hide the refused groups.
+            if let Err(failed) = loss.act(py, LOST, gone(), py.None().bind(py)) {
+                raised.set_context(py, Some(failed));
+            }
         }
         Err(raised)
     };

@@ -696,10 +696,67 @@ fn logged(
     })
 }
 
+/// The class, the `unwritten`, and the `__context__` of the error of `answer` under
+/// `warn`, with a handler of the `foundation` logger that raises.
+fn failing(
+    places: &[sdk::Place],
+    outcomes: &[(usize, Outcome)],
+    frame: &[usize],
+) -> (String, Vec<String>, String) {
+    Python::initialize();
+    Python::attach(|py| {
+        let globals = PyDict::new(py);
+        py.run(
+            c"
+import logging
+class Failing(logging.Handler):
+    def emit(self, record):
+        raise RuntimeError('the handler failed')
+handler = Failing()
+",
+            Some(&globals),
+            None,
+        )
+        .unwrap();
+        let handler = globals.get_item("handler").unwrap().unwrap();
+        let foundation = py
+            .import("logging")
+            .unwrap()
+            .call_method1("getLogger", ("foundation",))
+            .unwrap();
+        foundation.call_method1("addHandler", (&handler,)).unwrap();
+        let firsts = crate::write::firsts(places, &crate::write::named(places));
+        let error = crate::write::answer(
+            py,
+            places,
+            &firsts,
+            crate::Loss::Warn,
+            outcomes,
+            frame.to_vec(),
+        )
+        .unwrap_err();
+        foundation
+            .call_method1("removeHandler", (&handler,))
+            .unwrap();
+        let unwritten = error
+            .value(py)
+            .getattr("unwritten")
+            .unwrap()
+            .extract()
+            .unwrap();
+        (
+            error.get_type(py).name().unwrap().to_string(),
+            unwritten,
+            error.context(py).unwrap().to_string(),
+        )
+    })
+}
+
 /// A frame with a refusal and a loss raises `Rejected` with the seqs of the lost group
 /// in `lost` for each loss, and with `warn` also logs the warning of the loss. A frame
 /// with an end and a loss raises `GroupEnded` with `lost`, and one with no loss gives
-/// an empty `lost` and logs nothing.
+/// an empty `lost` and logs nothing. A logging handler that raises leaves `Rejected`
+/// raised, with the error of the handler as its `__context__`.
 #[test]
 fn answer_gives_the_seqs_of_the_lost_groups_in_lost_for_each_loss() {
     let places = grouped();
@@ -755,6 +812,14 @@ fn answer_gives_the_seqs_of_the_lost_groups_in_lost_for_each_loss() {
     assert_eq!(
         logged(&places, crate::Loss::Warn, &whole, &[1]),
         ("Rejected".to_owned(), Vec::new(), Vec::new())
+    );
+    assert_eq!(
+        failing(&places, &refused, &[1, 2, 3]),
+        (
+            "Rejected".to_owned(),
+            vec!["cell.a".to_owned(), "cell.time".to_owned()],
+            "RuntimeError: the handler failed".to_owned()
+        )
     );
 }
 
