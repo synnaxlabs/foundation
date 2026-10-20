@@ -79,9 +79,16 @@ pub struct Server {
     /// Gives the next value of each client. The loop of a client sets the random
     /// numbers of open62541 on its thread, which the server also draws from.
     rng: RefCell<Rng>,
-    /// The mode of each channel, or `None` for the policy `None`.
-    mode: Option<Mode>,
-    /// The user of each session, or `None` for an anonymous session.
+    /// The security of each channel and session, or `None` for the policy `None`.
+    security: Option<Security>,
+}
+
+/// The security of the channels and sessions of a [`Server`].
+#[derive(Clone, Copy)]
+struct Security {
+    /// The mode of each channel.
+    mode: Mode,
+    /// The only user, or `None` for anonymous sessions.
     user: Option<User<'static>>,
 }
 
@@ -91,18 +98,15 @@ struct Setup {
     double: f64,
     /// The count of the counters of [`Server::counting`].
     counters: usize,
-    /// The mode of each channel of [`Server::secure`].
-    mode: Option<Mode>,
-    /// The only user of [`Server::login`].
-    user: Option<User<'static>>,
+    /// The security of [`Server::secure`] and [`Server::login`].
+    security: Option<Security>,
 }
 
 impl Setup {
     const PLAIN: Self = Self {
         double: DOUBLE,
         counters: 0,
-        mode: None,
-        user: None,
+        security: None,
     };
 }
 
@@ -149,7 +153,7 @@ impl Server {
         body: impl AsyncFnOnce(&Self) -> T,
     ) -> T {
         let setup = Setup {
-            mode: Some(mode),
+            security: Some(Security { mode, user: None }),
             ..Setup::PLAIN
         };
         Self::serve(clock, net, address, rng, setup, body).await
@@ -170,8 +174,10 @@ impl Server {
         body: impl AsyncFnOnce(&Self) -> T,
     ) -> T {
         let setup = Setup {
-            mode: Some(mode),
-            user: Some(USER),
+            security: Some(Security {
+                mode,
+                user: Some(USER),
+            }),
             ..Setup::PLAIN
         };
         Self::serve(clock, net, address, rng, setup, body).await
@@ -211,8 +217,7 @@ impl Server {
         let Setup {
             double,
             counters,
-            mode,
-            user,
+            security,
         } = setup;
         let local = SocketAddr::new(address, PORT);
         let this = Self {
@@ -220,8 +225,7 @@ impl Server {
             net,
             url: CString::new(format!("opc.tcp://{local}")).expect("no NUL"),
             rng: RefCell::new(rng),
-            mode,
-            user,
+            security,
         };
         let manager = connection::Manager::listening(
             this.time(),
@@ -237,7 +241,9 @@ impl Server {
             server.set_per_read(PER_READ);
             server.add_bytes(&BYTES, 7 << 16);
             server.set_per_publish(u32::MAX);
-            if let Some(User { name, password }) = user {
+            if let Some(User { name, password }) =
+                security.and_then(|security| security.user)
+            {
                 server.admit(&[(name, password)]);
             }
             for index in 0..counters {
@@ -249,7 +255,7 @@ impl Server {
             }
         };
         let body = caught(async { body(&this).await });
-        let modes = mode.map(|mode| [mode]);
+        let modes = security.map(|security| [security.mode]);
         let secure = modes.as_ref().map(|modes| Secure {
             credentials: &SERVER_SIDE,
             policies: &[Policy::Basic256Sha256],
@@ -276,7 +282,7 @@ impl Server {
     /// a Read request: the process stops as the Rust allocator does when it has no
     /// memory.
     pub async fn connect(&self, count: usize) -> Client {
-        let session = match self.dial(self.mode, self.user).await {
+        let session = match self.dial(self.security).await {
             Ok(session) => session.expect("a pending wait never ends"),
             Err(crate::client::Error::Failed(status)) => {
                 panic!("a connect failed: {status:?}")
@@ -301,12 +307,10 @@ impl Server {
         }
     }
 
-    /// Connects a client to the server in `mode` with `user`, on its own connection
-    /// manager. A client in no mode gives no user.
+    /// Connects a client to the server with `security`, on its own connection manager.
     async fn dial(
         &self,
-        mode: Option<Mode>,
-        user: Option<User<'static>>,
+        security: Option<Security>,
     ) -> Result<Option<crate::client::Client>, crate::client::Error> {
         let rng = &mut Rng::from_seed(self.rng.borrow_mut().next_u64());
         crate::client::Client::connect(
@@ -315,12 +319,13 @@ impl Server {
             Net::clone(&self.net),
             rng,
             &self.url,
-            mode.map(|mode| crate::client::Session {
-                credentials: CLIENT_SIDE,
-                mode,
-                user,
-            })
-            .as_ref(),
+            security
+                .map(|Security { mode, user }| crate::client::Session {
+                    credentials: CLIENT_SIDE,
+                    mode,
+                    user,
+                })
+                .as_ref(),
             future::pending(),
         )
         .await
@@ -479,7 +484,7 @@ mod tests {
     use sim::{Sim, node};
     use types::time::Span;
 
-    use super::{Mode, PORT, Server, Variable};
+    use super::{Mode, PORT, Security, Server, Variable};
     use crate::client::Error;
     use crate::client::tests::common::channel;
     use crate::ffi::{self, Status};
@@ -702,15 +707,16 @@ mod tests {
     /// `Server::dial`: no public call connects in a mode other than that of the server.
     #[test]
     fn a_secure_server_offers_no_endpoint_in_another_mode() {
+        let anonymous = |mode| Some(Security { mode, user: None });
         let modes = [
-            (Mode::Sign, Some(Mode::SignAndEncrypt)),
-            (Mode::SignAndEncrypt, Some(Mode::Sign)),
+            (Mode::Sign, anonymous(Mode::SignAndEncrypt)),
+            (Mode::SignAndEncrypt, anonymous(Mode::Sign)),
             (Mode::Sign, None),
         ];
-        let results = modes.map(|(served, mode)| {
+        let results = modes.map(|(served, security)| {
             run(async move |node| {
                 let body =
-                    async |server: &Server| server.dial(mode, None).await.map(drop);
+                    async |server: &Server| server.dial(security).await.map(drop);
                 secure(&node, served, body).await
             })
         });
@@ -727,7 +733,10 @@ mod tests {
                 let (clock, net, address) =
                     (node.clock(), node.net(), node.addresses()[0]);
                 let body = async |server: &Server| {
-                    server.dial(Some(mode), None).await.map(drop)
+                    server
+                        .dial(Some(Security { mode, user: None }))
+                        .await
+                        .map(drop)
                 };
                 Server::login(clock, net, address, node.entropy().rng(), mode, body)
                     .await
