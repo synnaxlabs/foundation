@@ -881,6 +881,48 @@ fn an_apply_counts_a_voter_that_restarts_twice_in_its_put() {
     assert_eq!(cluster.board().applied, [(1, moved, Ok(moved))]);
 }
 
+// Voter 3 is down, and voter 2 restarts at 10 s and again 1 s later, before the
+// redialed session stores a chunk, which takes about 1 s over links of 300 ms. A
+// session that ends with no chunk stored ends the put after one redial.
+#[test]
+fn an_apply_misses_a_voter_whose_redialed_session_ends_with_no_chunk_stored() {
+    let mut cluster = Cluster::new(0);
+    cluster.delay(Span::from_nanos(300 * Span::MILLISECOND.nanos()));
+    cluster.start_voter(1);
+    cluster.start_voter(2);
+    cluster.run(seconds(10));
+    cluster.change(1, base(), &create_largest(40));
+    for run in [10, 1] {
+        cluster.run(seconds(run));
+        let node = cluster.node(2).clone();
+        cluster.sim.crash(&node, Crash::Power);
+        cluster.start_voter(2);
+    }
+    cluster.run(seconds(120));
+    let broken = blob::peer::Error::Stream(transport::Error::Broken {
+        reason: "reset by peer".to_owned(),
+    });
+    let quorum = Error::Quorum {
+        held: 1,
+        voters: 3,
+        missed: vec![
+            Missed {
+                node: key(2),
+                name: Some(name("plant.node2")),
+                cause: Miss::Put(broken),
+            },
+            late(3),
+        ],
+    };
+    assert_eq!(
+        quorum.to_string(),
+        "1 of 3 voters hold the chunks of the spec change, not a majority; \
+         plant.node2: its put failed: the blob stream failed: the connection broke: \
+         reset by peer; plant.node3: a step of its put passed the deadline of 10s"
+    );
+    assert_eq!(cluster.board().applied, [(1, base(), Err(quorum))]);
+}
+
 // `count` subjects of 512 keys, each of which fills one chunk of 16 417 bytes.
 pub(super) fn create_largest(count: usize) -> BTreeMap<Name, Definition> {
     let labels: Vec<String> = (0..count).map(|at| format!("plant.s{at}")).collect();
