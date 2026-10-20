@@ -35,17 +35,7 @@ pub(crate) async fn create_hub(
     tasks: Tasks,
     indexes: impl IntoIterator<Item = (u128, RangeInclusive<u128>)>,
 ) -> (Hub, i64) {
-    let (home, interner, now, time) = create_shard(node, tasks.clone()).await;
-    let hub = Hub::new(hub::Config {
-        home,
-        interner,
-        tasks,
-        node: crate::net::NODE,
-        public_key: crate::net::public_key(&crate::net::HOME),
-        time,
-        entropy: node.entropy(),
-        region: None,
-    });
+    let (hub, now) = open(node, tasks, None).await;
     let i64 = DataType::Sample(Type::Scalar(Scalar::I64));
     let mut definitions = Vec::new();
     for (index, data) in indexes {
@@ -77,6 +67,36 @@ pub(crate) async fn create_hub(
             .iter()
             .map(|(name, definition)| (name, definition)),
     );
+    (hub, now)
+}
+
+/// A hub on a new shard in `region`, whose spec defines its channels, and the node's
+/// mesh time now.
+pub(crate) async fn create_hub_in(
+    node: &sim::node::Node,
+    tasks: Tasks,
+    region: hub::Region,
+) -> (Hub, i64) {
+    open(node, tasks, Some(region)).await
+}
+
+/// A hub on a new shard in `region`, if any, and the node's mesh time now.
+async fn open(
+    node: &sim::node::Node,
+    tasks: Tasks,
+    region: Option<hub::Region>,
+) -> (Hub, i64) {
+    let (home, interner, now, time) = create_shard(node, tasks.clone()).await;
+    let hub = Hub::new(hub::Config {
+        home,
+        interner,
+        tasks,
+        node: crate::net::NODE,
+        public_key: crate::net::public_key(&crate::net::HOME),
+        time,
+        entropy: node.entropy(),
+        region,
+    });
     (hub, now)
 }
 

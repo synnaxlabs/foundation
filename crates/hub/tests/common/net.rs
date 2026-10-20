@@ -47,7 +47,20 @@ pub(crate) fn transport_sized(
     tasks: &Tasks,
     pool: &Rc<Pool>,
     key: PrivateKey,
+    sizes: (usize, usize),
+) -> Transport {
+    transport_with(node, tasks, pool, key, sizes, 16)
+}
+
+/// As [`transport_sized`], where the peer of each session may open `streams` streams
+/// at once.
+pub(crate) fn transport_with(
+    node: &sim::node::Node,
+    tasks: &Tasks,
+    pool: &Rc<Pool>,
+    key: PrivateKey,
     (message, window): (usize, usize),
+    streams: u32,
 ) -> Transport {
     let at = SocketAddr::new(node.addresses()[0], PORT);
     let mut parts = Port::bind(&node.net(), at)
@@ -57,7 +70,7 @@ pub(crate) fn transport_sized(
         private_key: key,
         message_bytes_max: NonZeroUsize::new(message).expect("not 0"),
         window_bytes: window,
-        streams_max: NonZeroU32::new(16).expect("not 0"),
+        streams_max: NonZeroU32::new(streams).expect("not 0"),
         idle: Span::from_nanos(60 * Span::SECOND.nanos()),
         clock: node.clock(),
         entropy: node.entropy(),
