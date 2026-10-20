@@ -147,9 +147,9 @@ pub enum Error {
     /// The ends of a frame of a write break a rule of its key set. Code `MALFORMED`.
     Frame(types::frame::Error),
     /// The home of the index of a program's write is `home`, another node, and the
-    /// forward of the write to it ended before its places. Code: `refusal`, the code
-    /// that `home` stopped the forward with, or `FAILED` when the session to `home`
-    /// failed or `home` broke HUB WIRE.
+    /// forward of the write to it ended before the program finished it. Code:
+    /// `refusal`, the code that `home` stopped the forward with, or `FAILED` when
+    /// `home` gave `MALFORMED`, the session to `home` failed, or `home` broke HUB WIRE.
     Forward {
         /// The home.
         home: node::Key,
