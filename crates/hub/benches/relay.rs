@@ -29,7 +29,8 @@
 //! Compare two builds on one pinned core whose SMT sibling is idle.
 //!
 //! `-- --line <prefix> --rounds <n>` runs only the lines whose name starts with
-//! `prefix`, and the timer, with `n` rounds in place of 50.
+//! `prefix`, in which `_` stands for a space, and the timer, with `n` rounds in place
+//! of 50.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -185,7 +186,10 @@ impl Run {
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
-                "--line" => run.line = Some(args.next().expect("a line prefix")),
+                "--line" => {
+                    let line = args.next().expect("a line prefix");
+                    run.line = Some(line.replace('_', " "));
+                }
                 "--rounds" => {
                     let rounds = args.next().expect("a count of rounds");
                     run.rounds = rounds.parse().expect("a count of rounds");
