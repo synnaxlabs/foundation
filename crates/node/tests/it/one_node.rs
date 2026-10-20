@@ -811,7 +811,12 @@ fn a_subscribed_plant_stores_each_change_at_its_read() {
     let mut opcua = Opcua::default();
     let mut influx = Influx::default();
     let rig = Rig::new();
-    rig.config(&served(plant(), opcua.serve(), influx.serve()));
+    // A sampling interval equal to the period of the changes lets two changes fall
+    // in one interval.
+    let rate = "  rate    = \"10Hz\"\n";
+    let hcl = plant().replacen(rate, "  rate    = \"20Hz\"\n", 1);
+    assert_ne!(hcl, plant(), "the config has an OPC UA connector at 10 Hz");
+    rig.config(&served(&hcl, opcua.serve(), influx.serve()));
     let plant = Plant::start(rig, opcua, influx);
     plant.rig.apply();
     first_stored(&plant, &VARIABLES);
