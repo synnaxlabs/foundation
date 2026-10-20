@@ -122,3 +122,55 @@ fn a_learner_stops_its_wait_when_it_names_the_next_voter() {
         assert_eq!(Rc::strong_count(&transport), one);
     });
 }
+
+// Each voter restarts, so node 4 holds a session to the new leader that the leader
+// lost, and a dial gives that session until a ping of `transport` ends it.
+#[test]
+fn a_learner_reaches_a_restarted_leader_after_its_old_session_ends() {
+    for seed in 0..8 {
+        let mut cluster = cluster(seed, true);
+        cluster.run(seconds(10));
+        assert!(last(&cluster.board().homes, 4).is_some(), "run {seed}");
+        for id in 1..=3 {
+            let node = cluster.node(id).clone();
+            cluster.sim.crash(&node, Crash::Process);
+        }
+        {
+            let mut board = cluster.board.lock().unwrap();
+            board.learners = [4].into();
+            board.hidden = Some(4);
+        }
+        cluster.script(|_| home_to(9));
+        for id in 1..=3 {
+            cluster.start_voter(id);
+        }
+        // A third of `IDLE`, two election timeouts for each voter, and an election.
+        cluster.run(seconds(30));
+        let homes = cluster.board().homes;
+        assert_eq!(last(&homes, 4), Some(key(9)), "run {seed}");
+    }
+}
+
+// No voter answers node 4, so its dial would wait until it times out.
+#[test]
+fn a_stop_of_the_group_ends_the_wait_for_the_dial_of_a_learner() {
+    solo(|node, tasks| async move {
+        let config = dialed_at(&node, &tasks, 4, 0, &MEMBERS, &IDS).await;
+        let transport = Rc::clone(&config.transport);
+        let mesh = Mesh::open(config).await.unwrap();
+        let clock = node.clock();
+        clock.sleep(seconds(3)).await;
+        let cause = fail_sync(&node);
+        let heartbeat = proven(1, 4, Body::Heartbeat { commit: 0 });
+        assert_eq!(mesh.receive(public(1), heartbeat), Ok(()));
+        let stopped = clock.now();
+        let mut watch = mesh.watch(INDEX);
+        assert_eq!(watch.next().await, Ok(None));
+        assert_eq!(watch.next().await, Err(cause));
+        mesh.ended().await;
+        let waited = clock.now() - stopped;
+        assert!(waited <= TICK, "it ended after {waited}");
+        drop(mesh);
+        assert_eq!(Rc::strong_count(&transport), 1);
+    });
+}
