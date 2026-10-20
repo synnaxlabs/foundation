@@ -779,6 +779,33 @@ fn a_keep_after_a_dropped_keep_of_another_founding_keeps_its_founding() {
     assert_ne!(dropped, 0, "no keep dropped");
 }
 
+// A founding file over the bound gives the error with no read. One at the bound is
+// read, and the full pool has no block for its first part.
+#[test]
+fn a_founding_file_over_the_most_bytes_of_a_founding_is_not_read() {
+    let head = crate::file::HEAD;
+    for most in [FOUNDING_BYTES_MAX + 1, FOUNDING_BYTES_MAX] {
+        solo(move |node, _| async move {
+            let files = node.files();
+            let len = u64::try_from(head + most).unwrap();
+            let file = files.open(Path::new(FILE), Mode::Create { len }).await;
+            file.unwrap().close().await;
+            let pool = create_pool();
+            let blocks = fill(&pool);
+            let read =
+                founding::founding(&files, Path::new(""), Rc::clone(&pool)).await;
+            drop(blocks);
+            let expected = if most > FOUNDING_BYTES_MAX {
+                let path = PathBuf::from(FILE);
+                Error::Unfounded { path }
+            } else {
+                exhausted(crate::file::CHUNK)
+            };
+            assert_eq!(read, Err(expected), "{most}");
+        });
+    }
+}
+
 #[test]
 fn memory_that_the_system_refuses_for_the_founding_file_gives_the_pool_error() {
     solo(|node, tasks| async move {

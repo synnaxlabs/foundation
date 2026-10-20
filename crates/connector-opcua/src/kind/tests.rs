@@ -479,22 +479,66 @@ struct Record {
     logged: Vec<String>,
 }
 
-/// Runs `script` on a scene of `setup` that polls at 10 Hz, as [`run_at`] does.
+/// Runs `script` on a scene of `setup` on [`Stage::POLL`], as [`scene`] does.
 fn run<S, F>(setup: Setup, script: S) -> Record
 where
     S: FnOnce(Rc<Scene>) -> F + Send + 'static,
     F: Future<Output = Result<(), Error>> + 'static,
 {
-    run_at("10Hz", setup, script)
+    scene(setup, Stage::POLL, script)
 }
 
-/// Runs `script` on a scene of `setup` that polls at `rate`, as [`scene`] does.
-fn run_at<S, F>(rate: &'static str, setup: Setup, script: S) -> Record
-where
-    S: FnOnce(Rc<Scene>) -> F + Send + 'static,
-    F: Future<Output = Result<(), Error>> + 'static,
-{
-    run_on(rate, setup, None, script)
+/// The inputs of a scene other than its setup and its script.
+#[derive(Clone, Copy)]
+struct Stage {
+    /// The port of the server.
+    port: u16,
+    /// The rate of the reads.
+    rate: &'static str,
+    /// The kind subscribes, as with no `polled`. Else it polls.
+    subscribed: bool,
+    /// The secure channel, or none for the mode `None`.
+    secure: Option<Secure>,
+}
+
+impl Stage {
+    /// A kind that polls at 10 Hz a server on port 4840 in the mode `None`.
+    const POLL: Self = Self {
+        port: 4840,
+        rate: "10Hz",
+        subscribed: false,
+        secure: None,
+    };
+
+    /// A kind that subscribes at 20 Hz to a server on port 4840 in the mode `None`.
+    /// The server samples each 50 ms and publishes each 100 ms, so a change arrives up
+    /// to 50 ms after its source timestamp.
+    const WATCH: Self = Self {
+        rate: "20Hz",
+        subscribed: true,
+        ..Self::POLL
+    };
+
+    /// This stage at `rate`.
+    const fn at(self, rate: &'static str) -> Self {
+        Self { rate, ..self }
+    }
+
+    /// This stage with the server behind a relay on [`RELAY`].
+    const fn relayed(self) -> Self {
+        Self {
+            port: RELAY,
+            ..self
+        }
+    }
+
+    /// This stage over the channel of `secure`.
+    const fn over(self, secure: Secure) -> Self {
+        Self {
+            secure: Some(secure),
+            ..self
+        }
+    }
 }
 
 /// The secure channel of a scene.
@@ -650,35 +694,19 @@ fn secret(name: &str) -> value::Kind {
     })
 }
 
-/// [`run_at`] over the channel of `secure`, or with no security when it is `None`.
-fn run_on<S, F>(
-    rate: &'static str,
-    setup: Setup,
-    secure: Option<Secure>,
-    script: S,
-) -> Record
-where
-    S: FnOnce(Rc<Scene>) -> F + Send + 'static,
-    F: Future<Output = Result<(), Error>> + 'static,
-{
-    scene(4840, rate, true, setup, secure, script)
-}
-
-/// Runs `script` on a scene of `setup` that reads at `rate` from port `port`, and polls
-/// when `polled`, over the channel of `secure`, with its server started, and records
+/// Runs `script` on a scene of `setup` on `stage`, with its server started, and records
 /// the frames of each channel until 1 s after the script returns.
-fn scene<S, F>(
-    port: u16,
-    rate: &'static str,
-    polled: bool,
-    setup: Setup,
-    secure: Option<Secure>,
-    script: S,
-) -> Record
+fn scene<S, F>(setup: Setup, stage: Stage, script: S) -> Record
 where
     S: FnOnce(Rc<Scene>) -> F + Send + 'static,
     F: Future<Output = Result<(), Error>> + 'static,
 {
+    let Stage {
+        port,
+        rate,
+        subscribed,
+        secure,
+    } = stage;
     let mut node = node::Config::default();
     if let Some(secure) = secure {
         node.wall = secure.wall;
@@ -687,7 +715,7 @@ where
         let rig = rig(&node, tasks.clone()).await;
         let hub = rig.hub();
         let address = format!("opc.tcp://{}:{port}", node.addresses()[0]);
-        let mut config = config(&address, rate, polled, &setup.reads);
+        let mut config = config(&address, rate, !subscribed, &setup.reads);
         let variables = setup.variables();
         if let Some(secure) = secure {
             secure.apply(&node, &mut config, &variables).await;
@@ -989,7 +1017,8 @@ fn ends_the_run_with_a_device_error_when_the_server_stops_and_reads_again_after(
 /// in the last 50 s.
 #[test]
 fn reads_at_a_rate_slower_than_the_session_timeout_with_no_device_error() {
-    let outcome = run_at("0.0005Hz", Setup::three(), |scene| async move {
+    let stage = Stage::POLL.at("0.0005Hz");
+    let outcome = scene(Setup::three(), stage, |scene| async move {
         scene.supervise(ms(4_050_000)).await
     });
     assert!(outcome.result.is_ok(), "{:?}", outcome.result);
@@ -1003,7 +1032,8 @@ fn reads_at_a_rate_slower_than_the_session_timeout_with_no_device_error() {
 /// answer in 5 s.
 #[test]
 fn ends_the_run_when_a_check_gets_no_answer() {
-    let outcome = run_at("0.01Hz", Setup::three(), |scene| async move {
+    let stage = Stage::POLL.at("0.01Hz");
+    let outcome = scene(Setup::three(), stage, |scene| async move {
         scene.after(ms(1_050), |scene| async move { scene.gate.close() });
         scene.supervise(ms(16_050)).await
     });
@@ -1018,7 +1048,8 @@ fn ends_the_run_when_a_check_gets_no_answer() {
 /// next tick ends the run at the next check of the connection, at most 10 s later.
 #[test]
 fn ends_the_run_when_a_check_finds_no_session() {
-    let outcome = run_at("0.01Hz", Setup::three(), |scene| async move {
+    let stage = Stage::POLL.at("0.01Hz");
+    let outcome = scene(Setup::three(), stage, |scene| async move {
         scene.stop().await;
         scene.variables.time_out_sessions(ms(5_000));
         scene.serve();
@@ -1038,7 +1069,8 @@ fn ends_the_run_when_a_check_finds_no_session() {
 #[test]
 fn keeps_the_run_when_a_check_answers_with_a_bad_state() {
     for status in [Status::BAD_USER_ACCESS_DENIED, Status::BAD_NODE_ID_UNKNOWN] {
-        let outcome = run_at("0.01Hz", Setup::three(), move |scene| async move {
+        let stage = Stage::POLL.at("0.01Hz");
+        let outcome = scene(Setup::three(), stage, move |scene| async move {
             scene.variables.answer_states(Quality(status.0));
             scene.supervise(ms(41_050)).await
         });
@@ -1173,7 +1205,8 @@ fn sends_no_check_when_it_reads_more_often_than_each_ten_seconds() {
 /// once, and the supervisor connects again and reads before that tick.
 #[test]
 fn ends_the_run_at_once_when_the_server_stops_between_ticks() {
-    let outcome = run_at("0.01Hz", Setup::three(), |scene| async move {
+    let stage = Stage::POLL.at("0.01Hz");
+    let outcome = scene(Setup::three(), stage, |scene| async move {
         scene.after(ms(1_050), |scene| async move { scene.stop().await });
         scene.after(ms(3_050), |scene| async move { scene.serve() });
         scene.supervise(ms(8_050)).await
@@ -2086,15 +2119,13 @@ fn refuses_to_discover() {
     assert_eq!(diagnostics, [expected]);
 }
 
-/// Runs `script` on a scene of `setup` that subscribes at 20 Hz, as [`scene`] does.
-/// The server samples each 50 ms and publishes each 100 ms, so a change arrives up to
-/// 50 ms after its source timestamp.
+/// Runs `script` on a scene of `setup` on [`Stage::WATCH`], as [`scene`] does.
 fn watch<S, F>(setup: Setup, script: S) -> Record
 where
     S: FnOnce(Rc<Scene>) -> F + Send + 'static,
     F: Future<Output = Result<(), Error>> + 'static,
 {
-    scene(4840, "20Hz", false, setup, None, script)
+    scene(setup, Stage::WATCH, script)
 }
 
 /// The offset of mesh time from the clock of the node of `scene`, in ns.
@@ -2319,7 +2350,8 @@ where
     S: FnOnce(Rc<Scene>) -> F + Send + 'static,
     F: Future<Output = Result<(), Error>> + 'static,
 {
-    scene(RELAY, "10Hz", false, setup, None, move |scene| async move {
+    let stage = Stage::WATCH.relayed().at("10Hz");
+    scene(setup, stage, move |scene| async move {
         let node = scene.node.clone();
         let up = move |message: &mut Vec<u8>| unsupport(message, kind);
         relayed_up(&node, up, script(scene)).await
@@ -2360,35 +2392,35 @@ fn polls_a_server_with_no_subscription_service() {
         let log = Arc::new(Mutex::new(Vec::new()));
         let sent = Arc::clone(&log);
         let setup = Setup::three();
-        let outcome =
-            scene(RELAY, "10Hz", false, setup, None, move |scene| async move {
-                let node = scene.node.clone();
-                let up = move |message: &mut Vec<u8>| {
-                    let kinds = [
-                        CREATE_SESSION,
-                        CREATE_SUBSCRIPTION,
-                        CREATE_MONITORED_ITEMS,
-                        PUBLISH,
-                        CLOSE_SESSION,
-                    ];
-                    if let Some(&kind) = kinds.iter().find(|&&kind| is(message, kind)) {
-                        sent.lock().expect("the log").push(kind);
-                    }
-                    if let Some(kind) = request {
-                        unsupport(message, kind);
-                    }
-                };
-                let down = move |message: &mut Vec<u8>| {
-                    if answer.is_some_and(|kind| is(message, kind)) {
-                        set_result(message, Status::BAD_NOT_IMPLEMENTED);
-                    }
-                };
-                scene.after(ms(430), |scene| async move {
-                    scene.variables.change(Quality::GOOD);
-                });
-                let supervised = scene.supervise(ms(1_050));
-                Box::pin(relayed_both(&node, up, down, supervised)).await
+        let stage = Stage::WATCH.relayed().at("10Hz");
+        let outcome = scene(setup, stage, move |scene| async move {
+            let node = scene.node.clone();
+            let up = move |message: &mut Vec<u8>| {
+                let kinds = [
+                    CREATE_SESSION,
+                    CREATE_SUBSCRIPTION,
+                    CREATE_MONITORED_ITEMS,
+                    PUBLISH,
+                    CLOSE_SESSION,
+                ];
+                if let Some(&kind) = kinds.iter().find(|&&kind| is(message, kind)) {
+                    sent.lock().expect("the log").push(kind);
+                }
+                if let Some(kind) = request {
+                    unsupport(message, kind);
+                }
+            };
+            let down = move |message: &mut Vec<u8>| {
+                if answer.is_some_and(|kind| is(message, kind)) {
+                    set_result(message, Status::BAD_NOT_IMPLEMENTED);
+                }
+            };
+            scene.after(ms(430), |scene| async move {
+                scene.variables.change(Quality::GOOD);
             });
+            let supervised = scene.supervise(ms(1_050));
+            Box::pin(relayed_both(&node, up, down, supervised)).await
+        });
         let case = (request, answer);
         assert!(outcome.result.is_ok(), "{:?}", outcome.result);
         assert_eq!(errors(&outcome.statuses), [], "{case:?}");
@@ -2458,23 +2490,17 @@ const CREATED: [u8; 4] = [0x01, 0x00, 0x16, 0x03];
 /// and the kind does not poll.
 #[test]
 fn fails_on_a_subscribe_that_the_server_refuses() {
-    let outcome = scene(
-        RELAY,
-        "20Hz",
-        false,
-        Setup::three(),
-        None,
-        |scene| async move {
-            let node = scene.node.clone();
-            let refuse = |message: &mut Vec<u8>| {
-                if is(message, CREATED) {
-                    set_result(message, Status(0x8077_0000));
-                }
-            };
-            let supervised = scene.supervise(ms(350));
-            Box::pin(relayed(&node, &Relay::default(), refuse, supervised)).await
-        },
-    );
+    let stage = Stage::WATCH.relayed();
+    let outcome = scene(Setup::three(), stage, |scene| async move {
+        let node = scene.node.clone();
+        let refuse = |message: &mut Vec<u8>| {
+            if is(message, CREATED) {
+                set_result(message, Status(0x8077_0000));
+            }
+        };
+        let supervised = scene.supervise(ms(350));
+        Box::pin(relayed(&node, &Relay::default(), refuse, supervised)).await
+    });
     assert!(outcome.result.is_ok(), "{:?}", outcome.result);
     let refused = "the subscribe to opc.tcp://10.0.0.1:4841 failed with \
                    BadTooManySubscriptions";
@@ -2495,28 +2521,22 @@ const CURRENT_TIME: [u8; 4] = [0x01, 0x00, 0xD2, 0x08];
 fn reads_the_current_time_of_the_server_each_10_s() {
     let reads = Arc::new(AtomicU32::new(0));
     let count = Arc::clone(&reads);
-    let outcome = scene(
-        RELAY,
-        "20Hz",
-        false,
-        Setup::three(),
-        None,
-        |scene| async move {
-            let node = scene.node.clone();
-            let up = move |message: &mut Vec<u8>| {
-                let time = message.windows(4).any(|node| node == CURRENT_TIME);
-                if is(message, READ_REQUEST) && time {
-                    count.fetch_add(1, Ordering::Relaxed);
-                }
-            };
-            for at in (430..25_000).step_by(1_000) {
-                scene.after(ms(at), |scene| async move {
-                    scene.variables.change(Quality::GOOD);
-                });
+    let stage = Stage::WATCH.relayed();
+    let outcome = scene(Setup::three(), stage, |scene| async move {
+        let node = scene.node.clone();
+        let up = move |message: &mut Vec<u8>| {
+            let time = message.windows(4).any(|node| node == CURRENT_TIME);
+            if is(message, READ_REQUEST) && time {
+                count.fetch_add(1, Ordering::Relaxed);
             }
-            Box::pin(relayed_up(&node, up, scene.supervise(ms(25_050)))).await
-        },
-    );
+        };
+        for at in (430..25_000).step_by(1_000) {
+            scene.after(ms(at), |scene| async move {
+                scene.variables.change(Quality::GOOD);
+            });
+        }
+        Box::pin(relayed_up(&node, up, scene.supervise(ms(25_050)))).await
+    });
     assert!(outcome.result.is_ok(), "{:?}", outcome.result);
     assert_eq!(errors(&outcome.statuses), []);
     assert_eq!(outcome.frames.len(), 26);
@@ -2661,36 +2681,29 @@ const SOURCE: Stamp = Stamp::from_nanos(1_767_139_200 * 1_000_000_000);
 /// Runs a watch of [`Setup::three`] in which each node changes at 430 ms with the
 /// status `quality`, and a relay sets both timestamps of each of those changes to 0.
 fn untimed(quality: Quality) -> Record {
-    scene(
-        RELAY,
-        "20Hz",
-        false,
-        Setup::three(),
-        None,
-        move |scene| async move {
-            let node = scene.node.clone();
-            let nanos = u64::try_from(SOURCE.nanos()).expect("after 1970");
-            let time = (nanos / 100 + 116_444_736_000_000_000).to_le_bytes();
-            let clear = move |message: &mut Vec<u8>| {
-                if !is(message, PUBLISHED) {
-                    return;
-                }
-                let mut at = 0;
-                while let Some(found) = message[at..].windows(8).position(|w| w == time)
-                {
-                    // The test server sets no picoseconds, so the server timestamp
-                    // follows the source timestamp. No other 8 bytes are equal.
-                    message[at + found..at + found + 16].fill(0);
-                    at += found + 16;
-                }
-            };
-            scene.after(ms(430), move |scene| async move {
-                scene.variables.change_at(quality, SOURCE);
-            });
-            let supervised = scene.supervise(ms(1_050));
-            Box::pin(relayed(&node, &Relay::default(), clear, supervised)).await
-        },
-    )
+    let stage = Stage::WATCH.relayed();
+    scene(Setup::three(), stage, move |scene| async move {
+        let node = scene.node.clone();
+        let nanos = u64::try_from(SOURCE.nanos()).expect("after 1970");
+        let time = (nanos / 100 + 116_444_736_000_000_000).to_le_bytes();
+        let clear = move |message: &mut Vec<u8>| {
+            if !is(message, PUBLISHED) {
+                return;
+            }
+            let mut at = 0;
+            while let Some(found) = message[at..].windows(8).position(|w| w == time) {
+                // The test server sets no picoseconds, so the server timestamp
+                // follows the source timestamp. No other 8 bytes are equal.
+                message[at + found..at + found + 16].fill(0);
+                at += found + 16;
+            }
+        };
+        scene.after(ms(430), move |scene| async move {
+            scene.variables.change_at(quality, SOURCE);
+        });
+        let supervised = scene.supervise(ms(1_050));
+        Box::pin(relayed(&node, &Relay::default(), clear, supervised)).await
+    })
 }
 
 /// A Good change with no timestamp ends the run with a config error, as no time
@@ -2752,33 +2765,27 @@ fn writes_two_drives_whose_source_timestamps_cross_at_stamps_that_increase() {
 /// device error, and the next run subscribes again and writes.
 #[test]
 fn subscribes_again_after_the_server_ends_the_subscription() {
-    let outcome = scene(
-        RELAY,
-        "20Hz",
-        false,
-        Setup::three(),
-        None,
-        |scene| async move {
-            let node = scene.node.clone();
-            let armed = Rc::new(Cell::new(false));
-            let arm = Rc::clone(&armed);
-            let end = move |message: &mut Vec<u8>| {
-                if armed.get() && is(message, PUBLISHED) {
-                    armed.set(false);
-                    set_result(message, Status::BAD_SESSION_CLOSED);
-                }
-            };
-            scene.after(ms(430), move |scene| async move {
-                scene.variables.change(Quality::GOOD);
-                arm.set(true);
-            });
-            scene.after(ms(3_030), |scene| async move {
-                scene.variables.change(Quality::GOOD);
-            });
-            let supervised = scene.supervise(ms(4_050));
-            Box::pin(relayed(&node, &Relay::default(), end, supervised)).await
-        },
-    );
+    let stage = Stage::WATCH.relayed();
+    let outcome = scene(Setup::three(), stage, |scene| async move {
+        let node = scene.node.clone();
+        let armed = Rc::new(Cell::new(false));
+        let arm = Rc::clone(&armed);
+        let end = move |message: &mut Vec<u8>| {
+            if armed.get() && is(message, PUBLISHED) {
+                armed.set(false);
+                set_result(message, Status::BAD_SESSION_CLOSED);
+            }
+        };
+        scene.after(ms(430), move |scene| async move {
+            scene.variables.change(Quality::GOOD);
+            arm.set(true);
+        });
+        scene.after(ms(3_030), |scene| async move {
+            scene.variables.change(Quality::GOOD);
+        });
+        let supervised = scene.supervise(ms(4_050));
+        Box::pin(relayed(&node, &Relay::default(), end, supervised)).await
+    });
     assert!(outcome.result.is_ok(), "{:?}", outcome.result);
     let ended = "the subscription to opc.tcp://10.0.0.1:4841 ended with \
                  BadNoSubscription";
@@ -2838,26 +2845,19 @@ fn a_cancel_during_a_read_of_the_current_time_ends_after_the_grace() {
 #[test]
 fn a_node_of_another_type_that_goes_bad_clears_the_note_in_both_modes() {
     for polled in [true, false] {
-        let rate = if polled { "10Hz" } else { "20Hz" };
-        let outcome = scene(
-            4840,
-            rate,
-            polled,
-            Setup::three(),
-            None,
-            |scene| async move {
-                scene.variables.set(B, crate::value::Value::I32(1));
-                scene.after(ms(1_530), |scene| async move {
-                    scene.variables.set_quality(B, Quality(0x8000_0000));
+        let stage = if polled { Stage::POLL } else { Stage::WATCH };
+        let outcome = scene(Setup::three(), stage, |scene| async move {
+            scene.variables.set(B, crate::value::Value::I32(1));
+            scene.after(ms(1_530), |scene| async move {
+                scene.variables.set_quality(B, Quality(0x8000_0000));
+            });
+            for at in [2_530, 3_530] {
+                scene.after(ms(at), |scene| async move {
+                    scene.variables.change(Quality::GOOD);
                 });
-                for at in [2_530, 3_530] {
-                    scene.after(ms(at), |scene| async move {
-                        scene.variables.change(Quality::GOOD);
-                    });
-                }
-                scene.supervise(ms(4_550)).await
-            },
-        );
+            }
+            scene.supervise(ms(4_550)).await
+        });
         assert!(outcome.result.is_ok(), "{polled}: {:?}", outcome.result);
         assert_eq!(errors(&outcome.statuses), [], "{polled}");
         let mistyped = "leaves out the values of the node `ns=3;i=7` of the channel \
@@ -2914,21 +2914,21 @@ fn polls_a_server_with_no_monitored_items_and_a_node_whose_watch_is_too_large() 
 fn a_cancel_while_the_subscribe_is_in_flight_ends_after_the_grace() {
     for request in [CURRENT_TIME, CREATE_SUBSCRIPTION] {
         let setup = Setup::three();
-        let outcome =
-            scene(RELAY, "20Hz", false, setup, None, move |scene| async move {
-                let node = scene.node.clone();
-                let stops = Rc::clone(&scene);
-                let up = move |message: &mut Vec<u8>| {
-                    let time = is(message, READ_REQUEST)
-                        && message.windows(4).any(|node| node == CURRENT_TIME);
-                    if time && request == CURRENT_TIME || is(message, request) {
-                        stops.gate.close();
-                    }
-                };
-                let end = relayed_up(&node, up, ends_after_the_cancel(&scene, ms(500)));
-                assert_eq!(Box::pin(end).await, GRACE, "{request:?}");
-                Ok(())
-            });
+        let stage = Stage::WATCH.relayed();
+        let outcome = scene(setup, stage, move |scene| async move {
+            let node = scene.node.clone();
+            let stops = Rc::clone(&scene);
+            let up = move |message: &mut Vec<u8>| {
+                let time = is(message, READ_REQUEST)
+                    && message.windows(4).any(|node| node == CURRENT_TIME);
+                if time && request == CURRENT_TIME || is(message, request) {
+                    stops.gate.close();
+                }
+            };
+            let end = relayed_up(&node, up, ends_after_the_cancel(&scene, ms(500)));
+            assert_eq!(Box::pin(end).await, GRACE, "{request:?}");
+            Ok(())
+        });
         assert!(outcome.result.is_ok(), "{request:?}: {:?}", outcome.result);
         assert_eq!(errors(&outcome.statuses), [], "{request:?}");
     }
@@ -2936,7 +2936,8 @@ fn a_cancel_while_the_subscribe_is_in_flight_ends_after_the_grace() {
 
 /// [`PLC`] supervised for 1.05 s over `secure`.
 fn secured(secure: Secure) -> Record {
-    run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
+    let stage = Stage::POLL.over(secure);
+    scene(Setup::three(), stage, |scene| async move {
         scene.supervise(ms(1_050)).await
     })
 }
@@ -2962,25 +2963,50 @@ const KEY_FIX: &str =
 const TRUST_FIX: &str =
     "Give the DER or PEM certificate of the server, or of the CA that issued it";
 
+/// Each policy in each security mode reads each change: a frame at each tick when the
+/// kind polls, and at each change when it subscribes.
 #[test]
 fn reads_over_a_secure_channel_of_each_policy_in_each_mode() {
-    for policy in Policy::ALL {
-        for unencrypted in [false, true] {
-            let offered = if unencrypted {
-                client::Mode::Sign
-            } else {
-                client::Mode::SignAndEncrypt
-            };
-            let outcome = secured(Secure {
-                offered,
-                unencrypted,
-                ..Secure::of(policy)
-            });
-            let at = format!("{policy:?}, unencrypted {unencrypted}");
-            assert!(outcome.result.is_ok(), "{at}: {:?}", outcome.result);
-            assert_eq!(errors(&outcome.statuses), [], "{at}");
-            assert_eq!(outcome.frames.len(), 11, "{at}");
-            assert_eq!(values(&outcome.frames, 2), served(&outcome, A), "{at}");
+    for stage in [Stage::POLL, Stage::WATCH] {
+        for policy in Policy::ALL {
+            for unencrypted in [false, true] {
+                let offered = if unencrypted {
+                    client::Mode::Sign
+                } else {
+                    client::Mode::SignAndEncrypt
+                };
+                let secure = stage.over(Secure {
+                    offered,
+                    unencrypted,
+                    ..Secure::of(policy)
+                });
+                let outcome = scene(Setup::three(), secure, |scene| async move {
+                    scene.after(ms(430), |scene| async move {
+                        scene.variables.change(Quality::GOOD);
+                    });
+                    scene.supervise(ms(1_050)).await
+                });
+                let at = format!(
+                    "{policy:?}, unencrypted {unencrypted}, subscribed {}",
+                    stage.subscribed
+                );
+                assert!(outcome.result.is_ok(), "{at}: {:?}", outcome.result);
+                assert_eq!(errors(&outcome.statuses), [], "{at}");
+                assert_eq!(notes(&outcome.statuses), Vec::<String>::new(), "{at}");
+                let mut served = served(&outcome, A);
+                let frames = if stage.subscribed {
+                    served.dedup();
+                    2
+                } else {
+                    11
+                };
+                assert_eq!(
+                    keys(&outcome.frames),
+                    vec![vec![1, 2, 3, 4]; frames],
+                    "{at}"
+                );
+                assert_eq!(values(&outcome.frames, 2), served, "{at}");
+            }
         }
     }
 }
@@ -2994,7 +3020,8 @@ fn a_run_with_no_read_keeps_its_session_over_a_secure_channel() {
         ..Setup::three()
     };
     let secure = Secure::of(Policy::Basic256Sha256);
-    let outcome = run_on("10Hz", setup, Some(secure), |scene| async move {
+    let stage = Stage::POLL.over(secure);
+    let outcome = scene(setup, stage, |scene| async move {
         scene.supervise(ms(1_050)).await
     });
     assert!(outcome.result.is_ok(), "{:?}", outcome.result);
@@ -3499,16 +3526,20 @@ fn a_missing_password_ends_the_run_until_it_is_written() {
         user: Some(("operator", None)),
         ..Secure::with_user(Policy::Basic256Sha256)
     };
-    let outcome = run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
-        scene.after(ms(1_050), |scene| async move {
-            let [(_, password)] = LOGINS else {
-                unreachable!("one login")
-            };
-            testing::create_secret(&scene.node.files(), &name(PASSWORD), password)
-                .await;
-        });
-        scene.supervise(ms(5_050)).await
-    });
+    let outcome = scene(
+        Setup::three(),
+        Stage::POLL.over(secure),
+        |scene| async move {
+            scene.after(ms(1_050), |scene| async move {
+                let [(_, password)] = LOGINS else {
+                    unreachable!("one login")
+                };
+                testing::create_secret(&scene.node.files(), &name(PASSWORD), password)
+                    .await;
+            });
+            scene.supervise(ms(5_050)).await
+        },
+    );
     assert!(outcome.result.is_ok(), "{:?}", outcome.result);
     let unread = "the secret secret(\"plant.opcua_password\"): the file \
                   /data/secrets/plant.opcua_password is not there. Write the value to \
@@ -3574,7 +3605,8 @@ fn refuses_a_trust_with_no_certificate_with_the_secret_of_the_trust() {
 fn a_missing_secret_ends_the_run_until_it_is_written() {
     let mut secure = Secure::of(Policy::Basic256Sha256);
     secure.credentials[1] = None;
-    let outcome = run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
+    let stage = Stage::POLL.over(secure);
+    let outcome = scene(Setup::three(), stage, |scene| async move {
         scene.after(ms(1_050), |scene| async move {
             testing::create_secret(&scene.node.files(), &name(KEY), CLIENT.key).await;
         });
@@ -3595,7 +3627,8 @@ fn a_missing_secret_ends_the_run_until_it_is_written() {
 fn a_replaced_key_heals_the_run() {
     let mut secure = Secure::of(Policy::Basic256Sha256);
     secure.credentials[1] = Some(OTHER.key);
-    let outcome = run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
+    let stage = Stage::POLL.over(secure);
+    let outcome = scene(Setup::three(), stage, |scene| async move {
         scene.after(ms(1_050), |scene| async move {
             testing::create_secret(&scene.node.files(), &name(KEY), CLIENT.key).await;
         });
@@ -3614,7 +3647,8 @@ fn a_replaced_key_heals_the_run() {
 fn a_replaced_trust_heals_the_run() {
     let mut secure = Secure::of(Policy::Basic256Sha256);
     secure.credentials[2] = Some(b"no certificate");
-    let outcome = run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
+    let stage = Stage::POLL.over(secure);
+    let outcome = scene(Setup::three(), stage, |scene| async move {
         scene.after(ms(1_050), |scene| async move {
             let files = scene.node.files();
             testing::create_secret(&files, &name(TRUST), SERVER.certificate).await;
@@ -3639,7 +3673,8 @@ fn a_certificate_whose_window_opens_later_reads_once_it_opens() {
         wall: START - Span::from_nanos(2 * Span::SECOND.nanos()),
         ..Secure::of(Policy::Basic256Sha256)
     };
-    let outcome = run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
+    let stage = Stage::POLL.over(secure);
+    let outcome = scene(Setup::three(), stage, |scene| async move {
         scene.supervise(ms(10_050)).await
     });
     assert!(outcome.result.is_ok(), "{:?}", outcome.result);
@@ -3657,7 +3692,8 @@ fn browses_over_a_secure_channel() {
     let found = Arc::new(Mutex::new(None));
     let slot = Arc::clone(&found);
     let secure = Secure::of(Policy::Aes256Sha256RsaPss);
-    let outcome = run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
+    let stage = Stage::POLL.over(secure);
+    let outcome = scene(Setup::three(), stage, |scene| async move {
         let query = browse::Query {
             start: browse::Path::root(),
             scope: browse::Scope::Level(None),
@@ -3686,7 +3722,8 @@ fn a_browse_names_the_certificate_that_the_server_does_not_trust() {
     let slot = Arc::clone(&found);
     let mut secure = Secure::of(Policy::Basic256Sha256);
     secure.server.trust = OTHER.certificate;
-    run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
+    let stage = Stage::POLL.over(secure);
+    scene(Setup::three(), stage, |scene| async move {
         let query = browse::Query {
             start: browse::Path::root(),
             scope: browse::Scope::Level(None),
@@ -3717,7 +3754,8 @@ fn a_browse_refuses_the_key_of_another_certificate() {
     let slot = Arc::clone(&found);
     let mut secure = Secure::of(Policy::Basic256Sha256);
     secure.credentials[1] = Some(OTHER.key);
-    run_on("10Hz", Setup::three(), Some(secure), |scene| async move {
+    let stage = Stage::POLL.over(secure);
+    scene(Setup::three(), stage, |scene| async move {
         let query = browse::Query {
             start: browse::Path::root(),
             scope: browse::Scope::Level(None),

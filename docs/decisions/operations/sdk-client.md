@@ -82,7 +82,7 @@
   `Client::open_reader(read::Config)` opens a `sdk::read::Reader` of channels by name,
   all of one index. `read::Config::new` gives `Mode::Complete`. The client's thread
   opens one `program::Reader` of the names, in a task of its own. The node refuses
-  channels of more than one index with `Refused(Refusal::Malformed)`, as for a writer.
+  channels of more than one index with `Refused(Refusal::Malformed)`.
   The person decided this (laptop.monitor, 2026-10-19T12:29:44Z,
   https://github.com/synnaxlabs/foundation/issues/3265#issuecomment-6267235296): the
   client-side merge by time and the probe of the index of each name leave #3265, and the

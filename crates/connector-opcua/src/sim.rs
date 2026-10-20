@@ -68,32 +68,16 @@ struct State {
     quality: Quality,
     /// The span of the server clock past the wall time of [`serve`].
     ahead: Span,
-    /// The most nodes of a Read that a server answers, set before it starts.
     #[cfg(test)]
-    most: Option<u32>,
-    /// The most session timeout of a server, set before it starts.
-    #[cfg(test)]
-    session: Option<Span>,
-    /// The largest queue of a monitored item and the shortest publishing interval
-    /// that a server grants, set before it starts.
-    #[cfg(test)]
-    queues: Option<(u32, f64)>,
+    limits: Limits,
     /// The reads of the state of the server (`ns=0;i=2259`) that a server answered.
     #[cfg(test)]
     states: u32,
     /// The status of each answer of the state of the server, at first Good.
     #[cfg(test)]
     answer: Quality,
-    /// The only logins that a server lets in, set before it starts.
     #[cfg(test)]
-    users: Option<&'static [(&'static str, &'static [u8])]>,
-    /// The URI of the security policy of the user token policy of a server, set before
-    /// it starts.
-    #[cfg(test)]
-    token: Option<&'static std::ffi::CStr>,
-    /// The status with which a server refuses each session, set before it starts.
-    #[cfg(test)]
-    refusal: Option<crate::ffi::Status>,
+    access: Access,
     /// The credentials and the one policy and mode of a server, set before it starts.
     security: Option<(Credentials<'static>, Policy, Mode)>,
 }
@@ -132,6 +116,75 @@ pub(crate) enum Fixed {
     Doubles,
 }
 
+/// The limits that a server applies when it starts, `None` for its own.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+struct Limits {
+    /// The most nodes of a Read, of [`Variables::refuse_reads_past`].
+    most: Option<u32>,
+    /// The longest timeout of a session, of [`Variables::time_out_sessions`].
+    session: Option<Span>,
+    /// The limits of [`Variables::limit_queues`].
+    queues: Option<Queues>,
+}
+
+#[cfg(test)]
+impl Limits {
+    /// Sets each limit that is not `None` on `server`.
+    fn apply(self, server: &mut Server) {
+        if let Some(most) = self.most {
+            server.refuse_reads_past(most);
+        }
+        if let Some(most) = self.session {
+            server.set_session_timeout(most);
+        }
+        if let Some(queues) = self.queues {
+            server.set_queues(queues.most);
+            server.set_publishing(queues.publishing);
+        }
+    }
+}
+
+/// The limits of a subscription that a server grants.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+struct Queues {
+    /// The largest queue of a monitored item.
+    most: u32,
+    /// The shortest publishing interval, in ms.
+    publishing: f64,
+}
+
+/// The sessions that a server lets in when it starts, `None` for its own.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+struct Access {
+    /// The only logins, of [`Variables::admit`].
+    users: Option<&'static [(&'static str, &'static [u8])]>,
+    /// The URI of the security policy of the user token policy, of
+    /// [`Variables::set_token_policy`].
+    token: Option<&'static std::ffi::CStr>,
+    /// The status of each refusal, of [`Variables::refuse_sessions`].
+    refusal: Option<crate::ffi::Status>,
+}
+
+#[cfg(test)]
+impl Access {
+    /// Sets each part that is not `None` on `server`.
+    fn apply(self, server: &Server) {
+        if let Some(users) = self.users {
+            server.admit(users);
+        }
+        if let Some(uri) = self.token {
+            server.set_token_policy(uri);
+        }
+        // After `admit`, which resets the access control.
+        if let Some(status) = self.refusal {
+            server.refuse_sessions(status);
+        }
+    }
+}
+
 impl Variables {
     /// The variables at the node ids `nodes`, each with the value 0 and the status
     /// Good.
@@ -164,21 +217,13 @@ impl Variables {
             quality: Quality::GOOD,
             ahead: Span::ZERO,
             #[cfg(test)]
-            most: None,
-            #[cfg(test)]
-            session: None,
-            #[cfg(test)]
-            queues: None,
+            limits: Limits::default(),
             #[cfg(test)]
             states: 0,
             #[cfg(test)]
             answer: Quality::GOOD,
             #[cfg(test)]
-            users: None,
-            #[cfg(test)]
-            token: None,
-            #[cfg(test)]
-            refusal: None,
+            access: Access::default(),
             security: None,
         })))
     }
@@ -257,13 +302,13 @@ impl Variables {
     /// client the limit.
     #[cfg(test)]
     pub(crate) fn refuse_reads_past(&self, most: u32) {
-        self.state().most = Some(most);
+        self.state().limits.most = Some(most);
     }
 
     /// Makes a server give each session a timeout of at most `most`.
     #[cfg(test)]
     pub(crate) fn time_out_sessions(&self, most: Span) {
-        self.state().session = Some(most);
+        self.state().limits.session = Some(most);
     }
 
     /// Makes a server that starts later grant each monitored item a queue of at most
@@ -271,7 +316,10 @@ impl Variables {
     /// ms.
     #[cfg(test)]
     pub(crate) fn limit_queues(&self, most: u32, ms: f64) {
-        self.state().queues = Some((most, ms));
+        self.state().limits.queues = Some(Queues {
+            most,
+            publishing: ms,
+        });
     }
 
     /// Makes a server offer only `policy` in `mode`, and no endpoint in `None`, on the
@@ -290,21 +338,21 @@ impl Variables {
     /// `users`, and no anonymous session.
     #[cfg(test)]
     pub(crate) fn admit(&self, users: &'static [(&'static str, &'static [u8])]) {
-        self.state().users = Some(users);
+        self.state().access.users = Some(users);
     }
 
     /// Gives a server that starts later the user token policy of `uri`, as
     /// [`Server::set_token_policy`] says.
     #[cfg(test)]
     pub(crate) fn set_token_policy(&self, uri: &'static std::ffi::CStr) {
-        self.state().token = Some(uri);
+        self.state().access.token = Some(uri);
     }
 
     /// Makes a server that starts later refuse each session with `status`, as
     /// [`Server::refuse_sessions`] says.
     #[cfg(test)]
     pub(crate) fn refuse_sessions(&self, status: crate::ffi::Status) {
-        self.state().refusal = Some(status);
+        self.state().access.refusal = Some(status);
     }
 
     /// Gives each later answer of the state of the server the status `quality`.
@@ -317,61 +365,6 @@ impl Variables {
     #[cfg(test)]
     pub(crate) fn states(&self) -> u32 {
         self.state().states
-    }
-
-    /// The value of [`Variables::fix`] of each variable.
-    #[cfg(test)]
-    fn fixed(&self) -> Vec<Option<Fixed>> {
-        let state = self.state();
-        state.variables.iter().map(|v| v.hooks.fixed).collect()
-    }
-
-    /// Gives `server` the most nodes of a Read of [`Variables::refuse_reads_past`], the
-    /// timeout of [`Variables::time_out_sessions`], the limits of
-    /// [`Variables::limit_queues`], the logins of [`Variables::admit`], the token
-    /// policy of [`Variables::set_token_policy`], and the refusal of
-    /// [`Variables::refuse_sessions`], and makes it answer the reads of its state.
-    #[cfg(test)]
-    fn hook(&self, server: &Server) {
-        let (most, session, queues, users, token, refusal) = {
-            let state = self.state();
-            let State {
-                most,
-                session,
-                queues,
-                users,
-                token,
-                refusal,
-                ..
-            } = *state;
-            (most, session, queues, users, token, refusal)
-        };
-        if let Some(most) = most {
-            server.refuse_reads_past(most);
-        }
-        if let Some(most) = session {
-            server.set_session_timeout(most);
-        }
-        if let Some((most, ms)) = queues {
-            server.set_queues(most);
-            server.set_publishing(ms);
-        }
-        if let Some(users) = users {
-            server.admit(users);
-        }
-        if let Some(uri) = token {
-            server.set_token_policy(uri);
-        }
-        // After `admit`, which resets the access control.
-        if let Some(status) = refusal {
-            server.refuse_sessions(status);
-        }
-        let variables = Variables::clone(self);
-        server.set_source(&state_node(), move || {
-            let mut state = variables.state();
-            state.states += 1;
-            (Value::I32(0), state.answer)
-        });
     }
 
     /// Calls `change` on the variable of `text`.
@@ -488,13 +481,29 @@ pub async fn serve(
         .map(|variable| variable.node.clone())
         .collect();
     #[cfg(test)]
-    let fixed = variables.fixed();
+    let (limits, access) = {
+        let state = variables.state();
+        (state.limits, state.access)
+    };
+    #[cfg(test)]
+    let fixed: Vec<_> = (variables.state().variables.iter())
+        .map(|variable| variable.hooks.fixed)
+        .collect();
     let security = variables.state().security;
     let add = |server: &mut Server| {
         server.cap_references(tree::REFERENCES);
         tree::add(server);
         #[cfg(test)]
-        variables.hook(server);
+        {
+            limits.apply(server);
+            access.apply(server);
+            let variables = Variables::clone(variables);
+            server.set_source(&state_node(), move || {
+                let mut state = variables.state();
+                state.states += 1;
+                (Value::I32(0), state.answer)
+            });
+        }
         let top = nodes.iter().map(|node| node.namespace).max().unwrap_or(0);
         for namespace in 2..=top {
             let uri = CString::new(format!("urn:foundation:sim:{namespace}"))
