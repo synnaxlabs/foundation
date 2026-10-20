@@ -34,7 +34,7 @@ jq -s '.[0] + .[1]' "$tmp/fill.pr.json" - > "$tmp/pr.json" <<'JSON'
 [{"state": "OPEN", "headRefName": "box1/10-held", "closingIssuesReferences": []},
  {"state": "OPEN", "headRefName": "laptop/main-fix", "closingIssuesReferences": []},
  {"state": "OPEN", "headRefName": "box2/99-other",
-  "closingIssuesReferences": [{"number": 14}]},
+  "closingIssuesReferences": [{"number": 16}, {"number": 14}]},
  {"state": "OPEN", "headRefName": "box2/12x-no-issue", "closingIssuesReferences": []},
  {"state": "CLOSED", "headRefName": "box1/12-closed", "closingIssuesReferences": []}]
 JSON
@@ -77,27 +77,37 @@ jq -s '.[0] + .[1]' "$tmp/fill.issue.json" - > "$tmp/issue.json" <<'JSON'
    {"name": "crate:other"}]},
  {"state": "OPEN", "number": 9, "title": "on closes",
   "createdAt": "2026-01-08T00:00:00Z",
-  "labels": [{"name": "ready"}, {"name": "crate:closes"}]}
+  "labels": [{"name": "ready"}, {"name": "crate:closes"}]},
+ {"state": "OPEN", "number": 1000, "title": "same second, later",
+  "createdAt": "2026-01-09T00:00:00Z", "labels": [{"name": "ready"}]},
+ {"state": "OPEN", "number": 999, "title": "same second",
+  "createdAt": "2026-01-09T00:00:00Z", "labels": [{"name": "ready"}]}
 ]
 JSON
 failed=0
 check() {
-  want_out=$1 want_code=$2
-  shift 2
-  out=$(PATH="$tmp/bin:$PATH" STUB=$tmp sh "$here/free.sh" "$@" 2>/dev/null)
+  want_out=$1 want_code=$2 want_err=$3
+  shift 3
+  PATH="$tmp/bin:$PATH" STUB=$tmp sh "$here/free.sh" "$@" >"$tmp/out" 2>"$tmp/err"
   code=$?
-  [ "$out" = "$want_out" ] && [ "$code" = "$want_code" ] && return
-  printf 'free.sh %s: want exit %s and\n%s\ngot exit %s and\n%s\n' "$*" \
-    "$want_code" "$want_out" "$code" "$out"
+  out=$(cat "$tmp/out") err=$(cat "$tmp/err")
+  # $(...) drops a trailing newline, so an empty want also asks for an empty file.
+  [ "$out" = "$want_out" ] && [ "$code" = "$want_code" ] && [ "$err" = "$want_err" ] &&
+    { [ -n "$want_out" ] || [ ! -s "$tmp/out" ]; } && return
+  printf 'free.sh %s: want exit %s and\n%s\n%s\ngot exit %s and\n%s\n%s\n' "$*" \
+    "$want_code" "$want_out" "$want_err" "$code" "$out" "$err"
   failed=1
 }
 check "5 night
 3 on blocked
-4 no crate" 0
-check "5 night" 0 night
+4 no crate
+999 same second
+1000 same second, later" 0 ""
+check "5 night" 0 "" night
+check "" 0 "" nothing
 touch "$tmp/fail.issue"
-check "" 1
+check "" 1 "HTTP 502: Bad Gateway"
 rm "$tmp/fail.issue"
 touch "$tmp/fail.pr"
-check "" 1
+check "" 1 "HTTP 502: Bad Gateway"
 exit "$failed"
