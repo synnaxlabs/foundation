@@ -19,12 +19,7 @@ use wire::Protocol;
 use wire::hub::{Credit, Due, Frames, Open, Refusal, Step, keys};
 
 use super::{Ended, Error, Lens, Matched, Mode, Streak, WINDOW};
-use crate::State;
-
-/// The most opens of one [`connect`]. The home's node dials only when it has no open
-/// session, and runs one dial at a time, so its session beats at most the session that
-/// was open and one that this node dialed before that session arrived.
-const TRIES: u32 = 3;
+use crate::{State, dial};
 
 /// A reader session on one stream to the home. A task opens the stream, takes each
 /// frame off it as it arrives, and sends each credit, so an idle caller never holds
@@ -567,35 +562,11 @@ fn poll_end(queue: &Weak<RefCell<Queue>>, cx: &Context<'_>) -> Poll<Option<Refus
     Poll::Pending
 }
 
-/// The session to `home`, another node, that the shard's transport holds or dials.
-async fn dial(
-    state: &Rc<RefCell<State>>,
-    home: types::node::Key,
-) -> Result<transport::Session, Error> {
-    let (transport, card) = {
-        let state = state.borrow();
-        let region = &state
-            .region
-            .as_ref()
-            .expect("invariant: only a node in a region has a remote home")
-            .region;
-        let member = region
-            .mesh
-            .member(home)
-            .expect("invariant: the mesh names only a member as a home");
-        (Rc::clone(&region.transport), member.card.card().clone())
-    };
-    transport
-        .dial(card.public_key, card.addresses.as_slice())
-        .await
-        .map_err(Error::Transport)
-}
-
 /// Opens a stream of `class` to `home`, and opens the session of `open` on `set`, whose
 /// frames it gives. A reply that breaks HUB WIRE, or a pool with no block for a
 /// message, stops the stream with its refusal. A session that closes with `Code(0)`
-/// before `Opened`, as one that loses the tie-break of ONE SESSION PER PEER does, gets
-/// another open on the session that the next dial gives, at most `TRIES` in all.
+/// before `Opened` gets another open on the session that the next dial gives, as
+/// [`dial::retry`] states.
 async fn connect(
     state: &Rc<RefCell<State>>,
     home: types::node::Key,
@@ -603,15 +574,18 @@ async fn connect(
     set: &Arc<KeySet>,
     open: &Open,
 ) -> Result<(Sender, Receiver, Frames), Error> {
-    let mut tries = 1;
-    loop {
-        match attempt(state, home, class, set, open).await {
-            Err(Error::Transport(
-                transport::Error::Closed { code: Code(0) }
-                | transport::Error::PeerClosed { code: Code(0) },
-            )) if tries < TRIES => tries += 1,
-            connected => return connected,
-        }
+    dial::retry(
+        async || attempt(state, home, class, set, open).await,
+        closed,
+    )
+    .await
+}
+
+/// The transport error that `error` carries.
+fn closed(error: &Error) -> Option<&transport::Error> {
+    match error {
+        Error::Transport(error) => Some(error),
+        _ => None,
     }
 }
 
@@ -623,8 +597,9 @@ async fn attempt(
     set: &Arc<KeySet>,
     open: &Open,
 ) -> Result<(Sender, Receiver, Frames), Error> {
-    let (mut sender, mut receiver) = dial(state, home)
-        .await?
+    let (mut sender, mut receiver) = dial::dial(state, home)
+        .await
+        .map_err(Error::Transport)?
         .open(class)
         .await
         .map_err(Error::Transport)?;

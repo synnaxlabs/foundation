@@ -3,6 +3,7 @@
 
 mod channel;
 mod commit;
+mod dial;
 mod gate;
 mod link;
 mod pending;
