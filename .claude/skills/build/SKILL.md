@@ -19,26 +19,30 @@ when its PR merges, `mcp__factory__next` clears it and starts `/build` again.
    by the exact path that its task notification gives, other than after a crash or a
    restart (`docs/coordination.md`, "Worktrees"). Never loop over `.claude/worktrees` or
    `git worktree list`: the worktrees of other sessions are there too.
-2. An open issue labeled `owner:$FACTORY_NAME` comes first: resume it from its last
-   state comment. Skip one labeled `blocked` while an issue that it waits on is open or
-   a question on it has no answer. When neither holds, remove `blocked` and resume it.
-   With none to resume, take the first issue that the free script prints (on the night
-   lane, run it with `sh -s night`): the oldest `ready` issue whose crates no issue with
-   an `owner:` label holds. An owned issue holds its crates while it has an open PR, or
-   while its owner builds it (it is not `blocked`).
+2. An open issue labeled `owner:$FACTORY_NAME` that is not `blocked` comes first:
+   resume it from its last state comment. With none to resume, take the first issue
+   that the free script prints (on the night lane, `sh -c "$s" free.sh night`): the
+   oldest `ready` issue whose crates no issue with an `owner:` label holds. An owned
+   issue holds its crates while an open PR closes it or has its number in its branch,
+   or while its owner builds it, which is while it is not `blocked`. Exit 3: git could
+   not get the script. Another exit that is not 0: fix what gh printed, and run it
+   again.
 
    ```sh
-   git show origin/main:.claude/skills/build/free.sh | sh
+   s=$(git show origin/main:.claude/skills/build/free.sh) || exit 3
+   sh -c "$s" free.sh
    ```
 3. Claim it: `gh issue edit <n> --add-label "owner:$FACTORY_NAME" --remove-label ready`
    (the first time, `gh label create "owner:$FACTORY_NAME"`). If it then has a second
-   `owner:` label, remove yours and take the next one. Then give back each other issue
-   labeled `owner:$FACTORY_NAME` that has no open PR: comment its state, remove your
-   `owner:` label, and add `ready` unless it is `blocked`. You hold at most one owned
-   issue with no open PR.
-4. Day lane: when fewer than two `ready` issues remain, file the next ones on the
+   `owner:` label, remove yours and take the next one.
+4. After a resume or a claim, give back each other issue labeled
+   `owner:$FACTORY_NAME` that no open PR closes or has in its branch: comment its
+   state, and remove your `owner:` label. Remove `blocked` from one when no issue that
+   it waits on is open and each question on it has an answer. Add `ready` to each that
+   is not `blocked`. You hold at most one owned issue with no open PR.
+5. Day lane: when fewer than two `ready` issues remain, file the next ones on the
    milestone path (Rules).
-5. An issue labeled `model:fable`: ask your engineer to switch with `/model` first.
+6. An issue labeled `model:fable`: ask your engineer to switch with `/model` first.
 
 Read only this before you plan: the issue and its comments, the records of
 `docs/decisions/` for your crate (the folder of its topic, and `grep -rl` for its name),
@@ -153,7 +157,9 @@ take the next issue meanwhile.
 - Ask the person in a comment on the issue or PR, then send `laptop.coordinator` the
   link to that comment at once (`docs/coordination.md`, "Messages"). A comment alone
   reaches no one. When no part of the issue is left to build, add `blocked` and take
-  other work (Take an issue). Remove `blocked` when the answer comes.
+  other work (Take an issue). When the answer comes, remove `blocked`, and your
+  `owner:` label if it is there, and add `ready`. If you build no other issue, take one
+  (Take an issue).
 - A key choice (`CLAUDE.md`, "The person decides the design"): send it to
   `laptop.monitor` when you make it, before work builds on it, then go on. Never add
   `blocked` for it.
@@ -164,7 +170,7 @@ take the next issue meanwhile.
   comment link.
 - Send the architect only a change to the public surface or to the meaning of a ruling.
   A fix of wording or links in a ruling needs no new approval.
-- Each issue that you file (step 4, or for your issue: its later steps, a deferral of a
+- Each issue that you file (step 5, or for your issue: its later steps, a deferral of a
   finding of your PR, or an issue that your PR waits on) states its goal, crates, tests
   that must pass, and decisions section, with a `crate:` label for each of its crates.
   Send its link to `laptop.coordinator` when you file it, which admits it
@@ -172,3 +178,4 @@ take the next issue meanwhile.
   Claim it (step 3) only when step 2 takes it. Your next state comment on your issue
   links each one that you file for it.
 - Before you stop, comment your state on the issue: done, next step, open questions.
+- A change to `free.sh` passes `sh .claude/skills/build/free_test.sh` first.
