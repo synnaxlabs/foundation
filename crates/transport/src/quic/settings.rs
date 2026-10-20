@@ -879,6 +879,8 @@ mod tests {
                 let sent = pair.server.sent.len();
                 pair.server.drops = usize::from(server.contains(&sent));
                 pair.run(Duration::from_millis(1));
+                // No public call shows the RTT, so the premise reads the noq-proto
+                // connection.
                 if rtt.is_none() && pair.client.sent.len() > 4 {
                     rtt = pair.client.connection().rtt(PathId::ZERO);
                 }
@@ -959,6 +961,8 @@ mod tests {
                 // has no round-trip sample.
                 pair.server.drops = usize::MAX;
                 pair.run(Duration::from_millis(700));
+                // No public call shows the RTT, so the premise reads the noq-proto
+                // connection.
                 let mut connections = pair.server.endpoint.connections.iter().flatten();
                 let connection = connections.next().expect("a connection");
                 let rtt = connection.inner.rtt(PathId::ZERO);

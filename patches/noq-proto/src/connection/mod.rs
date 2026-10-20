@@ -6759,7 +6759,7 @@ impl Connection {
             negotiate_max_idle_timeout(self.config.max_idle_timeout, Some(params.max_idle_timeout));
         trace!("negotiated max idle timeout {:?}", self.idle_timeout);
         // Foundation patch: before the first round-trip sample, 3 PTO fit in the
-        // negotiated idle timeout, also when the local one is longer.
+        // negotiated idle timeout from 5 ms, also when the local one is longer.
         if let Some(idle) = self.idle_timeout {
             let rtt = &mut self.path_data_mut(PathId::ZERO).rtt;
             let initial = rtt.get().min(idle / 10);
