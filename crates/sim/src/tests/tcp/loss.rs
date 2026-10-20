@@ -189,7 +189,7 @@ fn a_lost_ack_goes_with_the_next_segment_of_its_direction() {
 }
 
 #[test]
-fn a_syn_ack_that_is_lost_each_time_times_out_the_connect_and_leaves_the_backlog() {
+fn a_syn_ack_lost_each_time_leaves_the_backlog_at_63_s_and_the_connect_at_127_s() {
     let (mut sim, a, b) = pair(0, link::Config::default());
     sim.link(&b, &a, cut());
     let listen = tcp::Listen {
@@ -203,11 +203,10 @@ fn a_syn_ack_that_is_lost_each_time_times_out_the_connect_and_leaves_the_backlog
         let error = connect(&node, remote, options()).await.err();
         (node.clock().now(), error)
     });
-    sim.run_for(secs(64)).unwrap();
-    // Linux sends a SYN-ACK 6 times, 1 s after the first and twice as long after each.
-    let timed_out = legs(1) + secs(63);
-    let error = Net::TimedOut { remote };
-    assert_eq!(take(&first), (timed_out, Some(error)));
+    // Linux sends a SYN-ACK 6 times, 1 s after the first and twice as long after
+    // each, and drops the request at the timeout of the last.
+    sim.run_for(Span::from_nanos(delay().nanos() + secs(63).nanos()))
+        .unwrap();
     sim.link(&b, &a, link::Config::default());
     let server = start(&b, "server", move |_| async move {
         accept(&mut listener).await.peer()
@@ -215,8 +214,12 @@ fn a_syn_ack_that_is_lost_each_time_times_out_the_connect_and_leaves_the_backlog
     let _second = start(&a, "second", move |node| async move {
         connect(&node, remote, options()).await.unwrap()
     });
-    sim.run().unwrap();
+    sim.run_for(secs(1)).unwrap();
     assert_eq!(take(&server), at(&a, 49_153));
+    // The client does not know that its SYN arrived, and gives up 127 s after it.
+    sim.run().unwrap();
+    let error = Net::TimedOut { remote };
+    assert_eq!(take(&first), (after(secs(127)), Some(error)));
 }
 
 #[test]
@@ -499,4 +502,43 @@ fn a_lost_ack_of_a_handshake_times_out_the_accept_and_leaves_the_backlog() {
     });
     sim.run().unwrap();
     assert_eq!(take(&server), at(&a, 49_153));
+}
+
+#[test]
+fn a_held_byte_times_out_by_the_time_it_was_held_not_the_time_it_went() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    let server = start(&b, "server", move |_| async move {
+        let mut tcp = accept(&mut listener).await;
+        let read = read(&mut tcp, 2).await;
+        (read, tcp)
+    });
+    let remote = at(&b, 4433);
+    let client = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        node.clock().sleep(millis(10)).await;
+        let wrote = node.clock().now();
+        write_all(&mut tcp, &[1]).await.unwrap();
+        write_all(&mut tcp, &[2]).await.unwrap();
+        let error = read(&mut tcp, 1).await.unwrap_err();
+        (node.clock().now() - wrote, error)
+    });
+    sim.run_for(millis(5)).unwrap();
+    sim.link(&a, &b, cut());
+    sim.run_for(secs(205)).unwrap();
+    let half = link::Config {
+        loss: 0.5,
+        ..link::Config::default()
+    };
+    sim.link(&a, &b, half);
+    sim.run_for(millis(200)).unwrap();
+    sim.link(&a, &b, cut());
+    sim.run().unwrap();
+    // On this seed, the first byte arrives at 205.1 s, and the second byte, held since
+    // its write, is lost at each try from then. It times out at the first try 924.6 s
+    // after its hold, not after its first send at 205.1 s.
+    let (read, _tcp) = take(&server);
+    assert_eq!(read, Ok(vec![1]));
+    let error = Net::TimedOut { remote };
+    assert_eq!(take(&client), (Span::from_nanos(1_010_223_000_000), error));
 }
