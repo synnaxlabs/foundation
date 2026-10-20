@@ -9,8 +9,10 @@
 //! to a key set no larger than one before. A client read makes as many allocations for
 //! each frame it relays as a HUB WIRE session, and a client write of one or two groups
 //! makes none, also at a member that forwards it to its home. A complete reader that
-//! catches up from disk allocates only at each read. This binary has no test harness:
-//! the count covers each thread, and a harness allocates on its own thread at any time.
+//! catches up from disk allocates only at each read. A write that the ring has no room
+//! for makes none, also when the handoff of its writer finds no room. This binary has
+//! no test harness: the count covers each thread, and a harness allocates on its own
+//! thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -49,10 +51,11 @@ use common::{SETTLE, hub, name, unnamed};
 use home::reader::Next;
 use home::reader::complete::Charge;
 use hub::Hub;
+use hub::home::Outcome;
 use hub::reader::{self, Mode, Reader};
 use hub::writer::{self, Writer};
 use types::authority::Authority;
-use types::frame::{Draft, Form};
+use types::frame::{Draft, Form, Label, Path};
 use types::time::Span;
 use wire::hub::client;
 use woken::Woken;
@@ -499,7 +502,61 @@ fn main() {
     woken_of_a_reader_whose_frame_waits_for_credit();
     open_of_a_reader_of_many_channels();
     next_at_each_change_of_key_set();
+    lost_writes();
     write_and_next();
+}
+
+/// Writes one sample to `time` and to `value`, which the ring has no room for, with the
+/// allocations the write made.
+fn lose(writer: &mut Writer, stamp: i64) -> u64 {
+    let (lost, allocations) = ALLOCATOR.count(|| {
+        let draft = common::draft(writer, stamp);
+        let written = writer.write(Label::Path(Path::Live), draft);
+        matches!(written, Ok([Outcome::Lost { .. }]))
+    });
+    assert!(lost, "the ring has no room for the frame");
+    allocations
+}
+
+/// A write that the ring has no room for, and one of a writer whose handoff finds no
+/// room: neither allocates once warm.
+fn lost_writes() {
+    let mut sim = sim::Sim::new(sim::Config::default());
+    let node = sim.node(sim::node::Config::default());
+    sim.run_on(&node, |node, tasks| async move {
+        let (hub, mut stamp) = hub(&node, tasks).await;
+        let config = |subject, authority| writer::Config {
+            subject: name(subject),
+            authority: Authority(authority),
+            lease: None,
+            channels: vec![name("value")],
+        };
+        let mut writer = hub.writer(config("a", 1)).await.expect("opens");
+        'fill: loop {
+            for _ in 0..64 {
+                let draft = common::draft(&writer, stamp);
+                stamp += 1;
+                let written = writer.write(Label::Path(Path::Live), draft);
+                if matches!(written, Ok([Outcome::Lost { .. }])) {
+                    break 'fill;
+                }
+            }
+            node.clock().sleep(SETTLE).await;
+        }
+        let counted = |writer: &mut Writer, stamp: &mut i64, name| {
+            for n in 0..WARM + COUNTED {
+                let lost = lose(writer, *stamp);
+                *stamp += 1;
+                if n >= WARM {
+                    assert_eq!(lost, 0, "{name} write {n} allocated");
+                }
+            }
+        };
+        counted(&mut writer, &mut stamp, "lost");
+        let mut taker = hub.writer(config("b", 2)).await.expect("opens");
+        counted(&mut taker, &mut stamp, "handoff");
+    })
+    .expect("the run ends");
 }
 
 /// A write and `next` of a complete reader, when frames wait for it and when it
