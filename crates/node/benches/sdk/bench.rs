@@ -138,8 +138,10 @@ fn spans(
         }
         if let Some(reader) = &mut reader {
             let frame = if timed == Timed::HeldWithin {
-                let frame = reader.next_within(HELD).expect("the reader reads");
-                frame.expect("the client's thread holds the frame")
+                let frame = reader.next_within(Duration::from_secs(10));
+                frame
+                    .expect("the reader reads")
+                    .expect("the frame comes in 10 s")
             } else {
                 reader.next().expect("the reader reads")
             };
