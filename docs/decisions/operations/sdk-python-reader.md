@@ -6,9 +6,11 @@
   `numpy.ndarray` that the program owns, with `Frame.count` and `Frame.lost`. A channel
   of `uuid` reads as an array of dtype `object`, with one `uuid.UUID` for each sample,
   made after the guard from the 16 bytes of the sample, big-endian, which costs one
-  Python object a sample (below). `laptop.architect-2` approved it
-  (https://github.com/synnaxlabs/foundation/pull/3436#issuecomment-6278668296). Only a
-  channel of a type that is not a scalar raises `TypeError` at the open. The reader
+  Python object a sample (below). `laptop.architect-2` approved it at
+  2026-10-19T22:22:38Z
+  (https://github.com/synnaxlabs/foundation/pull/3436#issuecomment-6278668296). A
+  series of `uuid` to `Writer.write_series` waits on #3464. Only a channel of a type
+  that is not a scalar raises `TypeError` at the open. The reader
   follows the writer (SDK PYTHON WRITER): one `Mutex` taken with
   `MutexExt::lock_py_attached`, a check of the process before the lock, and no Python
   code while a call holds the lock. The plan
@@ -94,11 +96,14 @@
   the free of the frame. It runs once for each frame that a Python program reads, on the
   CPU of the program, not of the node, and adds 0 bytes per sample. It is on the path of
   a latest-mode read, so it counts against the latest-mode p99, whose limit is 2.5 µs a
-  hop. Its p99 is over the limit in each case, and in at least one pass of the queued
-  frame of 1 place of 100 samples (1.41 to 3.58 µs). A cut of the part per sample needs
-  arrays that view the buffers of the `sdk` frame, which this item rejects above. A cut
-  of the part per array needs no `numpy` array for each series, which the Python surface
-  cannot give. `laptop.architect-2` accepted this judgment at 0804db16e
+  hop. Its p99 is over the limit in each case of the table, and in at least one pass
+  of the queued frame of 1 place of 100 samples (1.41 to 3.58 µs) and of one sample of
+  `f64` (1.16 to 2.65 µs). A cut of the part per sample needs arrays that view the
+  buffers of the `sdk` frame, which this item rejects above. A cut of the part per array
+  needs no `numpy` array for each series, which the Python surface cannot give.
+  `laptop.architect-2` accepted this judgment at 0804db16e at 2026-10-19T21:54:00Z
   (https://github.com/synnaxlabs/foundation/pull/3436#issuecomment-6278228544), with the
-  line of 1024 places as its trigger
-  (https://github.com/synnaxlabs/foundation/pull/3436#issuecomment-6278668296).
+  line of 1024 places as its trigger at 2026-10-19T22:22:38Z
+  (https://github.com/synnaxlabs/foundation/pull/3436#issuecomment-6278668296), and held
+  it on this table at 2026-10-19T23:20:54Z
+  (https://github.com/synnaxlabs/foundation/pull/3436#issuecomment-6279518607).
