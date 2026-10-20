@@ -76,9 +76,16 @@
   `--exact --skip`. In queue run 39308250221, `check` took 32 min, `macos` 35 min,
   `windows` 28 min, and the `test` of ARM 22 min, and on Linux `cargo test` ran 173 test
   binaries and 40 doc-test sets one after another.
-  Amended (`laptop.monitor`, factory message `54cd29e1`, 2026-10-19, through #3448):
-  ARM runs the two parts at the same time. The matrix job `parts` of `arm.yaml` runs
-  `cargo xtask test nextest` and `cargo xtask test serial` on two runners, and the
-  job `test` gives the required check `test`, which passes when both parts passed. Both
-  skip when the filter found no change of code. In run 39335833233 the one job took
-  21 min.
+  Amended (`laptop.monitor`, recorded in #3448 at 2026-10-19T22:59:03Z,
+  https://github.com/synnaxlabs/foundation/issues/3448): ARM runs the two parts at the
+  same time. The matrix job `parts` of `arm.yaml` runs `cargo xtask test nextest` and
+  `cargo xtask test serial` on two `ubuntu-24.04-arm` runners, and the job `test`, on
+  `ubuntu-24.04`, gives the required check `test`, which passes when both parts passed.
+  Both skip when the filter found no change of code. Supersedes "The job `test` of
+  `arm.yaml` runs both parts, one after the other." of
+  https://github.com/synnaxlabs/foundation/issues/3418#issuecomment-6276305229, and the
+  name `test` of the ARM job in ARM RUNNER. In run 39335833233 the one job took 21 min.
+  In run 39349284591, with a cold cache, `nextest` took 13.1 min (11755 passed, 12
+  skipped) and `serial` 11.1 min (79 test targets with no harness, 235 doc tests), and
+  the workflow 13.4 min. Each part builds on its own runner, and ARM keeps a cache
+  entry for each part in place of one.
