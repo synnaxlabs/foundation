@@ -584,16 +584,15 @@ fn a_write_of_a_group_whose_channel_was_removed_gives_partial_and_the_writer_goe
         "channel \"cell.c\" {\n  data_type = \"i64\"\n  index = \"cell.time\"\n}\n";
     rig.config(&crate::plant::CHANNELS.replace(cell, ""));
     rig.apply();
-    let mut seq = 1;
-    let partial = rig.wait("a write gives partial", || {
-        match writer.write(&values).map(<[_]>::to_vec) {
-            Ok(outcomes) => {
-                seq += 1;
-                Err(format!("{outcomes:?}"))
-            }
-            Err(error) => Ok(error),
+    let unknown = Error::Stream(program::Error::Refused(Refusal::Unknown));
+    rig.wait("an open of a reader of cell.c gives unknown", || {
+        let cells = vec!["cell.c".parse().unwrap()];
+        match client.open_reader(sdk::read::Config::new(cells)).map(drop) {
+            Err(error) if error == unknown => Ok(()),
+            other => Err(format!("{other:?}")),
         }
     });
+    let partial = writer.write(&values).map(<[_]>::to_vec).unwrap_err();
     let names = |names: &[&str]| names.iter().map(|n| n.parse().unwrap()).collect();
     let removed = Outcome::Ended(sdk::write::End::Removed);
     let partial_at = |seq| Error::Partial {
@@ -601,16 +600,13 @@ fn a_write_of_a_group_whose_channel_was_removed_gives_partial_and_the_writer_goe
         unwritten: names(&["cell.c", "cell.time"]),
         outcomes: vec![(cell_time, removed), (plant_time, taken(seq, 1))],
     };
-    assert_eq!(partial, partial_at(seq));
+    assert_eq!(partial, partial_at(1));
     assert_eq!(
         partial.to_string(),
         "channels cell.c, cell.time were not written; channels plant.a, plant.time were"
     );
-    assert_eq!(
-        writer.write(&values).map(<[_]>::to_vec),
-        Err(partial_at(seq + 1))
-    );
-    let taken = Ok(&[(plant_time, taken(seq + 2, 1))][..]);
+    assert_eq!(writer.write(&values).map(<[_]>::to_vec), Err(partial_at(2)));
+    let taken = Ok(&[(plant_time, taken(3, 1))][..]);
     assert_eq!(writer.write(&[(a, Value::I64(3))]), taken);
     assert_eq!(writer.close(), Ok(()));
     assert_eq!(client.close(), Ok(()));
@@ -939,8 +935,9 @@ fn a_warm_call_makes_no_allocation_on_the_thread_of_its_caller() {
     read::a_warm_next_makes_no_allocation();
 }
 
-/// A `write` of far more values than places, after one of 1,000, makes no allocation:
-/// the writer keeps at most one value more than the places.
+/// A `write` of far more values than places, after one of 1,000, makes no allocation,
+/// and so does a `write_series` of far more series: the writer keeps at most one item
+/// more than the places.
 #[cfg(unix)]
 fn a_write_of_more_values_than_places_makes_no_allocation(
     writer: &mut sdk::write::Writer,
@@ -955,6 +952,16 @@ fn a_write_of_more_values_than_places_makes_no_allocation(
     assert_eq!(
         allocations, 0,
         "a write of more values than places allocates"
+    );
+    let empty = vec![of(0, 0, &[]); 100_000];
+    let series = writer.write_series(&empty[..1_000]).map(<[_]>::to_vec);
+    assert_eq!(series, unordered);
+    let (series, allocations) =
+        crate::ALLOCATOR.count(|| writer.write_series(&empty).map(<[_]>::to_vec));
+    assert_eq!(series, unordered);
+    assert_eq!(
+        allocations, 0,
+        "a write_series of more series than places allocates"
     );
 }
 
