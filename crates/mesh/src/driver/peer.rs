@@ -125,16 +125,18 @@ impl Mesh {
                 Ok(push) => self.push(push, &mut left).await,
                 Err(error) => Err(Failed::Call(error)),
             };
-            let again = |ended: transport::Error| {
-                redial || left.len() < before || !raced && replaced(&ended)
+            let Err(failed) = pushed else {
+                return Ok(());
             };
-            match pushed {
-                Ok(()) => return Ok(()),
-                Err(Failed::Call(_)) if session.ended().is_some_and(again) => {
-                    raced = left.len() == before && (raced || !redial);
-                    redial = false;
+            match (&failed, session.ended()) {
+                (Failed::Call(_), Some(_)) if left.len() < before => {
+                    (redial, raced) = (false, false);
                 }
-                Err(failed) => return Err(failed.into()),
+                (Failed::Call(_), Some(ended)) if !raced && replaced(&ended) => {
+                    raced = true;
+                }
+                (Failed::Call(_), Some(_)) if redial => redial = false,
+                _ => return Err(failed.into()),
             }
         }
     }

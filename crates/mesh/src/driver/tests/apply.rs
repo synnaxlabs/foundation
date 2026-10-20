@@ -952,7 +952,7 @@ fn an_apply_redials_a_voter_once_for_a_session_that_ends_with_code_0() {
     cluster.start_voter(1);
     cluster.start_voter(2);
     cluster.run(seconds(5));
-    cluster.board.lock().unwrap().closing = [2].into();
+    cluster.board.lock().unwrap().closes = [(2, [0, 0, 0].into())].into();
     cluster.change(1, base(), &create_largest(1));
     cluster.run(seconds(15));
     let closed =
@@ -972,6 +972,39 @@ fn an_apply_redials_a_voter_once_for_a_session_that_ends_with_code_0() {
     let board = cluster.board();
     assert_eq!(board.applied, [(1, base(), Err(quorum))]);
     assert_eq!(board.blobs, [(2, 3)].into());
+}
+
+// Voter 3 is down, and voter 2 closes the sessions of its first two blob streams with
+// `codes`, in order, then serves. Gives whether the apply committed, and the blob
+// streams that each node served.
+fn closes(codes: [u32; 2]) -> (bool, BTreeMap<u8, usize>) {
+    let mut cluster = Cluster::new(0);
+    cluster.start_voter(1);
+    cluster.start_voter(2);
+    cluster.run(seconds(5));
+    cluster.board.lock().unwrap().closes = [(2, codes.into())].into();
+    let definitions = create_largest(1);
+    cluster.change(1, base(), &definitions);
+    cluster.run(seconds(30));
+    let moved = pointer(1, &definitions);
+    let board = cluster.board();
+    (board.applied == [(1, moved, Ok(moved))], board.blobs)
+}
+
+// The session that ends with code 0 earns its own redial, so the plain redial is left
+// for the other session, whichever ends first.
+#[test]
+fn an_apply_redials_a_voter_for_a_code_0_end_before_or_after_another_end() {
+    assert_eq!(
+        closes([7, 0]),
+        (true, [(2, 3)].into()),
+        "code 7, then code 0"
+    );
+    assert_eq!(
+        closes([0, 7]),
+        (true, [(2, 3)].into()),
+        "code 0, then code 7"
+    );
 }
 
 // Voter 3 is down, and the links of voter 2 break 1.5 s into the apply, after the

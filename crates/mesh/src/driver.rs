@@ -1561,8 +1561,9 @@ mod tests {
         changes: BTreeMap<u8, (Pointer, BTreeMap<Name, Definition>)>,
         /// The nodes that answer no blob stream.
         silent: BTreeSet<u8>,
-        /// The nodes that close the session of each blob stream with code 0.
-        closing: BTreeSet<u8>,
+        /// The codes with which each node closes the session of each of its next blob
+        /// streams, in order.
+        closes: BTreeMap<u8, VecDeque<u32>>,
         /// The blob streams that each node served.
         blobs: BTreeMap<u8, usize>,
         /// Each spec change of `applies` that returned, in order: its node, the
@@ -1818,8 +1819,8 @@ mod tests {
 
     /// Serves each stream of each session that a peer opens to `transport`, as `node`
     /// does, and holds each blob stream with no answer when node `id` is silent, or
-    /// closes its session with code 0 when node `id` is closing. The group refuses no
-    /// message of a cluster.
+    /// closes its session with the next code that node `id` closes with. The group
+    /// refuses no message of a cluster.
     async fn accept(
         mesh: Mesh,
         transport: Rc<Transport>,
@@ -1845,17 +1846,18 @@ mod tests {
                         };
                         let (protocol, _) = wire::header::decode(&header).unwrap();
                         if protocol == Protocol::Blob {
-                            let (silent, closing) = {
+                            let (silent, close) = {
                                 let mut board = board.lock().unwrap();
                                 let blobs = board.blobs.entry(id).or_default();
                                 *blobs = blobs.checked_add(1).unwrap();
-                                (
-                                    board.silent.contains(&id),
-                                    board.closing.contains(&id),
-                                )
+                                let close = board
+                                    .closes
+                                    .get_mut(&id)
+                                    .and_then(VecDeque::pop_front);
+                                (board.silent.contains(&id), close)
                             };
-                            if closing {
-                                session.close(Code(0));
+                            if let Some(code) = close {
+                                session.close(Code(code));
                                 return;
                             }
                             if silent {
