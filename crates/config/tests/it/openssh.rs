@@ -89,7 +89,7 @@ fn writes_the_form_that_ssh_keygen_writes() {
 fn refuses_a_text_that_is_not_a_private_key_file() {
     let expected = (
         Unreadable::Format,
-        "the file is not an OpenSSH private key".into(),
+        "the file is not an OpenSSH private key as `ssh-keygen` writes it".into(),
     );
     assert_eq!(unreadable(""), expected);
     assert_eq!(unreadable(KEYGEN_PUB), expected);
@@ -120,7 +120,7 @@ fn refuses_a_key_of_an_unknown_algorithm_as_no_key_file() {
         unreadable(&text),
         (
             Unreadable::Format,
-            "the file is not an OpenSSH private key".into()
+            "the file is not an OpenSSH private key as `ssh-keygen` writes it".into()
         )
     );
 }
@@ -251,7 +251,7 @@ fn refuses_an_ed25519_key_whose_none_kdf_has_options_as_no_key_file() {
     );
     let expected = (
         Unreadable::Format,
-        "the file is not an OpenSSH private key".into(),
+        "the file is not an OpenSSH private key as `ssh-keygen` writes it".into(),
     );
     assert_eq!(unreadable(&text), expected);
 }
