@@ -260,3 +260,13 @@
   https://github.com/synnaxlabs/foundation/pull/3471#issuecomment-6280846885;
   `laptop.director`, 2026-10-18T21:48:56Z, condition 3:
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6255562713).
+  When the server refuses the connect, the `Error::Device` text "the connect to
+  {address} failed with {status}" gains ": {cause}", which ends with its fix, for the
+  statuses of the secure channel: `BadSecurityChecksFailed` names the certificate to
+  install by its source, SHA-1 thumbprint, and subject; each status of the certificate
+  of the server names the source of the trust; and `BadIdentityTokenRejected` names the
+  mode and the policies that the server must offer with an anonymous user. With no
+  `certificate`, only `BadIdentityTokenRejected` gains a cause. Lost: a new
+  `Failure::Connect` variant, a second `Display` arm for the same text; and the cause
+  in `client::Error`, which does not know the sources
+  (https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6285525305).
