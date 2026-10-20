@@ -27,10 +27,12 @@
   `after` panics for a stamp under the last stamp, since a refusal of the frame of the
   last stamp never gives one. `stamp::Writer`, crate-private, owns the hub's writer
   and the `Stamps` of its frames. Its `write` takes the series of a frame and a fill
-  that gets each entry, an index too. Then it puts the stamp in the index of each
-  present group through `Draft::series_mut`, over what the fill put there, so per
-  series it does the work of one fill (`laptop.architect-2`, 2026-10-20T10:38:11Z:
-  https://github.com/synnaxlabs/foundation/pull/3556#issuecomment-6289012175). It gives
+  that gets each entry, an index too, with the stamp of the frame, and writes that
+  stamp in each index. So `write` writes in no index, and per series it does the work
+  of one fill (`laptop.architect-2`, 2026-10-20T11:08:01Z:
+  https://github.com/synnaxlabs/foundation/pull/3556#issuecomment-6289484340, and
+  2026-10-20T11:22:40Z:
+  https://github.com/synnaxlabs/foundation/pull/3556#issuecomment-6289730092). It gives
   each group of the frame and whether the home applied it, and writes the refused groups
   again. A group for which the pool has no block, or that the home loses or refuses for
   another cause, is not applied. `Expired` and `Codec` panic: a writer with no lease
@@ -49,6 +51,11 @@
   https://github.com/synnaxlabs/foundation/pull/3556#issuecomment-6288704204; the
   reason: `laptop.architect-2`, 2026-10-20T10:44:46Z,
   https://github.com/synnaxlabs/foundation/pull/3556#issuecomment-6289116900).
+  Lost: a flag of each entry that `write` reads to put the stamp in each index, +159
+  ns on `write 256 f64 0`, and a `write` that puts the stamp in each index through
+  `Draft::series_mut` after the fill, +172 ns, each the median of 3 runs on a quiet
+  host (https://github.com/synnaxlabs/foundation/pull/3556#issuecomment-6289186365):
+  the fill already tells an index in its one load.
   The status writer of the supervisor stamps its frames with `Stamps::next`
   of its one read of mesh time, so one module holds the stamp rule
   (`laptop.architect-2`, 2026-10-13T01:38:13Z, item 2:
