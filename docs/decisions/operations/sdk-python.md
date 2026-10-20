@@ -8,40 +8,74 @@
   accepted at 2026-10-17T21:32:06Z
   (https://github.com/synnaxlabs/foundation/pull/3061#issuecomment-6241427370).
   `connect(address=None, *, public_key=None, subject=None, private_key=None,
-  data=None, strict=None)` dials a node (#3212 PR 1b and PR 2b). Each of the address,
-  `public_key`, and `subject` comes from the arguments, else from the profile, else
-  from `sdk::Node::local` on the data directory `data` (a `str` or an `os.PathLike`,
-  by default `foundation-data`): the node gives its address and public key, and its
-  first admin gives the subject. With an address, the data directory counts only when
-  its node is at that address. Each given argument parses before any read, and with
-  every value given, `connect` reads no file. `NotRunning` is no source; `Version`
-  and `Files` raise. `Client.address` is the address that `connect` dialed. The rules
-  are in Rust, not Python.
+  data=None, strict=None)` dials a node (#3212 PR 1b and PR 2b). The address comes
+  from the arguments, else from the data directory. Each of `public_key` and `subject`
+  comes from the arguments, else from the profile, else from the data directory: on
+  the data directory `data` (a `str` or an `os.PathLike`, by default
+  `foundation-data`), `sdk::Node::local` gives the address and public key of the node,
+  and its first admin gives the subject. The profile goes between the arguments and
+  the data directory (default 1 of `laptop.architect-2`, 2026-10-15T17:01:25Z,
+  https://github.com/synnaxlabs/foundation/issues/2177#issuecomment-6197670062), and
+  gives no address (item 6 of
+  https://github.com/synnaxlabs/foundation/pull/3473#issuecomment-6281062553). With an
+  address, the data directory counts only when its node is at that address. Each
+  given argument parses before any read. With the address, `public_key`, and
+  `subject` given, `connect` reads neither the profile nor the data directory.
+  `NotRunning` is no source; `Version` and `Files` raise. `Client.address` is the
+  address that `connect` dialed. The rules are in Rust, not Python.
 
   The profile is the HCL file that `FOUNDATION_PROFILE` names, else
   `~/.foundation/profile.hcl`, which `config::profile` decodes (PROFILE in
-  `docs/decisions/config/profile.md`). Its `subject` gives the subject, with the
-  key of its `private_key` file, relative to the profile's directory, else of
-  `~/.foundation/<subject>.key`. A `subject` argument with no `private_key` takes the
-  key of `~/.foundation/<subject>.key`. With no other source, the subject is the login
-  name of the user (`getpass.getuser`), with the key of `~/.foundation/<login>.key`.
-  A key file that is not there is made with mode 0600, as `ssh-keygen -t ed25519 -N
-  ""` writes it, in directories made with mode 0700. With no source of the public key,
-  the node that answers at the address is trusted on first use: `sdk::Node::answering`
-  gives its key, the profile pins it in a new `node` block, and the logger `foundation`
-  gets one WARNING. The pin takes a lock of `<profile>.lock`, writes `<profile>.new`,
-  and renames it, and each other byte of the file stays. Under the lock, a `node`
-  block of the address that is already in the file wins, and `connect` dials with its
-  key. `strict`, else the profile's `strict`, refuses a node with no source of its
-  key, and then `connect` writes no file. When a subject of a key file is refused, the
-  text gives the `subject` and `access` blocks that admit it. When the node does not
-  prove the pinned key, `connect` dials with `answering` again: a node that proves
-  another key gives the text of a changed key, and else the error of the dial raises
+  `docs/decisions/config/profile.md`). An empty `FOUNDATION_PROFILE` counts as unset.
+  Its `subject` gives the subject, with the key of its `private_key` file, else of
+  `~/.foundation/<subject>.key`. A `private_key` path that starts with `~` expands as
+  `os.path.expanduser` does, and a relative one is in the profile's directory. A file
+  that the profile names and that is not there raises, and is not made (item 4 of
+  https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6251937504; item 1
+  of https://github.com/synnaxlabs/foundation/pull/3473#issuecomment-6281062553). A
+  `subject` argument with no `private_key` takes the key of
+  `~/.foundation/<subject>.key`. With no other source, the subject is the login name
+  of the user (`getpass.getuser`), with the key of `~/.foundation/<login>.key`. A key
+  file in `~/.foundation` that is not there is made with mode 0600, as `ssh-keygen -t
+  ed25519 -N ""` writes it, in directories made with mode 0700. Its key comes from
+  `sdk::private_key` (`laptop.architect-2`, 2026-10-19T23:47:10Z,
+  https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279865842). The
+  make removes a `<file>.<pid>.new` that a crash left, writes and syncs that file,
+  links it to the name of the key file, and syncs the directory (items 2 and 3 of
+  https://github.com/synnaxlabs/foundation/pull/3473#issuecomment-6281062553). With
+  no source of the public key, the node that answers at the address is trusted on
+  first use: `sdk::Node::answering` gives its key, the profile pins it in a new
+  `node` block, and the logger `foundation` gets one WARNING (`laptop.architect-2`,
+  2026-10-18T15:53:21Z,
+  https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6251937504). The
+  pin takes a lock of `<profile>.lock`, writes `<profile>.new` with mode 0600, syncs
+  it, renames it, and syncs the directory, and each other byte of the file stays.
+  When the profile is a link, the two siblings are of the file it links to, so the
+  profile stays a link (item 2 of
+  https://github.com/synnaxlabs/foundation/pull/3473#issuecomment-6281062553). Under
+  the lock, a `node` block of the address that is already in the file wins, and
+  `connect` dials with its key. `strict`, else the profile's `strict`, refuses a node
+  with no source of its key, and then `connect` writes no file. When the node refuses
+  a subject with a key, other than the first admin of the data directory, the text
+  gives the `subject` and `access` blocks of `config::access::admit` that admit it
+  (C3 and item 4 of
+  https://github.com/synnaxlabs/foundation/pull/3473#issuecomment-6281062553;
+  `laptop.architect-2`, 2026-10-20T01:20:04Z,
+  https://github.com/synnaxlabs/foundation/pull/3473#issuecomment-6281074157). When
+  an address refuses the key of the node, `sdk::Client::connect` dials those
+  addresses with no key, and gives `sdk::Error::OtherKey` when the node proves
+  another key. A pinned key then gives the text of a changed key (C2 of
+  https://github.com/synnaxlabs/foundation/pull/3473#issuecomment-6281062553). Until
+  #3476, `sdk-python` reads and writes the profile and the key file with `std::fs`
+  (C1), and until #3477, it renders the problems of a profile itself (C6): each is
+  deferred by `laptop.architect-2`, 2026-10-20T01:19:08Z,
+  https://github.com/synnaxlabs/foundation/pull/3473#issuecomment-6281062553
   (`laptop.architect-2`, plan review, 2026-10-19T23:24:32Z, item 5 of
   https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279566176, and
   2026-10-19T23:49:24Z,
-  https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279895005). The
-  texts:
+  https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279895005). This
+  supersedes the rule that `subject` and `private_key` go together, and the two texts
+  of PR 1b that no source gives the public key or the subject. The texts:
   - `ValueError`: `private_key is the key of a subject: pass subject= too`. A `data`
     with a NUL byte: `data: the path holds a NUL byte`, as each other value parses
     (`laptop.architect-2`, 2026-10-18T21:14:26Z, item 5 of
@@ -50,12 +84,25 @@
     `<profile>:<line>:<column>: <message>. <fix>`.
   - `ValueError`, for a login name that is not a name: ``the login name "<login>" is
     not a subject name: <cause>; add `subject = "<name>"` to <profile>, or pass
-    subject=``.
+    subject=``. For a user with no login name: ``the user has no login name: <cause>;
+    add `subject = "<name>"` to <profile>, or pass subject=``.
+  - `ValueError`, for a profile or a key file that is not UTF-8: `<file>: the file is
+    not UTF-8`.
   - `ValueError`, for a key file with a passphrase that the profile's `private_key`
     names: ``<file>: the private key has a passphrase: remove `private_key` from
     <profile>, and connect makes ~/.foundation/<subject>.key``; for
     `~/.foundation/<subject>.key`: `...: move the file away, and connect makes a new
     key there`. The fix never removes the passphrase of the user's own SSH key.
+  - `OSError`, for a key file that the profile names and that is not there:
+    ``<file>: no file is there: remove `private_key` from <profile>, and connect
+    makes ~/.foundation/<subject>.key``; for a key file that is a link to no file:
+    `<file>: <cause>, and it names no file`.
+  - The WARNING of trust on first use: `trusted the node at <address> on first use:
+    public key <fingerprint>; it is pinned in <profile>`.
+  - `Refused`, for a subject with a key: `<refusal>. If the spec of the node does not
+    list subject <subject> with this key, add to its config files on the node's
+    host:`, an empty line, the blocks, an empty line, and ``then run `foundation
+    plan <files> --out <plan>` and `foundation apply <plan>` there``.
   - `ConnectionError`, with no address and no node on `data`: `no node runs in
     <data>: pass the address of the node, or data= with the --data of foundation
     start`.
@@ -67,7 +114,8 @@
   - `ConnectionError`, when the pinned key is not the one that the node proves: ``the
     node at <address> proves public key <fingerprint>, but <profile> pins
     <fingerprint>: when the node was made again, remove its `node "<address>"`
-    block from <profile>``.
+    block from <profile>``. With no pin, `OtherKey` gives `the node proves public key
+    <hex>, not the pinned <hex>`.
   - `ConnectionError`, when the subject must come from a node with no `admin.key`:
     `<data> holds no admin.key that a node wrote`.
   - `ConnectionError` for `Version`: `<data>/data/<file> holds format version
