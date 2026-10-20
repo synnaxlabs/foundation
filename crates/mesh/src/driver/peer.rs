@@ -157,8 +157,6 @@ pub(super) async fn get(
                 }
             }
         }
-        // Without the calls after a failure, the next peer still gets them after
-        // the next read: this saves that read and its round, not a chunk.
         left.extend(calls.flatten());
         missing = left;
         if missing.is_empty() {

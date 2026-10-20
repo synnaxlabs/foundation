@@ -231,8 +231,8 @@ fn lacking(seed: u64) -> (Cluster, BTreeMap<Name, Definition>) {
 }
 
 // Voter 1 is silent and voter 3 lacks the chunks of the first change. Voter 2 then
-// applies a change each 8 s, which replaces each pointer before `DEADLINE` ends.
-// Voter 3 starts each get at voter 2, which gave the last chunk.
+// applies a change each 8 s, which replaces each pointer before `DEADLINE` ends. A get
+// that a newer pointer drops at voter 1 makes the next get start at voter 2.
 #[test]
 fn a_change_each_8_s_with_a_silent_first_voter_keeps_no_voter_behind() {
     let mut behind = Vec::new();

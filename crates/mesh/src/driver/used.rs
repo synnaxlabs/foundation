@@ -91,7 +91,7 @@ enum Job {
 enum Gave {
     Got(Result<Option<node::Key>, blob::Error>),
     /// The result of the read, each chunk that it got from the store, and each listed
-    /// chunk that the store lacks or that a failed call left unread.
+    /// chunk that the store lacks or that the read did not reach after a failed call.
     Read(
         Result<(BTreeMap<Name, Definition>, Chunks), Cause>,
         Vec<Vec<u8>>,
@@ -105,7 +105,7 @@ enum Done {
     /// the chunks of its tree.
     Taken(BTreeMap<Name, Definition>, Chunks),
     /// The read failed, after it got `got` from the store. `lacked` holds each listed
-    /// chunk that the store lacks or that a failed call left unread.
+    /// chunk that the store lacks or that the read did not reach after a failed call.
     Failed {
         cause: Cause,
         got: Vec<Vec<u8>>,
@@ -165,8 +165,9 @@ impl Used {
     }
 
     // The next job for the newest pointer, once its step allows one. A get asks
-    // `voters`, each other voter in key order, from the one that gave the last chunk,
-    // and around.
+    // `voters`, each other voter in key order, from the one after the voter that a
+    // dropped get was asking, or else from the one that gave the last chunk, and
+    // around.
     fn next(
         &mut self,
         clock: &Clock,
@@ -520,8 +521,8 @@ pub(super) async fn keep(
 // The definitions of the spec of `pointer`, and the chunks of its tree, when it reads
 // and has no problem. `chunks` holds the tree in use. The read gets each chunk of
 // `listed` that `chunks` lacks and each chunk that the tree needs from `store`, adds
-// each to `got`, and adds each listed digest that `store` lacks, or that a failed call
-// left unread, to `lacked`.
+// each to `got`, and adds each listed digest that `store` lacks, or that the read did
+// not reach after a failed call, to `lacked`.
 async fn read(
     store: &blob::Store,
     prefix: &Prefix,

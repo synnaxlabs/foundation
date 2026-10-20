@@ -92,4 +92,4 @@
   line, `laptop.architect`, 2026-10-20T06:46:57Z
   (https://github.com/synnaxlabs/foundation/pull/3495#issuecomment-6285124027), which
   supersedes the start "from the voter that gave the last chunk of the pointer" of
-  6282311269.
+  https://github.com/synnaxlabs/foundation/pull/3495#issuecomment-6282311269.
