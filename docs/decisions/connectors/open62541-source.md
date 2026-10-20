@@ -1166,6 +1166,10 @@
   that does not parse as data, and PR 2d names the source before the run, with the test
   that pins that text
   (https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6255781688).
+  "Before the run" means at the start of each run and each browse, before the connect,
+  with no check at `plan` and no change to the `connector` contract (the person,
+  through `laptop.monitor`, 2026-10-20 02:30 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3471#issuecomment-6281947133).
   `laptop.monitor` accepted that move (2026-10-19 14:46 UTC,
   https://github.com/synnaxlabs/foundation/pull/3371#issuecomment-6270025607), on the
   condition that 2d is the next PR of #2934 that a user can reach, and carries that
