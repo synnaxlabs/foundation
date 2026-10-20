@@ -56,6 +56,52 @@ fn a_read_that_spans_a_first_start_gives_the_name() {
     }
 }
 
+/// `foundation profile` takes no lock. A read of the public key that reads `node.key`
+/// before a first start and the directory `mesh` after it must not say that the key
+/// is lost: the start made `node.key` durable before `mesh`.
+#[test]
+fn a_public_key_read_that_spans_a_first_start_is_not_lost() {
+    let rig = Rig::new();
+    let (shards, threads) = (os::shards().unwrap(), os::threads().unwrap());
+    let io = Rc::new(RefCell::new(Vec::new()));
+    let (holds, held) = mpsc::channel();
+    let released = Arc::new(AtomicBool::new(false));
+    let disk = Held {
+        disk: files(&rig.dir, &threads, &io),
+        holds,
+        released: Arc::clone(&released),
+    };
+    let (reads, read) = mpsc::channel();
+    let reader = start(&shards, "reader", move |_| async move {
+        let files = env::files::Files::new(disk);
+        reads.send(node::public_key(&files).await).unwrap();
+    });
+    wait(&held);
+    let region = node::Region::Stored;
+    let config = config(&rig, &shards, &threads, &io, free(), region, |disk| disk);
+    let node = node::Node::start(config);
+    let (serves, serving) = mpsc::channel();
+    node.spawn(move |_| {
+        serves.send(()).unwrap();
+        async {}
+    });
+    wait(&serving);
+    node.stop();
+    let flush = node.flush();
+    assert_eq!(node.join(), Ok(()));
+    assert!(flush.wait(PATIENCE));
+    released.store(true, Ordering::Release);
+    let result = wait(&read);
+    assert!(
+        matches!(result, Ok(_) | Err(node::Error::Unstarted)),
+        "{result:?}"
+    );
+    reader.join().unwrap();
+    for thread in io.take() {
+        thread.join().unwrap();
+    }
+}
+
 /// A disk whose list of the directory `mesh` waits until `released` is set. Sends on
 /// `holds` at each such list.
 struct Held {

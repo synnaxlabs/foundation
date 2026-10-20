@@ -28,6 +28,84 @@
 static void
 clientHouseKeeping(UA_Client *client, void *_);
 
+/* The offset of the memory of a block, aligned to 16 bytes */
+#define PUBLISH_HEADER ((sizeof(PublishBlock) + 15) & ~(size_t)15)
+
+/* The most decode memory for each byte of an answer: the bound of the array check
+ * of the decoder, whose worst known case is an empty DataValue (80 bytes from 1) */
+#define PUBLISH_EXPANSION 128
+
+static PublishBlock *
+PublishBlock_new(size_t size, PublishBlock *next) {
+    if(size > SIZE_MAX - PUBLISH_HEADER)
+        return NULL;
+    PublishBlock *block = (PublishBlock*)UA_malloc(PUBLISH_HEADER + size);
+    if(!block)
+        return NULL;
+    block->next = next;
+    block->size = size;
+    block->used = 0;
+    return block;
+}
+
+void *
+__Client_PublishArena_calloc(void *context, size_t nelem, size_t elsize) {
+    PublishArena *arena = (PublishArena*)context;
+    if(elsize && nelem > (SIZE_MAX - 15) / elsize)
+        return NULL;
+    size_t size = (nelem * elsize + 15) & ~(size_t)15;
+    if(size > arena->left)
+        return NULL;
+    PublishBlock *block = arena->blocks;
+    if(!block || block->size - block->used < size) {
+        size_t grown = (block && block->size > size) ? block->size : size;
+        block = PublishBlock_new(grown, block);
+        if(!block)
+            return NULL;
+        arena->blocks = block;
+    }
+    void *p = (UA_Byte*)block + PUBLISH_HEADER + block->used;
+    block->used += size;
+    arena->left -= size;
+    memset(p, 0, size);
+    return p;
+}
+
+/* Keeps the memory of an answer that took more than one block as one block, so a
+ * later answer of that size allocates nothing. It frees the blocks first, so the
+ * memory never holds both. */
+static void
+PublishArena_reset(PublishArena *arena) {
+    PublishBlock *block = arena->blocks;
+    if(!block)
+        return;
+    if(!block->next) {
+        block->used = 0;
+        return;
+    }
+    size_t used = 0;
+    while(block) {
+        PublishBlock *next = block->next;
+        used += block->used;
+        UA_free(block);
+        block = next;
+    }
+    arena->blocks = PublishBlock_new(used, NULL);
+}
+
+UA_StatusCode
+__Client_PublishArena_reserve(UA_Client *client, size_t size) {
+    PublishArena *arena = &client->publishArena;
+    if(arena->blocks && arena->blocks->size >= size)
+        return UA_STATUSCODE_GOOD;
+    PublishBlock *block = PublishBlock_new(size, NULL);
+    if(!block)
+        return UA_STATUSCODE_BADOUTOFMEMORY;
+    UA_free(arena->blocks);
+    arena->blocks = block;
+    return UA_STATUSCODE_GOOD;
+}
+
 /********************/
 /* Client Lifecycle */
 /********************/
@@ -314,6 +392,9 @@ UA_Client_clear(UA_Client *client) {
     client->namespaces = NULL;
     client->namespacesSize = 0;
 
+    UA_free(client->publishArena.blocks);
+    client->publishArena.blocks = NULL;
+
     /* Call the application notification callback */
     UA_ClientConfig *config = &client->config;
     if(config->lifecycleNotificationCallback)
@@ -533,6 +614,10 @@ processMSGResponse(UA_Client *client, UA_UInt32 requestId,
     UA_Response asyncResponse;
     UA_Response *response = (ac->syncResponse) ? ac->syncResponse : &asyncResponse;
     const UA_DataType *responseType = ac->responseType;
+    /* No pointer into an async Publish answer outlives its callback, so its
+     * memory comes from the arena, which the clean up resets */
+    UA_Boolean arena = !ac->syncResponse &&
+        responseType == &UA_TYPES[UA_TYPES_PUBLISHRESPONSE];
     /* Also initialize before decoding the type NodeId: errors there already
      * invoke the callback and clear the response. ServiceFault decoding only
      * initializes the header, so initialize the full expected response type. */
@@ -577,6 +662,13 @@ processMSGResponse(UA_Client *client, UA_UInt32 requestId,
     memset(&opt, 0, sizeof(UA_DecodeBinaryOptions));
     opt.customTypes = config->customDataTypes;
     opt.namespaceMapping = client->channel.namespaceMapping;
+    if(arena) {
+        size_t length = msg->length - offset;
+        client->publishArena.left = length > SIZE_MAX / PUBLISH_EXPANSION ?
+            SIZE_MAX : length * PUBLISH_EXPANSION;
+        opt.calloc = __Client_PublishArena_calloc;
+        opt.callocContext = &client->publishArena;
+    }
     retval = UA_decodeBinaryInternal(msg, &offset, response, responseType, &opt);
 
  process:
@@ -658,7 +750,10 @@ processMSGResponse(UA_Client *client, UA_UInt32 requestId,
 
     /* Clean up */
     UA_NodeId_clear(&responseTypeId);
-    if(!ac->syncResponse) {
+    if(arena) {
+        PublishArena_reset(&client->publishArena);
+        UA_free(ac);
+    } else if(!ac->syncResponse) {
         UA_clear(response, ac->responseType);
         UA_free(ac);
     } else {

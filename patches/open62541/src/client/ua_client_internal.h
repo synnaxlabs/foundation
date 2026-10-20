@@ -118,6 +118,37 @@ void
 __Client_AsyncService_abort(UA_Client *client, UA_UInt32 requestId,
                             const UA_ByteString *body);
 
+/* A block of the memory of the decode of a Publish answer. Its memory follows
+ * the header at an offset aligned to 16 bytes. */
+typedef struct PublishBlock {
+    struct PublishBlock *next;
+    size_t size;
+    size_t used;
+} PublishBlock;
+
+/* The memory of the decode of each async Publish answer. Each answer takes
+ * zeroed memory from the first block of the list, at most 128 bytes for each of
+ * its bytes, which `processMSGResponse` sets in `left` before the decode. The
+ * reset after its callback keeps the memory of an answer that took more than one
+ * block as one block, or none when that malloc fails, so the arena keeps the
+ * memory of the largest answer. */
+typedef struct {
+    PublishBlock *blocks;
+    size_t left;
+} PublishArena;
+
+/* The calloc of the decode of a Publish answer, of the PublishArena context.
+ * When the first block cannot hold the memory, it takes a new first block of at
+ * least the size of the old one. It gives NULL when nelem * elsize overflows or
+ * is over `left`, and takes the memory from `left`. */
+void *
+__Client_PublishArena_calloc(void *context, size_t nelem, size_t elsize);
+
+/* Makes the kept block of the arena hold at least size bytes. Call it only
+ * between answers. */
+UA_StatusCode
+__Client_PublishArena_reserve(UA_Client *client, size_t size);
+
 typedef struct CustomCallback {
     UA_UInt32 callbackId;
 
@@ -193,12 +224,14 @@ struct UA_Client {
 
     /* Async Service */
     UA_AsyncServiceList asyncServiceCalls;
+    PublishArena publishArena;
 
     /* Subscriptions */
     LIST_HEAD(, UA_Client_NotificationsAckNumber) pendingNotificationsAcks;
     LIST_HEAD(, UA_Client_Subscription) subscriptions;
     UA_UInt32 monitoredItemHandles;
     UA_UInt16 currentlyOutStandingPublishRequests;
+    UA_Boolean publishStopped; /* The caller sends no PublishRequest */
 
     /* Internal namespaces. The table maps the namespace Uri to its index. This
      * is used for the automatic namespace mapping in de/encoding. */

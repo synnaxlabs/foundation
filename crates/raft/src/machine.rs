@@ -31,10 +31,11 @@ pub enum Role {
 pub enum Admission {
     /// A reply, or a request from a voter of the newest configuration in the log.
     Admitted,
-    /// A `PreVote` or a `Vote` from a node that a committed configuration removed:
-    /// the configuration before the entries or a committed `Voters` entry held it,
-    /// the last committed configuration lacks it, and its last index is at or below
-    /// the commit, or its last term is below the term at the commit.
+    /// A `PreVote` or a `Vote` from a node that a committed configuration removed and
+    /// that the last [`Raft::set_learners`] left out: the configuration before the
+    /// entries or a committed `Voters` entry held it, the last committed configuration
+    /// lacks it, and its last index is at or below the commit, or its last term is
+    /// below the term at the commit.
     Removed,
     /// Each other request from a node that is not a voter.
     NotVoter,
@@ -394,7 +395,11 @@ impl Raft {
             last.index <= commit || last.term < at.term
         };
         match last {
-            Some(last) if behind(last) && self.log.removed(message.from) => {
+            Some(last)
+                if behind(last)
+                    && self.log.removed(message.from)
+                    && !self.learners.contains(&message.from) =>
+            {
                 Admission::Removed
             }
             Some(_) | None => Admission::NotVoter,
@@ -6374,6 +6379,19 @@ mod tests {
             assert_eq!(admission(pre_vote(3)), Admission::Removed);
             assert_eq!(admission(vote(3)), Admission::Removed);
             assert_eq!(admission(pre_vote(2)), Admission::Removed);
+        }
+
+        #[test]
+        fn a_removed_node_is_not_a_voter_until_the_learners_leave_it_out() {
+            let mut raft = removed_3();
+            let admission = |raft: &Raft| {
+                let pre_vote = raft.admission(&message(3, 2, pre_vote(3)));
+                [pre_vote, raft.admission(&message(3, 2, vote(3)))]
+            };
+            raft.set_learners([key(3)]);
+            assert_eq!(admission(&raft), [Admission::NotVoter; 2]);
+            raft.set_learners(Vec::new());
+            assert_eq!(admission(&raft), [Admission::Removed; 2]);
         }
 
         #[test]

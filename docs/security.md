@@ -188,18 +188,20 @@ state on `main`.
   signed ticket, and voters record membership (BQ11a). Every node checks each `Join`
   change at apply: the card's signature, a name and status channel names that are not
   reserved, under the region, not too long, and not held by a member, a key that is not
-  yet a member, status keys that no member holds, and the ticket's admission, scope,
-  uses, and expiry. The checks of the ticket's admission, scope, and expiry come before
-  the member checks, and the check of its use after them, so a join refusal names a key
-  or a name of the region only to a peer with a good admission (MEMBER RECORD). A status
-  holds at most 64 entries, so decode refuses more, and checks no signature. So a forged
-  card or a body that does not decode in a committed entry is a refused change, not a
-  stopped group. The proposing voter and the join answer are not built (#336). A ticket
-  holder that learns a node key out of band can take it with its own join, when that
-  join gets to the leader first. The real join is refused. A join that apply refuses
-  still binds its node key, so a voter that lies can deny a node key that it learns,
-  with no ticket. The node joins with a new key. The key gives no authority before its
-  join applies (MESH DRIVER).
+  yet a member, a region of fewer than `MEMBERS_MAX` = 128 members, status keys that no
+  member holds, and the ticket's admission, scope, uses, and expiry. The checks of the
+  ticket's admission, scope, and expiry come before the member checks, and the check of
+  its use after them, so a join refusal names a key or a name of the region only to a
+  peer with a good admission (MEMBER RECORD). A status holds at most 64 entries, so
+  decode refuses more, and checks no signature. So a forged card or a body that does not
+  decode in a committed entry is a refused change, not a stopped group. The proposing
+  voter and the join answer are not built (#336). A ticket holder that learns a node key
+  out of band can take it with its own join, when that join gets to the leader first.
+  The real join is refused. A join that apply refuses still binds its node key, so a
+  voter that lies can deny a node key that it learns, with no ticket. The node joins
+  with a new key. The key gives no authority before its join applies (MESH DRIVER). A
+  holder of a reusable ticket can fill a region to `MEMBERS_MAX`. Then each join is
+  refused until a member leaves (#3355).
 - `apply` signs the plan hash, and every node checks every change record (BQ12). So
   a voter that lies can stall its region, and cannot change access, keys, or
   placement. Not built (`spec`). Until #1213, a `Change::Spec` has no signature, and
@@ -212,10 +214,19 @@ state on `main`.
   the index a heartbeat or an append answer names, the order of an append's entries, and
   that no entry is above the append's term. A node that a change removed and that missed
   its release campaigns; a voter whose log holds the leave refuses the request, with
-  `removed` once the leave commits, and the node stops once a majority of the other
-  voters of the incoming half of its configuration answer so (#1105). A voter whose log
-  lacks the leave entry admits the request until #1107, so in `raft` alone such a node
-  can win an election once no voter has a lease, and lead until it commits the leave.
+  `removed` once the leave commits and the last `Raft::set_learners` left the node out,
+  with no join in the log of the voter that the voter has not applied
+  (https://github.com/synnaxlabs/foundation/pull/3411#issuecomment-6282135192), and the
+  node stops once a majority of the other voters of the incoming half of its
+  configuration answer so (#1105). A voter that a change removes and that stays a member
+  is a learner: it gets `NotVoter`, follows the log, and does not stop. Only a leave
+  that ends its membership (#3355) can stop it (`laptop.architect`,
+  https://github.com/synnaxlabs/foundation/pull/3411#issuecomment-6281787838). Such a
+  member that missed its change, and whose configuration lacks the leader, gets no log
+  until #1107, and sends a `PreVote` to each voter at each election timeout. A voter
+  whose log lacks the leave entry admits the request until #1107, so in `raft` alone
+  such a node can win an election once no voter has a lease, and lead until it commits
+  the leave.
 - `raft` drops a reply from a node that is neither a voter nor a learner
   (`Raft::set_learners`), unless a change removed the node or a later call to
   `set_learners` left it out, and `raft` has not released it yet (#352). It takes a
@@ -240,18 +251,19 @@ state on `main`.
   learner, or a node that it has not released yet (RAFT SURFACE). `Mesh::receive`
   refuses such a request (`Error::NotVoter`). It answers `removed` (`Error::Removed`,
   code 17) only to a `PreVote` or a `Vote` at or below its commit index, or below the
-  term at it, from a sender that a committed configuration removed, so a stranger
-  cannot learn from the answer which nodes the log held. A former voter can learn the
-  commit index of a voter, and the term at it, from the answers to votes with
-  different last positions. Neither holds data. A sender stops its group only when a
-  majority of the other voters of the incoming half of its own configuration give that
-  answer inside two election timeouts. That configuration can be smaller than the one in
-  force, so a minority of the voters in force that lags or lies can still stop a node
-  that missed its removal and a later add of itself (#1105, #1822, #3355). `node` serves
-  mesh streams when it has a region (NODE MESH). A voter that lies can still break
-  safety, because a false `AppendReply` counts as held, so `raft` trusts its voters
-  (RAFT SURFACE, #352 item 2). A join that a voter that lies writes gives its node the
-  key it names (MESH DRIVER). A signed `AppendReply` is #882.
+  term at it, from a sender that a committed configuration removed and that is not a
+  member, with no join in the log that this node has not applied, so a stranger cannot
+  learn from the answer which nodes the log held. A former
+  voter can learn the commit index of a voter, and the term at it, from the answers to
+  votes with different last positions. Neither holds data. A sender stops its group
+  only when a majority of the other voters of the incoming half of its own configuration
+  give that answer inside two election timeouts. That configuration can be smaller than
+  the one in force, so a minority of the voters in force that lies can still stop a
+  node that missed its removal and a later add of itself (#1105, #1822, #3355). `node`
+  serves mesh streams when it has a region (NODE MESH). A voter that lies can
+  still break safety, because a false `AppendReply` counts as held, so `raft` trusts its
+  voters (RAFT SURFACE, #352 item 2). A join that a voter that lies writes gives its
+  node the key it names (MESH DRIVER). A signed `AppendReply` is #882.
 - A voter that does not lead cannot make a node follow it: a heartbeat or an
   `Append` of a higher term, or of a term whose leader the node does not know yet,
   needs a quorum of votes for the sender, else `Error::Unproven` and nothing changes.
@@ -571,7 +583,7 @@ seconds on each PR, and `fuzz.yaml` runs each target for 600 seconds each night.
 | `connector_pem` | `connector::http::Roots::with_pem` on the text of a `ca` | The same error with a UTF-8 byte order mark put at the start; an `Ok` holds a root |
 | `connector_modbus_rtu` | `connector_modbus::rtu::decode_request`, `decode_reply`, `pdu::Request::decode`, `Request::decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `connector_modbus_tcp` | `connector_modbus::tcp::decode`, `pdu::Request::decode`, `decode_reply`, `read::groups`, `read::Group::values` | A request reads back unchanged; a reply has the asked count; reads of each register type that tile a read request group into that request, and give the values of its reply in address order, in each register order |
-| `connector_opcua_decode` | `connector_opcua::fuzz::decode`: `UA_decodeBinary` of open62541, as each type of `UA_TYPES` | No memory fault or leak; a decoded value encodes to its `UA_calcSizeBinary` length, and that encoding decodes, reads exactly its length, and encodes to the same bytes. A decoded `DataValue` gives the same read of its value (`Value::of` of the kind), or the same fault, and the same time (`value::time`), or the same status, from both decodes. Until #435 is fixed, the encoding decodes with as many zeros after it as its length. |
+| `connector_opcua_decode` | `connector_opcua::fuzz::decode`: `UA_decodeBinary` of open62541, as each type of `UA_TYPES`, with no `calloc` and with the `calloc` of the Publish arena | No memory fault or leak; the decode under the `calloc` gives the same status, length, and encoding, or `BadOutOfMemory` where the decode without it fails; a decoded value encodes to its `UA_calcSizeBinary` length, and that encoding decodes, reads exactly its length, and encodes to the same bytes. A decoded `DataValue` gives the same read of its value (`Value::of` of the kind), or the same fault, and the same time (`value::time`), or the same status, from both decodes. Until #435 is fixed, the encoding decodes with as many zeros after it as its length. |
 | `connector_opcua_certificate` | `connector_opcua::fuzz::certificate`: the certificate that a server sends, DER or PEM, as the client of the copy reads it: `verifyCertificate` of a memory group that trusts nothing, `newChannelContext` of each of the three policies, `compareCertificate` with the certificate of a channel; and `UA_CertificateUtils_getApplicationUri`, which the client reads only from its own certificate (feature `sim`) | No memory fault or leak, and no read of the console; the check never gives `Good`. Not reached: the trust load, under "No target yet" (#3289) |
 | `ops_mcp` | `foundation mcp`, through `ops::cli` | No error, and at most one reply for each line |
 | `types_name` | `Name` | Prints as the text it was read from |

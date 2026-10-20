@@ -196,10 +196,34 @@
   https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6279061464). A
   change that waits past the revised lifetime of the subscription ends it: the server
   deletes it, and `changes` ends as its doc states, after it gives the waiting changes.
-  The change buffers grow as needed in PR 4b of #2622, and the reserve of `PUBLISHES`
-  answers at `subscribe` comes in PR 4c with its counting test, which merges before PR 5
-  (`laptop.architect-2`, 2026-10-19T21:52:11Z,
-  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6278199669).
+  At `subscribe`, the client reserves in each change buffer the changes of
+  `PUBLISHES` answers, each of the changes that the revised queues of the items hold
+  (at least 1 an item), at most the most that fit an answer. It also reserves the
+  memory of the decode of one such answer (`laptop.architect-2`,
+  2026-10-19T21:52:11Z,
+  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6278199669). The
+  reserve is 360 B for each change, at most about 5.0 MB a client at the default
+  receive limit (P1 accepted by `laptop.architect-2`, 2026-10-20T02:01:06Z,
+  https://github.com/synnaxlabs/foundation/pull/3462#issuecomment-6281584662). Lost: a
+  reserve at the first answer, which saves memory only at a node whose take never
+  waited. open62541 decodes each Publish answer into memory that the client keeps. After
+  an answer that took more than one block, it keeps the memory of that answer as one
+  block, or none when that `malloc` fails, so the memory shrinks only then, and a later
+  answer of that size allocates none (`laptop.architect-2`, 2026-10-19T23:31:50Z,
+  https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6279663796). A
+  server that sends more changes than the queues hold grows the change buffers, which do
+  not shrink. Each buffer holds the changes of at most `PUBLISHES` answers, each at most
+  the receive limit over the 5 bytes of the smallest notification, so with the doubling
+  of a `Vec` the 2 buffers of a client hold at most about 54 MB. The decode of an answer
+  takes at most 128 B for each byte of the answer, the bound of the array check of the
+  decoder, so at most about 67 MB at the receive limit, and past it fails with
+  `BadOutOfMemory`, which closes the connection. The arena keeps at most that memory,
+  and while an answer decodes, its blocks hold less than 3 times it, about 200 MB. The
+  worst case that the decoder knows, an array of `Variant` values that each hold an
+  empty `DataValue`, takes 104 B for each byte, so an answer of it takes about 55 MB and
+  decodes. Lost: a fixed limit of the arena, which lets a small answer take the memory
+  of the largest (`laptop.architect-2`, 2026-10-20 02:27 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3462#issuecomment-6281907328).
   `subscribe(nodes, sampling)` asks for a publishing interval of the longer of
   `sampling` and 100 ms, at most 1 min, a keep-alive count of max(1, floor(1 min /
   interval)), and a queue of each item that holds the samples of two revised publishing
@@ -213,12 +237,21 @@
   (`laptop.architect-2`, 2026-10-19T22:06:54Z,
   https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6278430237). At
   `BadTooManyPublishRequests` with 1 Publish request kept, the patched open62541 also
-  deletes each local subscription, so `changes` ends with `BadNoSubscription`; the
-  release calls a delete service from within the answer, which runs the event loop of
-  the client with no end. While a change waits, the count is 0, so such an answer
-  changes nothing, and the resume sets `PUBLISHES` again (#3456) (`laptop.architect-2`,
-  2026-10-20T00:06:45Z,
-  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6280116432). The
+  deletes each local subscription and gives each the status of the refusal, so
+  `changes` ends with `BadTooManyPublishRequests`; the release calls a delete service
+  from within the answer, which runs the event loop of the client with no end
+  (`laptop.architect-2`, 2026-10-20T00:06:45Z,
+  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6280116432, and the
+  status, 2026-10-20T00:06:58Z,
+  https://github.com/synnaxlabs/foundation/issues/3456#issuecomment-6280119278). A flag
+  in the client stops the Publish requests while a change waits, and the take clears
+  it. `subscribe` sets the count once, and open62541 alone writes it after, so a
+  refusal while a change waits lowers it as at any other time, and the resume keeps it
+  (`laptop.architect-2`, 2026-10-20T00:39:50Z,
+  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6280562003). Lost: a
+  count of 0 as the stop, which the resume sets again over the count that a refusal
+  lowered while a change waited (`laptop.architect-2`, 2026-10-20T01:03:31Z,
+  https://github.com/synnaxlabs/foundation/pull/3462#issuecomment-6280867776). The
   `subscribe` rule caps the publishing interval of item 1 of
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6157348272 at 1 min,
   and adds the keep-alive count. Lost: no check, as a server that revises the keep-alive

@@ -17,7 +17,7 @@ use sim::{Sim, node};
 use types::quality::Quality;
 use types::time::{Span, Stamp};
 
-use self::common::is;
+use self::common::{is, set_result};
 use super::{
     Calls, Client, Flight, GRACE, Large, Nodes, READS, Request, SPLIT, STATE, Slots,
     UNREAD, answer, id_bytes, most,
@@ -2492,12 +2492,6 @@ const NOT_GOOD: [Status; 2] = [Status(0x00A9_0000), Status(0x4000_0000)];
 /// The type of a `CreateSession` answer.
 const CREATE_RESPONSE: [u8; 4] = [0x01, 0x00, 0xD0, 0x01];
 
-/// Sets the service result of the answer `message` to `status`.
-fn set_result(message: &mut [u8], status: Status) {
-    // The type of the answer, then its time and request handle.
-    message[40..44].copy_from_slice(&status.0.to_le_bytes());
-}
-
 /// Gives the end of a connect whose answers of type `kind` have the service result
 /// `status`, as `relayed_connect` does.
 fn session_result(kind: [u8; 4], status: Status) -> (Option<Status>, usize) {
@@ -2903,8 +2897,7 @@ fn a_read_with_two_failed_answers_ends_with_the_status_of_the_first() {
     let mut held = Vec::new();
     let reads = read_split(move |index, mut message| match index {
         1 => {
-            message[40..44]
-                .copy_from_slice(&Status::BAD_INTERNAL_ERROR.0.to_le_bytes());
+            set_result(&mut message, Status::BAD_INTERNAL_ERROR);
             held = message;
             vec![]
         }
