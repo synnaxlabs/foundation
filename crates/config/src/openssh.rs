@@ -3,12 +3,20 @@
 
 use std::fmt;
 
+use document::diagnostic::Code;
 use ssh_key::private::{Ed25519Keypair, Ed25519PrivateKey, KeypairData};
 use ssh_key::public::Ed25519PublicKey;
 use ssh_key::{HashAlg, LineEnding};
 use types::ed25519::{PrivateKey, PublicKey};
 
 const ALGORITHM: &str = "ssh-ed25519";
+const KEY_FORMAT: Code = Code::new("config.key-format");
+const KEY_ALGORITHM: Code = Code::new("config.key-algorithm");
+const KEY_PASSPHRASE: Code = Code::new("config.key-passphrase");
+const KEY_MISMATCH: Code = Code::new("config.key-mismatch");
+/// The fix of a key that a subject cannot take.
+const NEW_KEY: &str = "Make a new key with `ssh-keygen -t ed25519 -N \"\"`, and add \
+                       its `.pub` line to `keys` of the `subject` block";
 /// The name of each other algorithm of an OpenSSH public key. A message names only
 /// these, since another first word can be a secret.
 const OTHER_ALGORITHMS: [&str; 17] = [
@@ -124,7 +132,9 @@ pub fn line(key: PublicKey) -> String {
 }
 
 /// Why a text is not the OpenSSH private key file of an Ed25519 key with no
-/// passphrase. Its message quotes none of the text.
+/// passphrase. `Display` gives the message, which quotes none of the text: a lower-case
+/// clause with no final period. [`Unreadable::code`] and [`Unreadable::fix`] give the
+/// other parts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unreadable {
     /// It is not an OpenSSH private key file, which starts `-----BEGIN OPENSSH PRIVATE
@@ -136,6 +146,35 @@ pub enum Unreadable {
     Passphrase,
     /// The public key of the file is not the key of its private key.
     Mismatch,
+}
+
+impl Unreadable {
+    /// The stable code of the error.
+    #[must_use]
+    pub const fn code(&self) -> Code {
+        match self {
+            Self::Format => KEY_FORMAT,
+            Self::Algorithm(_) => KEY_ALGORITHM,
+            Self::Passphrase => KEY_PASSPHRASE,
+            Self::Mismatch => KEY_MISMATCH,
+        }
+    }
+
+    /// What to do instead: a sentence with no final period.
+    #[must_use]
+    pub const fn fix(&self) -> &'static str {
+        match self {
+            Self::Format => {
+                "Use the private key file that `ssh-keygen -t ed25519 -N \"\"` writes, \
+                 not its `.pub` file"
+            }
+            Self::Algorithm(_) | Self::Mismatch => NEW_KEY,
+            Self::Passphrase => {
+                "Use a key file with no passphrase, as `ssh-keygen -t ed25519 -N \"\"` \
+                 writes it"
+            }
+        }
+    }
 }
 
 impl fmt::Display for Unreadable {

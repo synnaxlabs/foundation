@@ -146,6 +146,37 @@ fn refuses_a_file_whose_public_key_is_not_its_private_key() {
     );
 }
 
+#[test]
+fn gives_the_code_and_the_fix_of_each_error() {
+    let new_key = "Make a new key with `ssh-keygen -t ed25519 -N \"\"`, and add its \
+                   `.pub` line to `keys` of the `subject` block";
+    let parts = |error: Unreadable| (error.code().as_str(), error.fix());
+    assert_eq!(
+        parts(Unreadable::Format),
+        (
+            "config.key-format",
+            "Use the private key file that `ssh-keygen -t ed25519 -N \"\"` writes, not \
+             its `.pub` file"
+        )
+    );
+    assert_eq!(
+        parts(Unreadable::Algorithm("ssh-rsa")),
+        ("config.key-algorithm", new_key)
+    );
+    assert_eq!(
+        parts(Unreadable::Passphrase),
+        (
+            "config.key-passphrase",
+            "Use a key file with no passphrase, as `ssh-keygen -t ed25519 -N \"\"` \
+             writes it"
+        )
+    );
+    assert_eq!(
+        parts(Unreadable::Mismatch),
+        ("config.key-mismatch", new_key)
+    );
+}
+
 proptest! {
     #[test]
     fn reads_back_each_key_that_it_writes(
