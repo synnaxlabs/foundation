@@ -54,7 +54,8 @@ fn the_block_pins_the_key_that_the_node_of_data_proves() {
     );
 }
 
-/// The exit status and the standard error of `args` with `stdout` as its output.
+/// Only Linux: [`Rig::spawn`] runs only there. The exit status and the standard error
+/// of `args` with `stdout` as its output.
 #[cfg(target_os = "linux")]
 fn ended(
     rig: &Rig,
@@ -68,7 +69,8 @@ fn ended(
     (status.code(), process.errors())
 }
 
-/// A full disk under standard output: `profile` reports it as `version` does.
+/// Only Linux: `/dev/full` and [`Rig::spawn`] exist only there. A full disk under
+/// standard output: `profile` reports it as `version` does.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_full_standard_output_is_reported_as_cli_reports_it() {
@@ -99,7 +101,8 @@ fn a_full_standard_output_is_reported_as_cli_reports_it() {
     assert_eq!(profile, version);
 }
 
-/// A closed standard output: `profile` ends as `version` does.
+/// Only Linux: [`Rig::spawn`] runs only there. A closed standard output: `profile`
+/// ends as `version` does.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_closed_standard_output_ends_as_cli_ends() {
@@ -133,8 +136,8 @@ fn ipv6_addresses_read_back() {
     }
 }
 
-/// A node whose `admin.key` this user cannot read still gives its public key: the
-/// command reads no secret.
+/// Only Unix: the test sets a file mode. A node whose `admin.key` this user cannot
+/// read still gives its public key: the command reads no file other than `node.key`.
 #[cfg(unix)]
 #[test]
 fn an_unreadable_admin_key_does_not_hide_the_public_key() {
@@ -153,7 +156,8 @@ fn an_unreadable_admin_key_does_not_hide_the_public_key() {
     assert_eq!(line, config::openssh::line(public_key));
 }
 
-/// A file `node.key` that this user cannot read gives `node.unreadable`.
+/// Only Unix: the test sets a file mode. A file `node.key` that this user cannot read
+/// gives `node.unreadable`.
 #[cfg(unix)]
 #[test]
 fn an_unreadable_node_key_is_refused() {
@@ -200,7 +204,7 @@ fn a_node_that_stopped_gives_its_key() {
     assert_eq!(block(&rig), running);
 }
 
-/// A node that crashed gives its key.
+/// Only Unix: [`Rig::kill`] sends `SIGKILL`. A node that crashed gives its key.
 #[cfg(unix)]
 #[test]
 fn a_node_that_crashed_gives_its_key() {
@@ -214,11 +218,10 @@ fn a_node_that_crashed_gives_its_key() {
     );
 }
 
-/// The text and the JSON of `profile` on `plant` of `rig`, where no node started.
-fn unstarted(rig: &Rig) {
-    let output = rig.run(&["profile", "--data", "plant", "10.0.0.5:7400"], b"");
-    let fix = "Start the node once with `foundation start --data=plant`, with \
-               `--name <name>`";
+/// `profile` on `dir` of `rig` fails with `code`, `message`, and `fix`, as text and
+/// as JSON.
+fn refused(rig: &Rig, dir: &str, code: &str, message: &str, fix: &str) {
+    let output = rig.run(&["profile", "--data", dir, "10.0.0.5:7400"], b"");
     assert_eq!(
         (
             output.status.code(),
@@ -228,18 +231,12 @@ fn unstarted(rig: &Rig) {
         (
             Some(1),
             "",
-            format!(
-                "error[node.unstarted]: no node has started in plant\nfix: {fix}\n"
-            )
-            .as_str()
+            format!("error[{code}]: {message}\nfix: {fix}\n").as_str()
         )
     );
-    let output = rig.run(
-        &["profile", "--data", "plant", "--json", "10.0.0.5:7400"],
-        b"",
-    );
-    let error = serde_json::json!({ "errors": [{ "code": "node.unstarted",
-        "message": "no node has started in plant", "fix": fix, "notes": [] }] });
+    let output = rig.run(&["profile", "--data", dir, "--json", "10.0.0.5:7400"], b"");
+    let error = serde_json::json!({ "errors": [{ "code": code, "message": message,
+        "fix": fix, "notes": [] }] });
     assert_eq!(
         (
             output.status.code(),
@@ -255,7 +252,72 @@ fn unstarted(rig: &Rig) {
 #[test]
 fn a_data_directory_with_no_node_is_refused() {
     let rig = Rig::new();
+    let unstarted = |rig: &Rig| {
+        refused(
+            rig,
+            "plant",
+            "node.unstarted",
+            "no node has started in plant",
+            "Start the node once with `foundation start --data=plant`, with `--name \
+             <name>`",
+        );
+    };
     unstarted(&rig);
     std::fs::create_dir_all(rig.dir.join("plant/data")).expect("make the directory");
     unstarted(&rig);
+}
+
+/// A `--data` that is a file, or whose `data` is a file, is no data directory.
+#[test]
+fn a_file_is_no_data_directory() {
+    let rig = Rig::new();
+    std::fs::write(rig.dir.join("plant"), b"").expect("write a file");
+    std::fs::create_dir_all(rig.dir.join("yard")).expect("make the directory");
+    std::fs::write(rig.dir.join("yard/data"), b"").expect("write a file");
+    for dir in ["plant", "yard"] {
+        refused(
+            &rig,
+            dir,
+            "node.unstarted",
+            &format!("no node has started in {dir}, which is not a data directory"),
+            "Give `--data` the data directory of a node that has started once",
+        );
+    }
+}
+
+/// A node that started and then lost `node.key` lost its key: a new start makes no
+/// key of this node.
+#[test]
+fn a_lost_node_key_is_refused() {
+    let mut rig = Rig::new();
+    rig.start_with(&["--name", "edge", "--data", "plant"]);
+    proved(&rig, "plant");
+    assert_eq!(rig.stop().status.code(), Some(0));
+    std::fs::remove_file(rig.dir.join("plant/data/node.key")).expect("remove the file");
+    refused(
+        &rig,
+        "plant",
+        "node.failed",
+        "the data directory has the directory of a mesh, and the file `node.key` is \
+         not there or holds a key that the founding of its region does not hold; \
+         restore `node.key` from a backup of this node, or give another data \
+         directory",
+        "Fix the cause that the message states, then run the command again",
+    );
+}
+
+/// A file `node.key` that a node did not write is refused.
+#[test]
+fn a_foreign_node_key_is_refused() {
+    let rig = Rig::new();
+    std::fs::create_dir_all(rig.dir.join("plant/data")).expect("make the directory");
+    std::fs::write(rig.dir.join("plant/data/node.key"), b"not a key").expect("write");
+    refused(
+        &rig,
+        "plant",
+        "node.failed",
+        "the file `node.key` in the data directory is not a node key; restore it from \
+         a backup of this node",
+        "Fix the cause that the message states, then run the command again",
+    );
 }

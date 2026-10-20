@@ -209,6 +209,17 @@ async fn public_key(
         Err(os::Error::Dir(error)) if error.kind() == io::ErrorKind::NotFound => {
             return Err(unstarted(dir));
         }
+        Err(os::Error::Dir(error)) if error.kind() == io::ErrorKind::NotADirectory => {
+            return Err(Failure {
+                code: UNSTARTED,
+                message: format!(
+                    "no node has started in {}, which is not a data directory",
+                    dir.display()
+                ),
+                fix: "Give `--data` the data directory of a node that has started once"
+                    .to_owned(),
+            });
+        }
         Err(error) => return Err(stored(dir, error)),
     };
     node::public_key(&files).await.map_err(|error| match error {
@@ -1566,6 +1577,11 @@ mod tests {
             unreached(dir, error).fix,
             "Start the node again with `foundation start` and `--data` set to that \
              directory"
+        );
+        assert_eq!(
+            unstarted(dir).fix,
+            "Start the node once with `foundation start`, with `--data` set to that \
+             directory and `--name <name>`"
         );
     }
 

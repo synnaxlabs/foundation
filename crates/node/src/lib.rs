@@ -560,13 +560,18 @@ pub async fn name(
 ///
 /// # Errors
 ///
-/// [`Error::Unstarted`] when `files` holds no file `node.key`, [`Error::Key`] for a
-/// file `node.key` that a node did not write, and [`Error::Directory`] for a file
-/// call that fails.
+/// With no file `node.key`: [`Error::NoCard`] when `files` has the directory of a
+/// mesh, so the key is lost, else [`Error::Unstarted`]. [`Error::Key`] for a file
+/// `node.key` that a node did not write, and [`Error::Directory`] for a file call that
+/// fails.
 pub async fn public_key(
     files: &env::files::Files,
 ) -> Result<types::ed25519::PublicKey, Error> {
-    identity::public_key(files).await?.ok_or(Error::Unstarted)
+    match identity::public_key(files).await? {
+        Some(public_key) => Ok(public_key),
+        None if directory::meshed(files).await? => Err(Error::NoCard),
+        None => Err(Error::Unstarted),
+    }
 }
 
 /// The error of [`Node::join`]: `failed`, else the first shard error by core, else
