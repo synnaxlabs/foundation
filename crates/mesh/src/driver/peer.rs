@@ -139,7 +139,7 @@ pub(super) async fn get(
                 async |session: &Session| blob::peer::get(store, session, chunks).await;
             match ask(transport, clock, contact, get).await {
                 Ok(misses) => {
-                    if misses.len() < chunks.len() {
+                    if misses.len() != chunks.len() {
                         gave = Some(*key);
                     }
                     left.extend(misses.iter().map(|miss| miss.digest));
