@@ -13,9 +13,12 @@
   Each runs two sim nodes: the plant (the rig and the connector) and the device (the
   kind's simulator). A `Suite` gives plain inputs: its table, a setup that defines what
   the connector needs and starts each writer that feeds it, its simulator, the name of
-  its progress count, its backoff form, and the configs that its check refuses with
-  their exact diagnostics. The simulator of `opcua` changes each variable every 100 ms,
-  so the suite runs the default mode, which subscribes, and its progress grows.
+  its progress count, its backoff form, the configs that its check refuses with
+  their exact diagnostics, the attributes of its config that take a secret, and an
+  echo simulator when its device can answer with a text of its own. The simulator of
+  a kind that subscribes changes its data at least every 100 ms, so its progress
+  grows: the simulator of `opcua` changes each variable every 100 ms, so the suite runs
+  the default mode, which subscribes.
   `polled = true` keeps its crate and ONE NODE tests (`laptop.architect-2`,
   2026-10-20T10:03:28Z:
   https://github.com/synnaxlabs/foundation/pull/3548#issuecomment-6288442532). People
@@ -89,8 +92,10 @@
      diagnostics, and `Rig::supervise` ends with the same `Error::Config`. For a kind
      whose check gives writes, a write channel that no spec defines gives
      Stopped, class Config, 0 restarts, and the text of `connector.unknown-channel`.
-     A kind whose check gives no writes passes with no check, until the read form of
-     #2642.
+     For a kind whose check gives a reader, a reader whose selector matches only a
+     name that no spec defines gives Stopped, class Config, 0 restarts, and the text
+     of `connector.no-channel`. A kind with no writes or no reader passes that form
+     with no check.
 
   6. **Random faults.** Over seeds 0 to 999 on each merge, each a run of its own: the
      connector runs, then meets 1 to 8 faults at random times in 15 s, each one of:
@@ -116,9 +121,22 @@
      not draw: approved by `laptop.architect-2`, 2026-10-20T08:40:04Z
      (https://github.com/synnaxlabs/foundation/pull/3548#issuecomment-6286993255).
 
-  Scenario 7 (no secret in a status) comes in #2642. The
-  numbers are tunable by the architect of `connector`. Plan of `laptop.architect-2` at
-  2026-10-13T21:22:43Z
+  7. **No secret in a status.** For a kind whose config takes secrets, the config of
+     its setup reads each of them from a secret whose value is a marker. No status,
+     no end of a run, and no check shows the marker. One run meets in turn: no device
+     for 10 s, the simulator for 5 s, and its stop for 10 s. A second run meets the
+     echo simulator, which answers each request with an error whose text holds each
+     header of the request, as a gateway in debug mode does: an error within 10 s,
+     and 5 s more. Then each refused config, and the read and write forms of scenario
+     5, each with the same secrets and each for 5 s. A kind with no secret passes
+     with no check. The status hides each secret value that a run read (ruling of
+     `laptop.architect-2` on #2849 item 4, 2026-10-16T17:54:49Z:
+     https://github.com/synnaxlabs/foundation/issues/2849#issuecomment-6221505945).
+     Until #3603 does that, the echo form of `influx` fails, as its status shows the
+     token. Scenario 7 runs 30.1 s of plant time for `opcua` (box1, at 2026-10-20).
+
+  The numbers are tunable by the architect of `connector`. Plan of
+  `laptop.architect-2` at 2026-10-13T21:22:43Z
   (https://github.com/synnaxlabs/foundation/issues/2247#issuecomment-6155477394), with
   the fixes of 2026-10-17T16:05:31Z
   (https://github.com/synnaxlabs/foundation/issues/2641#issuecomment-6236306639, item
