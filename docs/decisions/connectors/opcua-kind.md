@@ -223,10 +223,10 @@
   new check case at 2026-10-18T21:35:52Z:
   https://github.com/synnaxlabs/foundation/issues/3269#issuecomment-6255436768).
 - **Secure channel (#2934).** `opcua` takes `certificate`, `key`, and `trust`, each a
-  secret source (`file(...)` or `secret(...)`), and the bool `unencrypted`. With
-  `certificate`, the channel is `SignAndEncrypt`, or `Sign` with `unencrypted = true`.
-  With no `certificate`, the mode is None. Five codes split the refusals of the config:
-  `opcua.no-certificate` for each of `key`, `trust`, and `unencrypted` with no
+  secret source (`env(...)`, `file(...)`, or `secret(...)`), and the bool `unencrypted`.
+  With `certificate`, the channel is `SignAndEncrypt`, or `Sign` with `unencrypted =
+  true`. With no `certificate`, the mode is None. Four codes split the refusals of the
+  config: `opcua.no-certificate` for each of `key`, `trust`, and `unencrypted` with no
   `certificate`, `opcua.no-key` for a `certificate` with no `key`, `opcua.no-trust` for
   a `certificate` with no `trust`, and `opcua.bad-unencrypted` for an `unencrypted` that
   is not a bool. `opcua.no-trust` is its own code, as a code that names a key for a
