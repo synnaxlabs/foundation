@@ -192,10 +192,14 @@
   the commit (`laptop.architect`, 2026-10-19T18:56:00Z:
   https://github.com/synnaxlabs/foundation/pull/3407#issuecomment-6274855859), from a
   node that a committed configuration removed (the configuration before the entries or a
-  committed `Voters` entry held it, and the last committed configuration lacks it), and
-  `NotVoter` for each other request. `mesh` keeps no copy of the configurations (#1105,
-  #1762). It replaces `Raft::removed` (decided by `laptop.architect`,
-  2026-10-19T12:57:24Z:
+  committed `Voters` entry held it, and the last committed configuration lacks it) and
+  that the last `Raft::set_learners` left out, and `NotVoter` for each other request. A
+  release uses the same test. So a voter that a `Voters` change removes, and that stays
+  a member, is a learner: it follows the log and does not stop (`laptop.architect`,
+  2026-10-20T02:17:41Z:
+  https://github.com/synnaxlabs/foundation/pull/3411#issuecomment-6281787838). `mesh`
+  keeps no copy of the configurations (#1105, #1762). It replaces `Raft::removed`
+  (decided by `laptop.architect`, 2026-10-19T12:57:24Z:
   https://github.com/synnaxlabs/foundation/issues/1107#issuecomment-6267749373).
   `Raft::removed_by(by) -> Option<BTreeSet<node::Key>>` takes a `removed` answer from
   voter `by`, and gives each voter whose answer counts once they are a majority of the
@@ -260,8 +264,8 @@
   change of the configuration releases it. A node that a call leaves out and
   that no configuration in force holds is released as a removed node is. A node never
   sends a learner of its set a PreVote or a Vote. Each node keeps the set, so a new
-  leader has it. `mesh` is to set it from the members of its applied state, PR 2 of
-  #3140. Lost: learners in the configuration, which puts them in each signed change;
+  leader has it. `mesh` sets it from the members of its applied state (MESH DRIVER).
+  Lost: learners in the configuration, which puts them in each signed change;
   `Config::learners` at `Raft::new` with no setter, because `mesh` learns of a member
   only at an apply. Decided by `laptop.architect`, the plan, 2026-10-19T13:53:13Z
   (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6268881124), and

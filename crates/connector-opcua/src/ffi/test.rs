@@ -9,6 +9,14 @@ use super::{
 #[repr(C)]
 pub(crate) struct Server([u8; 0]);
 
+/// `PublishArena` of open62541: the memory of the decode of a Publish answer.
+#[repr(C)]
+pub(crate) struct Arena {
+    pub(crate) blocks: *mut c_void,
+    /// The bytes that the decode may still take.
+    pub(crate) left: usize,
+}
+
 /// `shim_counts` of `server.c`.
 #[repr(C)]
 pub(crate) struct Counts {
@@ -16,6 +24,7 @@ pub(crate) struct Counts {
     pub(crate) points: usize,
     pub(crate) monitors: usize,
     pub(crate) publishes: usize,
+    pub(crate) refused: usize,
 }
 
 /// `UA_LifecycleState` of a server.
@@ -302,6 +311,25 @@ unsafe extern "C" {
     );
     pub(crate) fn shim_client_receive(client: *mut super::Client, size: u32);
     pub(crate) fn shim_client_message(client: *mut super::Client, size: u32);
+    pub(crate) fn shim_client_blocks(
+        client: *mut super::Client,
+        bytes: *mut usize,
+    ) -> usize;
+    pub(crate) fn shim_client_calloc(
+        client: *mut super::Client,
+        nelem: usize,
+        elsize: usize,
+    ) -> *mut std::ffi::c_void;
+    pub(crate) fn __Client_PublishArena_calloc(
+        context: *mut std::ffi::c_void,
+        nelem: usize,
+        elsize: usize,
+    ) -> *mut std::ffi::c_void;
+    pub(crate) fn shim_arena_free(arena: *mut Arena);
+    pub(crate) fn __Client_PublishArena_reserve(
+        client: *mut super::Client,
+        size: usize,
+    ) -> u32;
     pub(crate) fn shim_log_fatal(el: *mut EventLoop, text: *const std::ffi::c_char);
     pub(crate) fn shim_log_warning(el: *mut EventLoop, text: *const std::ffi::c_char);
     pub(crate) fn shim_log_at(
@@ -319,6 +347,7 @@ unsafe extern "C" {
     pub(crate) fn shim_server_per_publish(server: *mut Server) -> u32;
     pub(crate) fn shim_server_keep_alives(server: *mut Server, least: u32);
     pub(crate) fn shim_server_held(server: *mut Server) -> u32;
+    pub(crate) fn shim_server_holds(server: *mut Server, most: u32);
     pub(crate) fn shim_server_publishing(server: *mut Server, ms: f64);
     pub(crate) fn shim_server_queues(server: *mut Server, most: u32);
     pub(crate) fn shim_server_count(server: *mut Server) -> *const Counts;

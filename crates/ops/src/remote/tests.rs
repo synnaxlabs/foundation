@@ -251,6 +251,7 @@ impl Remote {
             &common::front_ends(),
             &common::create_kinds(),
             reach,
+            common::unkeyed,
         )
         .await;
         assert_eq!(String::from_utf8(errors).expect("UTF-8"), "");
@@ -1527,6 +1528,7 @@ fn start_with(
         &front_ends,
         &kinds,
         reach,
+        common::unkeyed,
     );
     let Poll::Ready(run) = pin!(cli).poll(&mut Context::from_waker(Waker::noop()))
     else {

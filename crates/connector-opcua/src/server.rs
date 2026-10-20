@@ -466,7 +466,7 @@ impl Server {
     }
 
     /// Sets the most notifications of a Publish answer that the server grants.
-    #[cfg(test)]
+    #[cfg(feature = "sim")]
     pub(crate) fn set_per_publish(&self, most: u32) {
         // SAFETY: the server lives.
         unsafe { ffi::test::shim_server_publishes(self.raw(), most) };
@@ -491,6 +491,14 @@ impl Server {
     pub(crate) fn held(&self) -> u32 {
         // SAFETY: the server lives.
         unsafe { ffi::test::shim_server_held(self.raw()) }
+    }
+
+    /// Sets the most Publish requests that the server holds for each session. It
+    /// answers the oldest with `BadTooManyPublishRequests` to take one more.
+    #[cfg(test)]
+    pub(crate) fn set_held(&self, most: u32) {
+        // SAFETY: the server lives.
+        unsafe { ffi::test::shim_server_holds(self.raw(), most) };
     }
 
     /// Sets the largest queue of a monitored item that the server grants.
@@ -921,6 +929,13 @@ impl Counts<'_> {
     pub(crate) fn publishes(&self) -> usize {
         // SAFETY: as `browses`.
         unsafe { self.counts.as_ref().publishes }
+    }
+
+    /// Gives the count of the Publish requests answered with
+    /// `BadTooManyPublishRequests`.
+    pub(crate) fn refused(&self) -> usize {
+        // SAFETY: as `browses`.
+        unsafe { self.counts.as_ref().refused }
     }
 }
 

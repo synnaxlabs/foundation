@@ -19,10 +19,10 @@
 #include "timer.h"
 #pragma GCC diagnostic pop
 
-/* `shim_client_publishes` calls `__Client_Subscriptions_backgroundPublish`, which
+/* `shim_client_publish_resume` calls `__Client_Subscriptions_backgroundPublish`, which
  * asserts a client lock that only a build with threads takes. */
 #if UA_MULTITHREADING >= 100
-#error "shim_client_publishes takes no client lock"
+#error "shim_client_publish_resume takes no client lock"
 #endif
 
 #include "shim.h"
@@ -156,6 +156,9 @@ UA_StatusCode UA_SecurityPolicy_Filestore(UA_SecurityPolicy *policy,
 _Static_assert(sizeof(UA_NodeId) == 24, "UA_NodeId changed");
 _Static_assert(sizeof(UA_DataType) == 96, "UA_DataType changed");
 _Static_assert(sizeof(UA_DecodeBinaryOptions) == 40, "UA_DecodeBinaryOptions changed");
+_Static_assert(offsetof(UA_DecodeBinaryOptions, callocContext) == 16,
+               "callocContext moved");
+_Static_assert(offsetof(UA_DecodeBinaryOptions, calloc) == 24, "calloc moved");
 _Static_assert(offsetof(UA_DecodeBinaryOptions, decodedLength) == 32,
                "decodedLength moved");
 _Static_assert(sizeof(shim_node) == 24, "shim_node changed");
@@ -793,10 +796,31 @@ UA_Client *shim_client_new(UA_EventLoop *el, UA_UInt32 chunks, UA_UInt32 queued,
 }
 
 /* Sets the count of Publish requests that `client` keeps in flight while it has a
- * subscription, and sends the ones that it lacks. With 0, it sends no more. */
-void shim_client_publishes(UA_Client *client, UA_UInt16 count) {
+ * subscription. open62541 alone lowers it later, at each BadTooManyPublishRequests. */
+void shim_client_publish_count(UA_Client *client, UA_UInt16 count) {
     UA_Client_getConfig(client)->outStandingPublishRequests = count;
+}
+
+/* Stops the Publish requests of `client` until `shim_client_publish_resume`. */
+void shim_client_publish_stop(UA_Client *client) {
+    client->publishStopped = true;
+}
+
+/* Sends the Publish requests that `client` lacks, and each later one. */
+void shim_client_publish_resume(UA_Client *client) {
+    client->publishStopped = false;
     __Client_Subscriptions_backgroundPublish(client);
+}
+
+/* Makes the memory of `client` for the decode of a Publish answer hold an answer of
+ * `changes` changes of a scalar of at most 8 bytes. Call it between answers. */
+UA_StatusCode shim_client_reserve(UA_Client *client, size_t changes) {
+    /* The array of the changes, the value of each, and the rest of the answer */
+    size_t each = sizeof(UA_MonitoredItemNotification) + 16;
+    size_t rest = 1024;
+    if(changes > (SIZE_MAX - rest) / each)
+        return UA_STATUSCODE_BADOUTOFMEMORY;
+    return __Client_PublishArena_reserve(client, changes * each + rest);
 }
 
 typedef UA_StatusCode (*policy_of)(UA_SecurityPolicy *policy,

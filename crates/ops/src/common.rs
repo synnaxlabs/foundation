@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use sim::Sim;
 use spec::definition::Definition;
 use types::channel::Key;
+use types::ed25519::PublicKey;
 use types::name::Name;
 use wire::hub::client::BODY_BYTES_MAX;
 
@@ -284,6 +285,11 @@ pub(crate) fn files(files: &[(&str, &str)]) -> Vec<File> {
         .collect()
 }
 
+/// The `public_key` of a [`crate::cli`] whose command reads no key.
+pub(crate) async fn unkeyed(_: &Path) -> Result<PublicKey, Failure> {
+    panic!("a command read a key")
+}
+
 /// The run, output, and errors of `foundation <args>`, whose requests go through
 /// `reach`.
 pub(crate) async fn cli<C>(
@@ -308,6 +314,7 @@ where
         &front_ends,
         &kinds,
         reach,
+        unkeyed,
     );
     let run = run.await;
     let text = |bytes| String::from_utf8(bytes).expect("UTF-8");

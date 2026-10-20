@@ -1,0 +1,10 @@
+subject = "alice"
+private_key = "~/.foundation/alice.key"
+strict = true
+
+node "10.0.0.5:7400" {
+  public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPJio0ewQQkFj37UOssW9cm2gKr9m075UHcwrYgPa9Xo node@host"
+}
+node "[fe80::1%3]:7400" {
+  public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPJio0ewQQkFj37UOssW9cm2gKr9m075UHcwrYgPa9Xo"
+}

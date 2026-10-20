@@ -11,6 +11,7 @@ mod name;
 mod one_node;
 mod plant;
 mod port;
+mod profile;
 mod quickstart;
 mod rig;
 mod schema;

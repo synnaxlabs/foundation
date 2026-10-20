@@ -978,7 +978,11 @@ ExtensionObject_decodeBinaryContent(Ctx *ctx, UA_ExtensionObject *dst,
     /* Unknown type, just take the binary content */
     if(!type) {
         dst->encoding = UA_EXTENSIONOBJECT_ENCODED_BYTESTRING;
-        UA_NodeId_copy(typeId, &dst->content.encoded.typeId);
+        /* Under a calloc, nothing frees a copy: the id is in its memory */
+        if(ctx->opts.calloc)
+            dst->content.encoded.typeId = *typeId;
+        else
+            UA_NodeId_copy(typeId, &dst->content.encoded.typeId);
         return DECODE_DIRECT(&dst->content.encoded.body, String); /* ByteString */
     }
 
