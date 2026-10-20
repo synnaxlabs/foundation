@@ -40,7 +40,7 @@ fn main() {
         assert!(bytes <= BOUND, "{name}: the start takes {bytes} bytes");
     }
     let bytes = write_frames(&places);
-    assert_eq!(bytes, 16 * count, "16 bytes for each place of a write");
+    assert_eq!(bytes, 20 * count, "20 bytes for each place of a write");
 }
 
 /// The places at the cap, each name 255 bytes, the index at place 0.

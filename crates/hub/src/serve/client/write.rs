@@ -389,7 +389,16 @@ impl Replies {
         } else if self.taken.is_none() {
             self.next = None;
         }
-        (block, Reply::Outcome { frame, outcome })
+        // The set of a write stream is one group.
+        let group = 0;
+        (
+            block,
+            Reply::Outcome {
+                frame,
+                group,
+                outcome,
+            },
+        )
     }
 
     /// Calls a commit for the taken frames when none is due.
