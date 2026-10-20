@@ -405,6 +405,51 @@ fn sends_the_home_each_renewal_between_frames() {
     assert_eq!(served, [Ok(Got::Ended), Ok(Got::Ended)]);
 }
 
+/// A renewal and a frame that reach the member at one instant reach the home whole, in
+/// either order, and the next renewal is not lost. Over 32 seeds, so that `sim` runs
+/// the admit and the poll of the forward in each order.
+#[test]
+fn sends_the_home_a_renewal_that_comes_with_a_frame() {
+    let orders = Arc::new(Mutex::new([0; 2]));
+    for seed in 0..32 {
+        let renewed = Arc::new(Mutex::new(Vec::new()));
+        let (kept, counted) = (Arc::clone(&renewed), Arc::clone(&orders));
+        let served = away(
+            seed,
+            move |mut home| async move {
+                home.start().await;
+                let mut got = home.messages(4).await;
+                let first = usize::from(Signed::decode(&got[0]).is_err());
+                let at = if first == 0 { 0 } else { 3 };
+                let mut nonces = vec![renewal(&got.remove(at))];
+                assert_eq!(got, frame(10, 10));
+                counted.lock().expect("not poisoned")[first] += 1;
+                home.reply(taken(1, 0, 1)).await;
+                nonces.push(renewal(&home.messages(1).await[0]));
+                home.reply(stored(1)).await;
+                assert_eq!(home.stream.recv().await, Ok(None));
+                home.stream.sender.finish().expect("finishes");
+                assert_eq!(*kept.lock().expect("not poisoned"), nonces);
+            },
+            |mut agent, challenge| async move {
+                let mut stream = write(&agent).await;
+                renewed.lock().expect("not poisoned").push(challenge.nonce);
+                agent.send_hello(Agent::hello(challenge), &AGENT).await;
+                send(&mut stream, &frame(10, 10)).await;
+                let challenge = agent.hello.challenge().await;
+                assert_eq!(stream.reply().await, taken(1, 0, 1));
+                renew(&mut agent, challenge, &renewed).await;
+                assert_eq!(stream.reply().await, stored(1));
+                assert_eq!(end(&mut stream).await, []);
+                super::read::finish(&mut agent).await;
+            },
+        );
+        assert_eq!(served, [Ok(Got::Ended), Ok(Got::Ended)], "seed {seed}");
+    }
+    let orders = *orders.lock().expect("not poisoned");
+    assert!(orders.iter().all(|&count| count > 0), "orders {orders:?}");
+}
+
 /// A renewal that the member admits while it waits for the places of the home reaches
 /// the home then, so the hello that the home holds does not expire in that wait.
 #[test]
