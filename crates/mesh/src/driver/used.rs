@@ -213,6 +213,9 @@ impl Used {
     // replaced still sets the spec in use or `Spec::behind`. A get for one changes
     // nothing. Returns whether the spec in use changed.
     fn settle(&mut self, pointer: Pointer, done: Done) -> bool {
+        if let Done::Got(Ok(Some(gave))) = done {
+            (self.gave, self.dropped) = (Some(gave), None);
+        }
         let newest = self
             .newest
             .as_mut()
@@ -248,8 +251,7 @@ impl Used {
                 };
                 cause
             }
-            (Done::Got(Ok(Some(gave))), Some(newest)) => {
-                (self.gave, self.dropped) = (Some(gave), None);
+            (Done::Got(Ok(Some(_))), Some(newest)) => {
                 newest.step = Step::Read;
                 return false;
             }
@@ -688,5 +690,41 @@ impl Watch {
     pub async fn next(&mut self) -> Result<Spec, Stopped> {
         let read = |group: &Group| (group.used.spec.pointer, group.used.spec.clone());
         self.slot.next(read).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A get that ends after a newer pointer replaced its own still sets where the next
+    // get starts.
+    #[test]
+    fn a_get_of_a_replaced_pointer_keeps_the_voter_that_gave() {
+        let (one, two) = (node::Key::from_u128(1), node::Key::from_u128(2));
+        let mut used = Used {
+            spec: Spec {
+                pointer: None,
+                definitions: Rc::default(),
+                behind: None,
+            },
+            chunks: Chunks::default(),
+            newest: None,
+            gave: None,
+            dropped: Some(one),
+            task: None,
+        };
+        let old = Pointer {
+            version: 1,
+            root: Digest::of(b"old"),
+        };
+        let new = Pointer {
+            version: 2,
+            root: Digest::of(b"new"),
+        };
+        used.committed(old, BTreeSet::new());
+        used.committed(new, BTreeSet::new());
+        assert!(!used.settle(old, Done::Got(Ok(Some(two)))));
+        assert_eq!((used.gave, used.dropped), (Some(two), None));
     }
 }
