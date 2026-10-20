@@ -23,10 +23,10 @@ fn key(byte: u8) -> PublicKey {
     PrivateKey([byte; 32]).public()
 }
 
-/// Each problem of `text` as its code, message, and fix.
 const PASTED_KEY: &str = "Remove the private key from this file now, and write \
                           the path of its key file as `private_key`";
 
+/// Each problem of `text` as its code, message, and fix.
 fn problems(text: &str) -> Vec<(&'static str, String, String)> {
     let Err(diagnostics) = profile::decode(&read(text)) else {
         panic!("the profile decodes: {text}");

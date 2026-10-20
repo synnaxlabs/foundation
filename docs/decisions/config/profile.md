@@ -31,7 +31,9 @@
   gives only `config.private-key`, as in a config file (SUBJECT KEYS), with the fix to
   write the path of its key file as `private_key` (`laptop.architect-2`,
   2026-10-20T01:51:26Z, item 1 of
-  https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6281458911). A pin
+  https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6281458911; the fix,
+  2026-10-20T02:08:10Z, item 3 of
+  https://github.com/synnaxlabs/foundation/pull/3472#issuecomment-6281670865). A pin
   whose key holds such text also gives it: a key holds it with a chance under 10^-19,
   and an exception would pass a private key in the comment of the line
   (`laptop.architect-2`, 2026-10-20T01:53:14Z,
