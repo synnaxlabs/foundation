@@ -385,7 +385,7 @@ unsafe extern "C" {
         server: *mut Server,
         uri: *const c_char,
     ) -> u32;
-    pub(crate) fn shim_server_invalidate_tokens(server: *mut Server);
+    pub(crate) fn shim_server_refuse_sessions(server: *mut Server, status: u32) -> u32;
     pub(crate) fn shim_server_data_type(
         server: *mut Server,
         node: Node<'_>,

@@ -91,10 +91,9 @@ struct State {
     /// it starts.
     #[cfg(test)]
     token: Option<&'static std::ffi::CStr>,
-    /// Whether a server refuses each session as [`Server::invalidate_tokens`] says, set
-    /// before it starts.
+    /// The status with which a server refuses each session, set before it starts.
     #[cfg(test)]
-    invalidating: bool,
+    refusal: Option<crate::ffi::Status>,
     /// The credentials and the one policy and mode of a server, set before it starts.
     security: Option<(Credentials<'static>, Policy, Mode)>,
 }
@@ -179,7 +178,7 @@ impl Variables {
             #[cfg(test)]
             token: None,
             #[cfg(test)]
-            invalidating: false,
+            refusal: None,
             security: None,
         })))
     }
@@ -301,11 +300,11 @@ impl Variables {
         self.state().token = Some(uri);
     }
 
-    /// Makes a server that starts later refuse each session, as
-    /// [`Server::invalidate_tokens`] says.
+    /// Makes a server that starts later refuse each session with `status`, as
+    /// [`Server::refuse_sessions`] says.
     #[cfg(test)]
-    pub(crate) fn invalidate_tokens(&self) {
-        self.state().invalidating = true;
+    pub(crate) fn refuse_sessions(&self, status: crate::ffi::Status) {
+        self.state().refusal = Some(status);
     }
 
     /// Gives each later answer of the state of the server the status `quality`.
@@ -331,10 +330,10 @@ impl Variables {
     /// timeout of [`Variables::time_out_sessions`], the limits of
     /// [`Variables::limit_queues`], the logins of [`Variables::admit`], the token
     /// policy of [`Variables::set_token_policy`], and the refusal of
-    /// [`Variables::invalidate_tokens`], and makes it answer the reads of its state.
+    /// [`Variables::refuse_sessions`], and makes it answer the reads of its state.
     #[cfg(test)]
     fn hook(&self, server: &Server) {
-        let (most, session, queues, users, token, invalidating) = {
+        let (most, session, queues, users, token, refusal) = {
             let state = self.state();
             let State {
                 most,
@@ -342,10 +341,10 @@ impl Variables {
                 queues,
                 users,
                 token,
-                invalidating,
+                refusal,
                 ..
             } = *state;
-            (most, session, queues, users, token, invalidating)
+            (most, session, queues, users, token, refusal)
         };
         if let Some(most) = most {
             server.refuse_reads_past(most);
@@ -363,8 +362,9 @@ impl Variables {
         if let Some(uri) = token {
             server.set_token_policy(uri);
         }
-        if invalidating {
-            server.invalidate_tokens();
+        // After `admit`, which resets the access control.
+        if let Some(status) = refusal {
+            server.refuse_sessions(status);
         }
         let variables = Variables::clone(self);
         server.set_source(&state_node(), move || {

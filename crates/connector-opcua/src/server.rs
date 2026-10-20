@@ -393,12 +393,23 @@ impl Server {
         assert_eq!(status, Status::GOOD, "open62541 refused the token policies");
     }
 
-    /// Refuses each later session with `BadIdentityTokenInvalid`, as a server does that
-    /// cannot read the user token.
+    /// Refuses each later session with `status`, until a later [`Server::admit`].
+    ///
+    /// # Panics
+    ///
+    /// If `status` is not [`Status::BAD_IDENTITY_TOKEN_INVALID`] or
+    /// [`Status::BAD_USER_ACCESS_DENIED`].
     #[cfg(test)]
-    pub(crate) fn invalidate_tokens(&self) {
+    pub(crate) fn refuse_sessions(&self, status: Status) {
         // SAFETY: the server lives.
-        unsafe { ffi::test::shim_server_invalidate_tokens(self.raw()) };
+        let refused = Status(unsafe {
+            ffi::test::shim_server_refuse_sessions(self.raw(), status.0)
+        });
+        assert_eq!(
+            refused,
+            Status::GOOD,
+            "the shim refuses no session with {status:?}"
+        );
     }
 
     /// The number of the `DataType` of the variable `node`, in namespace 0.

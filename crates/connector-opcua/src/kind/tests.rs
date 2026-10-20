@@ -522,6 +522,8 @@ struct Secure {
     user: Option<(&'static str, Option<&'static [u8]>)>,
     /// The sessions that the server lets in.
     login: Login,
+    /// The status with which the server refuses each session, after [`Secure::login`].
+    refusal: Option<Status>,
     /// The URI of the security policy of the one user token policy of the server,
     /// else the user token policies of open62541.
     token: Option<&'static CStr>,
@@ -533,9 +535,6 @@ enum Login {
     Anonymous,
     /// Only the user names and passwords of the list.
     Only(&'static [(&'static str, &'static [u8])]),
-    /// The user token policies of [`LOGINS`], but it refuses each session with
-    /// `BadIdentityTokenInvalid`.
-    Invalid,
 }
 
 /// The secret of the certificate of [`PLC`].
@@ -573,6 +572,7 @@ impl Secure {
             ],
             user: None,
             login: Login::Anonymous,
+            refusal: None,
             token: None,
         }
     }
@@ -602,10 +602,9 @@ impl Secure {
         match self.login {
             Login::Anonymous => {}
             Login::Only(users) => variables.admit(users),
-            Login::Invalid => {
-                variables.admit(LOGINS);
-                variables.invalidate_tokens();
-            }
+        }
+        if let Some(status) = self.refusal {
+            variables.refuse_sessions(status);
         }
         if let Some(uri) = self.token {
             variables.set_token_policy(uri);
@@ -3352,7 +3351,7 @@ fn a_wrong_password_names_the_user_and_the_password() {
 #[test]
 fn an_invalid_token_names_both_causes() {
     let secure = Secure {
-        login: Login::Invalid,
+        refusal: Some(Status::BAD_IDENTITY_TOKEN_INVALID),
         ..Secure::with_user(Policy::Basic256Sha256)
     };
     let cause = "the server could not read the user token (its policy or its \
@@ -3400,6 +3399,20 @@ fn a_rejected_token_of_a_user_names_both_causes_in_each_mode() {
     }
 }
 
+/// A user with no password is a broken invariant, never an anonymous session.
+#[test]
+#[should_panic(expected = "invariant: Secured::read reads the password of each user")]
+fn a_user_with_no_password_panics() {
+    let security = Security {
+        user: Some(config::User {
+            name: "operator".into(),
+            password: secret::Source::Secret(name(PASSWORD)),
+        }),
+        ..cause_security()
+    };
+    secured_on(&security, CLIENT.certificate, None).session();
+}
+
 /// With no `user`, the two statuses name no cause.
 #[test]
 fn a_refused_anonymous_user_names_no_cause() {
@@ -3407,8 +3420,21 @@ fn a_refused_anonymous_user_names_no_cause() {
         Status::BAD_USER_ACCESS_DENIED,
         Status::BAD_IDENTITY_TOKEN_INVALID,
     ] {
-        let cause = cause_on(status, CLIENT.certificate);
-        assert_eq!(cause, None, "{}", status.name());
+        let outcome = secured(Secure {
+            refusal: Some(status),
+            ..Secure::of(Policy::Basic256Sha256)
+        });
+        assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+        let connect = format!(
+            "the connect to opc.tcp://10.0.0.1:4840 failed with {}",
+            status.name()
+        );
+        assert_eq!(
+            errors(&outcome.statuses),
+            [(DEVICE, connect)],
+            "{}",
+            status.name()
+        );
     }
 }
 
