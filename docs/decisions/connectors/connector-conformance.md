@@ -142,6 +142,11 @@
      https://github.com/synnaxlabs/foundation/issues/2849#issuecomment-6221505945).
      Scenario 7 runs 13.1 s of plant time for `influx` with no echo simulator (box1,
      at 2026-10-20).
+     Lost: the crash form of scenario 3, where the device node crashes and no close
+     reaches the plant. It comes back with the next change of scenario 7, the
+     `opcua` `user` and `password` once #3597 merges. OK of `laptop.monitor`,
+     2026-10-20T14:53:46Z:
+     https://github.com/synnaxlabs/foundation/pull/3607#issuecomment-6293785716.
 
   The numbers are tunable by the architect of `connector`. Plan of
   `laptop.architect-2` at 2026-10-13T21:22:43Z
