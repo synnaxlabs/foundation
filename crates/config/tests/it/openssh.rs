@@ -95,16 +95,16 @@ fn refuses_a_text_that_is_not_a_private_key_file() {
     assert_eq!(unreadable(KEYGEN_PUB), expected);
 }
 
-/// A text after an end mark gives one error with each line end. The fuzz target found
-/// it: its algorithm name is not UTF-8.
+/// A text after an end mark gives one error with LF and CRLF line ends. The fuzz target
+/// found it: its algorithm name is not UTF-8.
 #[test]
-fn gives_one_error_for_a_text_after_an_end_mark_with_each_line_end() {
+fn gives_one_error_for_a_text_after_an_end_mark_with_lf_and_crlf() {
     let text = "-----ENDOXc\n\n-----BEGIN OPENSSH PRIVATE KEY-----\n\
         b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gZtW\n\
         QyNTUxOQAAACDyYqNHsEEJBY9+1DrLFvXJtoCq/Jio0ewQQkFj37UOssW9cm2\n\
         gKr9m07\n5UHcwrYgPa9XoAAA{\0\0\0\0\0\0J\n\n\n\n\n\0lQGxhcHRvcAE=\n\
         -----END OPENSSH PRIVATE KEY-----\n";
-    for end in ["\n", "\r\n", "\r"] {
+    for end in ["\n", "\r\n"] {
         assert_eq!(
             unreadable(&text.replace('\n', end)),
             (
@@ -119,13 +119,56 @@ fn gives_one_error_for_a_text_after_an_end_mark_with_each_line_end() {
 
 /// `ssh-key` 0.6.7 skips the text before the begin mark, also an end mark.
 #[test]
-fn reads_a_key_file_after_text_before_its_begin_mark_with_each_line_end() {
-    for before in ["-----END x\n", "x\n", "\n"] {
-        for end in ["\n", "\r\n", "\r"] {
+fn reads_a_key_file_after_text_before_its_begin_mark() {
+    for before in [
+        "-----END x\n",
+        "-----BEGINx\n",
+        "x\n-----BEGINx\n",
+        "x\n",
+        "\n",
+    ] {
+        for end in ["\n", "\r\n"] {
             let text = format!("{before}{KEYGEN}").replace('\n', end);
             let key = openssh::private_key(&text).unwrap();
             assert_eq!(openssh::line(key.public()), KEYGEN_PUB, "{text:?}");
         }
+    }
+}
+
+/// `ssh-key` 0.6.7 takes a begin mark only at the start of the text or after a LF, so
+/// it skips a begin mark or a key file after a lone CR, and finds none in a text of CR
+/// line ends after other text.
+#[test]
+fn takes_the_begin_mark_that_ssh_key_takes() {
+    let other = openssh::key_file(&PrivateKey([7; 32]), "").replace('\n', "\r");
+    let after_key = format!("x\r{other}\n{KEYGEN}");
+    let after_begin = format!("x\r-----BEGIN y\n{KEYGEN}");
+    for text in [after_key, after_begin] {
+        let key = openssh::private_key(&text).unwrap();
+        assert_eq!(openssh::line(key.public()), KEYGEN_PUB, "{text:?}");
+    }
+    assert_eq!(
+        unreadable(&format!("x\r{}", KEYGEN.replace('\n', "\r"))),
+        (
+            Unreadable::Format,
+            "the file is not an OpenSSH private key as `ssh-keygen` writes it".into()
+        )
+    );
+}
+
+#[test]
+fn refuses_a_key_file_with_no_end_mark() {
+    let text = KEYGEN.replace("-----END OPENSSH PRIVATE KEY-----\n", "");
+    for end in ["\n", "\r\n", "\r"] {
+        assert_eq!(
+            unreadable(&text.replace('\n', end)),
+            (
+                Unreadable::Format,
+                "the file is not an OpenSSH private key as `ssh-keygen` writes it"
+                    .into()
+            ),
+            "{end:?}"
+        );
     }
 }
 

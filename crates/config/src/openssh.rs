@@ -172,9 +172,10 @@ pub fn line(key: PublicKey) -> String {
 /// passphrase. Its message quotes none of the text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unreadable {
-    /// It is not an OpenSSH private key file as `ssh-keygen` writes it: it does not
-    /// start `-----BEGIN OPENSSH PRIVATE KEY-----`, or it breaks the format in a way
-    /// that OpenSSH reads, as [`private_key`] says.
+    /// It is not an OpenSSH private key file as `ssh-keygen` writes it: its first line
+    /// that starts `-----BEGIN ` is not `-----BEGIN OPENSSH PRIVATE KEY-----`, no end
+    /// mark follows that line, or it breaks the format in a way that OpenSSH reads, as
+    /// [`private_key`] says.
     Format,
     /// The key is of another algorithm: its name, or `ECDSA` for an ECDSA key.
     Algorithm(&'static str),
@@ -262,14 +263,18 @@ pub fn private_key(text: &str) -> Result<PrivateKey, Unreadable> {
 
 /// `text` from its begin mark to its end mark as `ssh-key` takes it: the body with no
 /// white space, in lines of 70 characters, and each line end (`\n`, `\r\n`, or `\r`)
-/// as `\n`. `ssh-key` 0.6.7 skips the text before the begin mark and reads only lines
-/// of 70, as `ssh-keygen` writes them. OpenSSH reads any width, skips white space in
-/// the body as C `isspace` finds it, and skips the text after the end mark. `None` when
-/// no end mark follows a begin mark.
+/// as `\n`. `ssh-key` 0.6.7 takes a begin mark only at the start of the text or after
+/// a `\n`, skips the text before it, and reads only lines of 70, as `ssh-keygen` writes
+/// them. OpenSSH reads any width, skips white space in the body as C `isspace` finds
+/// it, and skips the text after the end mark. `None` when no end mark follows a begin
+/// mark.
 fn lines(text: &str) -> Option<String> {
-    let mut lines = text
-        .split(['\n', '\r'])
-        .skip_while(|line| !line.starts_with("-----BEGIN "));
+    let start = if text.starts_with("-----BEGIN ") {
+        0
+    } else {
+        text.find("\n-----BEGIN ")? + 1
+    };
+    let mut lines = text[start..].split(['\n', '\r']);
     let begin = lines.next()?;
     let space = |c: &char| c.is_ascii_whitespace() || *c == '\x0b';
     let mut body = Vec::new();
