@@ -7,8 +7,9 @@
 //! subscription. A Publish answer allocates a fixed count for any count of changes,
 //! and the first drives of a subscription allocate no memory for its changes. A read
 //! over a secure channel makes a fixed count of allocations. aws-lc allocates through
-//! the global allocator here, so the count holds its blocks too. The count covers each
-//! thread, so this binary has no test harness.
+//! the global allocator here, so the count holds its blocks too, other than its thread
+//! locals and its error queue, which stay in `malloc`. The count covers each thread, so
+//! this binary has no test harness.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 #![expect(unsafe_code, reason = "the routing of aws-lc and its positive control")]

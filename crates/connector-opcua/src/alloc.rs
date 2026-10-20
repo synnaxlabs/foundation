@@ -3,6 +3,7 @@
 //! so each C allocation goes through the global allocator of the binary. Each keeps
 //! the C contract: a failure gives NULL and never panics, and each pointer is aligned
 //! to 16. [`exhausted`] stops the process when a constructor of `shim.c` gives NULL.
+//! Behind `sim`, [`route_crypto`] gives these functions to aws-lc too.
 
 #![expect(unsafe_code, reason = "C allocates through these functions")]
 
@@ -177,8 +178,10 @@ unsafe extern "C" fn connector_opcua_free(ptr: *mut c_void) {
 
 /// Makes `OPENSSL_malloc`, `OPENSSL_realloc`, and `OPENSSL_free` of aws-lc use the
 /// global allocator of the binary, so a counting allocator counts the blocks of aws-lc
-/// too. The array of the thread locals of aws-lc, one block for each thread, stays in
-/// `malloc`. aws-lc then does not clear a block before it frees it.
+/// too, other than the blocks that aws-lc takes from `malloc` itself: the array of its
+/// thread locals, one block for each thread, and its error queue (the state of each
+/// thread that puts an error, and the data of each error). aws-lc then does not clear a
+/// block before it frees it.
 ///
 /// # Safety
 ///
@@ -192,22 +195,28 @@ unsafe extern "C" fn connector_opcua_free(ptr: *mut c_void) {
 /// `CRYPTO_set_mem_functions`.
 #[cfg(feature = "sim")]
 pub unsafe fn route_crypto() {
-    unsafe extern "C" fn crypto_malloc(
+    extern "C" fn crypto_malloc(
         size: usize,
         _: *const c_char,
         _: c_int,
     ) -> *mut c_void {
         connector_opcua_malloc(size)
     }
+    /// # Safety
+    ///
+    /// `ptr` is NULL or a live block of `crypto_malloc` or `crypto_realloc`.
     unsafe extern "C" fn crypto_realloc(
         ptr: *mut c_void,
         size: usize,
         _: *const c_char,
         _: c_int,
     ) -> *mut c_void {
-        // SAFETY: aws-lc gives NULL or a live pointer of `crypto_malloc`.
+        // SAFETY: the caller gives NULL or a live block of these functions.
         unsafe { connector_opcua_realloc(ptr, size) }
     }
+    /// # Safety
+    ///
+    /// As `crypto_realloc`.
     unsafe extern "C" fn crypto_free(ptr: *mut c_void, _: *const c_char, _: c_int) {
         // SAFETY: as in `crypto_realloc`.
         unsafe { connector_opcua_free(ptr) }

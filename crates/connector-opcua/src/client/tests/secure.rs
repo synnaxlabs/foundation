@@ -10,6 +10,7 @@ use aws_lc_sys::{
 };
 use types::time::{Span, Stamp};
 
+use super::common::channel;
 use super::{Client, PORT, VALUE, fits, fitting, long, run, serve_on};
 use crate::client::{
     Credential, Credentials, Error, Large, Mode, Names, Refusal, names,
@@ -17,30 +18,16 @@ use crate::client::{
 use crate::event;
 use crate::ffi::{self, Status};
 use crate::secure::{
-    ANONYMOUS, BROKEN_TRUST, CLIENT, CLIENT_ONLY_SERVER, CLIENT_PEM, EC, EMPTY_URI,
-    END, HEADED_TRUST, HIGH_PEM, HUGE_SUBJECT, Identity, LASTING, LINE_TRUST,
-    LONG_BLOCK_TRUST, LONG_ENTRY, LONG_KEY, LONG_SUBJECT, NAMELESS, ONE_BLOCK_TRUST,
-    OTHER, Policy, REJECTED_SERVER, SERVER, START, TRUST, TWO_URIS, UNNAMED,
+    ANONYMOUS, BROKEN_TRUST, CLIENT, CLIENT_ONLY_SERVER, CLIENT_PEM, CLIENT_SIDE, EC,
+    EMPTY_URI, END, HEADED_TRUST, HIGH_PEM, HUGE_SUBJECT, Identity, LASTING,
+    LINE_TRUST, LONG_BLOCK_TRUST, LONG_ENTRY, LONG_KEY, LONG_SUBJECT, NAMELESS,
+    ONE_BLOCK_TRUST, OTHER, Policy, REJECTED_SERVER, SERVED, SERVER, START, TRUST,
+    TWO_URIS, UNNAMED,
 };
 use crate::server::Limits;
 use crate::value::{Fault, Value};
 
-/// The test server, which trusts [`CLIENT`].
-const SERVED: Credentials<'_> = with(SERVER, CLIENT.certificate);
-
-/// The test client, which trusts [`SERVER`].
-const CLIENT_SIDE: Credentials<'_> = with(CLIENT, SERVER.certificate);
-
 const MODES: [Mode; 2] = [Mode::Sign, Mode::SignAndEncrypt];
-
-/// The credentials of `own` that trust `trust`.
-const fn with(own: Identity, trust: &'static [u8]) -> Credentials<'static> {
-    Credentials {
-        certificate: own.certificate,
-        key: own.key,
-        trust,
-    }
-}
 
 /// What a read of [`VALUE`] through a secure channel gives.
 #[derive(Debug, PartialEq)]
@@ -51,20 +38,6 @@ struct Read {
     answer: Result<Value, Fault>,
     /// The policy URI and the mode of the channel.
     channel: (String, ffi::Mode),
-}
-
-/// The policy URI and the mode of the channel of `client`, read from C: no call of
-/// `Client` and no server log gives them, and a read alone passes over each policy
-/// and mode that the server offers.
-fn channel(client: &Client) -> (String, ffi::Mode) {
-    let mut mode = ffi::Mode(0);
-    // SAFETY: the client lives, and `mode` is a place to write.
-    let policy =
-        unsafe { ffi::test::shim_client_channel(client.raw.as_ptr(), &raw mut mode) };
-    // SAFETY: open62541 gives a live string of the config of the client, or null.
-    let policy = unsafe { policy.as_ref() }.expect("the client has a channel");
-    // SAFETY: as above.
-    (unsafe { policy.lossy() }, mode)
 }
 
 /// The connect of a client whose loop starts at `client_wall` with `client` that
@@ -667,7 +640,7 @@ fn refused(own: Identity) -> Result<(), Error> {
 /// [`refused`] with a trust of `trust`, on a loop whose wall time starts at `wall`.
 fn refused_at(own: Identity, trust: &'static [u8], wall: Stamp) -> Result<(), Error> {
     let (connect, _) = run(0, async move |node| {
-        let client = with(own, trust);
+        let client = own.trusting(trust);
         let mut rng = node.entropy().rng();
         let url = format!("opc.tcp://{}", SocketAddr::new(node.addresses()[0], PORT));
         let url = CString::new(url).expect("the URL holds no NUL");
@@ -771,12 +744,7 @@ fn a_refusal_names_the_part_that_fails() {
 
 #[test]
 fn the_debug_of_credentials_holds_no_key() {
-    let credentials = Credentials {
-        certificate: CLIENT.certificate,
-        key: CLIENT.key,
-        trust: SERVER.certificate,
-    };
-    assert_eq!(format!("{credentials:?}"), "<credentials>");
+    assert_eq!(format!("{CLIENT_SIDE:?}"), "<credentials>");
 }
 
 #[test]
@@ -878,8 +846,8 @@ fn a_certificate_whose_first_uri_is_empty_ends_the_connect_before_the_dial() {
 
 #[test]
 fn a_client_sends_the_first_uri_of_its_certificate() {
-    let server = with(SERVER, TWO_URIS.certificate);
-    let client = with(TWO_URIS, SERVER.certificate);
+    let server = SERVER.trusting(TWO_URIS.certificate);
+    let client = TWO_URIS.trusting(SERVER.certificate);
     let (uri, _) = run(0, async move |node| {
         let time = event::Time::since(node.clock(), START);
         serve_on(
@@ -929,7 +897,7 @@ fn a_read_in_sign_and_encrypt_replays() {
 
 #[test]
 fn a_server_certificate_that_the_client_does_not_trust_ends_the_connect() {
-    let other = with(OTHER, CLIENT.certificate);
+    let other = OTHER.trusting(CLIENT.certificate);
     let (read, _) = connect(
         0,
         (other, START),
@@ -944,7 +912,7 @@ fn a_server_certificate_that_the_client_does_not_trust_ends_the_connect() {
 fn a_client_past_the_end_of_the_server_certificate_ends_the_connect() {
     let (read, _) = connect(
         0,
-        (with(SERVER, LASTING.certificate), START),
+        (SERVER.trusting(LASTING.certificate), START),
         (LASTING, SERVER.certificate, END + Span::SECOND),
         &Policy::ALL,
         Mode::Sign,
@@ -959,7 +927,7 @@ fn a_client_past_the_end_of_the_server_certificate_ends_the_connect() {
 fn a_client_one_second_before_the_end_of_the_server_certificate_reads() {
     let (read, _) = connect(
         0,
-        (with(SERVER, LASTING.certificate), START),
+        (SERVER.trusting(LASTING.certificate), START),
         (LASTING, SERVER.certificate, END - Span::SECOND),
         &Policy::ALL,
         Mode::Sign,
@@ -972,7 +940,7 @@ fn a_client_one_second_before_the_end_of_the_server_certificate_reads() {
 fn a_client_one_second_before_the_start_of_the_server_certificate_ends_the_connect() {
     let (read, _) = connect(
         0,
-        (with(SERVER, LASTING.certificate), START),
+        (SERVER.trusting(LASTING.certificate), START),
         (LASTING, SERVER.certificate, START - Span::SECOND),
         &Policy::ALL,
         Mode::Sign,

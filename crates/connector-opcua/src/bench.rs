@@ -1,8 +1,9 @@
 //! Runs the event loop of open62541 alone, its logger, and a connection manager with a
 //! server and clients on it, for benchmarks and allocation tests. [`client`] runs a
 //! server with clients that each have their own manager. [`kind`] writes the frames of
-//! the `opcua` kind with no server. [`value`] decodes the values of a read. Not part of
-//! the contract of the crate.
+//! the `opcua` kind with no server. [`value`] decodes the values of a read.
+//! [`route_crypto`] makes aws-lc allocate through the global allocator. Not part of the
+//! contract of the crate.
 
 #![expect(unsafe_code, reason = "open62541 is a C library")]
 

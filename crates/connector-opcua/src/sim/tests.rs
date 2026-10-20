@@ -15,13 +15,13 @@ use crate::client::browse::{
     Base, Cause, Class, Description, Foreign, Page, Reference, Unit,
 };
 use crate::client::subscription::Change;
-use crate::client::{self, Client, Credentials, Mode};
+use crate::client::{self, Client, Mode};
 use crate::connection::OPTIONS;
 use crate::event;
 use crate::ffi::Status;
 use crate::node::Node;
 use crate::node::ns0::{self, HAS_COMPONENT, ORGANIZES};
-use crate::secure::{CLIENT, Policy, SERVER, START};
+use crate::secure::{CLIENT_SIDE, Policy, SERVED, START};
 use crate::value::{Fault, Type, Value};
 
 const SPIKE: &str = "ns=3;s=SpikeData";
@@ -958,17 +958,7 @@ fn secure_connects() -> (Option<Status>, Option<client::Error>, Result<Value, Fa
             CString::new(format!("opc.tcp://{}", listener.local())).expect("no NUL");
         let mut rng = node.entropy().rng();
         let variables = Variables::new(&[SPIKE]);
-        let served = Credentials {
-            certificate: SERVER.certificate,
-            key: SERVER.key,
-            trust: CLIENT.certificate,
-        };
-        variables.secure(served, Policy::Basic256Sha256, Mode::SignAndEncrypt);
-        let own = Credentials {
-            certificate: CLIENT.certificate,
-            key: CLIENT.key,
-            trust: SERVER.certificate,
-        };
+        variables.secure(SERVED, Policy::Basic256Sha256, Mode::SignAndEncrypt);
         let mut out = (None, None, Ok(Value::I32(0)));
         let until = async {
             out.0 = connect(&node, &mut rng, &url).await.err();
@@ -979,7 +969,7 @@ fn secure_connects() -> (Option<Status>, Option<client::Error>, Result<Value, Fa
                     node.net(),
                     &mut rng,
                     &url,
-                    Some((&own, mode)),
+                    Some((&CLIENT_SIDE, mode)),
                     future::pending(),
                 )
                 .await

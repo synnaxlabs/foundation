@@ -44,7 +44,10 @@ mod pem;
 #[cfg(any(test, feature = "sim"))]
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the fuzz target reads only `SERVER`")
+    expect(
+        dead_code,
+        reason = "the fuzz target and the bench read only some peers"
+    )
 )]
 mod secure;
 #[cfg(feature = "open62541")]

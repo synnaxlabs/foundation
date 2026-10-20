@@ -341,6 +341,10 @@ pub(crate) const POLICIES: [&str; 3] = [
 /// The mode of a secure channel. open62541 takes the endpoint in the mode of the
 /// highest security level that the server offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    not(feature = "sim"),
+    expect(unreachable_pub, reason = "only the sim feature exports it")
+)]
 pub enum Mode {
     /// Each message is signed.
     Sign,

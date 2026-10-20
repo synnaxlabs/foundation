@@ -37,7 +37,7 @@ use crate::client::{self, GRACE};
 use crate::gate::Gate;
 use crate::secure::{
     CA_CLIENT, CLIENT, END, EXPIRED_CA, EXPIRED_CA_CLIENT, HIGH_PEM, LASTING, NAMELESS,
-    OTHER, Policy, SERVER, START,
+    OTHER, Policy, SERVED, SERVER, START,
 };
 use crate::sim::{Served, Variables, serve};
 
@@ -536,11 +536,7 @@ impl Secure {
             ahead: Span::ZERO,
             policy,
             offered: client::Mode::SignAndEncrypt,
-            server: Credentials {
-                certificate: SERVER.certificate,
-                key: SERVER.key,
-                trust: CLIENT.certificate,
-            },
+            server: SERVED,
             unencrypted: false,
             plain: false,
             credentials: [
