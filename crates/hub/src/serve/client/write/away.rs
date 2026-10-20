@@ -404,8 +404,11 @@ impl Flight {
             return Poll::Ready(());
         }
         let waker = match self.waiting.take() {
-            Some(waker) if waker.will_wake(cx.waker()) => waker,
-            _ => cx.waker().clone(),
+            Some(mut waker) => {
+                waker.clone_from(cx.waker());
+                waker
+            }
+            None => cx.waker().clone(),
         };
         self.waiting.set(Some(waker));
         Poll::Pending
@@ -524,7 +527,51 @@ async fn down(
 // this test calls the private `runs`.
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Wake;
+
+    use types::frame;
+    use wire::hub::write::Outcome;
+
     use super::*;
+
+    struct Count(AtomicUsize);
+
+    impl Wake for Count {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn an_outcome_wakes_the_last_task_that_waits_for_room() {
+        let flight = Flight::new();
+        for _ in 0..IN_FLIGHT {
+            flight.head();
+        }
+        let [first, last] = [(); 2].map(|()| Arc::new(Count(AtomicUsize::new(0))));
+        for count in [&first, &last] {
+            let waker = Waker::from(Arc::clone(count));
+            let polled = flight.poll_room(&Context::from_waker(&waker));
+            assert_eq!(polled, Poll::Pending);
+        }
+        let outcome = Reply::Outcome {
+            frame: 1,
+            group: 0,
+            outcome: Outcome::Taken {
+                range: frame::Range { seq: 0, count: 1 },
+            },
+        };
+        let mut message = vec![0; outcome.encoded_len()];
+        outcome.encode(&mut message);
+        flight.reply(&message).expect("an outcome of a sent frame");
+        let woken = [&first, &last].map(|count| count.0.load(Ordering::Relaxed));
+        assert_eq!(woken, [0, 1]);
+        let waker = Waker::from(first);
+        let polled = flight.poll_room(&Context::from_waker(&waker));
+        assert_eq!(polled, Poll::Ready(()));
+    }
 
     #[test]
     fn runs_cut_the_places_at_the_bytes_of_a_message() {
