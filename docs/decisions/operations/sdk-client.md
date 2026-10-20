@@ -53,7 +53,8 @@
   2026-10-20T02:16:54Z,
   https://github.com/synnaxlabs/foundation/pull/3470#issuecomment-6281777929;
   `laptop.architect-2`, 2026-10-20T05:26:15Z,
-  https://github.com/synnaxlabs/foundation/pull/3518#issuecomment-6284078739).
+  https://github.com/synnaxlabs/foundation/pull/3518#issuecomment-6284078739; text:
+  https://github.com/synnaxlabs/foundation/pull/3518#issuecomment-6284843984).
   `sdk::private_key()` gives a new key from the randomness of the OS
   (`laptop.architect-2`, 2026-10-19T23:47:10Z,
   https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279865842).
