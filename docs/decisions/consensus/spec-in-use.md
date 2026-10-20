@@ -8,14 +8,27 @@
   https://github.com/synnaxlabs/foundation/pull/2192#issuecomment-6090235986). One task
   in `mesh` reads the spec of each committed pointer with `spec::region::definitions`
   over the chunks of the spec in use and the chunks that the change lists, and gets each
-  chunk that the read gives as `Missing` from `Config::store`. A spec that reads and has
-  no problem at `spec::region::check` takes effect. A spec with problems or a tree that
-  does not read leaves the last spec in use (SPEC CHANGE). After a missing chunk, a
-  retry each second (`RETRY`, on the `env` clock) gets only that chunk, and reads again
-  only when the store gives it. A failed store call or file call is read again each
-  second. The state is at most two trees: the chunks of the spec in use, which
-  `spec::region::definitions` gives (REGION CHECK; `laptop.architect-2`,
-  2026-10-08T16:16:05Z,
+  chunk that the read gives as `Missing` from `Config::store`, or else from the peers. A
+  spec that reads and has no problem at `spec::region::check` takes effect. A spec with
+  problems or a tree that does not read leaves the last spec in use (SPEC CHANGE). After
+  a read that misses chunks, the task gets them at once, from `Config::store` and then
+  from the peers: each listed chunk that the store lacks in one round, and each other
+  chunk that the tree needs, one at a time. It reads again once a get gave one of them.
+  A get that finds no chunk asks again each second (`RETRY`, on the `env` clock). A get
+  asks the voters in key order, without this node, from the voter that gave the last
+  chunk, also of an earlier pointer or of a dropped get, and around. A get that a newer
+  pointer drops keeps the voter that it was asking, and the next get starts after it.
+  One exception: when that voter gave the last chunk, to a get of the same pointer, the
+  next get starts at it. Each peer gets the chunks
+  still missing in calls of at most `CHUNKS`, each within `peer::DEADLINE`. A call that
+  fails or passes the deadline gives the rest of the round to the next peer. Lost:
+  holders first; a set of the peers that failed; the get of one listed chunk at a time.
+  It dials as `Mesh::apply` does, with the same redial. A failed call of this node's
+  store ends the get with `Cause::Blob`. Each other failure of a peer moves to the next
+  peer. When no peer gives the chunk, the cause stays
+  `Missing`. A failed store call or file call is read again each second. The state is at
+  most two trees: the chunks of the spec in use, which `spec::region::definitions` gives
+  (REGION CHECK; `laptop.architect-2`, 2026-10-08T16:16:05Z,
   https://github.com/synnaxlabs/foundation/pull/1891#issuecomment-6064178995), or
   `spec::region::tree` of the founding definitions, and the chunks of the tree of the
   newest committed pointer that the task got. A newer pointer drops the chunks of the
@@ -61,4 +74,28 @@
   Supersedes: the base tree from the spec in use in item 2 of
   https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178, the wait
   of `Mesh::spec` in item 4 of the same comment, and the text of `Behind::pointer` in
-  https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6061345871.
+  https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6061345871. The get
+  from the peers: the plan of #1231, `laptop.architect`, 2026-10-19T17:02:16Z
+  (https://github.com/synnaxlabs/foundation/issues/1231#issuecomment-6272668202), and
+  items 2 and 3 of `laptop.integrator-1`, 2026-10-19T18:23:21Z
+  (https://github.com/synnaxlabs/foundation/issues/1231#issuecomment-6274225327), which
+  need no OK. The get at once after a miss, 2026-10-19T18:23:58Z
+  (https://github.com/synnaxlabs/foundation/issues/1231#issuecomment-6274236848), which
+  supersedes the wait of `RETRY` before each get of
+  https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6061345871. The
+  order of the voters, the get of the listed chunks in one round, and the rest of a
+  round to the next peer, `laptop.architect`, 2026-10-20T03:00:33Z
+  (https://github.com/synnaxlabs/foundation/pull/3495#issuecomment-6282311269), which
+  supersedes the "Also lost" line of the plan
+  (https://github.com/synnaxlabs/foundation/issues/1231#issuecomment-6272590081) for the
+  listed chunks, and the text of item 1 of
+  https://github.com/synnaxlabs/foundation/issues/1231#issuecomment-6274236848. The
+  start after the voter of a dropped get, the read once a get gave a chunk, and the Lost
+  line, `laptop.architect`, 2026-10-20T06:46:57Z
+  (https://github.com/synnaxlabs/foundation/pull/3495#issuecomment-6285124027), which
+  supersedes the start "from the voter that gave the last chunk of the pointer" of
+  https://github.com/synnaxlabs/foundation/pull/3495#issuecomment-6282311269. The start
+  at a dropped get's voter that gave the last chunk of the same pointer,
+  `laptop.architect`, 2026-10-20T07:16:31Z
+  (https://github.com/synnaxlabs/foundation/pull/3495#issuecomment-6285554859), which
+  supersedes the keep of each dropped get's voter of 6285124027.

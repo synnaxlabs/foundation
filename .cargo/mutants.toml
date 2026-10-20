@@ -191,6 +191,9 @@ exclude_re = [
   # counting-allocator test opens remote readers yet (#2015). The unit test of
   # `Sessions::add` kills it through the length of the list.
   'crates/hub/src/reader/remote\.rs:.*replace > with >= in Sessions::add',
+  # While no commit is due, no group waits, so a call when no group began to wait
+  # finds the list empty and does nothing.
+  'crates/hub/src/serve/client/write\.rs:.*replace > with >= in Writes::write$',
   # Equal keys get no rule (ONE SESSION PER PEER, rule 4), so no test can pin `<`.
   'crates/transport/src/table\.rs:.*replace < with <= in Table::arrive',
   # Only the `wal` bench calls `buffer::bench::Group::commit`, and it gives nothing
@@ -272,4 +275,7 @@ exclude_re = [
   'sdk/rust/src/read\.rs:.*replace served with \(\)$',
   # No writer opens, and each test of `crates/node/tests/it/sdk.rs` that writes fails.
   'sdk/rust/src/write\.rs:.*replace served with \(\)$',
+  # With the mutant, the node refuses each writer of one index, and each writer test of
+  # `crates/node/tests/it/sdk.rs` fails at its open.
+  'sdk/rust/src/write\.rs:.*replace != with == in served$',
 ]

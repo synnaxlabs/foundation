@@ -1,12 +1,13 @@
-- **OPCUA READ (#2524)** The `opcua` kind reads the Value of all its nodes on each
-  tick, in Read requests built once for a session (`client::Nodes`). The limit of one
-  message is known only after the connect: the server gives its buffer sizes,
-  MaxMessageSize, and MaxChunkCount in the ACK, and the server picks the token whose
-  encoded size each request carries. open62541 sends the first chunks of a message
-  before it finds that the message passes a limit, and the channel then closes. So the
-  client checks each request, and the answer of a Double for each node, against the
-  limits of the channel right after the connect. The copy of open62541 gives those
-  limits and the encoded size of the token through one more key of
+- **OPCUA READ (#2524)** With `polled = true`, or after the fallback of OPCUA SUBSCRIBE,
+  the `opcua` kind reads the Value of all its nodes on each tick, in Read requests
+  built once for a session (`client::Nodes`). The limit of one message is known only
+  after the connect: the server gives its buffer sizes, MaxMessageSize, and
+  MaxChunkCount in the ACK, and the server picks the token whose encoded size each
+  request carries. open62541 sends the first chunks of a message before it finds that
+  the message passes a limit, and the channel then closes. So the client checks each
+  request, and the answer of a Double for each node, against the limits of the channel
+  right after the connect. The copy of open62541 gives those limits and the encoded size
+  of the token through one more key of
   `UA_Client_getConnectionAttributeCopy` (`docs/dependencies.md`, "Local patches"). The
   client splits the nodes, in order, into requests that each fit one message both ways
   and hold at most the `MaxNodesPerRead` of the server (`ns=0;i=11705`, read once after
@@ -224,17 +225,17 @@
   decodes. Lost: a fixed limit of the arena, which lets a small answer take the memory
   of the largest (`laptop.architect-2`, 2026-10-20 02:27 UTC,
   https://github.com/synnaxlabs/foundation/pull/3462#issuecomment-6281907328).
-  `subscribe(nodes, sampling)` asks for a publishing interval of the longer of
-  `sampling` and 100 ms, at most 1 min, a keep-alive count of max(1, floor(1 min /
-  interval)), and a queue of each item that holds the samples of two revised publishing
-  intervals. When the revised interval is not positive, or times the larger of 1 and the
-  revised keep-alive count is over 5 min, half of the 10 min timeout of a Publish
-  request in open62541, `subscribe` fails with `BadOutOfRange` and sends no Publish
-  request: the client sends Publish requests only after this check. At
-  `BadNoSubscription` in a Publish answer, the patched open62541 deletes each local
-  subscription, so `changes` ends with `BadNoSubscription` and no Publish request goes
-  out again; the release only logs it and sends again at once
-  (`laptop.architect-2`, 2026-10-19T22:06:54Z,
+  `subscribe(nodes, sampling, round_trip)` asks for a publishing interval of the longer
+  of `sampling` and 100 ms, at most 1 min, a keep-alive count of max(1, floor(1 min /
+  interval)), and a queue of each item that holds the samples of the larger of two
+  revised publishing intervals and two of `round_trip` (OPCUA SUBSCRIBE). When the
+  revised interval is not positive, or times the larger of 1 and the revised keep-alive
+  count is over 5 min, half of the 10 min timeout of a Publish request in open62541,
+  `subscribe` fails with `BadOutOfRange` and sends no Publish request: the client sends
+  Publish requests only after this check. At `BadNoSubscription` in a Publish answer,
+  the patched open62541 deletes each local subscription, so `changes` ends with
+  `BadNoSubscription` and no Publish request goes out again; the release only logs it
+  and sends again at once (`laptop.architect-2`, 2026-10-19T22:06:54Z,
   https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6278430237). At
   `BadTooManyPublishRequests` with 1 Publish request kept, the patched open62541 also
   deletes each local subscription and gives each the status of the refusal, so

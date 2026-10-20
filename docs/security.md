@@ -324,8 +324,9 @@ state on `main`.
   that a peer serves under a hash that it does not match is never stored (C9d). The
   digests still open go again on a new stream, so each refused chunk costs the peer one
   stream. A reply out of order, or an end with digests open, stops the stream with
-  `MALFORMED`. `get` and `put` hold at most one chunk of their own. Nothing bounds a
-  silent peer but a drop of the future, which `mesh` owns (#1231).
+  `MALFORMED`. `get` and `put` hold at most one chunk of their own. `mesh` bounds each
+  `get` and `put` call on a peer, its dials included, with `peer::DEADLINE`, so a
+  silent peer costs it at most that time for each call.
 
 ### Time source to `estimate`
 

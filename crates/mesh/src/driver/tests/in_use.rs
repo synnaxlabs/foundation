@@ -1284,7 +1284,7 @@ fn the_spec_watch_of_each_member_gives_each_spec_that_takes_effect() {
 }
 
 // The member holds the spec in use and the newest pointer, never a pointer that a newer
-// one replaced.
+// one replaced. Its peers answer no get, so it gets each chunk only from its store.
 #[test]
 fn a_member_that_lacks_the_chunks_of_three_changes_uses_the_newest_once_it_gets_them() {
     let (mut cluster, leader, ..) = Cluster::led(0);
@@ -1293,7 +1293,9 @@ fn a_member_that_lacks_the_chunks_of_three_changes_uses_the_newest_once_it_gets_
     let mut at = base();
     for (version, definitions) in (1..).zip(&changes) {
         let puts = [1, 2].map(|id| (id, definitions.clone())).into();
-        cluster.board.lock().unwrap().puts = puts;
+        let mut board = cluster.board.lock().unwrap();
+        (board.puts, board.silent) = (puts, [1, 2].into());
+        drop(board);
         cluster.run(seconds(1));
         cluster.apply(leader, at, definitions);
         cluster.run(seconds(5));
@@ -1315,8 +1317,10 @@ fn a_member_that_lacks_the_chunks_of_three_changes_uses_the_newest_once_it_gets_
         assert_eq!(board.specs[&3], behind, "pointer {next:?}");
         at = next;
     }
-    cluster.board.lock().unwrap().puts = [(3, changes[2].clone())].into();
-    cluster.run(seconds(5));
+    let mut board = cluster.board.lock().unwrap();
+    (board.puts, board.silent) = ([(3, changes[2].clone())].into(), [1, 2].into());
+    drop(board);
+    cluster.run(seconds(25));
     assert_eq!(cluster.board().specs[&3], seen(at, &changes[2]));
 }
 

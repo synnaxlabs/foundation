@@ -20,6 +20,7 @@ mod tests;
 
 const BAD_ADDRESS: Code = Code::new("opcua.bad-address");
 const BAD_NODE_ID: Code = Code::new("opcua.bad-node-id");
+const BAD_POLLED: Code = Code::new("opcua.bad-polled");
 const BAD_UNENCRYPTED: Code = Code::new("opcua.bad-unencrypted");
 const REPEATED_CHANNEL: Code = Code::new("opcua.repeated-channel");
 
@@ -35,6 +36,8 @@ pub struct Config {
     /// path.
     pub(crate) address: CString,
     pub(crate) rate: Rate,
+    /// Whether the run reads each node once per tick, in place of a subscription.
+    pub(crate) polled: bool,
     /// Each of another channel. None until an import adds them.
     pub(crate) reads: Vec<Read>,
     /// With no `certificate`, `None`, and the channel has the mode `None`.
@@ -53,7 +56,7 @@ pub(crate) struct Security {
 
 /// The body of the config.
 pub(crate) const BODY: Body = Body {
-    summary: "Polls the nodes of an OPC UA server at a rate.",
+    summary: "Subscribes to the nodes of an OPC UA server, or polls them at a rate.",
     attributes: &[
         schema::Attribute {
             name: "address",
@@ -65,7 +68,16 @@ pub(crate) const BODY: Body = Body {
             name: "rate",
             value: "a rate, such as \"10Hz\"",
             presence: Presence::Required,
-            summary: "The reads per second.",
+            summary: "The most samples per second of each node.",
+        },
+        schema::Attribute {
+            name: "polled",
+            value: "a bool",
+            presence: Presence::Optional,
+            summary: "Reads each node once per tick of the rate, in place of a \
+                      subscription. A subscription writes a node only at its first \
+                      value and at each change, so a reader that opens later gets no \
+                      sample of a node until it changes. Default false.",
         },
         schema::Attribute {
             name: "certificate",
@@ -105,13 +117,24 @@ pub(crate) const BODY: Body = Body {
         label: Some("the channel"),
         forms: &[READ],
     }],
-    examples: &[EXAMPLE, SECURE, SIGNED],
+    examples: &[EXAMPLE, POLLED, SECURE, SIGNED],
 };
 
 /// A connector to one server.
 const EXAMPLE: &str = "\
 address = \"opc.tcp://plc:4840\"
 rate    = \"10Hz\"
+
+read \"plant.pressure\" {
+  node_id = \"ns=3;s=Pressure\"
+}
+";
+
+/// A connector that reads each node at each tick.
+const POLLED: &str = "\
+address = \"opc.tcp://plc:4840\"
+rate    = \"10Hz\"
+polled  = true
 
 read \"plant.pressure\" {
   node_id = \"ns=3;s=Pressure\"
@@ -157,8 +180,8 @@ pub(crate) struct Read {
     pub(crate) node: Node,
 }
 
-/// Reads `address`, `rate`, the attributes of [`security`], and zero or more `read`
-/// blocks, and no other key or block.
+/// Reads `address`, `rate`, an optional `polled`, the attributes of [`security`],
+/// and zero or more `read` blocks, and no other key or block.
 pub(crate) fn parse(config: &Document) -> Result<Config, Vec<Diagnostic>> {
     let mut diagnostics = Vec::new();
     let address = endpoint(config);
@@ -172,16 +195,25 @@ pub(crate) fn parse(config: &Document) -> Result<Config, Vec<Diagnostic>> {
     );
     let address = address.map_err(|error| diagnostics.push(error));
     let rate = rate.map_err(|error| diagnostics.push(error));
+    let polled = config
+        .attributes
+        .get("polled")
+        .map(|polled| flag(&polled.value));
+    let polled = polled.unwrap_or(Ok(false));
+    let polled = polled.map_err(|error| diagnostics.push(error));
     let reads = reads(config, &mut diagnostics);
     let security = security(config).map_err(|errors| diagnostics.extend(errors));
     diagnostics.extend(read::unknown(config, kind::NOUN, &BODY));
-    match (address, rate, security) {
-        (Ok(address), Ok(rate), Ok(security)) if diagnostics.is_empty() => Ok(Config {
-            address,
-            rate,
-            reads,
-            security,
-        }),
+    match (address, rate, polled, security) {
+        (Ok(address), Ok(rate), Ok(polled), Ok(security)) if diagnostics.is_empty() => {
+            Ok(Config {
+                address,
+                rate,
+                polled,
+                reads,
+                security,
+            })
+        }
         _ => Err(diagnostics),
     }
 }
@@ -325,6 +357,19 @@ fn address(value: &Value) -> Result<CString, Diagnostic> {
     }
     CString::new(text.as_bytes())
         .map_err(|_nul| refused("the address holds a NUL".into()))
+}
+
+/// Reads `polled`, a bool.
+fn flag(value: &Value) -> Result<bool, Diagnostic> {
+    match value.kind {
+        document::value::Kind::Bool(polled) => Ok(polled),
+        ref kind => Err(Diagnostic::new(
+            BAD_POLLED,
+            value.span,
+            format!("`polled` is a bool, not {}", kind.noun()),
+            "Write `polled = true` or `polled = false`".into(),
+        )),
+    }
 }
 
 /// Reads the `read` blocks of `config`, and adds each problem to `diagnostics`.

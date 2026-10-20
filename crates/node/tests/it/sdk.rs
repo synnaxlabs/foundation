@@ -404,6 +404,25 @@ fn an_open_of_a_writer_of_an_unknown_name_gives_unknown_and_the_client_goes_on()
     rig.stop();
 }
 
+/// The `sdk` writes one group: it refuses channels of two indexes, and ends the write,
+/// so that a writer of each channel writes.
+#[test]
+fn an_open_of_a_writer_of_two_indexes_gives_malformed_and_the_client_goes_on() {
+    let (mut rig, node, subject) = planted();
+    let client = Client::connect(&node, subject).unwrap();
+    let channels = vec!["plant.a".parse().unwrap(), "cell.c".parse().unwrap()];
+    let opened = client.open_writer(Config::new(channels)).map(drop);
+    let malformed = Error::Stream(program::Error::Refused(Refusal::Malformed));
+    assert_eq!(opened, Err(malformed));
+    for name in ["plant.a", "cell.c"] {
+        let mut writer = client.open_writer(Config::new(vec![name.parse().unwrap()]));
+        let writer = writer.as_mut().unwrap();
+        assert_eq!(writer.write(&[(0, Value::I64(7))]), Ok(taken(0, 1)));
+    }
+    assert_eq!(client.close(), Ok(()));
+    rig.stop();
+}
+
 /// The node refuses a frame whose series is not `count` samples, and the writer goes
 /// on.
 #[test]

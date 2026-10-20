@@ -109,6 +109,32 @@ where
     sessions::serve_session(seed, wire, rules, open, ready, program)
 }
 
+/// As [`serve_session_on`] on the default wire, with mesh time, a pool of [`POOL`], and
+/// [`rules`], once `before` ran on the simulation and the home's node. The program's
+/// node gives its end to `program`.
+pub(super) fn serve_session_after<P>(
+    seed: u64,
+    before: impl FnOnce(&mut sim::Sim, &sim::node::Node),
+    program: impl FnOnce(Agent) -> P + Send + 'static,
+) -> Home
+where
+    P: Future<Output = ()> + 'static,
+{
+    let open = async move |node: &sim::node::Node, tasks: &env::tasks::Tasks| {
+        let test = home(node, tasks, POOL, true).await;
+        (test.hub.clone(), test)
+    };
+    sessions::serve_session_after(
+        seed,
+        sim::link::Config::default(),
+        before,
+        Some(rules()),
+        open,
+        async |_| {},
+        move |node, tasks, at| as_agent(node, tasks, at, program),
+    )
+}
+
 /// Runs [`sessions::sessions`] on a synced [`Test`] hub.
 fn sessions<const N: usize, P>(
     seed: u64,

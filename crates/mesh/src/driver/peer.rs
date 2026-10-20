@@ -1,5 +1,6 @@
 //! The calls of `blob::peer` on the members of a group.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::poll_fn;
 use std::pin::{Pin, pin};
@@ -7,8 +8,9 @@ use std::task::Poll;
 
 use env::clock::Clock;
 use raft::Voters;
-use transport::Session;
+use transport::{Address, Session, Transport};
 use types::digest::Digest;
+use types::ed25519::PublicKey;
 use types::node;
 use types::time::Span;
 
@@ -94,36 +96,147 @@ impl Mesh {
     }
 
     // Puts `digests` on `to` in calls of at most `CHUNKS` chunks, in order, and gives
-    // why the first call that did not end `Ok` within `DEADLINE`, its dials included,
-    // failed. A call that failed on a session that ended dials once more: a session
-    // to a process of `to` that restarted ends only at its first use.
+    // why the first call that did not end `Ok` failed. The card of `to` is read once,
+    // at the first call.
     async fn put_on(&self, to: node::Key, digests: &[Digest]) -> Result<(), Miss> {
-        for call in digests.chunks(CHUNKS) {
-            let put = async {
-                let session = self.dial(to).await?;
-                match blob::peer::put(&self.store, &session, call).await {
-                    Err(_) if session.ended().is_some() => {}
-                    first => return first.map_err(Miss::Put),
-                }
-                let session = self.dial(to).await?;
-                let put = blob::peer::put(&self.store, &session, call).await;
-                put.map_err(Miss::Put)
+        let contact = self.group.borrow().contact(to).ok_or(Miss::Unknown)?;
+        for chunks in digests.chunks(CHUNKS) {
+            let put = async |session: &Session| {
+                blob::peer::put(&self.store, session, chunks).await
             };
-            within(&self.clock, DEADLINE, put)
-                .await
-                .unwrap_or(Err(Miss::Deadline))?;
+            ask(&self.transport, &self.clock, &contact, put).await?;
         }
         Ok(())
     }
+}
 
-    // The session of the transport to member `to`, which it dials at the addresses
-    // of the card of `to` when it has none open.
-    async fn dial(&self, to: node::Key) -> Result<Session, Miss> {
-        let contact = self.group.borrow().contact(to);
-        let (public_key, addresses) = contact.ok_or(Miss::Unknown)?;
-        let dialed = self.transport.dial(public_key, &addresses).await;
-        dialed.map_err(Miss::Dial)
+/// The public key of a member and the addresses of its card.
+pub(super) type Contact = (PublicKey, Vec<Address>);
+
+/// Gets each chunk of `digests` from `peers`, in order, and puts it in `store`. Each
+/// peer gets the chunks still missing in calls of at most [`CHUNKS`], each within
+/// [`DEADLINE`]. A chunk that a peer does not give goes to the next peer, and a call
+/// that fails or passes the deadline gives the rest to the next peer. `progress`
+/// holds where the get is at each step, so that a caller that drops it knows.
+///
+/// # Errors
+///
+/// The error of `store` when it fails or refuses the put of a chunk. No later peer
+/// is asked.
+pub(super) async fn get(
+    store: &blob::Store,
+    transport: &Transport,
+    clock: &Clock,
+    digests: &[Digest],
+    peers: &[(node::Key, Contact)],
+    progress: &Cell<Progress>,
+) -> Result<(), blob::Error> {
+    let got = walk(store, transport, clock, digests, peers, progress).await;
+    progress.set(Progress {
+        asking: None,
+        ..progress.get()
+    });
+    got
+}
+
+/// Where a get is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Progress {
+    /// The peer that it asks, or `None` before the first and after the get ends.
+    pub(super) asking: Option<node::Key>,
+    /// The last peer that gave it a chunk, or `None` while no peer gave one.
+    pub(super) gave: Option<node::Key>,
+}
+
+// The body of `get`, which leaves `asking` set when it returns.
+async fn walk(
+    store: &blob::Store,
+    transport: &Transport,
+    clock: &Clock,
+    digests: &[Digest],
+    peers: &[(node::Key, Contact)],
+    progress: &Cell<Progress>,
+) -> Result<(), blob::Error> {
+    let mut missing = digests.to_vec();
+    for (key, contact) in peers {
+        let asking = Some(*key);
+        progress.set(Progress {
+            asking,
+            ..progress.get()
+        });
+        let mut left = Vec::new();
+        let mut calls = missing.chunks(CHUNKS);
+        for chunks in calls.by_ref() {
+            let get =
+                async |session: &Session| blob::peer::get(store, session, chunks).await;
+            match ask(transport, clock, contact, get).await {
+                Ok(misses) => {
+                    if misses.len() != chunks.len() {
+                        progress.set(Progress {
+                            asking,
+                            gave: asking,
+                        });
+                    }
+                    left.extend(misses.iter().map(|miss| miss.digest));
+                }
+                Err(Failed::Call(blob::peer::Error::Store(error))) => {
+                    return Err(error);
+                }
+                Err(_) => {
+                    left.extend(chunks);
+                    break;
+                }
+            }
+        }
+        left.extend(calls.flatten());
+        missing = left;
+        if missing.is_empty() {
+            break;
+        }
     }
+    Ok(())
+}
+
+// Why a call on a peer gave no result.
+enum Failed {
+    Dial(transport::Error),
+    Call(blob::peer::Error),
+    Deadline,
+}
+
+impl From<Failed> for Miss {
+    fn from(failed: Failed) -> Self {
+        match failed {
+            Failed::Dial(error) => Self::Dial(error),
+            Failed::Call(error) => Self::Put(error),
+            Failed::Deadline => Self::Deadline,
+        }
+    }
+}
+
+// Runs `call` on the session of `transport` to the peer of `contact`, which it dials
+// when it has none open, and fails when `DEADLINE` passes first, its dials included. A
+// call that failed on a session that ended dials once more: a session to a process
+// that restarted ends only at its first use.
+async fn ask<T>(
+    transport: &Transport,
+    clock: &Clock,
+    (public_key, addresses): &Contact,
+    call: impl AsyncFn(&Session) -> Result<T, blob::peer::Error>,
+) -> Result<T, Failed> {
+    let redialed = async {
+        let dial = async || transport.dial(*public_key, addresses).await;
+        let session = dial().await.map_err(Failed::Dial)?;
+        match call(&session).await {
+            Err(_) if session.ended().is_some() => {}
+            first => return first.map_err(Failed::Call),
+        }
+        let session = dial().await.map_err(Failed::Dial)?;
+        call(&session).await.map_err(Failed::Call)
+    };
+    within(clock, DEADLINE, redialed)
+        .await
+        .unwrap_or(Err(Failed::Deadline))
 }
 
 /// The output of `future`, or `None` when `span` passes first.

@@ -92,6 +92,8 @@ pub(crate) struct Status(pub(crate) u32);
 impl Status {
     pub(crate) const GOOD: Self = Self(0);
     pub(crate) const BAD_NOT_FOUND: Self = Self(0x803E_0000);
+    pub(crate) const BAD_SERVICE_UNSUPPORTED: Self = Self(0x800B_0000);
+    pub(crate) const BAD_NOT_IMPLEMENTED: Self = Self(0x8040_0000);
     #[cfg(test)]
     pub(crate) const BAD_INVALID_ARGUMENT: Self = Self(0x80AB_0000);
     pub(crate) const BAD_CONNECTION_CLOSED: Self = Self(0x80AE_0000);

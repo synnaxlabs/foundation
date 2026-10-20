@@ -314,7 +314,10 @@
   that reached it last, then each voter after the one that it dialed, and after the last
   voter the first. The group holds the session. The leader sends a learner a heartbeat
   at each quorum check, one each election timeout, so a member that the leader reaches
-  dials no voter. A failed dial does nothing. The member names the next voter each two
+  makes this dial to no voter. The get of a missing chunk of the spec in use dials the
+  voters as SPEC IN USE states (`laptop.architect`, 2026-10-20T08:22:06Z,
+  https://github.com/synnaxlabs/foundation/pull/3495#issuecomment-6286691154). A failed
+  dial does nothing. The member names the next voter each two
   election timeouts. Its wait for the dial of the voter before stops then, also when the
   group stops or each `Mesh` drops, but the attempt of the transport goes on until it
   ends (`Transport::dial`). The transport runs at most one attempt for each peer, so a

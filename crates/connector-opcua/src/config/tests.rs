@@ -100,6 +100,7 @@ fn reads_the_address_the_rate_and_each_read() {
         Ok(Config {
             address: CString::new(ADDRESS).expect("no NUL"),
             rate: Rate::new(10, 1).expect("a rate"),
+            polled: false,
             reads: vec![
                 read("plant.spike", "ns=3;s=SpikeData"),
                 read("plant.dip", "ns=3;i=1001"),
@@ -117,9 +118,44 @@ fn reads_a_config_with_no_read() {
         Ok(Config {
             address: CString::new(ADDRESS).expect("no NUL"),
             rate: Rate::new(10, 1).expect("a rate"),
+            polled: false,
             reads: Vec::new(),
             security: None,
         })
+    );
+}
+
+#[test]
+fn reads_polled() {
+    let config = |polled| {
+        let attributes = [
+            (0, "address", string(ADDRESS)),
+            (10, "rate", string("10Hz")),
+            (20, "polled", Value::Bool(polled)),
+        ];
+        parse(&document(&attributes, Vec::new())).map(|config| config.polled)
+    };
+    assert_eq!((config(true), config(false)), (Ok(true), Ok(false)));
+}
+
+#[test]
+fn refuses_a_polled_that_is_not_a_bool() {
+    let config = document(
+        &[
+            (0, "address", string(ADDRESS)),
+            (10, "rate", string("10Hz")),
+            (20, "polled", string("true")),
+        ],
+        Vec::new(),
+    );
+    assert_eq!(
+        parse(&config),
+        Err(vec![refused(
+            "opcua.bad-polled",
+            21,
+            "`polled` is a bool, not a string",
+            "Write `polled = true` or `polled = false`",
+        )])
     );
 }
 
@@ -407,7 +443,7 @@ fn refuses_each_key_and_block_it_does_not_take() {
                 "document.unknown-attribute",
                 60,
                 "`security` is not an attribute of the connector",
-                "Use `address`, `rate`, `certificate`, `key`, `trust`, or \
+                "Use `address`, `rate`, `polled`, `certificate`, `key`, `trust`, or \
                  `unencrypted`, or remove it",
             ),
             refused(
