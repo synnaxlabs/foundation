@@ -85,9 +85,14 @@
   Part 7), the kind closes that session and polls on a new session for the rest of
   that connect, as `polled = true` does, so the server keeps no subscription, with the
   note "polls: the server has no subscriptions ({status})". The next connect tries
-  a subscription again, since the server can change. Other statuses end the run with
-  `kind::Error::Device`. The person ("Ok what you choose is ok", 2026-10-13, through
-  `laptop.monitor`, 2026-10-13T23:43:30Z,
+  a subscription again, since the server can change. The fallback connects only
+  through the run value of the first connect, over its secure channel, and no other
+  path takes the secure channel as an argument. So no test runs the fallback over a
+  secure channel: a relay cannot change a signed message, and open62541 has no hook
+  of one server that refuses a subscribe (`laptop.architect-2`, 2026-10-20T12:29:05Z,
+  https://github.com/synnaxlabs/foundation/issues/3539#issuecomment-6290852770).
+  Other statuses end the run with `kind::Error::Device`. The person ("Ok what you
+  choose is ok", 2026-10-13, through `laptop.monitor`, 2026-10-13T23:43:30Z,
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6157559393), and
   `laptop.architect-2`, 2026-10-13T23:43:18Z,
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6157556938, with
