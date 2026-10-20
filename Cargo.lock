@@ -2009,6 +2009,9 @@ dependencies = [
 name = "sdk-python"
 version = "0.0.0"
 dependencies = [
+ "config",
+ "config-hcl",
+ "document",
  "numpy",
  "os",
  "program",

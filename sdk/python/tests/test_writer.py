@@ -19,7 +19,7 @@ import uuid
 import numpy as np
 
 import foundation
-from test_client import PATIENCE, Node, fork
+from test_client import PATIENCE, Node, fork, home
 from test_stubs import assert_stated, called
 
 CHANNELS = """
@@ -139,6 +139,10 @@ def strays() -> set:
         for pid, ppid, pgid in fields
         if pgid == os.getpgrp() and ppid != os.getpid()
     }
+
+
+def setUpModule() -> None:
+    home(unittest.addModuleCleanup)
 
 
 class Selfish(np.ndarray):

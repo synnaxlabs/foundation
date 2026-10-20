@@ -8,35 +8,66 @@
   accepted at 2026-10-17T21:32:06Z
   (https://github.com/synnaxlabs/foundation/pull/3061#issuecomment-6241427370).
   `connect(address=None, *, public_key=None, subject=None, private_key=None,
-  data=None)` dials a node (#3212 PR 1b). Each of the address, `public_key`, and the
-  pair (`subject`, `private_key`) comes from the arguments, else from
-  `sdk::Node::local` on the data directory `data` (a `str` or an `os.PathLike`, by
-  default `foundation-data`): the node gives its address and public key, and its first
-  admin gives the subject. With an address, the data directory counts
-  only when its node is at that address. Each given argument parses before any read,
-  and with every value given, `connect` reads no file. `NotRunning` is no source;
-  `Version` and `Files` raise. When no source gives the public key and the subject, the
-  text of the public key wins. `Client.address` is the address that `connect` dialed.
-  The rules are in Rust, not Python. A profile of PR 2 goes between the arguments and
-  the data directory (default 1 of `laptop.architect-2`, 2026-10-15T17:01:25Z,
-  https://github.com/synnaxlabs/foundation/issues/2177#issuecomment-6197670062). The
+  data=None, strict=None)` dials a node (#3212 PR 1b and PR 2b). Each of the address,
+  `public_key`, and `subject` comes from the arguments, else from the profile, else
+  from `sdk::Node::local` on the data directory `data` (a `str` or an `os.PathLike`,
+  by default `foundation-data`): the node gives its address and public key, and its
+  first admin gives the subject. With an address, the data directory counts only when
+  its node is at that address. Each given argument parses before any read, and with
+  every value given, `connect` reads no file. `NotRunning` is no source; `Version`
+  and `Files` raise. `Client.address` is the address that `connect` dialed. The rules
+  are in Rust, not Python.
+
+  The profile is the HCL file that `FOUNDATION_PROFILE` names, else
+  `~/.foundation/profile.hcl`, which `config::profile` decodes (PROFILE in
+  `docs/decisions/config/profile.md`). Its `subject` gives the subject, with the
+  key of its `private_key` file, relative to the profile's directory, else of
+  `~/.foundation/<subject>.key`. A `subject` argument with no `private_key` takes the
+  key of `~/.foundation/<subject>.key`. With no other source, the subject is the login
+  name of the user (`getpass.getuser`), with the key of `~/.foundation/<login>.key`.
+  A key file that is not there is made with mode 0600, as `ssh-keygen -t ed25519 -N
+  ""` writes it, in directories made with mode 0700. With no source of the public key,
+  the node that answers at the address is trusted on first use: `sdk::Node::answering`
+  gives its key, the profile pins it in a new `node` block, and the logger `foundation`
+  gets one WARNING. The pin takes a lock of `<profile>.lock`, writes `<profile>.new`,
+  and renames it, and each other byte of the file stays. Under the lock, a `node`
+  block of the address that is already in the file wins, and `connect` dials with its
+  key. `strict`, else the profile's `strict`, refuses a node with no source of its
+  key, and then `connect` writes no file. When a subject of a key file is refused, the
+  text gives the `subject` and `access` blocks that admit it. When the node does not
+  prove the pinned key, `connect` dials with `answering` again: a node that proves
+  another key gives the text of a changed key, and else the error of the dial raises
+  (`laptop.architect-2`, plan review, 2026-10-19T23:24:32Z, item 5 of
+  https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279566176, and
+  2026-10-19T23:49:24Z,
+  https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279895005). The
   texts:
-  - `ValueError`: `subject and private_key go together: give both or neither`. A `data`
+  - `ValueError`: `private_key is the key of a subject: pass subject= too`. A `data`
     with a NUL byte: `data: the path holds a NUL byte`, as each other value parses
     (`laptop.architect-2`, 2026-10-18T21:14:26Z, item 5 of
     https://github.com/synnaxlabs/foundation/pull/3255#issuecomment-6255225319).
+  - `ValueError`, for a profile with a problem: one line for each problem,
+    `<profile>:<line>:<column>: <message>. <fix>`.
+  - `ValueError`, for a login name that is not a name: ``the login name "<login>" is
+    not a subject name: <cause>; add `subject = "<name>"` to <profile>, or pass
+    subject=``.
+  - `ValueError`, for a key file with a passphrase that the profile's `private_key`
+    names: ``<file>: the private key has a passphrase: remove `private_key` from
+    <profile>, and connect makes ~/.foundation/<subject>.key``; for
+    `~/.foundation/<subject>.key`: `...: move the file away, and connect makes a new
+    key there`. The fix never removes the passphrase of the user's own SSH key.
   - `ConnectionError`, with no address and no node on `data`: `no node runs in
     <data>: pass the address of the node, or data= with the --data of foundation
     start`.
-  - `ConnectionError`, with no source of the public key: `no source gives the public
-    key of the node at <address>: pass public_key=, or data= with the --data of
-    foundation start on the node's host`. When `data` holds a node at another address:
-    `no source gives the public key of the node at <address>: <data> holds the node at
-    <other>; pass public_key=, or connect to <other>`.
-  - `ConnectionError`, with no source of the subject: `no source gives the subject for
-    the node at <address>: pass subject= and private_key=, or data= with the --data of
-    foundation start on the node's host`, and the same form with `<data> holds the
-    node at <other>; pass subject= and private_key=, or connect to <other>`.
+  - `ConnectionError`, with `strict` and no source of the public key: ``no source gives
+    the public key of the node at <address>, and `strict` refuses a node that no
+    source pins: pass public_key=, or add the block that `foundation profile
+    <address>` prints on the node's host to <profile>``, with `; <data> holds the node
+    at <other>` at the end when `data` holds a node at another address.
+  - `ConnectionError`, when the pinned key is not the one that the node proves: ``the
+    node at <address> proves public key <fingerprint>, but <profile> pins
+    <fingerprint>: when the node was made again, remove its `node "<address>"`
+    block from <profile>``.
   - `ConnectionError`, when the subject must come from a node with no `admin.key`:
     `<data> holds no admin.key that a node wrote`.
   - `ConnectionError` for `Version`: `<data>/data/<file> holds format version

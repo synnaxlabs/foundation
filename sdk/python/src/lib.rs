@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::{Mutex, PoisonError};
 
+use config::openssh;
 use pyo3::exceptions::{
     PyConnectionError, PyException, PyMemoryError, PyOSError, PyOverflowError,
     PyRuntimeError, PyTypeError, PyValueError,
@@ -19,6 +20,9 @@ use types::ed25519::{PrivateKey, PublicKey};
 use types::name::Name;
 use types::time::Span;
 
+use crate::profile::Profile;
+
+mod profile;
 #[cfg(feature = "sim")]
 mod sim;
 #[cfg(test)]
@@ -85,26 +89,41 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
 /// hello of `subject`. The client then renews the hello until it closes.
 ///
 /// `public_key` is the 32 bytes of the key that the node proves, and `private_key` the
-/// 32 bytes of a key that the spec lists for `subject`. Each of `address`,
-/// `public_key`, and the pair (`subject`, `private_key`) comes from the arguments, else
-/// from the node that runs on the data directory `data`: that node gives its address
-/// and public key, and its first admin gives the subject. `data` is a `str` or an
-/// `os.PathLike`, the `--data` of `foundation start`, by default `foundation-data`.
-/// With an `address`, the data directory counts only when its node is at that
-/// address: `127.0.0.1:p` matches a node bound on `0.0.0.0:p`. Other Python threads
-/// run while it waits.
+/// 32 bytes of a key that the spec lists for `subject`. A `subject` with no
+/// `private_key` takes the key of `~/.foundation/<subject>.key`. Each of `address`,
+/// `public_key`, and `subject` comes from the first source that gives it: the
+/// arguments, the profile, then the node that runs on the data directory `data`, which
+/// gives its address and public key, and whose first admin gives the subject. `data` is
+/// a `str` or an `os.PathLike`, the `--data` of `foundation start`, by default
+/// `foundation-data`. With an `address`, the data directory counts only when its node
+/// is at that address: `127.0.0.1:p` matches a node bound on `0.0.0.0:p`.
+///
+/// The profile is the HCL file that `FOUNDATION_PROFILE` names, else
+/// `~/.foundation/profile.hcl`. Its `subject` gives the subject, with the key of its
+/// `private_key` file, else of `~/.foundation/<subject>.key`, and each `node` block
+/// pins the public key of the node at its address. With no other source, the subject
+/// is the login name of the user, with the key of `~/.foundation/<login>.key`. A key
+/// file that is not there is made, as `ssh-keygen -t ed25519 -N ""` makes it. With no
+/// source of the public key, the node that answers at `address` is trusted on first
+/// use: the profile pins its key, and the logger `foundation` gets one WARNING.
+/// `strict`, else the profile's `strict`, refuses a node with no source of its key.
+/// Other Python threads run while it waits.
 ///
 /// Raises `TypeError` for an argument of a wrong type, `ValueError` for an argument
-/// that does not parse or a pair given in half, `RuntimeError` when a thread of the
-/// client or of the read of `data` cannot start, `OSError` when the local UDP socket
-/// cannot bind, `MemoryError` when the OS refuses the memory of the pool of the frames
-/// of the client's readers, `ConnectionError` when no source gives a value, the data
-/// directory cannot be read, the client cannot reach the node, or the node refuses the
-/// subject, and `PanicException` when a thread of the client or of the read of `data`
-/// panicked.
+/// that does not parse, a `private_key` with no `subject`, a profile with a problem, or
+/// a key file that is not the OpenSSH file of an Ed25519 key with no passphrase,
+/// `RuntimeError` when a thread of the client or of the read of `data` cannot start,
+/// `OSError` when the local UDP socket cannot bind or the profile or a key file cannot
+/// be read or written, `MemoryError` when the OS refuses the memory of the pool of the
+/// frames of the client's readers, `ConnectionError` when no source gives the address,
+/// or with `strict` the public key, the data directory cannot be read, the client
+/// cannot reach the node, the node does not prove the key that the profile pins, or the
+/// node refuses the subject, and `PanicException` when a thread of the client or of the
+/// read of `data` panicked.
 #[pyfunction]
 #[pyo3(signature = (
     address=None, *, public_key=None, subject=None, private_key=None, data=None,
+    strict=None,
 ))]
 fn connect(
     py: Python<'_>,
@@ -113,35 +132,45 @@ fn connect(
     subject: Option<&str>,
     private_key: Option<&[u8]>,
     data: Option<PathBuf>,
+    strict: Option<bool>,
 ) -> PyResult<Client> {
-    let subject = pair(["subject", "private_key"], subject, private_key)?;
+    let subject = parse_subject(subject, private_key)?;
     let address = address.map(parse_address).transpose()?;
     let data = data.map(parse_data).transpose()?;
     let public_key = public_key.map(parse_public_key).transpose()?;
-    let subject = subject.map(|(name, key)| parse_subject(name, key));
     let given = Given {
         address,
         public_key,
-        subject: subject.transpose()?,
+        subject,
     };
-    let (address, public_key, subject) = match given {
+    let (address, key, (subject, filed)) = match given {
         Given {
             address: Some(address),
             public_key: Some(public_key),
-            subject: Some(subject),
-        } => (address, public_key, subject),
+            subject: Some(Named::Keyed(subject)),
+        } => (address, Key::Known(public_key), (subject, false)),
         given => {
             let data = data.unwrap_or_else(|| PathBuf::from("foundation-data"));
-            given.sourced(&data, local(py, &data)?)?
+            given.sourced(py, &data, local(py, &data)?, strict)?
         }
     };
+    let (public_key, profile) = match key {
+        Key::Known(public_key) => (public_key, None),
+        Key::Pinned(public_key, profile) => (public_key, Some(profile)),
+        Key::Unknown(profile) => (trust(py, address, &profile)?, Some(profile)),
+    };
+    let pinned = profile.as_ref().map(|profile| (public_key, profile));
     let node = sdk::Node {
         addresses: vec![address],
         public_key,
     };
+    let refused = filed.then(|| Refusal {
+        subject: subject.name.clone(),
+        public_key: subject.private_key.public(),
+    });
     let client = py
         .detach(|| sdk::Client::connect(&node, subject))
-        .map_err(|e| error(py, &e))?;
+        .map_err(|e| connect_error(py, &e, address, pinned, refused.as_ref()))?;
     Ok(Client {
         session: Mutex::new(Some(client)),
         process: process::id(),
@@ -153,17 +182,42 @@ fn connect(
 struct Given {
     address: Option<SocketAddr>,
     public_key: Option<PublicKey>,
-    subject: Option<sdk::Subject>,
+    subject: Option<Named>,
+}
+
+/// The subject that the arguments of [`connect`] give.
+enum Named {
+    /// `subject=` with `private_key=`.
+    Keyed(sdk::Subject),
+    /// `subject=` alone, with the key of `~/.foundation/<subject>.key`.
+    Filed(Name),
+}
+
+/// Where the public key of the node comes from.
+enum Key {
+    /// An argument or the data directory.
+    Known(PublicKey),
+    /// The profile pins it.
+    Pinned(PublicKey, Profile),
+    /// No source: the node that answers is trusted on first use, and the profile
+    /// pins it.
+    Unknown(Profile),
 }
 
 impl Given {
-    /// The address, the node's public key, and the subject, each from the arguments,
-    /// else from `local`, the node that runs on the data directory `data`, if any.
+    /// The address, the source of the node's public key, and the subject with whether
+    /// its key comes from a key file. Each comes
+    /// from the arguments, else from the profile, else from `local`, the node that
+    /// runs on the data directory `data`, if any. Else the public key is unknown,
+    /// unless `strict`, else the profile's `strict`. Else the subject is the login
+    /// name of the user, with the key of `~/.foundation/<login>.key`.
     fn sourced(
         self,
+        py: Python<'_>,
         data: &Path,
         local: Option<(sdk::Node, Option<sdk::Subject>)>,
-    ) -> PyResult<(SocketAddr, PublicKey, sdk::Subject)> {
+        strict: Option<bool>,
+    ) -> PyResult<(SocketAddr, Key, (sdk::Subject, bool))> {
         let (local, other) = match local {
             Some((node, _))
                 if self
@@ -185,40 +239,156 @@ impl Given {
                 data.display()
             )));
         };
-        let unsourced = |what: &str, pass: &str| {
-            PyConnectionError::new_err(match other {
-                Some(other) => format!(
-                    "no source gives {what} at {address}: {} holds the node at \
-                     {other}; pass {pass}, or connect to {other}",
-                    data.display()
-                ),
-                None => format!(
-                    "no source gives {what} at {address}: pass {pass}, or data= with \
-                     the --data of foundation start on the node's host"
-                ),
-            })
-        };
+        let profile = Profile::read(py)?;
         let (node, admin) = local.unzip();
-        let public_key = self
-            .public_key
-            .or_else(|| node.map(|node| node.public_key))
-            .ok_or_else(|| unsourced("the public key of the node", "public_key="))?;
-        let subject = match (self.subject, admin) {
-            (Some(subject), _) | (None, Some(Some(subject))) => subject,
-            (None, Some(None)) => {
+        let pinned = profile.held.nodes.get(&address).copied();
+        let unknown = self.public_key.is_none() && pinned.is_none() && node.is_none();
+        if unknown && strict.unwrap_or(profile.held.strict) {
+            let held = other.map_or_else(String::new, |other| {
+                format!("; {} holds the node at {other}", data.display())
+            });
+            return Err(PyConnectionError::new_err(format!(
+                "no source gives the public key of the node at {address}, and `strict` \
+                 refuses a node that no source pins: pass public_key=, or add the \
+                 block that `foundation profile {address}` prints on the node's host \
+                 to {}{held}",
+                profile.path.display()
+            )));
+        }
+        let subject = match (self.subject, &profile.held.subject, admin) {
+            (Some(Named::Keyed(subject)), _, _) | (None, None, Some(Some(subject))) => {
+                (subject, false)
+            }
+            (Some(Named::Filed(name)), _, _) => {
+                let private_key = profile.private_key(py, &name, None)?;
+                (sdk::Subject { name, private_key }, true)
+            }
+            (None, Some(name), _) => {
+                let named = profile.held.private_key.as_deref();
+                let private_key = profile.private_key(py, name, named)?;
+                let name = name.clone();
+                (sdk::Subject { name, private_key }, true)
+            }
+            (None, None, Some(None)) => {
                 return Err(PyConnectionError::new_err(format!(
                     "{} holds no admin.key that a node wrote",
                     data.display()
                 )));
             }
-            (None, None) => {
-                return Err(unsourced(
-                    "the subject for the node",
-                    "subject= and private_key=",
-                ));
-            }
+            (None, None, None) => (login(py, &profile)?, true),
         };
-        Ok((address, public_key, subject))
+        let key = match (self.public_key, pinned, node) {
+            (Some(public_key), _, _)
+            | (None, None, Some(sdk::Node { public_key, .. })) => {
+                Key::Known(public_key)
+            }
+            (None, Some(public_key), _) => Key::Pinned(public_key, profile),
+            (None, None, None) => Key::Unknown(profile),
+        };
+        Ok((address, key, subject))
+    }
+}
+
+/// The subject of the login name of the user, with the key of
+/// `~/.foundation/<login>.key`. Raises `ValueError` with the fix in `profile` when
+/// the login name is not a subject name.
+fn login(py: Python<'_>, profile: &Profile) -> PyResult<sdk::Subject> {
+    let login: String = py.import("getpass")?.call_method0("getuser")?.extract()?;
+    let name = login.parse::<Name>().map_err(|e| {
+        PyValueError::new_err(format!(
+            "the login name {login:?} is not a subject name: {e}; add `subject = \
+             \"<name>\"` to {}, or pass subject=",
+            profile.path.display()
+        ))
+    })?;
+    Ok(sdk::Subject {
+        private_key: profile.private_key(py, &name, None)?,
+        name,
+    })
+}
+
+/// The public key that the node at `address` proves, which `profile` then pins, or the
+/// key that a program pinned in `profile` meanwhile. Logs one WARNING on the logger
+/// `foundation`. Other Python threads run while it dials.
+fn trust(
+    py: Python<'_>,
+    address: SocketAddr,
+    profile: &Profile,
+) -> PyResult<PublicKey> {
+    let node = py
+        .detach(|| sdk::Node::answering(vec![address]))
+        .map_err(|e| error(py, &e))?;
+    let public_key = profile.pin(address, node.public_key)?;
+    py.import("logging")?
+        .call_method1("getLogger", ("foundation",))?
+        .call_method1(
+            "warning",
+            (format!(
+                "trusted the node at {address} on first use: public key {}; it is \
+                 pinned in {}",
+                openssh::fingerprint(public_key),
+                profile.path.display()
+            ),),
+        )?;
+    Ok(public_key)
+}
+
+/// The subject that a hello names, for the text of a refusal.
+struct Refusal {
+    subject: Name,
+    public_key: PublicKey,
+}
+
+/// The Python exception of `error`, the failed connect to the node at `address`. When
+/// `pinned` is the key that a profile pins and the node proves another, it names both.
+/// When the node refuses `refused`, the subject of a key file, it gives the blocks of
+/// the spec that admit it.
+fn connect_error(
+    py: Python<'_>,
+    error: &sdk::Error,
+    address: SocketAddr,
+    pinned: Option<(PublicKey, &Profile)>,
+    refused: Option<&Refusal>,
+) -> PyErr {
+    match (error, pinned) {
+        (
+            sdk::Error::Session(program::Error::Transport(_)),
+            Some((pinned, profile)),
+        ) => match py.detach(|| sdk::Node::answering(vec![address])) {
+            Ok(node) if node.public_key != pinned => {
+                PyConnectionError::new_err(format!(
+                    "the node at {address} proves public key {}, but {} pins {}: \
+                     when the node was made again, remove its `node \"{address}\"` \
+                     block from {}",
+                    openssh::fingerprint(node.public_key),
+                    profile.path.display(),
+                    openssh::fingerprint(pinned),
+                    profile.path.display(),
+                ))
+            }
+            _ => self::error(py, error),
+        },
+        (
+            sdk::Error::Session(program::Error::Refused(program::Refusal::Refused)),
+            _,
+        ) if let Some(Refusal {
+            subject,
+            public_key,
+        }) = refused =>
+        {
+            let text = format!(
+                "{error}. If the spec of the node does not list subject {subject} with \
+                 this key, add to its config files on the node's host:\n\n\
+                 subject \"{subject}\" {{\n  keys = \"{}\"\n}}\n\n\
+                 access \"{subject}\" {{\n  subjects = \"{subject}\"\n  select   = \
+                 \"**\"\n  allow    = [\"read\"]\n}}\n\n\
+                 then run `foundation plan <files> --out <plan>` and `foundation \
+                 apply <plan>` there",
+                openssh::line(*public_key),
+            );
+            exception(py, error, text)
+        }
+        _ => self::error(py, error),
     }
 }
 
@@ -252,23 +422,6 @@ fn local(
     }
 }
 
-/// The values of a pair of arguments `names`, or `None` when neither is given.
-/// Raises `ValueError` when only one is.
-fn pair<A, B>(
-    names: [&str; 2],
-    a: Option<A>,
-    b: Option<B>,
-) -> PyResult<Option<(A, B)>> {
-    match (a, b) {
-        (Some(a), Some(b)) => Ok(Some((a, b))),
-        (None, None) => Ok(None),
-        _ => Err(PyValueError::new_err(format!(
-            "{} and {} go together: give both or neither",
-            names[0], names[1]
-        ))),
-    }
-}
-
 /// The socket address of `address`.
 fn parse_address(address: &str) -> PyResult<SocketAddr> {
     address.parse().map_err(|e| {
@@ -290,14 +443,30 @@ fn parse_public_key(public_key: &[u8]) -> PyResult<PublicKey> {
         .map_err(|e| PyValueError::new_err(format!("public_key: {e}")))
 }
 
-/// The subject of the arguments `subject` and `private_key`.
-fn parse_subject(subject: &str, private_key: &[u8]) -> PyResult<sdk::Subject> {
-    Ok(sdk::Subject {
-        name: subject
-            .parse::<Name>()
-            .map_err(|e| PyValueError::new_err(format!("subject: {e}")))?,
-        private_key: PrivateKey(bytes("private_key", private_key)?),
-    })
+/// The subject of the arguments `subject` and `private_key`, or `None` when neither
+/// is given. Raises `ValueError` for `private_key` with no `subject`.
+fn parse_subject(
+    subject: Option<&str>,
+    private_key: Option<&[u8]>,
+) -> PyResult<Option<Named>> {
+    let Some(subject) = subject else {
+        return match private_key {
+            Some(_) => Err(PyValueError::new_err(
+                "private_key is the key of a subject: pass subject= too",
+            )),
+            None => Ok(None),
+        };
+    };
+    let name = subject
+        .parse::<Name>()
+        .map_err(|e| PyValueError::new_err(format!("subject: {e}")))?;
+    Ok(Some(match private_key {
+        Some(private_key) => Named::Keyed(sdk::Subject {
+            name,
+            private_key: PrivateKey(bytes("private_key", private_key)?),
+        }),
+        None => Named::Filed(name),
+    }))
 }
 
 /// A program's session with one node. A `with` block closes it at its end. A client

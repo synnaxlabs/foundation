@@ -1,12 +1,17 @@
 use std::env;
 use std::ffi::CStr;
+use std::fs;
+use std::net::SocketAddr;
 use std::path::Path;
 
 use pyo3::exceptions::PyConnectionError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3::wrap_pymodule;
+use types::ed25519::PrivateKey;
 use types::frame;
+
+use crate::profile::Profile;
 
 const SUITE: &CStr = c"
 import io, sys, unittest
@@ -320,4 +325,28 @@ fn error_raises_refused_or_stopped_with_the_code_of_each_refusal() {
             }
         }
     });
+}
+
+#[test]
+fn a_pin_keeps_the_key_that_another_program_pinned_after_the_read() {
+    let dir = env::temp_dir().join(format!("foundation-pin-{}", std::process::id()));
+    let path = dir.join("profile.hcl");
+    let at: SocketAddr = "10.0.0.5:7400".parse().unwrap();
+    let [first, second] = [1, 2].map(|byte| PrivateKey([byte; 32]).public());
+    Python::initialize();
+    Python::attach(|_| {
+        let profile = Profile {
+            path: path.clone(),
+            held: config::profile::Profile::default(),
+        };
+        fs::create_dir_all(&dir).unwrap();
+        let text = format!(
+            "node \"{at}\" {{\n  public_key = \"{}\"\n}}\n",
+            config::openssh::line(first)
+        );
+        fs::write(&path, &text).unwrap();
+        assert_eq!(profile.pin(at, second).unwrap(), first);
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+    });
+    fs::remove_dir_all(&dir).unwrap();
 }
