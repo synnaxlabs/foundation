@@ -457,13 +457,18 @@ fn untaken(written: Result<&[(usize, Outcome)], sdk::Error>) -> Untaken {
     }
 }
 
+/// What the text of a loss in a frame of a writer names.
+const LOST: &str = "samples were lost";
+
 /// Answers a frame whose groups did not all get `Taken`, by the first rule that holds:
 /// a group whose write ended raises `GroupEnded`; a refused group raises `Rejected`;
 /// and a lost group does what `loss` says, with the channels of the lost groups, so it
-/// gives `Ok` for `warn` and `ignore`. `outcomes` is the place of the index and the
-/// outcome of each group, in the order of their index places, and `frame` the places of
-/// the items of the call, of the writer of `places` and `named`. The channels of the
-/// frame are those of `frame` and the index of each group, each named once.
+/// gives `Ok` for `warn` and `ignore`. `GroupEnded` and `Rejected` give the seqs of the
+/// lost groups in `lost`, and with `warn` also log the loss. `outcomes` is the place of
+/// the index and the outcome of each group, in the order of their index places, and
+/// `frame` the places of the items of the call, of the writer of `places` and `named`.
+/// The channels of the frame are those of `frame` and the index of each group, each
+/// named once.
 pub(crate) fn answer(
     py: Python<'_>,
     places: &[Place],
@@ -472,13 +477,6 @@ pub(crate) fn answer(
     outcomes: &[(usize, Outcome)],
     frame: Vec<usize>,
 ) -> PyResult<()> {
-    let outcome = |place: usize| {
-        let index = places[place].index;
-        let at = outcomes
-            .binary_search_by_key(&index, |&(index, _)| index)
-            .expect("invariant: each group of the frame has its outcome");
-        outcomes[at].1
-    };
     let frame = channels(places, named, outcomes, frame);
     let end = outcomes.iter().find_map(|&(_, outcome)| match outcome {
         Outcome::Ended(end) => Some(end),
@@ -493,7 +491,7 @@ pub(crate) fn answer(
             (Vec::new(), Vec::new(), Vec::new());
         for &place in &frame {
             let name = places[place].name.as_str();
-            match outcome(place) {
+            match outcome(places, outcomes, place) {
                 Outcome::Taken { .. } => written.push(name),
                 Outcome::Refused(_) => {
                     unwritten.push(name);
@@ -505,10 +503,15 @@ pub(crate) fn answer(
         let text = causes(places, outcomes, &written, &missed);
         (written, unwritten, text)
     };
+    let gone = || lost(places, outcomes, &frame);
     let listed = |raised: PyErr, written: Vec<&str>, unwritten: Vec<&str>| {
         let value = raised.value(py);
         value.setattr("written", PyTuple::new(py, written)?)?;
         value.setattr("unwritten", PyTuple::new(py, unwritten)?)?;
+        value.setattr("lost", crate::seqs(py, gone())?)?;
+        if loss == Loss::Warn && gone().next().is_some() {
+            loss.act(py, LOST, gone(), py.None().bind(py))?;
+        }
         Err(raised)
     };
     match (end, refused) {
@@ -529,18 +532,37 @@ pub(crate) fn answer(
             raised.value(py).setattr("code", rejection(refusal).0)?;
             listed(raised, written, unwritten)
         }
-        (None, None) => {
-            let gone = frame.iter().filter_map(|&place| match outcome(place) {
-                Outcome::Lost { range } => {
-                    let start = u128::from(range.seq);
-                    let seqs = start..start + u128::from(range.count);
-                    Some((places[place].name.as_str(), seqs))
-                }
-                _ => None,
-            });
-            loss.act(py, "samples were lost", gone, py.None().bind(py))
-        }
+        (None, None) => loss.act(py, LOST, gone(), py.None().bind(py)),
     }
+}
+
+/// The outcome of the group of the channel at `place` of a writer of `places`, by
+/// `outcomes`.
+fn outcome(places: &[Place], outcomes: &[(usize, Outcome)], place: usize) -> Outcome {
+    let index = places[place].index;
+    let at = outcomes
+        .binary_search_by_key(&index, |&(index, _)| index)
+        .expect("invariant: each group of the frame has its outcome");
+    outcomes[at].1
+}
+
+/// The name of each channel at `frame` of a writer of `places` in a lost group, by
+/// `outcomes`, with the seqs of its lost samples.
+fn lost<'a>(
+    places: &'a [Place],
+    outcomes: &'a [(usize, Outcome)],
+    frame: &'a [usize],
+) -> impl Iterator<Item = (&'a str, Range<u128>)> + Clone {
+    frame
+        .iter()
+        .filter_map(move |&place| match outcome(places, outcomes, place) {
+            Outcome::Lost { range } => {
+                let start = u128::from(range.seq);
+                let seqs = start..start + u128::from(range.count);
+                Some((places[place].name.as_str(), seqs))
+            }
+            _ => None,
+        })
 }
 
 /// The place of each channel name of `places`: the first place of a name that two

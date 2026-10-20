@@ -636,6 +636,128 @@ fn answer_gives_the_seqs_of_the_lost_groups_only() {
     });
 }
 
+/// The class and `lost` of what `answer` raises for a frame of the items at `frame` of
+/// a writer of `places`, with `loss` and `outcomes`, and each text that it logged on
+/// the `foundation` logger.
+fn logged(
+    places: &[sdk::Place],
+    loss: crate::Loss,
+    outcomes: &[(usize, Outcome)],
+    frame: &[usize],
+) -> (String, Vec<(String, u64, u64)>, Vec<String>) {
+    Python::initialize();
+    Python::attach(|py| {
+        let foundation = py
+            .import("logging")
+            .unwrap()
+            .call_method1("getLogger", ("foundation",))
+            .unwrap();
+        let handler = py
+            .import("logging.handlers")
+            .unwrap()
+            .getattr("BufferingHandler")
+            .unwrap()
+            .call1((100,))
+            .unwrap();
+        foundation.call_method1("addHandler", (&handler,)).unwrap();
+        let named = crate::write::named(places);
+        let error =
+            crate::write::answer(py, places, &named, loss, outcomes, frame.to_vec())
+                .unwrap_err();
+        foundation
+            .call_method1("removeHandler", (&handler,))
+            .unwrap();
+        let seqs = error.value(py).getattr("lost").unwrap();
+        let seqs = seqs
+            .cast::<PyDict>()
+            .unwrap()
+            .iter()
+            .map(|(name, seqs)| {
+                let start = seqs.getattr("start").unwrap().extract().unwrap();
+                let stop = seqs.getattr("stop").unwrap().extract().unwrap();
+                (name.extract().unwrap(), start, stop)
+            })
+            .collect();
+        let texts = handler
+            .getattr("buffer")
+            .unwrap()
+            .try_iter()
+            .unwrap()
+            .map(|record| {
+                let record = record.unwrap();
+                record
+                    .call_method0("getMessage")
+                    .unwrap()
+                    .extract()
+                    .unwrap()
+            })
+            .collect();
+        (error.get_type(py).name().unwrap().to_string(), seqs, texts)
+    })
+}
+
+/// A frame with a refusal and a loss raises `Rejected` with the seqs of the lost group
+/// in `lost` for each loss, and with `warn` also logs the warning of the loss. A frame
+/// with an end and a loss raises `GroupEnded` with `lost`, and one with no loss gives
+/// an empty `lost` and logs nothing.
+#[test]
+fn answer_gives_the_seqs_of_the_lost_groups_in_lost_for_each_loss() {
+    let places = grouped();
+    let refused = [
+        (5, Outcome::Refused(Refusal::Full)),
+        (
+            6,
+            Outcome::Lost {
+                range: range(10, 3),
+            },
+        ),
+        (7, Outcome::Taken { range: range(0, 3) }),
+    ];
+    let line = |start, stop| {
+        vec![
+            ("line.a".to_owned(), start, stop),
+            ("line.time".to_owned(), start, stop),
+        ]
+    };
+    assert_eq!(
+        logged(&places, crate::Loss::Warn, &refused, &[1, 2, 3]),
+        (
+            "Rejected".to_owned(),
+            line(10, 13),
+            vec!["samples were lost: line.a (3), line.time (3)".to_owned()]
+        )
+    );
+    for loss in [crate::Loss::Raise, crate::Loss::Ignore] {
+        assert_eq!(
+            logged(&places, loss, &refused, &[1, 2, 3]),
+            ("Rejected".to_owned(), line(10, 13), Vec::new()),
+            "{loss:?}"
+        );
+    }
+    let ended = [
+        (4, Outcome::Ended(End::Removed)),
+        (
+            6,
+            Outcome::Lost {
+                range: range(20, 2),
+            },
+        ),
+    ];
+    assert_eq!(
+        logged(&places, crate::Loss::Warn, &ended, &[0, 2]),
+        (
+            "GroupEnded".to_owned(),
+            line(20, 22),
+            vec!["samples were lost: line.a (2), line.time (2)".to_owned()]
+        )
+    );
+    let whole = [(5, Outcome::Refused(Refusal::Order))];
+    assert_eq!(
+        logged(&places, crate::Loss::Warn, &whole, &[1]),
+        ("Rejected".to_owned(), Vec::new(), Vec::new())
+    );
+}
+
 /// A writer of `plant.time`, `plant.a`, and `plant.time` whose frame gives the stamp at
 /// place 2, the repeat of the index, names the index once, also in `ended`.
 #[test]

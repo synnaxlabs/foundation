@@ -331,6 +331,7 @@ class WriterTest(unittest.TestCase):
             self.assertEqual(raised.exception.written, ("plant.a", "plant.time"))
             self.assertEqual(raised.exception.unwritten, ())
             self.assertEqual(raised.exception.ended, ("other.a", "other.time"))
+            self.assertEqual(raised.exception.lost, {})
             self.assertEqual(
                 str(raised.exception),
                 "the write of other.time ended (unknown: a channel of its group was "
@@ -344,6 +345,7 @@ class WriterTest(unittest.TestCase):
             self.assertEqual(raised.exception.written, ())
             self.assertEqual(raised.exception.unwritten, ())
             self.assertEqual(raised.exception.ended, ("other.a", "other.time"))
+            self.assertEqual(raised.exception.lost, {})
             self.assertEqual(
                 str(raised.exception),
                 "the write of other.time ended (unknown: a channel of its group was "

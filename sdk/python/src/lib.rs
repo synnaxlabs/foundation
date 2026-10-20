@@ -68,8 +68,12 @@ pyo3::create_exception!(
      is the names of the channels of the frame in the groups that the node took, and \
      `unwritten` those in the groups that it refused, each in place order. A lost \
      group is in neither: the node spent its stamps, so it cannot be written again. \
-     Its text names the cause of each group that the node did not take. The writer \
-     goes on. To write the frame again, write only the channels of `unwritten`."
+     `lost` is a `dict` from the name of each channel of the lost groups of the frame, \
+     the index of each included, to the `range` of the seqs of its lost samples, as \
+     `DataLost.seqs` gives it, and is empty when no group was lost. With \
+     `on_loss=\"warn\"`, the call also logs the warning of the loss. Its text names \
+     the cause of each group that the node did not take. The writer goes on. To write \
+     the frame again, write only the channels of `unwritten`."
 );
 pyo3::create_exception!(
     foundation,
@@ -80,10 +84,14 @@ pyo3::create_exception!(
      channels of the writer in each group that ended, the index included, and \
      `written` and `unwritten` those of the channels of the frame in the groups that \
      the node took and refused, each in place order. A lost group is in no list: the \
-     node spent its stamps. Its text names the cause of each group that the node did \
-     not take. The writer goes on: each later frame that holds a channel of `ended` \
-     raises it again, so a writer of one index writes nothing more. To write the frame \
-     again, write only the channels of `unwritten`."
+     node spent its stamps. `lost` is a `dict` from the name of each channel of the \
+     lost groups of the frame, the index of each included, to the `range` of the seqs \
+     of its lost samples, as `DataLost.seqs` gives it, and is empty when no group was \
+     lost. With `on_loss=\"warn\"`, the call also logs the warning of the loss. Its \
+     text names the cause of each group that the node did not take. The writer goes \
+     on: each later frame that holds a channel of `ended` raises it again, so a writer \
+     of one index writes nothing more. To write the frame again, write only the \
+     channels of `unwritten`."
 );
 pyo3::create_exception!(
     foundation,
@@ -572,8 +580,10 @@ impl Client {
     /// control from it. `lease` is the seconds that the writer may go with no write and
     /// keep control, or `None` for no limit. `on_loss` is what a write does when the
     /// node took no room for a live frame: `"warn"` logs a warning on the `foundation`
-    /// logger, `"raise"` raises `DataLost`, and `"ignore"` does nothing. Other Python
-    /// threads run while it waits.
+    /// logger, `"raise"` raises `DataLost`, and `"ignore"` does nothing. A call that
+    /// raises `Rejected` or `GroupEnded` for a frame that also lost a group gives the
+    /// lost seqs in its `lost`, for each `on_loss`, and with `"warn"` also logs the
+    /// warning. Other Python threads run while it waits.
     ///
     /// Raises `TypeError` for an argument of a wrong type; `ValueError` for no channel,
     /// a name that does not parse, an `authority` outside 0 to 255, a `lease` that,
