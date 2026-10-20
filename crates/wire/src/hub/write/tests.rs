@@ -582,12 +582,10 @@ mod corpus {
     /// The result of each reply of the fuzz input `bytes` at a `Replies`, as the fuzz
     /// target gives it: each message of a length byte and its bytes, where a message
     /// whose first byte is 0 counts a frame sent.
-    fn decoded(mut bytes: &[u8]) -> Vec<Result<Reply, Error>> {
+    fn decoded(bytes: &[u8]) -> Vec<Result<Reply, Error>> {
         let mut replies = Replies::new();
         let mut got = Vec::new();
-        while let Some((&len, rest)) = bytes.split_first() {
-            let (message, rest) = rest.split_at(usize::from(len).min(rest.len()));
-            bytes = rest;
+        for message in crate::common::messages(bytes) {
             if message.first() == Some(&0) {
                 replies.sent();
             } else {
