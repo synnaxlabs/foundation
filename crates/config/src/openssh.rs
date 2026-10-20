@@ -220,7 +220,9 @@ impl fmt::Display for Unreadable {
 ///
 /// [`Unreadable`] says why the text is not such a file.
 pub fn private_key(text: &str) -> Result<PrivateKey, Unreadable> {
-    let text = lines(text);
+    let Some(text) = lines(text) else {
+        return Err(Unreadable::Format);
+    };
     let file = match ssh_key::PrivateKey::from_openssh(&text) {
         Ok(file) => file,
         // With no `ecdsa` feature, `ssh-key` reads no ECDSA private key.
@@ -261,12 +263,13 @@ pub fn private_key(text: &str) -> Result<PrivateKey, Unreadable> {
 /// `text` up to its end mark as `ssh-key` takes it: the body with no white space, in
 /// lines of 70 characters, and each line end as `\n`. `ssh-key` 0.6.7 reads only lines
 /// of 70, as `ssh-keygen` writes them, and OpenSSH reads any width, skips white space
-/// in the body as C `isspace` finds it, and skips the text after the end mark.
-fn lines(text: &str) -> String {
+/// in the body as C `isspace` finds it, and skips the text after the end mark. `None`
+/// when no line before the first end mark can be the begin mark.
+fn lines(text: &str) -> Option<String> {
     let lines: Vec<&str> = text.lines().collect();
     let end = lines.iter().position(|line| line.starts_with("-----END"));
     let Some([begin, body @ .., end]) = end.map(|end| &lines[..=end]) else {
-        return text.to_owned();
+        return None;
     };
     let space = |c: &char| c.is_ascii_whitespace() || *c == '\x0b';
     let body: Vec<char> = body.concat().chars().filter(|c| !space(c)).collect();
@@ -277,7 +280,7 @@ fn lines(text: &str) -> String {
     }
     file.push_str(end);
     file.push('\n');
-    file
+    Some(file)
 }
 
 /// Whether the public key of `file`, as [`lines`] gives it, is an ECDSA key.

@@ -95,6 +95,23 @@ fn refuses_a_text_that_is_not_a_private_key_file() {
     assert_eq!(unreadable(KEYGEN_PUB), expected);
 }
 
+/// A text whose first line is an end mark gives one error with LF and CRLF line ends.
+/// The fuzz target found it.
+#[test]
+fn refuses_a_text_that_starts_with_an_end_mark_with_each_line_end() {
+    let text = "-----ENDOXc\n\n-----BEGIN OPENSSH PRIVATE KEY-----\n\
+        b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gZtW\n\
+        QyNTUxOQAAACDyYqNHsEEJBY9+1DrLFvXJtoCq/Jio0ewQQkFj37UOssW9cm2\n\
+        gKr9m07\n5UHcwrYgPa9XoAAA{\0\0\0\0\0\0J\n\n\n\n\n\0lQGxhcHRvcAE=\n\
+        -----END OPENSSH PRIVATE KEY-----\n";
+    let expected = (
+        Unreadable::Format,
+        "the file is not an OpenSSH private key as `ssh-keygen` writes it".into(),
+    );
+    assert_eq!(unreadable(text), expected);
+    assert_eq!(unreadable(&text.replace('\n', "\r\n")), expected);
+}
+
 #[test]
 fn refuses_a_key_of_another_algorithm_by_its_name() {
     assert_eq!(
