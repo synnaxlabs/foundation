@@ -238,14 +238,17 @@
   2026-10-12T18:29:52Z
   (https://github.com/synnaxlabs/foundation/issues/1361#issuecomment-6130215772), with
   the deferral of #2471. A message with a proof takes the links from the newest back
-  while they fit with no entry, and clones only those. An `Append` keeps its entries
-  only when each link fits. So `fits` does not depend on the order of the links. A
-  leader with 127 silent learners after 300 voter changes spends about 18 ms/s on
-  their heartbeats, in place of 134 ms/s with a clone of each link and a drop of the
-  oldest one at a time: the cost of a fault, over the idle limit of 10 ms/s. Lost: a
-  binary search on the count of links to drop, which clones each link of the log
-  first; links that the queues share, the deferral "entries that the queues share, not
-  copy" below. Decided by `laptop.architect`, 2026-10-20T00:59:40Z
+  while they fit with no entry, and clones only those and the first one that does not
+  fit. An `Append` keeps its entries only when the whole chain fits with no entry.
+  This gives the message that a drop of the oldest link at a time gives, under the two
+  conditions of `fits` in its doc. The `mesh` length is a sum, so it meets both. A
+  leader with 127 silent learners after 300 voter changes uses 17.2 to 18.5 ms/s of
+  idle CPU (box2, release, sim driver), in place of 134 to 136 ms/s with a clone of
+  each link and a drop of the oldest one at a time: the cost of a fault, over the idle
+  limit of 10 ms/s. Lost: a binary search on the count of links to drop, which clones
+  each link of the log first; links that the queues share, the deferral "entries that
+  the queues share, not copy" below. Decided by `laptop.architect`,
+  2026-10-20T00:59:40Z
   (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6280820710).
   `Raft::set_learners` sets the nodes that get the log and have no vote. `raft` keeps
   the set apart from the configuration: a key that the configuration in force holds as

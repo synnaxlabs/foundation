@@ -1,6 +1,6 @@
 //! The cost of a leader's heartbeat tick on a large log: the chain of each heartbeat
 //! comes from the index of the configuration entries, not from a scan of the log. On a
-//! long chain, each heartbeat clones only the links that fit.
+//! long chain, each heartbeat clones only the links that fit and one more.
 
 use std::collections::BTreeMap;
 

@@ -20,8 +20,9 @@ pub struct Config {
     /// `Append` of the largest entry with no proof. A message with a proof drops its
     /// entries, then the oldest links of its chain, so `fits` must hold each message
     /// with no entry and no link. `raft` panics when `fits` is false for an `Append`
-    /// of one entry with no proof, or for a message with no entry and no link. It
-    /// does not depend on the order of the links.
+    /// of one entry with no proof, or for a message with no entry and no link.
+    /// `fits` does not depend on the order of the links, and when it holds a message,
+    /// it holds that message with fewer entries or links.
     pub fits: fn(&Message) -> bool,
 }
 
