@@ -18,9 +18,9 @@ use crate::event;
 use crate::ffi::{self, Status};
 use crate::secure::{
     ANONYMOUS, BROKEN_TRUST, CLIENT, CLIENT_ONLY_SERVER, CLIENT_PEM, EC, EMPTY_URI,
-    END, HEADED_TRUST, HIGH_PEM, Identity, LASTING, LINE_TRUST, LONG_BLOCK_TRUST,
-    LONG_ENTRY, LONG_KEY, LONG_SUBJECT, NAMELESS, ONE_BLOCK_TRUST, OTHER, Policy,
-    REJECTED_SERVER, SERVER, START, TRUST, TWO_URIS, UNNAMED,
+    END, HEADED_TRUST, HIGH_PEM, HUGE_SUBJECT, Identity, LASTING, LINE_TRUST,
+    LONG_BLOCK_TRUST, LONG_ENTRY, LONG_KEY, LONG_SUBJECT, NAMELESS, ONE_BLOCK_TRUST,
+    OTHER, Policy, REJECTED_SERVER, SERVER, START, TRUST, TWO_URIS, UNNAMED,
 };
 use crate::server::Limits;
 use crate::value::{Fault, Value};
@@ -1295,4 +1295,11 @@ fn names_give_the_whole_of_a_subject_past_1024_bytes() {
         subject: format!("/description={}/CN=client", "d".repeat(1100)),
     };
     assert_eq!(names(LONG_ENTRY), Some(entry));
+}
+
+/// Each of the 300 000 bytes of the unit of [`HUGE_SUBJECT`] takes 4 characters in the
+/// one-line form, past the 1 MiB that aws-lc writes.
+#[test]
+fn names_give_none_for_a_subject_past_1_mib_in_the_one_line_form() {
+    assert_eq!(names(HUGE_SUBJECT), None);
 }
