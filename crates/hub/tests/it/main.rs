@@ -37,8 +37,11 @@ mod net;
 
 #[path = "../common/agent.rs"]
 mod agent;
+mod away;
 mod definitions;
 mod forward;
+#[path = "../common/forwarded.rs"]
+mod forwarded;
 mod link;
 mod named;
 #[path = "../common/node.rs"]
@@ -889,6 +892,19 @@ fn opens_no_writer_with_a_lease_of_zero() {
         let want =
             format!("control lease must be longer than zero, got {}", Span::ZERO);
         assert_eq!(error.to_string(), want);
+    });
+}
+
+/// An unknown name fails before a lease of zero.
+#[test]
+fn opens_no_writer_on_an_unknown_name_with_a_lease_of_zero() {
+    run(9, |test| async move {
+        let config = writer::Config {
+            lease: Some(Span::ZERO),
+            ..config("a", &["value", "nope"])
+        };
+        let error = test.hub.writer(config).await.expect_err("an unknown name");
+        assert_eq!(error, writer::Error::Unknown(name("nope")));
     });
 }
 

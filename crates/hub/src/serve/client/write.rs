@@ -1,5 +1,6 @@
 //! The write stream of a client session.
 
+mod away;
 mod group;
 
 use std::cell::RefCell;
@@ -28,8 +29,8 @@ use self::group::{Frame, Group, Parts, Written};
 use super::{Reserved, body};
 use crate::State;
 use crate::serve::admission::Admission;
-use crate::serve::{Error, alloc, unless};
-use crate::writer::{self, Homed, Split, Writer};
+use crate::serve::{Error, alloc, boxed, unless};
+use crate::writer::{self, Found, Homed, Split, Writer};
 
 /// The stream that carried the open of a write to this node.
 #[derive(Clone, Copy)]
@@ -59,11 +60,19 @@ pub(super) async fn serve(
     receiver: &mut Receiver,
     sender: &mut Sender,
 ) -> Result<(), Error> {
+    let open = open(state, admission, subject.clone(), write, receiver).await?;
     let origin = Origin::Program;
-    let Some((set, writes, _ends)) =
-        opened(state, admission, origin, subject, write, receiver, sender).await?
-    else {
-        return Ok(());
+    let opened = opened(state, admission, origin, subject, open, receiver, sender);
+    let (set, writes, _ends) = match opened.await? {
+        None => return Ok(()),
+        Some(Opened::Here(set, writes, ends)) => (set, writes, ends),
+        Some(Opened::Away { home, open }) => {
+            // In its own box, so the future of a local write holds none of the state
+            // of a forward.
+            let away =
+                || away::serve(state, admission, home, write, open, receiver, sender);
+            return boxed(away).await;
+        }
     };
     let writes = relay(state, set, writes, None, receiver, sender).await?;
     writes.finish(state, sender).await
@@ -87,30 +96,47 @@ pub(super) async fn forward(
         .subject()
         .expect("invariant: an admitted hello has a subject");
     let origin = Origin::Forward { via, forward };
-    let Some((set, writes, _ends)) =
-        opened(state, admission, origin, subject, write, receiver, sender).await?
-    else {
-        return Ok(());
+    let open = open(state, admission, subject.clone(), write, receiver).await?;
+    let opened = opened(state, admission, origin, subject, open, receiver, sender);
+    let (set, writes, _ends) = match opened.await? {
+        None => return Ok(()),
+        Some(Opened::Here(set, writes, ends)) => (set, writes, ends),
+        Some(Opened::Away { home, .. }) => {
+            return Err(Error::Writer(Box::new(writer::Error::Remote { home })));
+        }
     };
     let renewal = |message: &[u8]| renewal(admission, state, message);
     let writes = relay(state, set, writes, Some(&renewal), receiver, sender).await?;
     writes.finish(state, sender).await
 }
 
-/// Verifies the open of `write` with `admission`, takes the group of a forward, opens
-/// one writer for each group, and sends its places, then gives the writes of the
-/// stream, their set, and the hold of their ends and counts in the budget. Gives
-/// `None` after it finishes `sender` when the program finishes first.
+/// Where the writers of a write opened.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one for each write stream, which its serve unpacks at once"
+)]
+enum Opened {
+    /// At this node, the home of each index: the set of the writes of the stream, the
+    /// writes, and the hold of their ends and counts in the budget.
+    Here(Arc<KeySet>, Writes, Reserved),
+    /// Not opened: the home of its one index is `home`, another node. Gives back the
+    /// open.
+    Away { home: node::Key, open: Open },
+}
+
+/// Takes the group of a forward from `open`, opens one writer for each group, and
+/// sends its places, then gives the writes of the stream, or the open when the home
+/// of its one index is another node. Gives `None` after it finishes `sender` when the
+/// program finishes first.
 async fn opened(
     state: &Rc<RefCell<State>>,
     admission: &Admission,
     origin: Origin,
     subject: Name,
-    write: Write,
+    open: Open,
     receiver: &mut Receiver,
     sender: &mut Sender,
-) -> Result<Option<(Arc<KeySet>, Writes, Reserved)>, Error> {
-    let open = open(state, admission, subject.clone(), write, receiver).await?;
+) -> Result<Option<Opened>, Error> {
     let held = held(&open.channels);
     let (open, decoded) = match origin {
         Origin::Program => (open, Reserved::new(state, subject.clone(), held)?),
@@ -124,11 +150,24 @@ async fn opened(
             (open, decoded)
         }
     };
-    let Some(homed) =
+    let (authority, lease) = (open.authority, open.lease);
+    let Some(found) =
         here(state, admission, origin, subject.clone(), open, receiver).await?
     else {
         sender.finish()?;
         return Ok(None);
+    };
+    let homed = match found {
+        Found::Homed(homed) => homed,
+        Found::Many => return Err(Error::ManyIndexes),
+        Found::Away { home, channels } => {
+            let open = Open {
+                authority,
+                lease,
+                channels,
+            };
+            return Ok(Some(Opened::Away { home, open }));
+        }
     };
     let ends = Reserved::new(state, subject, bytes(Frames::bytes(homed.places())))?;
     let split = homed
@@ -143,7 +182,7 @@ async fn opened(
     start(state, sender, &set, &entries, channels).await?;
     drop(decoded);
     let writes = Writes::new(&set, writers);
-    Ok(Some((set, writes, ends)))
+    Ok(Some(Opened::Here(set, writes, ends)))
 }
 
 /// The open of the group at the places of the run of `forward`, or `None` when the
@@ -204,11 +243,12 @@ fn bytes(len: usize) -> u64 {
     u64::try_from(len).expect("invariant: a u64 holds a usize")
 }
 
-/// Resolves the channels of `open` and waits for this node to be the home of each
-/// index, or gives `None` when the program finishes first. The channels of a forward
-/// on more than one index give [`Error::ManyIndexes`] before it waits for a home, so
-/// it takes no control. Each message of a forward during the wait is a renewal that
-/// `admission` admits.
+/// Resolves the channels of `open`, waits for the home of each index, and gives what
+/// [`Homed::find`] or, for a forward, [`Homed::one`] found, or `None` when the program
+/// finishes first. The channels of a forward on more than one index give
+/// [`Found::Many`] before it waits for a home, so it takes no control. Each message
+/// of a forward during the wait is a renewal that `admission` admits. Open a writer
+/// that it gives with no wait.
 async fn here(
     state: &Rc<RefCell<State>>,
     admission: &Admission,
@@ -216,7 +256,7 @@ async fn here(
     subject: Name,
     open: Open,
     receiver: &mut Receiver,
-) -> Result<Option<Homed>, Error> {
+) -> Result<Option<Found>, Error> {
     let config = writer::Config {
         subject,
         authority: open.authority,
@@ -232,19 +272,18 @@ async fn here(
         }
         Ok(())
     });
-    let homed = async {
+    let found = async {
         match origin {
-            Origin::Program => Homed::new(state, config).await.map(Some),
+            Origin::Program => Homed::find(state, config).await,
             Origin::Forward { via, .. } => Homed::one(state, config, via).await,
         }
     };
-    let Some(homed) = unless(program, homed).await? else {
+    let Some(found) = unless(program, found).await? else {
         return Ok(None);
     };
-    let Some(homed) = homed.map_err(|error| Error::Writer(Box::new(error)))? else {
-        return Err(Error::ManyIndexes);
-    };
-    Ok(Some(homed))
+    found
+        .map(Some)
+        .map_err(|error| Error::Writer(Box::new(error)))
 }
 
 /// Sends the places of the write and their run: place `n` is entry `n` of `set`, with

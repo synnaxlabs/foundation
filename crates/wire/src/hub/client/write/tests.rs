@@ -456,4 +456,26 @@ proptest! {
         prop_assert_eq!(Open::decode(&encode_open(&open)), Ok(open));
     }
 
+    /// A node that forwards a write sends the open it decoded, encoded again, under
+    /// the program's signature of the bytes it read.
+    #[test]
+    fn encodes_each_open_that_decodes_to_the_same_bytes(
+        authority: u8,
+        lease in proptest::option::of(any::<i64>()),
+        channels in proptest::collection::vec(name(), 1..8),
+        at: prop::sample::Index,
+        byte: u8,
+    ) {
+        let open = Open {
+            authority: Authority(authority),
+            lease: lease.map(Span::from_nanos),
+            channels,
+        };
+        let mut bytes = encode_open(&open);
+        let at = at.index(bytes.len());
+        bytes[at] = byte;
+        if let Ok(decoded) = Open::decode(&bytes) {
+            prop_assert_eq!(encode_open(&decoded), bytes);
+        }
+    }
 }

@@ -110,7 +110,8 @@ impl Open {
         }
     }
 
-    /// Decodes the open in `bytes`, all the bytes of its body.
+    /// Decodes the open in `bytes`, all the bytes of its body. An open that decodes
+    /// encodes back to `bytes` with [`Open::encode`].
     ///
     /// # Errors
     ///

@@ -103,7 +103,11 @@ impl Frames {
     ///
     /// When a draft is due, each [`types::frame::Error`] of [`Layout::from_ends`]. The
     /// caller then stops the stream as `MALFORMED`.
-    #[inline]
+    #[expect(
+        clippy::inline_always,
+        reason = "as a call, it adds about 60 instructions to each frame of a relay"
+    )]
+    #[inline(always)]
     pub fn due(&mut self) -> Result<Due<'_>, types::frame::Error> {
         if self.assembly.drafting() {
             let Some(Head { form, .. }) = self.head else {
@@ -187,10 +191,10 @@ impl Frames {
         self.drafted()
     }
 
-    /// Takes no draft for the frame whose draft is due, when the pool of the home has
-    /// no block for it. The frame's body, when it has one, then comes as
-    /// [`Due::Message`], and [`Frames::decode`] checks each message, drops it, and
-    /// gives [`Step::More`].
+    /// Takes no draft for the frame whose draft is due: the pool of the home has no
+    /// block for it, or the node sends the frame on unchanged. The frame's body, when
+    /// it has one, then comes as [`Due::Message`], and [`Frames::decode`] checks each
+    /// message, drops it, and gives [`Step::More`].
     ///
     /// # Panics
     ///

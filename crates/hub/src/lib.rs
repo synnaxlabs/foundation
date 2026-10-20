@@ -3,6 +3,7 @@
 
 mod channel;
 mod commit;
+mod dial;
 mod gate;
 mod link;
 mod pending;
@@ -258,10 +259,10 @@ impl Hub {
     /// # Errors
     ///
     /// [`writer::Error::Empty`] for no name, [`writer::Error::Unknown`] for the first
-    /// name that no channel has, then, for the first index whose home is not this
-    /// node, [`writer::Error::Remote`], or [`writer::Error::Mesh`] when the mesh
-    /// stopped. Else [`writer::Error::Home`] for a lease that is not longer than zero:
-    /// never `Unsynced`.
+    /// name that no channel has, then [`writer::Error::Home`] for a lease that is not
+    /// longer than zero (never `Unsynced`), then, for the first index whose home is
+    /// not this node, [`writer::Error::Remote`], or [`writer::Error::Mesh`] when the
+    /// mesh stopped.
     pub async fn writer(
         &self,
         config: writer::Config,

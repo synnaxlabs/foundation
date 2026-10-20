@@ -217,6 +217,13 @@ impl Reserved {
             bytes,
         })
     }
+
+    /// Reserves `bytes` more, until it drops.
+    fn add(&mut self, bytes: u64) -> Result<(), Error> {
+        self.state.borrow().bodies.reserve(&self.subject, bytes)?;
+        self.bytes += bytes;
+        Ok(())
+    }
 }
 
 impl Drop for Reserved {

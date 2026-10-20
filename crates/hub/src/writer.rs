@@ -71,15 +71,6 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-impl From<Away> for Error {
-    fn from(away: Away) -> Self {
-        match away {
-            Away::Remote(home) => Self::Remote { home },
-            Away::Mesh(stopped) => Self::Mesh(stopped),
-        }
-    }
-}
-
 /// Why a write failed. No seq moves for either.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Failure {
@@ -167,6 +158,20 @@ pub struct Writer {
     outcomes: Vec<::home::Outcome>,
 }
 
+/// What [`Homed::find`] or [`Homed::one`] found for a writer.
+pub(crate) enum Found {
+    /// This node is the home of each index.
+    Homed(Homed),
+    /// The channels resolve to more indexes than [`Homed::one`] takes.
+    Many,
+    /// The channels resolve to one index, whose home is `home`, another node. Gives
+    /// back the channels of the config.
+    Away {
+        home: node::Key,
+        channels: Vec<Name>,
+    },
+}
+
 /// A writer whose channels resolved, with this node the home of each index. It opens
 /// with no wait.
 pub(crate) struct Homed {
@@ -185,31 +190,45 @@ impl Homed {
         state: &Rc<RefCell<State>>,
         config: Config,
     ) -> Result<Self, Error> {
+        match Self::find(state, config).await? {
+            Found::Homed(homed) => Ok(homed),
+            Found::Many => {
+                unreachable!("invariant: no writer has more than usize::MAX indexes")
+            }
+            Found::Away { home, .. } => Err(Error::Remote { home }),
+        }
+    }
+
+    /// As [`Homed::new`], but gives [`Found::Away`] when the channels resolve to one
+    /// index whose home is another node. Never gives [`Found::Many`].
+    pub(crate) async fn find(
+        state: &Rc<RefCell<State>>,
+        config: Config,
+    ) -> Result<Found, Error> {
         let via = state.borrow().node;
-        let homed = Self::within(state, config, usize::MAX, via).await?;
-        Ok(homed.expect("invariant: no writer has more than usize::MAX indexes"))
+        Self::within(state, config, usize::MAX, via).await
     }
 
     /// As [`Homed::new`] for a writer on one index, which `via` opened: the node of its
-    /// program. Gives `None` when its channels resolve to more than one index: before
-    /// the wait for the home, or when a change of a channel during that wait gives them
-    /// a second.
+    /// program. Gives [`Found::Many`] when its channels resolve to more than one index:
+    /// before the wait for the home, or when a change of a channel during that wait
+    /// gives them a second.
     pub(crate) async fn one(
         state: &Rc<RefCell<State>>,
         config: Config,
         via: node::Key,
-    ) -> Result<Option<Self>, Error> {
+    ) -> Result<Found, Error> {
         Self::within(state, config, 1, via).await
     }
 
-    /// As [`Homed::new`] for a writer that `via` opened, or `None` when the channels
-    /// resolve to more than `indexes` indexes after the wait for mesh time.
+    /// As [`Homed::find`] for a writer that `via` opened, or [`Found::Many`] when the
+    /// channels resolve to more than `indexes` indexes after the wait for mesh time.
     async fn within(
         state: &Rc<RefCell<State>>,
         config: Config,
         indexes: usize,
         via: node::Key,
-    ) -> Result<Option<Self>, Error> {
+    ) -> Result<Found, Error> {
         let Config {
             subject,
             authority,
@@ -219,21 +238,33 @@ impl Homed {
         if channels.is_empty() {
             return Err(Error::Empty);
         }
-        // An unknown name fails before the wait for mesh time.
+        // An unknown name and a lease of no length fail before the wait for mesh time,
+        // so a write that its home would refuse does not go to the home.
         resolve(&mut state.borrow_mut(), &channels)?;
+        if let Some(span) = lease
+            && let Err(error) = control::lease::Lease::new(span)
+        {
+            let span = error.span;
+            return Err(Error::Home(home::writer::Error::Lease { span }));
+        }
         crate::time::known(state).await;
         let (keys, groups) = loop {
             let (keys, groups) = resolve(&mut state.borrow_mut(), &channels)?;
             if groups.len() > indexes {
-                return Ok(None);
+                return Ok(Found::Many);
             }
             let checked: Vec<channel::Key> =
                 groups.iter().map(|&(index, _)| index).collect();
             let pending = Pending::new(state, keys.clone());
             // A change of a channel ends the wait at once, and the names resolve again.
-            if let Ok(homed) = pending.wait(crate::homes(state, &checked)).await {
-                homed?;
-                break (keys, groups);
+            match pending.wait(crate::homes(state, &checked)).await {
+                Ok(Ok(())) => break (keys, groups),
+                Ok(Err(Away::Remote(home))) if groups.len() == 1 => {
+                    return Ok(Found::Away { home, channels });
+                }
+                Ok(Err(Away::Remote(home))) => return Err(Error::Remote { home }),
+                Ok(Err(Away::Mesh(stopped))) => return Err(Error::Mesh(stopped)),
+                Err(_) => {}
             }
         };
         let holder = control::Writer {
@@ -241,7 +272,7 @@ impl Homed {
             authority,
             via,
         };
-        Ok(Some(Self {
+        Ok(Found::Homed(Self {
             state: Rc::clone(state),
             holder,
             lease,
