@@ -353,6 +353,7 @@
   changes `wire` for one fact of the stream. Decided by `laptop.architect` at
   2026-10-18T20:58:27Z
   (https://github.com/synnaxlabs/foundation/issues/3266#issuecomment-6255066811).
+  Superseded for `Writer::index` by "PR 3a" below.
   Amended (#3283): the node splits a write by index, not the client. The person, at
   2026-10-19T12:27:44Z
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267198734):
@@ -508,11 +509,20 @@
   series of one group hold two counts. `Writer::write(time)` gives the place of the
   index and the outcome of each group of the frame, in group order, and `Unsent` applies
   to each group of it. The lease is for each group, and with `Time::Node` each group
-  gets its own stamp: the docs of `Config::lease` and `Writer::write` say so.
-  `Writer::index` is gone: the `index` of each place gives it. Ruled by
+  gets its own stamp: the docs of `Config::lease` and `Writer::write` say so. Ruled by
   `laptop.architect` at 2026-10-19T13:10:34Z
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268011114, items
-  4 and 5). Plan:
+  4 and 5). `Writer::index` is gone: the `index` of each place gives it. This changes
+  item 5 of that ruling, as `laptop.architect` decided at 2026-10-19T15:10:51Z
+  (https://github.com/synnaxlabs/foundation/pull/3365#issuecomment-6270542720, item 3)
+  and approved on #3558 at 2026-10-20T09:20:44Z
+  (https://github.com/synnaxlabs/foundation/pull/3558#issuecomment-6287720622).
+  Supersedes the `Writer::index` of
+  https://github.com/synnaxlabs/foundation/issues/3266#issuecomment-6255066811. A
+  write panics, before it sends, on a draft of a group that its writer does not have,
+  which only a draft of another writer, swapped in, holds.
+  `wire::hub::write::Replies::frames` gives the frame of the last send, so the writer
+  keeps only the outcomes of that frame. Plan:
   https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6286854444. Lost: a
   draft that takes one count for each group, which makes the caller find the group of
   each place.
