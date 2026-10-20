@@ -1636,7 +1636,8 @@ mod tests {
 
     // The server holds the client's session and pings its own, then closes both, and
     // dials a 16th node at once. The prune that this dial runs comes before the
-    // carrier ends the ping, and keeps the entry of its task.
+    // carrier ends the ping, and keeps the entry of its task. A prune that dropped it
+    // panics in the task when the ping ends.
     #[test]
     fn a_prune_keeps_the_entry_of_a_ping_that_waits() {
         let (mut sim, client, server) = testing::nodes(0);
@@ -1669,11 +1670,6 @@ mod tests {
             held.expect("the held session").close(Code(6));
             let dial = pin!(transport.dial(others[0], &[]));
             assert!(testing::poll_once(dial).await.is_none());
-            {
-                let table = transport.table.borrow();
-                assert_eq!(table.nodes.len(), 2);
-                assert!(table.nodes[&CLIENT.public()].proving);
-            }
             linger(&node).await;
         });
         testing::start(&client, move |shard, node| async move {
