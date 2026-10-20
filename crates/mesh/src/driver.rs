@@ -363,7 +363,7 @@ impl Mesh {
     ///   names as its sender.
     /// - [`Error::Removed`] when the message is a `PreVote` or a `Vote` from a node
     ///   that a committed configuration removed, as [`raft::Admission::Removed`]
-    ///   states.
+    ///   states, with no join in the log that this node has not applied.
     /// - [`Error::NotVoter`] when the message is another request from a node that is
     ///   not a voter of this node's configuration.
     /// - [`Error::Claim`] when a claim of a known signer in the message does not
@@ -388,13 +388,20 @@ impl Mesh {
         let mut group = self.group.borrow_mut();
         group.taking()?;
         let from = message.from;
-        if group.public_key(from).map(Known::public_key) != Some(peer) {
+        let known = group.public_key(from);
+        if known.map(Known::public_key) != Some(peer) {
             return Err(Error::Spoofed { from });
         }
+        // The learners of `raft` are the applied members, so a member whose join is
+        // not applied can be one that a committed configuration removed.
         match group.raft.admission(&message) {
             Admission::Admitted => {}
-            Admission::Removed => return Err(Error::Removed { from }),
-            Admission::NotVoter => return Err(Error::NotVoter { from }),
+            Admission::Removed if !matches!(known, Some(Known::Unapplied(_))) => {
+                return Err(Error::Removed { from });
+            }
+            Admission::Removed | Admission::NotVoter => {
+                return Err(Error::NotVoter { from });
+            }
         }
         claim::check(&group.raft, &mut message, |key| group.public_key(key))?;
         group.input(|raft| raft.step(message))?;
@@ -3950,6 +3957,34 @@ mod tests {
                     assert_eq!(reply_term(&mesh, leader).await, later());
                 });
             }
+        }
+
+        // Node 4 joins, becomes a voter, and is demoted, all committed, and stays a
+        // member. Node 1 answers it at the commit, before the apply, and after it.
+        #[test]
+        fn answers_not_voter_to_a_demoted_member_whose_join_is_not_applied() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let mut data = changes(&[plant_ticket(), join_change(4)]);
+                data.extend([
+                    voters(TERM, &[1, 2, 3, 4], &IDS),
+                    voters(TERM, &[1, 2, 3, 4], &[]),
+                    voters(TERM, &IDS, &[1, 2, 3, 4]),
+                    voters(TERM, &IDS, &[]),
+                ]);
+                write(&mesh, data).await;
+                let commit = proven(2, 1, Body::Heartbeat { commit: 6 });
+                assert_eq!(mesh.receive(public(2), commit), Ok(()));
+                let last = Position::default();
+                let ask = |body| mesh.receive(public(4), message(4, 1, body));
+                let not_voter = Err(Error::NotVoter { from: key(4) });
+                let before = [ask(Body::PreVote { last }), ask(Body::Vote { last })];
+                assert_eq!(before, [not_voter.clone(), not_voter.clone()]);
+                node.clock().sleep(TICK).await;
+                assert!(mesh.member(key(4)).is_some(), "node 4 is not a member");
+                let after = [ask(Body::PreVote { last }), ask(Body::Vote { last })];
+                assert_eq!(after, [not_voter.clone(), not_voter]);
+            });
         }
 
         #[test]
