@@ -102,7 +102,7 @@ struct Case {
     waiting: bool,
 }
 
-const CASES: [Case; 9] = [
+const CASES: [Case; 5] = [
     Case {
         name: "live 1x2",
         node: false,
@@ -147,42 +147,6 @@ const CASES: [Case; 9] = [
         present: 1,
         series: 2,
         waiting: true,
-    },
-    Case {
-        name: "live 2x(1x2)",
-        node: false,
-        count: 1,
-        groups: 2,
-        present: 2,
-        series: 2,
-        waiting: false,
-    },
-    Case {
-        name: "live 2x(1x64)",
-        node: false,
-        count: 1,
-        groups: 2,
-        present: 2,
-        series: 64,
-        waiting: false,
-    },
-    Case {
-        name: "live 8x(1x2)",
-        node: false,
-        count: 1,
-        groups: 8,
-        present: 8,
-        series: 2,
-        waiting: false,
-    },
-    Case {
-        name: "live 1/8x(1x2)",
-        node: false,
-        count: 1,
-        groups: 8,
-        present: 1,
-        series: 2,
-        waiting: false,
     },
 ];
 
