@@ -85,10 +85,10 @@ pub fn bound(ticket: &Ticket) -> Span {
 /// `config.transport` proves, `ask` sends that request, and does not send `config.card`
 /// or `config.status`. Else it writes the new request over it. So a node that stops
 /// after a voter applied its join, and before the answer came, is admitted at the next
-/// call. When a round ends with a voter that refuses the stored request, and no voter
-/// has answered in this call that this node's join applied, `ask` writes the request
-/// of `config.card` and `config.status` over it and asks the next round with that, at
-/// once. The file stays for the life of `config.dir`: each
+/// call. When a round before the last ends with a voter that refuses the stored
+/// request, and no voter has answered in this call that this node's join applied, `ask`
+/// writes the request of `config.card` and `config.status` over it and asks the next
+/// round with that, at once. The file stays for the life of `config.dir`: each
 /// [`Mesh::open`](crate::Mesh::open) of a founding that lacks this node reads it.
 ///
 /// # Errors
