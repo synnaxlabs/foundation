@@ -206,21 +206,22 @@
   receive limit (P1 accepted by `laptop.architect-2`, 2026-10-20T02:01:06Z,
   https://github.com/synnaxlabs/foundation/pull/3462#issuecomment-6281584662). Lost: a
   reserve at the first answer, which saves memory only at a node whose take never
-  waited. open62541 decodes each Publish answer into memory that the client keeps.
-  After an answer that took more than one block, it keeps the memory of that answer as
-  one block, so the memory never shrinks, and a later answer of that size allocates none
-  (`laptop.architect-2`, 2026-10-19T23:31:50Z,
+  waited. open62541 decodes each Publish answer into memory that the client keeps. After
+  an answer that took more than one block, it keeps the memory of that answer as one
+  block, or none when that `malloc` fails, so the memory shrinks only then, and a later
+  answer of that size allocates none (`laptop.architect-2`, 2026-10-19T23:31:50Z,
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6279663796). A
-  server that sends more changes than the queues hold grows the change buffers, which
-  do not shrink. Each buffer holds the changes of at most `PUBLISHES` answers, each at
-  most the receive limit over the 5 bytes of the smallest notification, so with the
-  doubling of a `Vec` the 2 buffers of a client hold at most about 54 MB. The decode
-  of an answer takes at most 128 B for each byte of the answer, the bound of the array
-  check of the decoder, and past it fails with `BadOutOfMemory`, which closes the
-  connection: at most about 67 MB at the receive limit. A decode that succeeds takes at
-  most 80 B for each byte, an empty `DataValue`, so about 42 MB. The arena keeps at
-  most the memory of one answer, and its blocks hold less than 4 times that while an
-  answer decodes.
+  server that sends more changes than the queues hold grows the change buffers, which do
+  not shrink. Each buffer holds the changes of at most `PUBLISHES` answers, each at most
+  the receive limit over the 5 bytes of the smallest notification, so with the doubling
+  of a `Vec` the 2 buffers of a client hold at most about 54 MB. The decode of an answer
+  takes at most 128 B for each byte of the answer, the bound of the array check of the
+  decoder, so at most about 67 MB at the receive limit, and past it fails with
+  `BadOutOfMemory`, which closes the connection. The arena keeps at most that memory,
+  and while an answer decodes, its blocks hold less than 3 times it, about 200 MB. The
+  worst case that the decoder knows, an array of empty `DataValue` values, takes 80 B
+  for each byte, so an answer of it takes about 42 MB and decodes. Lost: a fixed limit
+  of the arena, which lets a small answer take the memory of the largest.
   `subscribe(nodes, sampling)` asks for a publishing interval of the longer of
   `sampling` and 100 ms, at most 1 min, a keep-alive count of max(1, floor(1 min /
   interval)), and a queue of each item that holds the samples of two revised publishing

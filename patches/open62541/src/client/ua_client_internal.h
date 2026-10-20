@@ -128,10 +128,10 @@ typedef struct PublishBlock {
 
 /* The memory of the decode of each async Publish answer. Each answer takes
  * zeroed memory from the first block of the list, at most 128 bytes for each of
- * its bytes, which the decode sets in `left`. The reset after its callback
- * keeps the memory of an answer that took more than one block as one block, or
- * none when that malloc fails, so the arena keeps the memory of the largest
- * answer. */
+ * its bytes, which `processMSGResponse` sets in `left` before the decode. The
+ * reset after its callback keeps the memory of an answer that took more than one
+ * block as one block, or none when that malloc fails, so the arena keeps the
+ * memory of the largest answer. */
 typedef struct {
     PublishBlock *blocks;
     size_t left;

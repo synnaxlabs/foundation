@@ -584,20 +584,41 @@ mod tests {
             let elements = u32::try_from(elements).unwrap().to_le_bytes();
             data[length..length + 4].copy_from_slice(&elements);
         }
+        let (code, used) = variant_in_arena(&data[start..]);
+        let most = (data.len() - start) * EXPANSION;
+        assert_eq!(code.name(), "BadOutOfMemory");
+        assert!(used <= most, "{used} of {most}");
+        decode(&data);
+    }
+
+    /// An array of 1000 empty `DataValue` values, the worst case that the decoder knows,
+    /// takes 80 bytes for each byte and decodes under the calloc of the decode of a
+    /// Publish answer.
+    #[test]
+    fn empty_data_values_decode_at_80_bytes_for_each_byte() {
+        let mut data = vec![0x97];
+        data.extend(1000_i32.to_le_bytes());
+        data.resize(data.len() + 1000, 0);
+        assert_eq!(variant_in_arena(&data), (Status::GOOD, 80_000));
+    }
+
+    /// Decodes a `Variant` from `bytes` under the calloc of the decode of a Publish
+    /// answer of `bytes`, and gives the status and the bytes that its blocks used.
+    fn variant_in_arena(bytes: &[u8]) -> (Status, usize) {
         let input = Bytes {
-            length: data.len() - start,
-            data: data[start..].as_mut_ptr(),
+            length: bytes.len(),
+            data: bytes.as_ptr().cast_mut(),
         };
         let mut arena = ffi::test::Arena {
             blocks: std::ptr::null_mut(),
-            left: input.length * EXPANSION,
+            left: bytes.len() * EXPANSION,
         };
         let mut options = DecodeOptions::default();
         options.context = (&raw mut arena).cast();
         options.calloc = Some(ffi::test::__Client_PublishArena_calloc);
         let mut value = [0_u64; 6];
-        // SAFETY: the value holds the 48 bytes of a `Variant`, aligned to 8, and the
-        // arena lives to the free below.
+        // SAFETY: the value holds the 48 bytes of a `Variant`, aligned to 8, the decoder
+        // only reads the input, and the arena lives to the free below.
         let code = unsafe {
             ffi::UA_decodeBinary(
                 &raw const input,
@@ -616,10 +637,7 @@ mod tests {
         }
         // SAFETY: nothing reads the decoded value after this.
         unsafe { ffi::test::shim_arena_free(&raw mut arena) };
-        let most = input.length * EXPANSION;
-        assert_eq!(Status(code).name(), "BadOutOfMemory");
-        assert!(used <= most, "{used} of {most}");
-        decode(&data);
+        (Status(code), used)
     }
 
     /// A `Variant` of 127 values and no bytes after the length passes the length check
