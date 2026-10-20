@@ -96,17 +96,20 @@
 
   The status of a run hides the last value of each source that `Context::secret` read in
   that run: in each text of `Context::error`, of `Context::note`, and of the end of the
-  run, it shows one `<secret>` in place of each run of chars that the
-  `String::from_utf8_lossy` form of such a value covers, with no ASCII white space at
-  its ends and not empty, before the cut at 1024 bytes. So a server that sends a token
-  back in its answer does not put it in the status or in the log lines that the status
-  writes. A kind adds no mark of its own for a value that `Context::secret` gave. A form
-  of a value that a kind makes, such as the base64 of `user:password`, is the duty of
-  that kind. The trigger to hide values in the browse answer of #2705 is a browse error
-  that holds server text. Decided by `laptop.architect-2` on 2026-10-16T17:54:49Z
+  run, it shows one `secret::Value::MARK` (`<secret>`) in place of each run of chars
+  that the `String::from_utf8_lossy` form of such a value covers, with no ASCII white
+  space at its ends and not empty, before the cut at 1024 bytes. So a server that sends
+  a token back in its answer does not put it in the status or in the log lines that the
+  status writes. A kind adds no mark of its own for a value that `Context::secret` gave.
+  A form of a value that a kind makes, such as the base64 of `user:password`, is the
+  duty of that kind. The trigger to hide values in the browse answer of #2705 is a
+  browse error that holds server text. Decided by `laptop.architect-2` on
+  2026-10-16T17:54:49Z
   (https://github.com/synnaxlabs/foundation/issues/2849#issuecomment-6221505945), the
   last value of each source on 2026-10-20T16:07:17Z
-  (https://github.com/synnaxlabs/foundation/issues/3603#issuecomment-6295375095), and
-  one mark for each covered run of chars and the text form with no ASCII white space
-  at its ends on 2026-10-20T16:32:37Z
-  (https://github.com/synnaxlabs/foundation/pull/3621#issuecomment-6295893529).
+  (https://github.com/synnaxlabs/foundation/issues/3603#issuecomment-6295375095), one
+  mark for each covered run of chars and the text form with no ASCII white space at its
+  ends on 2026-10-20T16:32:37Z
+  (https://github.com/synnaxlabs/foundation/pull/3621#issuecomment-6295893529), and one
+  mark in `secret` on 2026-10-20T17:21:41Z
+  (https://github.com/synnaxlabs/foundation/pull/3621#issuecomment-6296857466).

@@ -75,9 +75,6 @@ const NOTE: usize = SUPERVISOR.len();
 const TEXT_MAX: usize = 1024;
 /// The mark in place of the middle of a text that is too long.
 const MARK: &str = "…";
-/// The mark in place of each run of chars that the last value of each source that a
-/// run read covers, as `Debug` of `secret::Value` prints.
-const HIDDEN: &str = "<secret>";
 /// The least time between two writes of a change of counts alone.
 const PERIOD: Span = Span::SECOND;
 /// The most time that the changes of state wait for the home to apply the status,
@@ -221,7 +218,7 @@ impl Status {
         }
     }
 
-    /// Shows `value` of `source` as [`HIDDEN`] in each text of the run after the call,
+    /// Shows `value` of `source` as [`secret::Value::MARK`] in each text of the run after the call,
     /// in place of the last value of `source`. With no run, it does nothing.
     pub(crate) fn hold(&self, source: &secret::Source, value: &secret::Value) {
         if let Some(run) = self.values.run.borrow_mut().as_mut() {
@@ -471,9 +468,9 @@ impl Secrets {
         }
     }
 
-    /// `text` with each run of chars that a value covers replaced by one [`HIDDEN`].
+    /// `text` with each run of chars that a value covers replaced by one [`secret::Value::MARK`].
     /// It finds the values in `text`, not in what it gives, so a value inside
-    /// [`HIDDEN`] does not change a mark.
+    /// [`secret::Value::MARK`] does not change a mark.
     fn hide<'a>(&self, text: &'a str) -> Cow<'a, str> {
         let mut hidden = String::new();
         // `text[shown..]` is not in `hidden` yet, and the run of covered chars ends
@@ -492,7 +489,7 @@ impl Secrets {
             };
             if end == 0 || at > end {
                 hidden.push_str(&text[shown..at]);
-                hidden.push_str(HIDDEN);
+                hidden.push_str(secret::Value::MARK);
             }
             end = end.max(cover);
             shown = end;
@@ -1234,14 +1231,6 @@ mod tests {
     }
 
     #[test]
-    fn hides_with_the_mark_that_debug_of_a_value_prints() {
-        let value = secret::Value::new(b"s3cret".to_vec());
-        assert_eq!(format!("{value:?}"), HIDDEN);
-    }
-
-    /// It sets and reads the run of the status by hand, to hold a value with no run
-    /// and to see the texts with no write.
-    #[test]
     fn hides_only_the_last_value_of_each_source() {
         let status = Status::new(Vec::new(), tracing::Span::none());
         let (first, second) = (secret::Source::Env("A".into()), name("plant.b"));
@@ -1274,7 +1263,7 @@ mod tests {
             let got = secrets(&bytes).hide(&text);
             prop_assert!(!got.bytes().any(|byte| byte.is_ascii_digit()), "{}", got);
             let want: String = (parts.iter())
-                .flat_map(|(plain, _)| [plain.as_str(), HIDDEN])
+                .flat_map(|(plain, _)| [plain.as_str(), "<secret>"])
                 .collect();
             prop_assert_eq!(got, want);
         }
