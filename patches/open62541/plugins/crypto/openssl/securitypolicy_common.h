@@ -60,9 +60,15 @@ void UA_Openssl_Init(void);
 int UA_OpenSSL_refusePassword(char *buf, int size, int rwflag, void *userdata);
 
 /* Gives the BIO that each PEM read of `pem` reads, which the caller frees. Gives
- * NULL with `line` set to the line, from 1, of the first piece of a PEM block that
- * aws-lc reads in two ways by the sign of `char`, or NULL with `line` 0 when there
- * is no memory. */
+ * NULL with `line` set to the line, from 1 and counted by `\n`, of the first piece
+ * of a PEM block that aws-lc reads in two ways by the sign of `char`, or NULL with
+ * `line` 0 when there is no memory. `line` may be NULL. aws-lc reads the pieces of
+ * `BIO_gets` (at most 253 bytes, each through its `\n`) and drops the bytes of 0x20
+ * or less as a `char` at the end of each, so it keeps the bytes through the last one
+ * of 0x21 to 0x7F where `char` is signed, and more where it is unsigned only when a
+ * byte after them is 0x80 to 0xFF. A block runs from a piece that starts
+ * `-----BEGIN ` and whose kept bytes hold no NUL and end in `-----`, through the next
+ * piece whose kept bytes start `-----END `. */
 BIO *UA_OpenSSL_PemBio(const UA_ByteString *pem, size_t *line);
 
 UA_StatusCode

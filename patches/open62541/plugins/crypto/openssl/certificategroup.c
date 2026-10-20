@@ -281,8 +281,7 @@ openSSLLoadEachCertificate(const UA_ByteString cert, STACK_OF(X509) *stack,
 /* Loads `crl`, DER then PEM. */
 static X509_CRL *
 openSSLLoadCrl(const UA_ByteString *crl) {
-    const UA_Byte *at = crl->data;
-    X509_CRL *result = d2i_X509_CRL(NULL, &at, (long)crl->length);
+    X509_CRL *result = UA_OpenSSL_LoadDerCrl(crl);
     return result ? result : UA_OpenSSL_LoadPemCrl(crl);
 }
 
@@ -395,8 +394,7 @@ openSSLLoadLeafCertificate(UA_ByteString cert, size_t *offset) {
     }
     *offset += cert.length;
 
-    size_t line;
-    BIO *bio = UA_OpenSSL_PemBio(&cert, &line);
+    BIO *bio = UA_OpenSSL_PemBio(&cert, NULL);
     if(!bio)
         return NULL;
     X509 *result = PEM_read_bio_X509(bio, NULL, UA_OpenSSL_refusePassword, NULL);
@@ -1030,10 +1028,9 @@ UA_CertificateUtils_getKeySize(UA_ByteString *certificate,
  * then DER, or NULL. */
 static EVP_PKEY *
 openSSLLoadPublicKey(const UA_ByteString *data) {
-    size_t line;
     const UA_Byte *at = data->data;
     X509 *cert = NULL;
-    BIO *bio = UA_OpenSSL_PemBio(data, &line);
+    BIO *bio = UA_OpenSSL_PemBio(data, NULL);
     if(bio)
         cert = PEM_read_bio_X509(bio, NULL, UA_OpenSSL_refusePassword, NULL);
     BIO_free(bio);
@@ -1041,7 +1038,7 @@ openSSLLoadPublicKey(const UA_ByteString *data) {
         cert = d2i_X509(NULL, &at, (long)data->length);
     X509_REQ *csr = NULL;
     if(!cert) {
-        bio = UA_OpenSSL_PemBio(data, &line);
+        bio = UA_OpenSSL_PemBio(data, NULL);
         if(bio)
             csr = PEM_read_bio_X509_REQ(bio, NULL, UA_OpenSSL_refusePassword, NULL);
         BIO_free(bio);

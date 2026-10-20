@@ -157,10 +157,8 @@ pub(crate) enum Refusal {
     /// The PEM block of the certificate `number`, from 1, of `trust` holds bytes after
     /// it, such as trust settings or a second certificate.
     Trailing { number: usize },
-    /// Line `number`, from 1, of `credential`, counted by `\n`, is in a PEM block, and
-    /// a piece of it that aws-lc reads (at most 253 bytes, through its `\n`) holds a
-    /// byte of 0x80 to 0xFF after its last byte of 0x21 to 0x7F, or anywhere when it
-    /// has none, which aws-lc reads in two ways by the CPU target.
+    /// Line `number`, from 1 and counted by `\n`, of `credential` is in a PEM block
+    /// and holds a byte of 0x80 to 0xFF that the CPU targets read in two ways.
     Line {
         credential: Credential,
         number: usize,

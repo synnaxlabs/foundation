@@ -85,14 +85,7 @@ UA_OpenSSL_refusePassword(char *buf, int size, int rwflag, void *userdata) {
     return -1;
 }
 
-/* Gives the line, from 1 and counted by `\n`, of the first piece of a PEM block in
- * `pem` that aws-lc reads in two ways by the sign of `char`, else 0. aws-lc reads
- * the pieces of `BIO_gets` (at most 253 bytes, each through its `\n`) and drops the
- * bytes of 0x20 or less as a `char` at the end of each, so it keeps the bytes through
- * the last one of 0x21 to 0x7F where `char` is signed, and more where it is unsigned
- * only when a byte after them is 0x80 to 0xFF. A block runs from a piece that starts
- * `-----BEGIN ` and whose kept bytes hold no NUL and end in `-----`, through the next
- * piece whose kept bytes start `-----END `. */
+/* The check of `UA_OpenSSL_PemBio`: gives the line that it refuses, else 0. */
 static size_t
 openSSLAmbiguousLine(const UA_ByteString pem) {
     const UA_Byte *at = pem.data;
@@ -129,8 +122,10 @@ openSSLAmbiguousLine(const UA_ByteString pem) {
 
 BIO *
 UA_OpenSSL_PemBio(const UA_ByteString *pem, size_t *line) {
-    *line = openSSLAmbiguousLine(*pem);
-    if(*line > 0)
+    size_t found = openSSLAmbiguousLine(*pem);
+    if(line)
+        *line = found;
+    if(found > 0)
         return NULL;
     return BIO_new_mem_buf((void *)pem->data, (ossl_ssize_t)pem->length);
 }
@@ -1428,11 +1423,12 @@ cleanup:
     return retval;
 }
 
-/* Loads `privateKey`, DER then PEM, and writes to `line` the line at which
- * `UA_OpenSSL_PemBio` refuses it, else 0. */
+/* Loads `privateKey`, DER then PEM, and writes to `line`, unless NULL, the line at
+ * which `UA_OpenSSL_PemBio` refuses it, else 0. */
 static EVP_PKEY *
 openSSLLoadPrivateKey(const UA_ByteString *privateKey, size_t *line) {
-    *line = 0;
+    if(line)
+        *line = 0;
     if(privateKey->length == 0)
         return NULL;
     const unsigned char *at = privateKey->data;
@@ -1449,8 +1445,7 @@ openSSLLoadPrivateKey(const UA_ByteString *privateKey, size_t *line) {
 
 EVP_PKEY *
 UA_OpenSSL_LoadPrivateKey(const UA_ByteString *privateKey) {
-    size_t line;
-    return openSSLLoadPrivateKey(privateKey, &line);
+    return openSSLLoadPrivateKey(privateKey, NULL);
 }
 
 size_t
@@ -1460,11 +1455,12 @@ UA_CertificateUtils_keyLine(const UA_ByteString *key) {
     return line;
 }
 
-/* Loads `certificate`, DER then PEM, and writes to `line` the line at which
- * `UA_OpenSSL_PemBio` refuses it, else 0. */
+/* Loads `certificate`, DER then PEM, and writes to `line`, unless NULL, the line at
+ * which `UA_OpenSSL_PemBio` refuses it, else 0. */
 static X509 *
 openSSLLoadCertificate(const UA_ByteString *certificate, size_t *line) {
-    *line = 0;
+    if(line)
+        *line = 0;
     X509 *result = UA_OpenSSL_LoadDerCertificate(certificate);
     if(result)
         return result;
@@ -1486,8 +1482,7 @@ UA_CertificateUtils_certificateLine(const UA_ByteString *certificate) {
 X509 *
 UA_OpenSSL_LoadCertificate(const UA_ByteString *certificate,
                            int keyType) {
-    size_t line;
-    X509 *result = openSSLLoadCertificate(certificate, &line);
+    X509 *result = openSSLLoadCertificate(certificate, NULL);
     if(!result)
         return NULL;
 
@@ -1539,8 +1534,7 @@ UA_OpenSSL_LoadDerCrl(const UA_ByteString *crl) {
 
 X509_CRL *
 UA_OpenSSL_LoadPemCrl(const UA_ByteString *crl) {
-    size_t line;
-    BIO *bio = UA_OpenSSL_PemBio(crl, &line);
+    BIO *bio = UA_OpenSSL_PemBio(crl, NULL);
     if(!bio)
         return NULL;
     X509_CRL *result =
