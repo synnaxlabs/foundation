@@ -65,7 +65,7 @@ pub(crate) fn is(message: &[u8], kind: [u8; 4]) -> bool {
 }
 
 /// Sets the service result of the answer `message` to `status`.
-pub(super) fn set_result(message: &mut [u8], status: Status) {
+pub(crate) fn set_result(message: &mut [u8], status: Status) {
     // The type of the answer, then its time and request handle.
     message[40..44].copy_from_slice(&status.0.to_le_bytes());
 }

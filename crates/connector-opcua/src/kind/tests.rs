@@ -7,7 +7,7 @@ use std::fmt::Display;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ::sim::{Sim, node};
@@ -32,8 +32,8 @@ use types::quality::Quality;
 
 use super::*;
 use crate::client::GRACE;
-use crate::client::tests::common::{env, is, rig};
-use crate::client::tests::{RELAY, relayed_up};
+use crate::client::tests::common::{env, is, rig, set_result};
+use crate::client::tests::{RELAY, Relay, relayed, relayed_up};
 use crate::gate::Gate;
 use crate::sim::{Served, Variables, serve};
 
@@ -2208,6 +2208,90 @@ fn fails_on_a_node_that_the_server_does_not_watch() {
                      channel `plant.b`: BadNodeIdUnknown";
     assert_eq!(errors(&outcome.statuses), [(2, unwatched.into())]);
     assert_eq!(outcome.frames.len(), 0);
+}
+
+/// The binary encoding of a `CreateSubscription` answer, a `NodeId` of 4 bytes.
+const CREATED: [u8; 4] = [0x01, 0x00, 0x16, 0x03];
+
+/// A subscribe that the server refuses with a status other than
+/// `BadServiceUnsupported` or `BadNotImplemented` ends each run with a device error,
+/// and the kind does not poll.
+#[test]
+fn fails_on_a_subscribe_that_the_server_refuses() {
+    let outcome = scene(RELAY, "20Hz", false, Setup::three(), |scene| async move {
+        let node = scene.node.clone();
+        let refuse = |message: &mut Vec<u8>| {
+            if is(message, CREATED) {
+                set_result(message, Status(0x8077_0000));
+            }
+        };
+        let supervised = scene.supervise(ms(350));
+        Box::pin(relayed(&node, &Relay::default(), refuse, supervised)).await
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    let refused = "the subscribe to opc.tcp://10.0.0.1:4841 failed with \
+                   BadTooManySubscriptions";
+    assert_eq!(errors(&outcome.statuses), [(2, refused.into())]);
+    assert_eq!(notes(&outcome.statuses), Vec::<String>::new());
+    assert_eq!(outcome.frames.len(), 0);
+}
+
+/// The binary encoding of a Read request, a `NodeId` of 4 bytes.
+const READ_REQUEST: [u8; 4] = [0x01, 0x00, 0x77, 0x02];
+
+/// The `NodeId` of the current time of a server, `ns=0;i=2258`, in 4 bytes.
+const CURRENT_TIME: [u8; 4] = [0x01, 0x00, 0xD2, 0x08];
+
+/// The kind reads the current time of the server when it subscribes and then each
+/// 10 s, not at each change.
+#[test]
+fn reads_the_current_time_of_the_server_each_10_s() {
+    let reads = Arc::new(AtomicU32::new(0));
+    let count = Arc::clone(&reads);
+    let outcome = scene(RELAY, "20Hz", false, Setup::three(), |scene| async move {
+        let node = scene.node.clone();
+        let up = move |message: &mut Vec<u8>| {
+            let time = message.windows(4).any(|node| node == CURRENT_TIME);
+            if is(message, READ_REQUEST) && time {
+                count.fetch_add(1, Ordering::Relaxed);
+            }
+        };
+        for at in (430..25_000).step_by(1_000) {
+            scene.after(ms(at), |scene| async move {
+                scene.variables.change(Quality::GOOD);
+            });
+        }
+        Box::pin(relayed_up(&node, up, scene.supervise(ms(25_050)))).await
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    assert_eq!(errors(&outcome.statuses), []);
+    assert_eq!(outcome.frames.len(), 26);
+    assert_eq!(reads.load(Ordering::Relaxed), 3);
+}
+
+/// The note of a node of another type stays while a change leaves that node out: the
+/// status after the change at 1.43 s still holds it, and the end of the run clears it.
+#[test]
+fn keeps_the_note_of_a_node_of_another_type_while_changes_leave_it_out() {
+    use crate::value::Value as V;
+    let outcome = watch(Setup::three(), |scene| async move {
+        scene.after(ms(430), |scene| async move {
+            scene.variables.set(B, V::I32(7));
+        });
+        scene.after(ms(1_430), |scene| async move {
+            scene.variables.set(A, V::F64(10.0));
+            scene.variables.set(C, V::F64(10.0));
+        });
+        scene.supervise(ms(3_050)).await
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    assert_eq!(errors(&outcome.statuses), []);
+    assert_eq!(keys(&outcome.frames), [vec![1, 2, 3, 4], vec![1, 2, 4]]);
+    let note = "leaves out the values of the node `ns=3;i=7` of the channel `plant.b`: \
+                they are of type Int32, and the channel has samples of type f64";
+    let shown: Vec<_> = texts(&outcome.statuses, NOTE).map(String::as_str).collect();
+    assert_eq!(shown, ["", note, note, "", ""]);
+    assert_eq!(last(&outcome.statuses, MISTYPED), 1);
 }
 
 /// A change to a status that is not Good is left out and counted, and a frame with
