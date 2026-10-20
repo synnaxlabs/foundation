@@ -26,10 +26,8 @@ Never read all of `docs/decisions/`: read only the records that an issue names.
   states its goal, crates, tests that must pass, and decisions section; the scenario
   needs it; and nothing blocks it. Else reply on the issue with the reason. Issues off
   the path wait without a milestone. An issue labeled `blocked` with no `owner:` label
-  is on the backlog. When its wait ends or drops, `/build`, step 2, removes `blocked`
-  and sends you its link. Write a dropped wait's line again from what the issue
-  states. Admit it as a new issue when the line names nothing open, else add
-  `blocked` again.
+  is on the backlog. When its wait ends, a builder removes `blocked` and sends you its
+  link (`/build`, Rules). Admit it then as a new issue.
 - **Refill.** On every wake, count the `ready` issues with no `owner:` label. While
   there are fewer than builders, take the next open issues on the path from the
   backlog, not only new ones, and admit each that passes. An idle builder is a failure

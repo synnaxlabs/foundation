@@ -20,13 +20,11 @@ when its PR merges, `mcp__factory__next` clears it and starts `/build` again.
    restart (`docs/coordination.md`, "Worktrees"). Never loop over `.claude/worktrees` or
    `git worktree list`: the worktrees of other sessions are there too.
 2. Run the waits script. It prints each `blocked` issue with its owner and its state.
-   For each with your name, `ended` is a wait that has ended (Rules). At `dropped`, an
-   issue or PR that it waits on closed with no merge or as not done: write the line
-   again from what the issue states. Give each of yours with `no line` its line
-   (Rules). For each with `-` at `ended` or `dropped`, remove `blocked` and send its
-   link to `laptop.coordinator`, which admits it (`/coordinate`, "Admit";
-   `docs/coordination.md`, "Messages", while it is paused). Its exits mean what they
-   mean in step 4. Then an open issue labeled `owner:$FACTORY_NAME` that is not
+   For each with your name or `-`, `ended` is a wait that has ended (Rules). At
+   `dropped`, an issue or PR that it waits on closed with no merge or as not done:
+   write the line again from what the issue and the closed one state, and keep
+   `blocked`. Give each of yours with `no line` its line (Rules). Its exits mean what
+   they mean in step 4. Then an open issue labeled `owner:$FACTORY_NAME` that is not
    `blocked` comes first, one with no open PR before one with an open PR: resume it
    from its last state comment. Run "Wait once" in the background for the PR of each
    other one that has auto-merge on.
@@ -175,12 +173,14 @@ take the next issue meanwhile.
   other work (Take an issue). A `blocked` issue names each wait in one line of its body,
   `Waits on #<n>, #<m>.`, for issues and PRs, with `the person` for a question
   (`Waits on #12 and the person.`). When the answer comes, take `the person` out of the
-  line, and delete the line when nothing is left. A wait has ended when each issue
-  that the line names closed as completed, each PR merged, and the line names no
-  `the person`, as `ended` of the waits script says (step 2). Then remove `blocked` if
-  it is there. If the issue has your `owner:` label and no open PR closes it or has its
-  number in its branch, also give it back (step 3). `/coordinate` admits an issue with
-  no `owner:` label. If you build no other issue, take one (Take an issue).
+  line. Delete the line when nothing is left in it. A wait has ended when you delete
+  the line, or when each issue that it names closed as completed, each PR merged, and
+  it names no `the person`, as `ended` of the waits script says (step 2). Then remove
+  `blocked` if it is there. If the issue has your `owner:` label and no open PR closes
+  it or has its number in its branch, also give it back (step 3). With no `owner:`
+  label, send its link to `laptop.coordinator`, which admits it (`/coordinate`,
+  "Admit"; `docs/coordination.md`, "Messages", while it is paused). If you build no
+  other issue, take one (Take an issue).
 - A key choice (`CLAUDE.md`, "The person decides the design"): send it to
   `laptop.monitor` when you make it, before work builds on it, then go on. Never add
   `blocked` for it.
