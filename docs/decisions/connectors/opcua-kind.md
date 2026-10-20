@@ -301,21 +301,22 @@
   `document.missing-attribute`. The fix at `user` or `password` with no `certificate`
   says why: a password never goes in clear, so it needs `certificate` with its `key` and
   `trust` (`laptop.monitor`, the key choices (3) and (b) accepted with this condition,
-  2026-10-20T13:15Z). `opcua.bad-user` is for a `user` that is not a string or is empty.
-  The session sends a `UserNameIdentityToken` with the bytes of the name and the
-  password, so a NUL byte does not cut the password. No password goes in clear:
-  open62541 refuses a user token policy in the policy None on a channel that is not
-  `SignAndEncrypt`, and the connector never turns that off, so the connect gives
-  `BadIdentityTokenRejected`. `run` and `browse` read `password` with the other sources.
-  `BadUserAccessDenied` and `BadIdentityTokenInvalid` with a `user` give "the server
-  refused the user {user} with the password {source}. Check `user` and the password
-  {source}". A server can also send `BadIdentityTokenRejected` for a token that it
-  refuses, so with a `user` its text names both causes: no endpoint in the mode that
-  lets in a user name and password, in the mode Sign only a user token whose policy is
-  None, or the refusal of the user. The fix names `user` and the password, and in the
-  mode Sign a user name token whose policy encrypts the password; in the mode
-  SignAndEncrypt it asks for user names and passwords on one of the policies
-  (`laptop.architect-2`, 2026-10-20T12:58:13Z:
+  2026-10-20T13:45:03Z:
+  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6292324991).
+  `opcua.bad-user` is for a `user` that is not a string or is empty. The session sends a
+  `UserNameIdentityToken` with the bytes of the name and the password, so a NUL byte
+  does not cut the password. No password goes in clear: open62541 refuses a user token
+  policy in the policy None on a channel that is not `SignAndEncrypt`, and the connector
+  never turns that off, so the connect gives `BadIdentityTokenRejected`. `run` and
+  `browse` read `password` with the other sources. `BadUserAccessDenied` and
+  `BadIdentityTokenInvalid` with a `user` give "the server refused the user {user} with
+  the password {source}. Check `user` and the password {source}". A server can also send
+  `BadIdentityTokenRejected` for a token that it refuses, so with a `user` its text
+  names both causes: no endpoint in the mode that lets in a user name and password, in
+  the mode Sign only a user token whose policy is None, or the refusal of the user. The
+  fix names `user` and the password, and in the mode Sign a user name token whose policy
+  encrypts the password; in the mode SignAndEncrypt it asks for user names and passwords
+  on one of the policies (`laptop.architect-2`, 2026-10-20T12:58:13Z:
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6291388946). Lost: a
   block `user "operator" { password = ... }`, a block for one pair, as a later X.509
   user token would need a second form (plan:
