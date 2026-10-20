@@ -830,6 +830,96 @@ fn a_crash_in_the_write_of_the_join_file_leaves_a_whole_request_and_the_node_joi
     }
 }
 
+// A process crash after the rename of the first write and before the sync of
+// the directory, then an ask that sends the stored request and joins, then a power
+// cut. Gives what the file holds after the cut, and the third ask with a new card.
+#[test]
+fn an_ask_that_sends_the_stored_request_makes_it_durable() {
+    let mut lost = Vec::new();
+    for seed in 0..4_u64 {
+        for step in 0..64_i64 {
+            let span = Span::from_nanos(step.saturating_mul(25_000));
+            let mut cluster = recorded_cluster(seed, &IDS, &[]);
+            let joiner = cluster.sim.node(sim::node::Config::default());
+            let card = common::member(JOINER).card;
+            let ask = || (ticket_to(TICKET, &IDS), card.clone());
+            drop(asks_at(&joiner, vec![ask()]));
+            cluster.sim.run_for(span).unwrap();
+            cluster.sim.crash(&joiner, Crash::Process);
+            let left = on(
+                &mut cluster,
+                &joiner,
+                |node| async move { stored(&node).await },
+            );
+            if !matches!(left, Ok(Some(_))) {
+                continue;
+            }
+            let asked = asks_at(&joiner, vec![ask()]);
+            cluster.run(seconds(20));
+            let asked: Vec<_> =
+                asked.lock().unwrap().drain(..).map(|(a, _)| a).collect();
+            assert_eq!(asked, [Ok(founding_of(&IDS, &IDS))], "{seed} {span:?}");
+            cluster.sim.crash(&joiner, Crash::Power);
+            let after = on(
+                &mut cluster,
+                &joiner,
+                |node| async move { stored(&node).await },
+            );
+            if matches!(after, Ok(None)) {
+                let new = member_signed(JOINER, JOINER, 2).card;
+                let asked = asks_at(&joiner, vec![(ticket_to(TICKET, &IDS), new)]);
+                cluster.run(seconds(30));
+                let asked: Vec<_> =
+                    asked.lock().unwrap().drain(..).map(|(a, _)| a).collect();
+                lost.push((seed, step, asked));
+            }
+        }
+    }
+    assert!(lost.is_empty(), "{lost:?}");
+}
+
+// An ask makes its mesh directory and keeps the request in it.
+#[test]
+fn an_ask_makes_its_directory() {
+    solo(|node, tasks| async move {
+        let transport = transport_of(&node, &tasks, JOINER);
+        let config = join::Config {
+            dir: PathBuf::from("mesh"),
+            ..config_of(&node, transport, ticket_to(TICKET, &IDS))
+        };
+        let request = request_of(&config);
+        let asked = join::ask(config).await;
+        assert!(matches!(asked, Err(Error::Unjoined { .. })), "{asked:?}");
+        let blocks = crate::file::Blocks::new(create_pool()).unwrap();
+        let files = node.files();
+        let left =
+            join::file::read(&files, Path::new("mesh"), &blocks, Mode::Read).await;
+        assert_eq!(left, Ok(Some(request)));
+    });
+}
+
+// An ask that joins, a power cut, then an ask with a new card joins.
+#[test]
+fn an_ask_that_joins_leaves_its_request_after_a_power_cut() {
+    for seed in 0..8_u64 {
+        let mut cluster = recorded_cluster(seed, &IDS, &[]);
+        let joiner = cluster.sim.node(sim::node::Config::default());
+        let asked = asks_at(
+            &joiner,
+            vec![(ticket_to(TICKET, &IDS), common::member(JOINER).card)],
+        );
+        cluster.run(seconds(20));
+        let asked: Vec<_> = asked.lock().unwrap().drain(..).map(|(a, _)| a).collect();
+        assert_eq!(asked, [Ok(founding_of(&IDS, &IDS))], "{seed}");
+        cluster.sim.crash(&joiner, Crash::Power);
+        let new = member_signed(JOINER, JOINER, 2).card;
+        let asked = asks_at(&joiner, vec![(ticket_to(TICKET, &IDS), new)]);
+        cluster.run(seconds(30));
+        let asked: Vec<_> = asked.lock().unwrap().drain(..).map(|(a, _)| a).collect();
+        assert_eq!(asked, [Ok(founding_of(&IDS, &IDS))], "{seed}");
+    }
+}
+
 /// What [`Mesh::start`] of [`JOINER`] with the founding of [`IDS`] gives, after
 /// `before` ran on its node.
 #[expect(clippy::unwrap_in_result, reason = "a test may panic")]

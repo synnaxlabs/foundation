@@ -4,7 +4,8 @@
 //!
 //! The file holds an 8-byte check of the rest, the format version, then what
 //! `Request::encode` gives. A write removes `join`, writes `join.new`, renames it to
-//! `join`, and syncs the directory.
+//! `join`, and syncs the directory. The file stays for the life of the directory: each
+//! open of a founding that lacks this node reads it.
 
 use std::path::Path;
 
@@ -46,8 +47,8 @@ pub(crate) async fn read(
     request.map(Some).ok_or(Error::JoinFile { path })
 }
 
-/// Makes `dir`, durable in its parent, and writes `request` as its join file. The file
-/// is durable when it returns `Ok`.
+/// Writes `request` as the join file of `dir`, which [`durable`] made. The file is
+/// durable when it returns `Ok`.
 ///
 /// # Errors
 ///
@@ -61,6 +62,16 @@ pub(crate) async fn write(
 ) -> Result<(), Error> {
     let mut body = Vec::new();
     request.encode(&mut body);
-    file::make_dir(files, dir).await.map_err(Error::Files)?;
     Ok(file::replace(files, dir, FILE, blocks, VERSION, &body).await?)
+}
+
+/// Makes `dir` and the name of each file in it durable, so that a join file that a
+/// crash left in the page cache stays.
+///
+/// # Errors
+///
+/// - [`Error::Files`] when a file call fails.
+pub(crate) async fn durable(files: &Files, dir: &Path) -> Result<(), Error> {
+    file::make_dir(files, dir).await.map_err(Error::Files)?;
+    files.sync_dir(dir).await.map_err(Error::Files)
 }

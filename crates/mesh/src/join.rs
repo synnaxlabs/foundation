@@ -116,6 +116,7 @@ pub async fn ask(config: Config) -> Result<region::Founding, Error> {
         "invariant: the transport proves the public key of the card"
     );
     let blocks = Blocks::new(Rc::clone(&pool)).map_err(Error::Pool)?;
+    file::durable(&files, &dir).await?;
     let request = match file::read(&files, &dir, &blocks, Mode::Write).await? {
         Some(stored)
             if stored.ticket == ticket.public_key()
