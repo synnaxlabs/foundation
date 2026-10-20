@@ -622,6 +622,46 @@ class ReaderTest(unittest.TestCase):
         self.assertEqual(got[0]["plant.a"].tolist(), [1.5])
         self.assertEqual(got[1], "stopped")
 
+    def test_a_reader_of_each_index_reads_the_frames_of_a_writer_of_two(self) -> None:
+        plant = self.client.open_reader(["plant.a", "plant.b"])
+        self.addCleanup(plant.close)
+        other = self.client.open_reader("other.a")
+        self.addCleanup(other.close)
+        with self.writes.open_writer(["plant.a", "other.a", "plant.b"]) as writer:
+            writer.write({"plant.a": 1.5, "other.a": 2.5, "plant.b": 3})
+            writer.write({"other.a": 6.5})
+            plant_stamps, other_stamps = Stamps(), Stamps()
+            # Ahead of the node's stamps of the frames before.
+            plant_stamps.next += 10**9
+            other_stamps.next += 10**9
+            stamps = (int(plant_stamps.take(1)[0]), int(other_stamps.take(1)[0]))
+            writer.write({
+                "plant.a": 4.5,
+                "plant.b": 5,
+                "other.a": 7.5,
+                "plant.time": stamps[0],
+                "other.time": stamps[1],
+            })
+            writer.write_series({
+                "plant.a": np.array([8.5, 9.5]),
+                "plant.b": np.array([10, 11], dtype=np.int64),
+                "plant.time": plant_stamps.take(2),
+                "other.a": np.array([12.5, 13.5, 14.5]),
+                "other.time": other_stamps.take(3),
+            })
+        plants = self.read(plant, 3)
+        self.assertEqual(
+            [(f["plant.a"].tolist(), f["plant.b"].tolist()) for f in plants],
+            [([1.5], [3]), ([4.5], [5]), ([8.5, 9.5], [10, 11])],
+        )
+        self.assertEqual(plants[1]["plant.time"].astype(np.int64)[0], stamps[0])
+        others = self.read(other, 4)
+        self.assertEqual(
+            [f["other.a"].tolist() for f in others],
+            [[2.5], [6.5], [7.5], [12.5, 13.5, 14.5]],
+        )
+        self.assertEqual(others[2]["other.time"].astype(np.int64)[0], stamps[1])
+
 
 if __name__ == "__main__":
     unittest.main()
