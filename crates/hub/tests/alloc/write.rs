@@ -30,10 +30,19 @@ pub(crate) const SPACING: Span = Span::from_nanos(30_000_000);
 pub(crate) struct Progress {
     /// The program has the places of its write.
     pub(crate) started: AtomicBool,
-    /// The frames that the program sent.
+    /// The bursts that the program sent.
     pub(crate) sent: AtomicUsize,
-    /// The outcomes that the program took.
+    /// The bursts whose outcomes the program took.
     pub(crate) taken: AtomicUsize,
+}
+
+/// The frames of a program's write.
+#[derive(Clone, Copy)]
+pub(crate) struct Run {
+    pub(crate) groups: Groups,
+    /// The frames that the program sends before it takes their outcomes.
+    pub(crate) burst: i64,
+    pub(crate) bursts: i64,
 }
 
 /// A program writes frames that the node stamps, one at a time: of `value` for one
@@ -50,7 +59,12 @@ pub(crate) fn relays_a_frame_with_no_allocation(groups: Groups) {
         core: None,
     };
     let (node, kept) = (program.clone(), Arc::clone(&progress));
-    let main = move |tasks| write(node, tasks, at, kept, groups);
+    let run = Run {
+        groups,
+        burst: 1,
+        bursts: WARM + COUNTED,
+    };
+    let main = move |tasks| write(node, tasks, at, kept, run);
     drop(program.shards().start(config, main).expect("starts"));
     sim.run_on(&home, move |node, tasks| serve(node, tasks, progress))
         .expect("the run ends");
@@ -119,19 +133,19 @@ pub(crate) async fn wait(node: &sim::node::Node, n: i64, done: impl Fn() -> bool
     }
 }
 
-/// The program: admits a hello, opens a write of `groups`, and sends each frame of
-/// the run once the outcomes of the frame before it came. The places of two groups are
-/// `time`, `time-b`, `value`, and `value-b`.
+/// The program: admits a hello, opens a write of the groups of `run`, and sends each
+/// burst of `run` once the outcomes of the burst before it came. The places of two
+/// groups are `time`, `time-b`, `value`, and `value-b`.
 pub(crate) async fn write(
     node: sim::node::Node,
     tasks: Tasks,
     at: Address,
     progress: Arc<Progress>,
-    groups: Groups,
+    run: Run,
 ) {
     let mut agent = Agent::dial(&node, tasks, at, common::name(SUBJECT)).await;
     agent.admit().await;
-    let (select, count): (&[&str], u32) = match groups {
+    let (select, count): (&[&str], u32) = match run.groups {
         Groups::One => (&["value"], 1),
         Groups::Two => (&["value", "value-b"], 2),
     };
@@ -146,14 +160,19 @@ pub(crate) async fn write(
     };
     let ends: Vec<_> = (0..series).map(|place| (place, (place + 1) * 8)).collect();
     let mut body = vec![0; ends.len() * 8];
-    for n in 0..WARM + COUNTED {
-        for value in body.chunks_mut(8).skip(ends.len() / 2) {
-            value.copy_from_slice(&n.to_le_bytes());
+    for burst in 0..run.bursts {
+        let frames = burst * run.burst..(burst + 1) * run.burst;
+        for n in frames.clone() {
+            for value in body.chunks_mut(8).skip(ends.len() / 2) {
+                value.copy_from_slice(&n.to_le_bytes());
+            }
+            stream.frame(head, &[], &ends, &body).await;
         }
-        stream.frame(head, &[], &ends, &body).await;
         progress.sent.fetch_add(1, Ordering::Relaxed);
-        for group in 0..count {
-            outcome(&mut stream, n, group).await;
+        for n in frames {
+            for group in 0..count {
+                outcome(&mut stream, n, group).await;
+            }
         }
         progress.taken.fetch_add(1, Ordering::Relaxed);
     }

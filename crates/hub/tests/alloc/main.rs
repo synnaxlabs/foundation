@@ -492,6 +492,7 @@ fn main() {
         write::relays_a_frame_with_no_allocation(groups);
     }
     forward::forwards_a_frame_with_no_allocation();
+    forward::forwards_a_full_window_with_no_allocation();
     catch_up_from_disk();
     woken_of_a_reader_that_takes_each_frame();
     woken_of_a_reader_that_falls_behind_again();
