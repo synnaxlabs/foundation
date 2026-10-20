@@ -985,6 +985,56 @@ mod tests {
     }
 
     #[test]
+    fn arm_skips_its_tests_only_with_no_change_of_code() {
+        let arm = workflow(&fixture().join("../.."), "arm.yaml", "ARM");
+        let arm: Vec<&str> = arm.lines().collect();
+        // A third job can give a second check named `test`.
+        let jobs: Vec<&str> = (under(&arm, "jobs:").into_iter())
+            .filter(|line| indent(line) == 2)
+            .collect();
+        assert_eq!(jobs, ["  changes:", "  parts:", "  test:"]);
+        assert_eq!(
+            outputs(&arm),
+            [concat!(
+                "      code: ${{ github.event_name == 'push' && 'false'",
+                " || steps.filter.outputs.code }}",
+            )]
+        );
+        // The paths of a change of code, which both the trigger of a push to `main`
+        // and the filter of each other event give.
+        let paths = [
+            "'crates/**'",
+            "'bench/**'",
+            "'fuzz/**'",
+            "'xtask/**'",
+            "'sdk/**'",
+            "'oracles/**'",
+            "'patches/**'",
+            "'Cargo.toml'",
+            "'Cargo.lock'",
+            "'.cargo/**'",
+            "'rust-toolchain*'",
+            "'clippy.toml'",
+            "'rustfmt.toml'",
+            "'deny.toml'",
+            "'docs/quickstart.md'",
+            "'.github/workflows/**'",
+        ];
+        let push = under(&under(&under(&arm, "on:"), "  push:"), "    paths:");
+        let push: Vec<&str> = (push.iter())
+            .map(|line| line.strip_prefix("      - ").unwrap_or(line))
+            .collect();
+        assert_eq!(push, paths);
+        let step = filter_step(&arm);
+        assert_eq!(step[..FILTER.len()], FILTER);
+        let filter: Vec<&str> = (step[FILTER.len()..].iter())
+            .map(|line| line.strip_prefix("              - ").unwrap_or(line))
+            .collect();
+        assert_eq!(filter[0], "            code:");
+        assert_eq!(filter[1..], paths);
+    }
+
+    #[test]
     fn windows_runs_the_tests_of_program_one_at_a_time() {
         let config =
             std::fs::read_to_string(fixture().join("../../.github/nextest.toml"))
