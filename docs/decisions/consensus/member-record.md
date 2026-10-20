@@ -215,17 +215,20 @@
   that applied the join admits only the stored request, so the case left is a call in
   which each voter that applied the join does not admit it, after the card or the status
   changed (`laptop.architect`, 2026-10-20T12:00:29Z,
-  https://github.com/synnaxlabs/foundation/pull/3571#issuecomment-6290352039). An `ask`
+  https://github.com/synnaxlabs/foundation/pull/3571#issuecomment-6290352039; each
+  refusal counts, in place of "for its card, its ticket, or its status" of its item 3,
+  until #3588: 2026-10-20T12:37:53Z,
+  https://github.com/synnaxlabs/foundation/pull/3571#issuecomment-6291013253). An `ask`
   in a mesh directory that holds a founding file gives `Error::Founded`, before it makes
   the directory or reads `join`: the file stays for the life of the directory, and each
   open of a founding that lacks this node reads it. Lost: `ask` gives the stored
   founding when the ticket is for its region, which is a silent success for a caller in
   the wrong order (`laptop.architect`, 2026-10-20T11:14:16Z,
-  https://github.com/synnaxlabs/foundation/pull/3571#issuecomment-6289593633).
-  Until snapshots (#253), a region whose founders all left cannot admit a node. `secret`
-  finds no key itself: `ops` and `node` read the member and pass its seal key. A
-  rotation and `Remove` wait for a caller; a rotation that only the node signs lets a
-  stolen key lock the node out. Lost: a record that only the admitting
+  https://github.com/synnaxlabs/foundation/pull/3571#issuecomment-6289593633). Until
+  snapshots (#253), a region whose founders all left cannot admit a node. `secret` finds
+  no key itself: `ops` and `node` read the member and pass its seal key. A rotation and
+  `Remove` wait for a caller; a rotation that only the node signs lets a stolen key lock
+  the node out. Lost: a record that only the admitting
   voter checks (a voter that lies admits any key, against BQ12). A `card::Signed` holds
   the `node::Key` that its signature covers
   (`Signed::key`): the key cannot come from the public key, which can rotate, so the
