@@ -218,10 +218,11 @@ impl Reserved {
         })
     }
 
-    /// Reserves the rest of `bytes` past what it holds, until it drops. It keeps what
-    /// it holds when `bytes` is less.
+    /// Reserves the rest of `bytes`, at least what it holds, until it drops.
     fn grow(&mut self, bytes: u64) -> Result<(), Error> {
-        let more = bytes.saturating_sub(self.bytes);
+        let more = bytes
+            .checked_sub(self.bytes)
+            .expect("invariant: a hold grows");
         self.state.borrow().bodies.reserve(&self.subject, more)?;
         self.bytes += more;
         Ok(())

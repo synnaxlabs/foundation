@@ -101,7 +101,9 @@
   goes between frames, and each reply goes to the program as it came. It reads no more
   of the program while 64 frames have an outcome due, so a forward moves at most 64
   frames in each round trip to the home (answer 4 of
-  https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6269021946). When
+  https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6269021946). One
+  task counts the replies of a forward before it reads the program, in each poll, so
+  the window keeps no waker. A join of many homes keeps that order (#3565). When
   the forward is cut, the member resets the program's write with the code of the home,
   and with `FAILED` in place of `MALFORMED`. It also gives `FAILED` for a reply that
   `Replies` refuses, a finish of the home before the program's, a finish with an outcome

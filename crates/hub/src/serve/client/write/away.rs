@@ -25,7 +25,7 @@ use crate::serve::{Error, alloc, unless};
 use crate::{State, dial};
 
 /// The most frames sent to the home with an outcome due. The node reads no more of the
-/// program while so many are due.
+/// program while so many are due. The `WINDOW` of the `forward` bench is this number.
 const IN_FLIGHT: u64 = 64;
 
 /// Serves the write of the subject of `admission` that `write` starts with `open`,
