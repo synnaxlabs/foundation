@@ -304,22 +304,26 @@ mod tests {
         workflow::under(lines, key).unwrap_or_else(|e| panic!("{e}"))
     }
 
-    /// `.github/workflows/ci.yaml` in the workspace at `root`, with no blank or comment
+    /// `.github/workflows/<file>` in the workspace at `root`, with no blank or comment
     /// line.
-    fn workflow(root: &Path) -> String {
+    ///
+    /// # Panics
+    ///
+    /// When its top-level keys are not `name: <name>`, `on`, `concurrency`, and `jobs`.
+    fn workflow(root: &Path, file: &str, name: &str) -> String {
         let text =
-            std::fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap();
-        let ci = yaml_lines(&text);
+            std::fs::read_to_string(root.join(".github/workflows").join(file)).unwrap();
+        let lines = yaml_lines(&text);
         // A key such as `defaults`, `env`, or `run-name` can change what a job runs.
-        let keys: Vec<&str> = (ci.iter().copied())
+        let keys: Vec<&str> = (lines.iter().copied())
             .filter(|line| !line.starts_with(' '))
             .collect();
         assert_eq!(
             keys,
-            ["name: CI", "on:", "concurrency:", "jobs:"],
-            "ci.yaml has a top-level key that the checks do not read"
+            [&format!("name: {name}"), "on:", "concurrency:", "jobs:"],
+            "{file} has a top-level key that the checks do not read"
         );
-        ci.join("\n")
+        lines.join("\n")
     }
 
     /// The lines of the step `filter` of `ci.yaml` up to the text of its filters.
@@ -666,7 +670,7 @@ mod tests {
     #[test]
     fn models_filter_names_each_crate_that_a_model_task_selects() {
         let root = fixture().join("../..");
-        let ci = workflow(&root);
+        let ci = workflow(&root, "ci.yaml", "CI");
         let ci: Vec<&str> = ci.lines().collect();
         let (models, jobs) = (models(&ci), under(&ci, "jobs:"));
         // An input such as `predicate-quantifier` or `ref` can make the filter skip a
@@ -724,7 +728,7 @@ mod tests {
     /// The lines of the job `name` of `ci.yaml`, whose matrix holds one entry for each
     /// OS.
     fn os_job(name: &str) -> Vec<String> {
-        let ci = workflow(&fixture().join("../.."));
+        let ci = workflow(&fixture().join("../.."), "ci.yaml", "CI");
         let ci: Vec<&str> = ci.lines().collect();
         let job = under(&under(&ci, "jobs:"), &format!("  {name}:"));
         job.into_iter().map(str::to_owned).collect()
@@ -917,10 +921,8 @@ mod tests {
 
     #[test]
     fn arm_runs_both_parts_of_the_tests_at_once_and_fails_when_one_fails() {
-        let arm =
-            std::fs::read_to_string(fixture().join("../../.github/workflows/arm.yaml"))
-                .unwrap();
-        let arm = yaml_lines(&arm);
+        let arm = workflow(&fixture().join("../.."), "arm.yaml", "ARM");
+        let arm: Vec<&str> = arm.lines().collect();
         let jobs = under(&arm, "jobs:");
         let changed =
             "    if: \"!cancelled() && needs.changes.outputs.code != 'false'\"";
@@ -1076,7 +1078,8 @@ mod tests {
     #[test]
     fn models_filter_names_each_workspace_crate_that_miri_runs() {
         let root = fixture().join("../..");
-        let (ci, metadata) = (workflow(&root), metadata(&root).unwrap());
+        let (ci, metadata) =
+            (workflow(&root, "ci.yaml", "CI"), metadata(&root).unwrap());
         let ci: Vec<&str> = ci.lines().collect();
         let models = models(&ci);
         let workspace = metadata["packages"].as_array().unwrap();
