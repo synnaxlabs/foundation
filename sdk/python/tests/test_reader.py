@@ -463,27 +463,33 @@ class ReaderTest(unittest.TestCase):
     def test_ctrl_c_ends_a_reader_that_waits_and_the_next_call_gets_the_frame(
         self,
     ) -> None:
-        # CPython runs the signal handlers only on its main thread, and the interpreter
-        # of `cargo test` has no handler of SIGINT, so `interrupt_main` does nothing.
-        # `main_thread` is the thread that first imported `threading`, which can be the
-        # suite's. The wheel jobs run this test.
-        if (threading.current_thread() is not threading.main_thread()
-                or signal.getsignal(signal.SIGINT) is not signal.default_int_handler):
-            self.skipTest("Python does not handle SIGINT on this thread")
+        # CPython runs the signal handlers only on the thread that started it, which in
+        # `cargo test` can be another test's, and only there does `set_wakeup_fd` not
+        # raise. `threading.main_thread` and `signal.getsignal` do not tell. The wheel
+        # jobs run this test.
+        try:
+            signal.set_wakeup_fd(signal.set_wakeup_fd(-1))
+        except ValueError:
+            self.skipTest("Python runs no signal handler on this thread")
         reader = self.client.open_reader("plant.a")
         self.addCleanup(reader.close)
         interrupted = []
+        ended = threading.Event()
 
         def interrupt() -> None:
             time.sleep(0.2)
             interrupted.append(time.monotonic())
             _thread.interrupt_main()
+            # A reader that Ctrl-C does not end fails the test, and does not hang it.
+            if not ended.wait(PATIENCE):
+                reader.close()
 
         thread = threading.Thread(target=interrupt, daemon=True)
         thread.start()
         with self.assertRaises(KeyboardInterrupt):
             for _ in reader:
                 pass
+        ended.set()
         self.assertLess(time.monotonic() - interrupted[0], 1.0)
         thread.join(PATIENCE)
         with self.writes.open_writer("plant.a") as writer:
