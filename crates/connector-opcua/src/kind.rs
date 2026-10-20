@@ -98,16 +98,19 @@ impl kind::Kind for Kind {
     /// the changes once per publishing interval: the period, but at least 100 ms and at
     /// most 1 min. Each change goes in a frame at the mesh time of its device time: its
     /// source timestamp, or its server timestamp when that is earlier or the source
-    /// timestamp is absent. The run maps the clock of the server to mesh time from a
-    /// read of its current time at the start, each 10 s, and at once when a server
-    /// timestamp is after the arrival of its change, or the newest server timestamp of
-    /// the changes is older than that of the changes before. One frame holds the
+    /// timestamp is absent, or the device time of the change before it of its node in
+    /// one Publish answer when that is later, so the changes of a node keep their
+    /// order. The run maps the clock of the server to mesh time from a read of its
+    /// current time at the start, each 10 s, and at once when a server timestamp is
+    /// after the arrival of its change, or the newest server timestamp of the changes
+    /// is older than that of the changes before. One frame holds the
     /// changes of one device time, one value per channel. The queue of each node in the
     /// server holds the samples of two publishing intervals, or of two round trips of
     /// the first read when they are longer. A change after values that the server
     /// dropped from a full queue adds 1 to `missed`. When the server answers the
-    /// subscribe with `BadServiceUnsupported` or `BadNotImplemented`, the run polls as
-    /// `polled` does until the connect ends, and the note says so.
+    /// subscribe with `BadServiceUnsupported` or `BadNotImplemented`, the run closes
+    /// the session and polls as `polled` does on a new session until the cancel or an
+    /// error, and the note says so.
     ///
     /// Each tick of `polled` writes one frame stamped at the midpoint of the read.
     /// When 10 s pass with no read, the run reads the state of the server to check
@@ -128,17 +131,18 @@ impl kind::Kind for Kind {
     /// The error of [`Context::writer`] and of each failed write. [`Error::Config`]
     /// with `connector.index` for each channel that is an index; that error comes
     /// alone. Else [`Error::Config`] with `opcua.sample-type` for each channel whose
-    /// sample type is not `bool`, `i8` to `u64`, `f32`, or `f64`, and, with `polled`,
-    /// with `opcua.large-read` when the Read of one node alone is past one message of
-    /// the server. [`Error::Device`] when the connect, a read, or one check fails: a
-    /// check fails on a bad service result or on no answer in 5 s. Also
-    /// [`Error::Device`], at once, when the client loses its channel or its session
-    /// between two ticks. With no `polled`, also [`Error::Device`] when a read of the
-    /// current time or the subscribe fails, when the server does not watch a node, and
-    /// when the subscription ends, and [`Error::Config`] with `opcua.large-watch` when
-    /// the `CreateMonitoredItems` call of one node alone is past one message of the
-    /// server, and with `opcua.no-timestamp` for a Good change with no timestamp that
-    /// maps to mesh time.
+    /// sample type is not `bool`, `i8` to `u64`, `f32`, or `f64`, and, when it polls
+    /// (with `polled` or after the fallback), with `opcua.large-read` when the Read of
+    /// one node alone is past one message of the server. [`Error::Device`] when the
+    /// connect, a read, or one check fails: a check fails on a bad service result or
+    /// on no answer in 5 s. Also [`Error::Device`], at once, when the client loses its
+    /// channel or its session between two ticks. With no `polled`, also
+    /// [`Error::Device`] when a read of the current time or the subscribe fails, when
+    /// the server does not watch a node, and when the subscription ends, and
+    /// [`Error::Config`] with `opcua.large-watch` when the `CreateMonitoredItems` call
+    /// of one node alone is past one message of the server, and with
+    /// `opcua.no-timestamp` for a Good change with no timestamp that maps to mesh
+    /// time.
     fn run(&self, ctx: Context<Config>) -> impl Future<Output = Result<(), Error>> {
         run(ctx)
     }
@@ -238,22 +242,13 @@ async fn run(ctx: Context<Config>) -> Result<(), Error> {
     let Some(mut frames) = Frames::open(&ctx).await? else {
         return Ok(());
     };
-    let time = event::Time::mesh(ctx.clock().clone(), frames.writer.time());
-    let ran = session(
-        time,
-        ctx.span().clone(),
-        ctx.net().clone(),
-        &mut ctx.rng(),
-        &ctx.config().address,
-        ctx.cancel().wait(),
-        async |client| {
-            if ctx.config().polled {
-                read(&ctx, client, &mut frames).await.map(|()| None)
-            } else {
-                watch::run(&ctx, client, &mut frames).await
-            }
-        },
-    )
+    let ran = connect(&ctx, frames.writer.time(), async |client| {
+        if ctx.config().polled {
+            read(&ctx, client, &mut frames).await.map(|()| None)
+        } else {
+            watch::run(&ctx, client, &mut frames).await
+        }
+    })
     .await?;
     match ran.transpose()?.flatten() {
         Some(status) => fall_back(&ctx, &mut frames, status).await,
@@ -270,18 +265,11 @@ async fn fall_back(
     frames: &mut Frames<'_>,
     status: Status,
 ) -> Result<(), Error> {
-    frames.polls = Some(status);
-    frames.left.show(ctx, frames.polls, None);
-    let ran = session(
-        event::Time::mesh(ctx.clock().clone(), frames.writer.time()),
-        ctx.span().clone(),
-        ctx.net().clone(),
-        &mut ctx.rng(),
-        &ctx.config().address,
-        ctx.cancel().wait(),
-        async |client| read(ctx, client, frames).await,
-    )
-    .await?;
+    frames.note.polls = Some(status);
+    frames.note.show(ctx, None);
+    let mesh = frames.writer.time();
+    let ran =
+        connect(ctx, mesh, async |client| read(ctx, client, frames).await).await?;
     ran.unwrap_or(Ok(()))
 }
 
@@ -290,22 +278,33 @@ async fn fall_back(
 async fn idle(ctx: &Context<Config>) -> Result<(), Error> {
     // The status channels opened, so the node has mesh time and this gives at once.
     let mesh = ctx.time().await;
-    let ran = session(
+    let ran = connect(ctx, mesh, async |client| {
+        ctx.clear_error();
+        ctx.note(&NO_READ);
+        let idle = client.idle(ctx.cancel().wait()).await;
+        idle.map_err(|status| failed(client.url(), Call::Check, status))
+    })
+    .await?;
+    ran.unwrap_or(Ok(()))
+}
+
+/// Runs `work` on a session to the server of `ctx` until its cancel, as [`session`]
+/// does, with the mesh time `mesh`.
+async fn connect<T>(
+    ctx: &Context<Config>,
+    mesh: hub::Time,
+    work: impl AsyncFnOnce(&mut Client) -> T,
+) -> Result<Option<T>, Error> {
+    session(
         event::Time::mesh(ctx.clock().clone(), mesh),
         ctx.span().clone(),
         ctx.net().clone(),
         &mut ctx.rng(),
         &ctx.config().address,
         ctx.cancel().wait(),
-        async |client| {
-            ctx.clear_error();
-            ctx.note(&NO_READ);
-            let idle = client.idle(ctx.cancel().wait()).await;
-            idle.map_err(|status| failed(client.url(), Call::Check, status))
-        },
+        work,
     )
-    .await?;
-    ran.unwrap_or(Ok(()))
+    .await
 }
 
 /// Connects to `address` with `time`, `span`, `net`, and `rng`, as [`Client::connect`]
@@ -436,9 +435,7 @@ struct Frames<'a> {
     /// The sample type of the channel of each read, in order.
     types: Vec<Scalar>,
     left: Left,
-    /// The answer to the subscribe for which the run polls, which the note names
-    /// before the read.
-    polls: Option<Status>,
+    note: Note,
 }
 
 /// The counts of the values that a frame leaves out.
@@ -446,7 +443,14 @@ struct Left {
     bad: status::Count,
     uncertain: status::Count,
     mistyped: status::Count,
-    /// The read and the type that the note names, or `None` when it shows none.
+}
+
+/// The note of a run.
+struct Note {
+    /// The answer to the subscribe for which the run polls, which the note names
+    /// first.
+    polls: Option<Status>,
+    /// The read and the type that the note names, or `None` when it names none.
     noted: Option<(usize, value::Type)>,
 }
 
@@ -483,9 +487,11 @@ impl<'a> Frames<'a> {
                 bad: ctx.count("bad"),
                 uncertain: ctx.count("uncertain"),
                 mistyped: ctx.count("mistyped"),
+            },
+            note: Note {
+                polls: None,
                 noted: None,
             },
-            polls: None,
         }))
     }
 
@@ -509,7 +515,7 @@ impl<'a> Frames<'a> {
     ) -> Result<(), Error> {
         let (mut bad, mut uncertain, mut mistyped) = (0, 0, 0);
         let mut first = None;
-        let noted = self.left.noted.map(|(at, _)| at);
+        let noted = self.note.noted.map(|(at, _)| at);
         let mut absent = false;
         let kept = values.into_iter().enumerate().map(|(at, value)| {
             let Some(value) = value else {
@@ -538,7 +544,7 @@ impl<'a> Frames<'a> {
         let written = self.writer.write(kept, stamp);
         self.left.add(bad, uncertain, mistyped);
         if first.is_some() || !absent {
-            self.left.note(self.ctx, self.polls, first);
+            self.note.set(self.ctx, first);
         }
         written
     }
@@ -551,20 +557,21 @@ impl Left {
         self.uncertain.add(uncertain);
         self.mistyped.add(mistyped);
     }
+}
 
+impl Note {
     /// Sets the note of `ctx` for `mistyped`, when it is not the note of the frame
     /// before: the read at a value of another type, its type, and the sample type of
     /// its channel, after the note of [`fall_back`] for `polls`. `None` shows only
     /// that note, or none.
     #[inline]
-    fn note(
+    fn set(
         &mut self,
         ctx: &Context<Config>,
-        polls: Option<Status>,
         mistyped: Option<(usize, value::Type, Scalar)>,
     ) {
         if mistyped.map(|(at, value, _)| (at, value)) != self.noted {
-            self.show(ctx, polls, mistyped);
+            self.show(ctx, mistyped);
         }
     }
 
@@ -572,11 +579,10 @@ impl Left {
     fn show(
         &mut self,
         ctx: &Context<Config>,
-        polls: Option<Status>,
         mistyped: Option<(usize, value::Type, Scalar)>,
     ) {
         self.noted = mistyped.map(|(at, value, _)| (at, value));
-        let polls = polls.map(|status| {
+        let polls = self.polls.map(|status| {
             format!("polls: the server has no subscriptions ({status:?})")
         });
         let polls = polls.as_deref().unwrap_or_default();

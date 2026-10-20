@@ -102,7 +102,6 @@ pub(super) async fn run(
         let arrived = server.mesh.now();
         let unsure = drive.take(changes, &mut server.fit, arrived, reads)?;
         missed.add(drive.overflows);
-        frames.left.add(drive.bad, drive.uncertain, 0);
         if unsure || ctx.clock().now() >= due {
             let Some(read) = ctx.cancel().race(server.read(client)).await else {
                 break;
@@ -219,9 +218,10 @@ struct Drive {
     entries: Vec<Entry>,
     /// The entry of the frame that is filled for each read, in order.
     slots: Vec<Option<usize>>,
-    /// The device time of the next value of each read, in the order of `entries`, and
-    /// in [`Drive::take`] that of the last entry of each read.
+    /// The device time of the next value of each read, in the order of `entries`.
     next: Vec<Option<Monotonic>>,
+    /// The device time of the last entry of each read, in the order of changes.
+    last: Vec<Option<Monotonic>>,
     /// The device time of the newest server timestamp of the last drive with one.
     newest: Option<Monotonic>,
     /// The count of changes with an overflow.
@@ -253,6 +253,7 @@ impl Drive {
             entries: Vec::new(),
             slots: vec![None; reads],
             next: vec![None; reads],
+            last: vec![None; reads],
             newest: None,
             overflows: 0,
             bad: 0,
@@ -280,7 +281,7 @@ impl Drive {
         reads: &[Read],
     ) -> Result<bool, Error> {
         self.entries.clear();
-        self.next.fill(None);
+        self.last.fill(None);
         (self.overflows, self.bad, self.uncertain) = (0, 0, 0);
         let (mut unsure, mut newest) = (false, None);
         for (order, change) in changes.iter().enumerate() {
@@ -313,8 +314,8 @@ impl Drive {
                 }
             };
             // A clock that steps back inside the drive gives an earlier device time.
-            let at = self.next[change.index].map_or(at, |last| at.max(last));
-            self.next[change.index] = Some(at);
+            let at = self.last[change.index].map_or(at, |last| at.max(last));
+            self.last[change.index] = Some(at);
             self.entries.push(Entry {
                 index: change.index,
                 value: change.value,
@@ -376,6 +377,7 @@ impl Drive {
         fit: &Fit,
         reads: &[Read],
     ) -> Result<(), Error> {
+        frames.left.add(self.bad, self.uncertain, 0);
         self.order(fit);
         let Self { entries, slots, .. } = self;
         let mut start = 0;

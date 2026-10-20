@@ -25,6 +25,12 @@
   change. Lost, a simple version first: the true time of the values on one side of a
   clock step inside one drive. A fit for each side of the step keeps it
   (https://github.com/synnaxlabs/foundation/issues/3514).
+  Lost, a simple version first: a drive writes one frame of each channel for each
+  device time, so a drive of k device times costs O(k × channels): 4.1 ms for 1000
+  nodes with a device time for each change (AWS c7i.8xlarge). A sparse write of the
+  moved channels makes it O(k)
+  (https://github.com/synnaxlabs/foundation/issues/3468) (`laptop.architect-2`, item
+  5 of https://github.com/synnaxlabs/foundation/pull/3507#issuecomment-6284120720).
   The queue of each item holds the samples of the larger of two publishing intervals
   that the server gives and two round trips of the first `CurrentTime` read. Past a
   round trip of two intervals, one Publish answer can come a round trip after the one

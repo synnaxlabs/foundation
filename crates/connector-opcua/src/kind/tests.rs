@@ -2137,13 +2137,16 @@ where
 {
     scene(RELAY, "10Hz", false, setup, move |scene| async move {
         let node = scene.node.clone();
-        let unknown = move |message: &mut Vec<u8>| {
-            if is(message, kind) {
-                message[26..28].copy_from_slice(&[0xFF, 0x7F]);
-            }
-        };
-        relayed_up(&node, unknown, script(scene)).await
+        let up = move |message: &mut Vec<u8>| unsupport(message, kind);
+        relayed_up(&node, up, script(scene)).await
     })
+}
+
+/// Gives a request of type `kind` in `message` a type that the server does not know.
+fn unsupport(message: &mut [u8], kind: [u8; 4]) {
+    if is(message, kind) {
+        message[26..28].copy_from_slice(&[0xFF, 0x7F]);
+    }
 }
 
 /// The note of a run that polls a server with no subscription service.
@@ -2186,8 +2189,8 @@ fn polls_a_server_with_no_subscription_service() {
                 if let Some(&kind) = kinds.iter().find(|&&kind| is(message, kind)) {
                     sent.lock().expect("the log").push(kind);
                 }
-                if request.is_some_and(|kind| is(message, kind)) {
-                    message[26..28].copy_from_slice(&[0xFF, 0x7F]);
+                if let Some(kind) = request {
+                    unsupport(message, kind);
                 }
             };
             let down = move |message: &mut Vec<u8>| {
@@ -2446,7 +2449,8 @@ fn untimed(quality: Quality) -> Record {
                 let mut at = 0;
                 while let Some(found) = message[at..].windows(8).position(|w| w == time)
                 {
-                    // The source timestamp, then the server timestamp.
+                    // The test server sets no picoseconds, so the server timestamp
+                    // follows the source timestamp. No other 8 bytes are equal.
                     message[at + found..at + found + 16].fill(0);
                     at += found + 16;
                 }
