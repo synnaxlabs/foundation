@@ -253,14 +253,18 @@
   holds under the 10 ms/s that `laptop.architect` set, 2026-10-19T19:01:39Z
   (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6274961164).
   Deferred: appends whose entries the queues of all peers share. Trigger: before
-  `MEMBERS_MAX` grows past 128. A learner reads the log only from the leader. Fan-out
-  from any voter is deferred to #3368, with its trigger: a region needs more than 128
-  members. A member that stops answering costs the leader its queue. For a member that
-  answers only what it read, MESH DRIVER bounds that queue: one heartbeat, at most one
-  `PreVote` and one `Vote`, and the appends of its window (one while it probes, else up
-  to `INFLIGHT`, one for a learner). Of the replies to what that member sends, it holds
-  at most one `HeartbeatReply` and one `PreVoteReply` of each answer, and one reply to
-  each append or `Vote`. The mesh test
+  `MEMBERS_MAX` grows past 128. A learner reads the log only from the leader. A learner
+  that no leader can dial reaches a new leader within about two election timeouts for
+  each voter after the last message of the old one (MESH DRIVER; `laptop.architect`,
+  2026-10-19T19:46:05Z,
+  https://github.com/synnaxlabs/foundation/pull/3415#issuecomment-6275819044, finding
+  2). Fan-out from any voter is deferred to #3368, with its trigger: a region needs more
+  than 128 members. A member that stops answering costs the leader its queue. For a
+  member that answers only what it read, MESH DRIVER bounds that queue: one heartbeat,
+  at most one `PreVote` and one `Vote`, and the appends of its window (one while it
+  probes, else up to `INFLIGHT`, one for a learner). Of the replies to what that member
+  sends, it holds at most one `HeartbeatReply` and one `PreVoteReply` of each answer,
+  and one reply to each append or `Vote`. The mesh test
   `holds_one_heartbeat_and_the_window_for_a_member_that_does_not_answer` copies
   `raft::INFLIGHT` = 8, so a change of `INFLIGHT` changes that test too. It is the cost
   of a fault, not of an idle node. Deferred: a byte bound on the queue of a member, and

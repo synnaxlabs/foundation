@@ -308,20 +308,28 @@
   https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037266854, approved
   by the architect, 2026-10-07T11:52:00Z:
   https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501). A
-  leader that cannot dial a member, such as one whose card has no address, reaches it
-  on a session that the member dialed. So a member that is not a voter, and to which no
-  leader sent a message for two election timeouts, dials the next voter in key order
-  after the voter that it met last, as the leader that reached it or as the voter that
-  it dialed, and after the last voter it dials the first. The group holds the session.
-  The leader sends a learner a heartbeat at each quorum check, one each election
-  timeout, so a member that the leader reaches dials no voter. A failed dial does
-  nothing, and the member dials at most one voter for each two election timeouts. The
-  transport keeps at most one session for each pair of nodes (the plan of PR 2b of
-  #3140,
-  https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6283363405). A stop
-  of the group drops each handle. When `Transport::dial` gives the one open session to a
-  peer (#1363), a call can take its session from `dial`, and #1598 decides whether the
-  handle goes back to the task. `set_home` makes a member the home of an index, and
+  leader that cannot dial a member, such as one whose card has no address, reaches it on
+  a session that the member dialed. So a member that is not a voter, and to which no
+  leader sent a message for two election timeouts, dials a voter. It dials the voters in
+  key order: first the leader that reached it last, then each voter after the one that
+  it dialed, and after the last voter the first. The group holds the session. The leader
+  sends a learner a heartbeat at each quorum check, one each election timeout, so a
+  member that the leader reaches dials no voter. A failed dial does nothing. The member
+  names the next voter each two election timeouts, and the dial of the voter before
+  stops then, also when the group stops or each `Mesh` drops. So it dials at most one
+  voter at a time, and it reaches a leader that it can dial within about two election
+  timeouts for each voter. The transport keeps at most one session for each pair of
+  nodes (`laptop.architect`: the wait, 2026-10-19T19:46:05Z,
+  https://github.com/synnaxlabs/foundation/pull/3415#issuecomment-6275819044, finding 2;
+  the plan of PR 2b of #3140, 2026-10-20T04:26:42Z,
+  https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6283370668; the
+  text, 2026-10-20T05:21:52Z,
+  https://github.com/synnaxlabs/foundation/pull/3517#issuecomment-6284026549). This
+  supersedes "the task is the only one that dials" of the plan of PR 4d. A stop of the
+  group drops each handle. `Transport::dial` gives the one open session to a peer
+  (#1363), so a call can take its session from `dial`. #1598 decides whether the handle
+  goes back to the task.
+  `set_home` makes a member the home of an index, and
   returns when this node applied an entry that sets it. A try starts with two checks on
   this node: the node is a voter (`Error::NoVote`), and the home is a member
   (`Error::NotMember`). Only the two and a stop of the group end the call with an error.
