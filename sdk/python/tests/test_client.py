@@ -3,7 +3,6 @@
 `FOUNDATION_NODE` is the path of the `foundation` binary that each test starts.
 """
 
-import base64
 import errno
 import gc
 import getpass
@@ -97,28 +96,16 @@ def fingerprint(line: str) -> str:
         return keygen("-l", "-f", file.name).split()[1]
 
 
-def public_key(line: str) -> bytes:
-    """The 32 bytes of the public key of `line`."""
-    return base64.b64decode(line.split()[1])[-32:]
-
-
-def mismatched() -> str:
-    """An OpenSSH key file with the public key of `ZERO` and the private key
-    `bytes([1] * 32)`, whose public key is another."""
-
-    def string(data: bytes) -> bytes:
-        return len(data).to_bytes(4, "big") + data
-
-    public = base64.b64decode(ZERO.split()[1])
-    private = bytes(8) + public + string(bytes([1] * 32) + public_key(ZERO))
-    private += string(b"")
-    private += bytes(range(1, 1 + -len(private) % 8))
-    body = b"openssh-key-v1\0" + string(b"none") + string(b"none") + string(b"")
-    body += (1).to_bytes(4, "big") + string(public) + string(private)
-    text = base64.b64encode(body).decode()
-    lines = [text[i : i + 70] for i in range(0, len(text), 70)]
-    begin, end = "BEGIN OPENSSH PRIVATE KEY", "END OPENSSH PRIVATE KEY"
-    return "\n".join([f"-----{begin}-----", *lines, f"-----{end}-----", ""])
+# An OpenSSH key file with the public key of `ZERO` and the private key
+# `bytes([1] * 32)`, whose public key is another.
+MISMATCHED = """-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACA7aie8zrakLWKjqNAqbw1zZTIVdx3iQ6Y6wEihi1naKQAAAIgAAAAAAAAA
+AAAAAAtzc2gtZWQyNTUxOQAAACA7aie8zrakLWKjqNAqbw1zZTIVdx3iQ6Y6wEihi1naKQ
+AAAEABAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBATtqJ7zOtqQtYqOo0CpvDXNl
+MhV3HeJDpjrASKGLWdopAAAAAAECAwQF
+-----END OPENSSH PRIVATE KEY-----
+"""
 
 
 def blocks(subject: str, key: str) -> str:
@@ -958,10 +945,19 @@ class ProfileTest(unittest.TestCase):
             f"only `ssh-ed25519`. {new_key}"
         )
         with open(key, "w") as file:
-            file.write(mismatched())
+            file.write(MISMATCHED)
         refused(
             "config.key-mismatch: the public key of the file is not the key of its "
             f"private key. {new_key}"
+        )
+        os.remove(key)
+        comment = b"a\xffb"
+        arguments = ["-q", "-t", "ed25519", "-N", "", "-C", comment, "-f", key]
+        subprocess.run(["ssh-keygen", *arguments], check=True)
+        refused(
+            "config.key-comment: the key file holds a text that is not UTF-8, such as "
+            "its comment. Give the key a comment in UTF-8 with `ssh-keygen -c -C "
+            "<comment> -f <file>`"
         )
 
     def test_a_profile_with_a_problem_is_refused_by_line(self) -> None:
