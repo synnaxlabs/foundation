@@ -796,8 +796,8 @@ impl Lab {
     ///
     /// When `rate` is 0 or over 10^7, or `write` wrote to `channel` before. As the
     /// simulation runs, when the writer does not open, as when the spec at `node`
-    /// has no `channel`, when `channel` is an index, or when the home does not apply a
-    /// frame.
+    /// has no `channel`, when `channel` is an index, as its frame then has no index,
+    /// or when the home does not apply a frame.
     pub(crate) fn write(&mut self, node: Node, channel: &str, rate: u64, count: u64) {
         assert!(
             !self.writes.contains_key(channel),
@@ -985,13 +985,16 @@ impl Lab {
             self.stores.contains_key(address),
             "lab failure: no Influx store at {address}"
         );
-        let seqs = self.written(channel);
+        let node = self.write_to(channel).node;
         let measurement = self.stores[address].measurements.get(channel);
         let measurement = measurement.unwrap_or_else(|| {
             panic!("lab failure: the connector at {address} writes no {channel}")
         });
         let measurement = measurement.clone();
-        let index = self.index(self.write_to(channel).node, channel);
+        // The spec read runs the simulation, so the seqs and the store are read after
+        // it, at one time.
+        let index = self.index(node, channel);
+        let seqs = self.written(channel);
         let influx = &self.stores[address];
         influx::stored(
             &influx.store,
@@ -1759,7 +1762,7 @@ fn a_write_at_the_last_host_started_stamps_true_time() {
 }
 
 #[test]
-fn each_host_reads_true_time() {
+fn each_host_clock_reads_the_same_time() {
     let mut lab = Lab::new(1);
     for name in ["a", "b", "c"] {
         lab.start(name);
@@ -1839,11 +1842,14 @@ placement "x" {
         let name: types::name::Name = "x.time".parse().unwrap();
         (applied, spec.definitions.contains_key(&name))
     });
-    assert_eq!(
-        applied.unwrap_err()["errors"][0]["message"],
-        "1 of 2 voters hold the chunks of the spec change, not a majority; b: a step \
-         of its put passed the deadline of 10s"
-    );
+    let error = serde_json::json!({"errors": [{
+        "code": "ops.apply",
+        "fix": "Fix the cause in the message, then plan and apply again",
+        "message": "1 of 2 voters hold the chunks of the spec change, not a majority; \
+                    b: a step of its put passed the deadline of 10s",
+        "notes": [],
+    }]});
+    assert_eq!(applied.unwrap_err(), error);
     assert!(!held, "the spec at a holds x.time");
 }
 
