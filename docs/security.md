@@ -210,7 +210,9 @@ state on `main`.
   that no entry is above the append's term. A node that a change removed and that missed
   its release campaigns; a voter whose log holds the leave refuses the request, with
   `removed` once the leave commits and the last `Raft::set_learners` left the node out,
-  and the node stops once a majority of the other voters of the incoming half of its
+  with no join in the log of the voter that the voter has not applied
+  (https://github.com/synnaxlabs/foundation/pull/3411#issuecomment-6282135192), and the
+  node stops once a majority of the other voters of the incoming half of its
   configuration answer so (#1105). A voter that a change removes and that stays a member
   is a learner: it gets `NotVoter`, follows the log, and does not stop. Only a leave
   that ends its membership (#3355) can stop it (`laptop.architect`,
@@ -245,7 +247,8 @@ state on `main`.
   refuses such a request (`Error::NotVoter`). It answers `removed` (`Error::Removed`,
   code 17) only to a `PreVote` or a `Vote` at or below its commit index, or below the
   term at it, from a sender that a committed configuration removed and that is not a
-  member, so a stranger cannot learn from the answer which nodes the log held. A former
+  member, with no join in the log that this node has not applied, so a stranger cannot
+  learn from the answer which nodes the log held. A former
   voter can learn the commit index of a voter, and the term at it, from the answers to
   votes with different last positions. Neither holds data. A sender stops its group
   only when a majority of the other voters of the incoming half of its own configuration

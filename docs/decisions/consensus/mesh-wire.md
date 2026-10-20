@@ -36,9 +36,11 @@
   below the term at it (`laptop.architect`, 2026-10-19T18:56:00Z:
   https://github.com/synnaxlabs/foundation/pull/3407#issuecomment-6274855859), from a
   node that a committed configuration removed, when `Start.voters` or a committed
-  `Voters` entry held it (RAFT VOTERS), and that is not a member, gets code 17 instead
-  (`Error::Removed`). A
-  `Change::Card` over the bound of MESH DRIVER gets code 18 instead (`Error::Soon`), and
+  `Voters` entry held it (RAFT VOTERS), and that is not a member, with no join in the
+  log that this node has not applied (`laptop.architect`, 2026-10-20T02:45:51Z:
+  https://github.com/synnaxlabs/foundation/pull/3411#issuecomment-6282135192), gets
+  code 17 instead (`Error::Removed`). A `Change::Card` over the bound of MESH DRIVER
+  gets code 18 instead (`Error::Soon`), and
   the peer gives `Error::Soon` and does not forward it again. A join that the leader
   refuses as `Error::Contested` gets code 19 instead, and the peer gives
   `Error::Contested` and does not forward it again (decided by the architect,
