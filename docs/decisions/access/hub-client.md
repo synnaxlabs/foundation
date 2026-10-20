@@ -402,8 +402,9 @@
   frame come in group order: `Replies::sent` takes the groups of each frame, and an
   outcome of that frame for another group gives `Error::Group { frame, group, next }`,
   also for a group that the frame does not hold. `Outcome::Ended(End)` (kind 5,
-  `End::Removed` or `End::Failed`) answers a group whose writer ended. The node makes
-  the draft due at the last end, and sets each count of the run into the draft, so a
+  `End::Removed`, `End::Failed`, or `End::Refused`) answers a group whose writer
+  ended. The node makes the draft due at the last end, and sets each count of the run
+  into the draft, so a
   write stream holds 20 bytes for each place: 16 of ends and 4 of counts (MEMORY
   BOUNDS). Decided by `laptop.architect` at 2026-10-19T13:14:46Z
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268096380), on the
