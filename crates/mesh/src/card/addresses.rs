@@ -63,7 +63,7 @@ impl Addresses {
         &self.0
     }
 
-    pub(super) fn encode(&self, out: &mut Vec<u8>) {
+    pub(crate) fn encode(&self, out: &mut Vec<u8>) {
         bytes::put_count(self.0.len(), out);
         for &address in &self.0 {
             put(address, out);
@@ -72,7 +72,7 @@ impl Addresses {
 
     // Needs no check of `new`: the count is checked first, and the byte form holds no
     // flow info and no scope.
-    pub(super) fn decode(bytes: &mut &[u8]) -> Option<Self> {
+    pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Self> {
         let count = bytes::take_count(bytes)?;
         if count > u64::from(MAX) {
             return None;

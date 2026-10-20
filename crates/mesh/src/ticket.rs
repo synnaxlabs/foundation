@@ -2,18 +2,22 @@
 
 use std::fmt;
 
+use base64ct::{Base64UrlUnpadded, Encoding as _};
 use types::ed25519::{BadSignature, Pair, PrivateKey, PublicKey};
 use types::name::{Name, Prefix};
 use types::node;
 use types::time::{Span, Stamp};
 
 use crate::bytes::{
-    put_bool, put_name, put_optional_span, put_stamp, take_bool, take_name,
-    take_optional_span, take_stamp,
+    put_bool, put_count, put_key, put_name, put_optional_span, put_prefix,
+    put_public_key, put_stamp, take, take_bool, take_count, take_key, take_name,
+    take_optional_span, take_prefix, take_public_key, take_stamp,
 };
 use crate::card;
 
 const TAG: &[u8] = b"foundation/admission/1";
+
+const TEXT: &str = "foundation-ticket-1-";
 
 /// What a join ticket admits. The region records it with the ticket's public key.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,8 +68,9 @@ pub struct Voter {
 }
 
 /// The secret part of a join ticket, which an operator carries to the joining node. It
-/// is never in region state or in a file. Its `Debug` writes the region and the public
-/// key only, and it has no `Display`, no `Clone`, and no equality.
+/// is never in region state, and Foundation never writes it to a file. Its `Debug`
+/// writes the region and the public key only, and it has no `Display`, no `Clone`, and
+/// no equality.
 pub struct Ticket {
     private_key: PrivateKey,
     region: Prefix,
@@ -113,7 +118,69 @@ impl Ticket {
     pub fn admission(&self, card: &card::Signed) -> [u8; 64] {
         Pair::new(&self.private_key).sign(&statement(card))
     }
+
+    /// The text that an operator carries: `foundation-ticket-1-` and the URL-safe
+    /// Base64 of the byte form, with no padding. The byte form is the private key, the
+    /// region prefix behind a length byte, and each voter as its node key, its public
+    /// key, and its addresses, behind a count of 8 little-endian bytes. The text is a
+    /// secret: the private key is in it.
+    #[must_use]
+    pub fn encode(&self) -> String {
+        let mut bytes = self.private_key.0.to_vec();
+        put_prefix(&self.region, &mut bytes);
+        put_count(self.voters.len(), &mut bytes);
+        for voter in &self.voters {
+            put_key(voter.key, &mut bytes);
+            put_public_key(voter.public_key, &mut bytes);
+            voter.addresses.encode(&mut bytes);
+        }
+        format!("{TEXT}{}", Base64UrlUnpadded::encode_string(&bytes))
+    }
+
+    /// The ticket of `text`, which [`Ticket::encode`] gives.
+    ///
+    /// # Errors
+    ///
+    /// [`Unreadable`] when `text` is not that form.
+    pub fn decode(text: &str) -> Result<Self, Unreadable> {
+        let text = text.strip_prefix(TEXT).ok_or(Unreadable)?;
+        let bytes = Base64UrlUnpadded::decode_vec(text).ok().ok_or(Unreadable)?;
+        let mut bytes = bytes.as_slice();
+        let private_key = PrivateKey(take(&mut bytes).ok_or(Unreadable)?);
+        let region = take_prefix(&mut bytes).ok_or(Unreadable)?;
+        let count = take_count(&mut bytes).ok_or(Unreadable)?;
+        let mut voters = Vec::new();
+        for _ in 0..count {
+            voters.push(take_voter(&mut bytes).ok_or(Unreadable)?);
+        }
+        if voters.is_empty() || !bytes.is_empty() {
+            return Err(Unreadable);
+        }
+        Ok(Self::new(private_key, region, voters))
+    }
 }
+
+// Takes one voter of the byte form of [`Ticket::encode`].
+fn take_voter(bytes: &mut &[u8]) -> Option<Voter> {
+    Some(Voter {
+        key: take_key(bytes)?,
+        public_key: take_public_key(bytes)?,
+        addresses: card::addresses::Addresses::decode(bytes)?,
+    })
+}
+
+/// A text that is no ticket. It names no part of the text, since the text is a
+/// secret.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Unreadable;
+
+impl fmt::Display for Unreadable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the text is not a join ticket")
+    }
+}
+
+impl std::error::Error for Unreadable {}
 
 impl fmt::Debug for Ticket {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -284,12 +351,148 @@ fn statement(card: &card::Signed) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
+
     use proptest::prelude::*;
+    use transport::Address;
 
     use super::*;
     use crate::common::{
         BEFORE_EXPIRY, EXPIRY, key, options, private, public, signed, ticket, voter,
     };
+
+    // The text of `bytes` with the first part of a ticket.
+    fn text(bytes: &[u8]) -> String {
+        format!(
+            "foundation-ticket-1-{}",
+            Base64UrlUnpadded::encode_string(bytes)
+        )
+    }
+
+    // The byte form of `ticket(7)`, written out.
+    fn bytes_of_ticket_7() -> Vec<u8> {
+        let mut bytes = vec![7; 32];
+        bytes.extend(b"\x05plant");
+        bytes.extend(1u64.to_le_bytes());
+        bytes.extend(key(1).as_u128().to_le_bytes());
+        bytes.extend(public(1).to_bytes());
+        bytes.extend(1u64.to_le_bytes());
+        bytes.extend([0, 4, 10, 0, 0, 1]);
+        bytes.extend(4000u16.to_le_bytes());
+        bytes
+    }
+
+    fn voters() -> impl Strategy<Value = Vec<Voter>> {
+        let address = (any::<bool>(), any::<[u8; 4]>(), any::<u16>()).prop_map(
+            |(tcp, ip, port)| {
+                let at = SocketAddr::from((ip, port));
+                if tcp {
+                    Address::Tcp(at)
+                } else {
+                    Address::Udp(at)
+                }
+            },
+        );
+        let voter = (any::<u8>(), prop::collection::vec(address, 0..4)).prop_map(
+            |(id, list)| Voter {
+                key: key(id),
+                public_key: public(id),
+                addresses: card::addresses::Addresses::new(list).unwrap(),
+            },
+        );
+        prop::collection::vec(voter, 1..5)
+    }
+
+    fn regions() -> impl Strategy<Value = Prefix> {
+        prop_oneof![
+            Just(Prefix::ROOT),
+            Just("plant".parse().unwrap()),
+            Just("plant.edge.a".parse().unwrap()),
+        ]
+    }
+
+    #[test]
+    fn the_text_is_the_first_part_and_the_base64_of_the_byte_form() {
+        assert_eq!(ticket(7).encode(), text(&bytes_of_ticket_7()));
+    }
+
+    #[test]
+    fn the_text_of_the_root_region_has_an_empty_prefix() {
+        let ticket = Ticket::new(private(7), Prefix::ROOT, vec![voter()]);
+        let mut bytes = bytes_of_ticket_7();
+        bytes.splice(32..38, [0]);
+        assert_eq!(ticket.encode(), text(&bytes));
+        let decoded = Ticket::decode(&ticket.encode()).unwrap();
+        assert_eq!(decoded.region(), &Prefix::ROOT);
+    }
+
+    #[test]
+    fn each_cut_of_the_text_is_unreadable() {
+        let text = ticket(7).encode();
+        for end in 0..text.len() {
+            assert_eq!(
+                Ticket::decode(text.get(..end).unwrap()).err(),
+                Some(Unreadable),
+                "{end}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_byte_past_the_end_is_unreadable() {
+        let mut bytes = bytes_of_ticket_7();
+        bytes.push(0);
+        assert_eq!(Ticket::decode(&text(&bytes)).err(), Some(Unreadable));
+    }
+
+    #[test]
+    fn a_ticket_with_no_voter_is_unreadable() {
+        let mut bytes = vec![7; 32];
+        bytes.extend(b"\x05plant");
+        bytes.extend(0u64.to_le_bytes());
+        assert_eq!(Ticket::decode(&text(&bytes)).err(), Some(Unreadable));
+    }
+
+    #[test]
+    fn a_wrong_first_part_is_unreadable() {
+        let base64 = Base64UrlUnpadded::encode_string(&bytes_of_ticket_7());
+        for first in [
+            "",
+            "foundation-ticket-",
+            "foundation-ticket-2-",
+            "Foundation-ticket-1-",
+            "foundation_ticket_1_",
+            " foundation-ticket-1-",
+        ] {
+            let text = format!("{first}{base64}");
+            assert_eq!(Ticket::decode(&text).err(), Some(Unreadable), "{first}");
+        }
+    }
+
+    #[test]
+    fn padded_or_standard_base64_is_unreadable() {
+        let mut padded = text(&bytes_of_ticket_7());
+        padded.push_str("==");
+        let standard = format!(
+            "foundation-ticket-1-{}",
+            base64ct::Base64Unpadded::encode_string(&[0xfb; 33])
+        );
+        for text in [padded, standard] {
+            assert_eq!(Ticket::decode(&text).err(), Some(Unreadable), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_voter_key_of_small_order_is_unreadable() {
+        let mut bytes = bytes_of_ticket_7();
+        bytes[62..94].copy_from_slice(&[0; 32]);
+        assert_eq!(Ticket::decode(&text(&bytes)).err(), Some(Unreadable));
+    }
+
+    #[test]
+    fn unreadable_names_no_part_of_the_text() {
+        assert_eq!(Unreadable.to_string(), "the text is not a join ticket");
+    }
 
     fn record(id: u8, reusable: bool) -> Record {
         Record::new(ticket(id).public_key(), options("plant.edge", reusable))
@@ -530,6 +733,30 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn decode_keeps_the_key_pair_the_region_and_the_voters(
+            private_key in any::<[u8; 32]>(),
+            region in regions(),
+            voters in voters(),
+        ) {
+            let ticket = Ticket::new(PrivateKey(private_key), region, voters);
+            let text = ticket.encode();
+            let decoded = Ticket::decode(&text).unwrap();
+            prop_assert_eq!(decoded.public_key(), ticket.public_key());
+            prop_assert_eq!(decoded.region(), ticket.region());
+            prop_assert_eq!(decoded.voters(), ticket.voters());
+            prop_assert_eq!(decoded.encode(), text);
+        }
+
+        #[test]
+        fn decode_of_any_text_after_the_first_part_never_panics(
+            bytes in prop::collection::vec(any::<u8>(), 0..160),
+        ) {
+            if let Ok(ticket) = Ticket::decode(&text(&bytes)) {
+                prop_assert_eq!(ticket.encode(), text(&bytes));
+            }
+        }
+
         #[test]
         fn a_ticket_admits_each_card_that_it_signs(
             ticket_id in any::<u8>(),
