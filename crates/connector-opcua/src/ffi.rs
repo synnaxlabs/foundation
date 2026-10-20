@@ -1010,8 +1010,8 @@ unsafe extern "C" {
     ///
     /// # Safety
     ///
-    /// `buffer` is a live `UA_ByteString` whose `data` is NULL or a live block of
-    /// `connector_opcua_malloc` of at least `length` bytes.
+    /// `buffer` is a live `UA_ByteString` whose `data` is NULL with `length` 0, or a
+    /// live block of `connector_opcua_malloc` of at least `length` bytes.
     pub fn shim_send_free(buffer: *mut Bytes);
     pub(crate) fn shim_establish(
         cm: *mut ConnectionManager,
