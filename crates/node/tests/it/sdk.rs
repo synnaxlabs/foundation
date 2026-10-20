@@ -566,7 +566,8 @@ fn a_call_of_two_indexes_that_the_writer_cannot_send_gives_its_error_in_its_plac
 
 /// Once a channel of one group of two is removed, each write of that group gives
 /// `Partial` with the exact channels written and not written, the other group goes
-/// on, and the close gives no error for the group that ended.
+/// on, and the close gives no error for the group, which ended after the frame that
+/// the node took of it was on disk.
 #[test]
 fn a_write_of_a_group_whose_channel_was_removed_gives_partial_and_the_writer_goes_on() {
     let (mut rig, node, subject) = planted();
@@ -574,12 +575,14 @@ fn a_write_of_a_group_whose_channel_was_removed_gives_partial_and_the_writer_goe
     let channels = ["cell.c", "plant.a"].map(|n| n.parse().unwrap());
     let mut writer = client.open_writer(Config::new(channels.into())).unwrap();
     let (c, a, cell_time, plant_time) = (0, 1, 2, 3);
+    let values = [(c, Value::I64(1)), (a, Value::I64(2))];
+    let both = [(cell_time, taken(0, 1)), (plant_time, taken(0, 1))];
+    assert_eq!(writer.write(&values), Ok(&both[..]));
     let cell =
         "channel \"cell.c\" {\n  data_type = \"i64\"\n  index = \"cell.time\"\n}\n";
     rig.config(&crate::plant::CHANNELS.replace(cell, ""));
     rig.apply();
-    let values = [(c, Value::I64(1)), (a, Value::I64(2))];
-    let mut seq = 0;
+    let mut seq = 1;
     let partial = rig.wait("a write gives partial", || {
         match writer.write(&values).map(<[_]>::to_vec) {
             Ok(outcomes) => {
