@@ -324,8 +324,8 @@ fn writes_each_value_and_the_stamp_of_the_request_in_each_index() {
 
 /// The first two samples are before the request, so each takes 1 ns after the last
 /// stamp: the first holds past it, and the second does not, so its error grows by 2 ns.
-/// The third has its ends in reverse order. The fourth has the midpoint of the third, so
-/// it takes 1 ns after it, and that 1 ns is its error.
+/// The third has its ends in reverse order. The fourth has the midpoint of the third,
+/// so it takes 1 ns after it, and that 1 ns is its error.
 #[test]
 fn stamps_each_sample_at_its_midpoint_or_after_the_last_stamp_with_its_error() {
     let writes = [values(1.5, 7, -3, [true; 3])];

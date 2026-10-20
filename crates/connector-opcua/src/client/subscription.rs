@@ -129,16 +129,15 @@ impl Client {
     /// least 100 ms and at most 1 min, and a keep-alive count of the publishing
     /// intervals in 1 min. Each item queues the values that it samples in the larger
     /// of two publishing intervals that the server gives and two of `round_trip`, the
-    /// oldest dropped first. Each item
-    /// asks for both timestamps and a change of the status or the value. It reads the
-    /// `MaxMonitoredItemsPerCall` of the server, and sends the items in
-    /// `CreateMonitoredItems` calls of at most that many. Each answer of a Publish fits
-    /// the receive limit of the client, for items of a scalar of at most 8 bytes. Once
-    /// the server makes the subscription, the client keeps [`PUBLISHES`] Publish
-    /// requests in flight, or fewer after a server refuses one, and [`Client::read`]
-    /// and the services send fewer to keep the sum from the call. Each change that
-    /// comes, also while the client reads or serves, stays in the client until
-    /// [`Client::changes`] gives it, with no drop.
+    /// oldest dropped first. Each item asks for both timestamps and a change of the
+    /// status or the value. It reads the `MaxMonitoredItemsPerCall` of the server, and
+    /// sends the items in `CreateMonitoredItems` calls of at most that many. Each
+    /// answer of a Publish fits the receive limit of the client, for items of a scalar
+    /// of at most 8 bytes. Once the server makes the subscription, the client keeps
+    /// [`PUBLISHES`] Publish requests in flight, or fewer after a server refuses one,
+    /// and [`Client::read`] and the services send fewer to keep the sum from the call.
+    /// Each change that comes, also while the client reads or serves, stays in the
+    /// client until [`Client::changes`] gives it, with no drop.
     /// While a change waits, the client sends no Publish request, so at most the
     /// answers of the [`PUBLISHES`] requests in flight wait, and later values wait in
     /// the queues of the server. It reserves the memory of the changes of
