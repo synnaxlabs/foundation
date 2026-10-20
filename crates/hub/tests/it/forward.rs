@@ -448,6 +448,16 @@ fn stops_a_forward_whose_home_is_another_node_as_not_home() {
     assert_eq!(served, [Err(serve::Error::Writer(Box::new(remote)))]);
 }
 
+/// A forward whose group is on two indexes stops as `MALFORMED`.
+#[test]
+fn stops_a_forward_whose_group_is_on_two_indexes_as_malformed() {
+    let served = forwarded(4119, homed, |member| async move {
+        let mut stream = member.write(&["value", "value-b"], &[0, 1]).await;
+        assert_eq!(stream.recv().await, reset_with(MALFORMED));
+    });
+    assert_eq!(served, [Err(serve::Error::ManyIndexes)]);
+}
+
 /// A forward whose stream ends before its last place opens nothing, and finishes.
 #[test]
 fn finishes_a_forward_that_ends_before_its_last_place() {
