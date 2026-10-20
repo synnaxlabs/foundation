@@ -13,6 +13,8 @@ pub(crate) struct Server([u8; 0]);
 #[repr(C)]
 pub(crate) struct Arena {
     pub(crate) blocks: *mut c_void,
+    /// The bytes that the decode may still take.
+    pub(crate) left: usize,
 }
 
 /// `shim_counts` of `server.c`.

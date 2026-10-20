@@ -863,6 +863,72 @@ fn an_answer_keeps_no_field_of_the_answer_before() {
     assert_eq!(stamped, [true, false, false]);
 }
 
+/// Replaces the Double of the change in the Publish answer `message`, of one item, with
+/// 50 `Variant` arrays, each the first element of the one before, of the most
+/// elements that the array check of the decoder lets through, then a `Variant` of no
+/// type that fails the decode.
+fn nested(message: &mut Vec<u8>) {
+    let value = at(message, &[0x0F, 0x0B]) + 1;
+    let mut arrays = [0x98, 0, 0, 0, 0].repeat(50);
+    arrays.push(0x3F);
+    let delta = i32::try_from(arrays.len()).expect("fits") - 9;
+    message.splice(value..value + 9, arrays);
+    resized(message, delta);
+    for level in 0..50 {
+        let length = value + 5 * level + 1;
+        // The 48 bytes of a `Variant`, and 128 elements for each such span left.
+        let elements = 128 * ((message.len() - length - 4) / 48);
+        let elements = u32::try_from(elements).expect("fits").to_le_bytes();
+        message[length..length + 4].copy_from_slice(&elements);
+    }
+}
+
+/// A Publish answer takes at most 128 bytes of decode memory for each of its bytes,
+/// the bound of the array check of the decoder, so a server can not make the client
+/// keep more: past the first answer, a relay makes an answer of nested arrays whose
+/// decode fails at that bound, which closes the connection, and the client keeps one
+/// block under it.
+#[test]
+fn an_answer_takes_at_most_128_bytes_for_each_of_its_bytes() {
+    let (size, kept) = run(0, async |node| {
+        serve(&node, 4, async |mut peer| {
+            let level = add_level(&peer);
+            let url = format!("opc.tcp://{}:{RELAY}", node.addresses()[0]);
+            let answers = Cell::new(0);
+            let size = Cell::new(0);
+            let rewrite = |message: &mut Vec<u8>| {
+                let found =
+                    message.windows(DATA_CHANGE.len()).any(|w| w == DATA_CHANGE);
+                if is(message, PUBLISH_RESPONSE) && found {
+                    answers.set(answers.get() + 1);
+                    if answers.get() == 2 {
+                        nested(message);
+                        size.set(message.len());
+                    }
+                }
+            };
+            relayed(&node, &Relay::default(), rewrite, async {
+                let mut client = peer.connect(&url).await.expect("the client connects");
+                let revised = client.subscribe(&[numbered(0)], LEVEL).await;
+                assert!(revised.is_ok(), "{revised:?}");
+                let first = client.changes(future::pending()).await.map(untimed);
+                assert_eq!(first, Ok(vec![changed_to(0.0, false)]));
+                level.set(1.0);
+                let idle = client.idle(peer.clock.sleep(ms(1000))).await;
+                assert_eq!(idle.map_err(Status::name), Err("BadOutOfMemory"));
+                let kept = blocks(&client);
+                client.close().await;
+                (size.get(), kept)
+            })
+            .await
+        })
+        .await
+    })
+    .0;
+    assert_eq!(kept.0, 1);
+    assert!(size > 250 && kept.1 <= 128 * size, "{size} {kept:?}");
+}
+
 /// A reserve past the memory of the process fails with `BadOutOfMemory` and keeps the
 /// block of the subscribe: of more changes than a size holds, of more bytes than a
 /// block with its header holds, and of more bytes than the allocator gives.

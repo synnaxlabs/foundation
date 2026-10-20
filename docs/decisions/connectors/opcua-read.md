@@ -214,9 +214,13 @@
   server that sends more changes than the queues hold grows the change buffers, which
   do not shrink. Each buffer holds the changes of at most `PUBLISHES` answers, each at
   most the receive limit over the 5 bytes of the smallest notification, so with the
-  doubling of a `Vec` the 2 buffers of a client hold at most about 54 MB, and the
-  memory of the decode about 11 MB, or less than 3 times that while an answer larger
-  than the kept memory decodes.
+  doubling of a `Vec` the 2 buffers of a client hold at most about 54 MB. The decode
+  of an answer takes at most 128 B for each byte of the answer, the bound of the array
+  check of the decoder, and past it fails with `BadOutOfMemory`, which closes the
+  connection: at most about 67 MB at the receive limit. A decode that succeeds takes at
+  most 80 B for each byte, an empty `DataValue`, so about 42 MB. The arena keeps at
+  most the memory of one answer, and its blocks hold less than 4 times that while an
+  answer decodes.
   `subscribe(nodes, sampling)` asks for a publishing interval of the longer of
   `sampling` and 100 ms, at most 1 min, a keep-alive count of max(1, floor(1 min /
   interval)), and a queue of each item that holds the samples of two revised publishing

@@ -74,9 +74,10 @@ fn read(clock: Clock, data: &[u8]) -> (Status, Status) {
 /// `Good`, it encodes the value, decodes those bytes with as many zeros after them as
 /// their length (#435), and encodes again. A `DataValue` gives the same read of its
 /// value, or the same fault, and the same time (`value::time`), or the same status,
-/// from both decodes. A decode under the calloc of the decode of a Publish answer
-/// gives the same status, length, and encoding. An input of fewer than 2 bytes
-/// decodes nothing.
+/// from both decodes. A decode under the calloc of the decode of a Publish answer,
+/// with its limit of 128 bytes for each byte of the input, gives the same status,
+/// length, and encoding, or `BadOutOfMemory` when the decode fails. An input of fewer
+/// than 2 bytes decodes nothing.
 ///
 /// # Panics
 ///
@@ -91,10 +92,10 @@ pub fn decode(data: &[u8]) {
         Ok(decoded) => decoded,
         Err(status) => {
             let status = Err(status.name());
-            assert_eq!(
-                arena.map(drop),
-                status,
-                "{name}: the calloc changes the decode"
+            let arena = arena.map(drop);
+            assert!(
+                arena == status || arena == Err("BadOutOfMemory"),
+                "{name}: the calloc changes the decode: {arena:?}, {status:?}"
             );
             return;
         }
@@ -199,6 +200,10 @@ unsafe fn encode(
     Ok(bytes)
 }
 
+/// `PUBLISH_EXPANSION` of the patched open62541: the most decode memory of a Publish
+/// answer for each of its bytes.
+const EXPANSION: usize = 128;
+
 /// Splits `data` into the type that its first two bytes pick and the rest.
 fn pick(data: &[u8]) -> Option<(&'static DataType, &[u8])> {
     let (&[low, high], input) = data.split_first_chunk()?;
@@ -207,7 +212,8 @@ fn pick(data: &[u8]) -> Option<(&'static DataType, &[u8])> {
 }
 
 /// Decodes a value of `data_type` from the start of `bytes` under the calloc of the
-/// decode of a Publish answer, and gives its encoding and the number of bytes read.
+/// decode of a Publish answer, with the limit that a Publish answer of `bytes` gets,
+/// and gives its encoding and the number of bytes read.
 fn arena(
     data_type: &'static DataType,
     bytes: &[u8],
@@ -215,6 +221,7 @@ fn arena(
     let mut memory = vec![0_u64; data_type.size().div_ceil(8)];
     let mut arena = ffi::test::Arena {
         blocks: std::ptr::null_mut(),
+        left: bytes.len().saturating_mul(EXPANSION),
     };
     let input = Bytes {
         length: bytes.len(),
@@ -532,6 +539,7 @@ mod tests {
         };
         let mut arena = ffi::test::Arena {
             blocks: std::ptr::null_mut(),
+            left: usize::MAX,
         };
         let mut options = DecodeOptions::default();
         options.context = (&raw mut arena).cast();
@@ -558,6 +566,58 @@ mod tests {
             (Status(code), value[2], value[3].wrapping_sub(first)),
             (Status::GOOD, name.len(), 0)
         );
+    }
+
+    /// 50 nested `Variant` arrays, each of the most elements that the array check of the
+    /// decoder lets through, take at most 128 bytes for each byte of the input under
+    /// the calloc of the decode of a Publish answer, and fail with `BadOutOfMemory`.
+    #[test]
+    fn nested_arrays_take_at_most_128_bytes_for_each_byte() {
+        let mut data = vec![u8::try_from(VARIANT).unwrap(), 0];
+        let start = data.len();
+        data.extend([0x98, 0, 0, 0, 0].repeat(50));
+        data.push(0x3F);
+        data.resize(data.len() + 10_000, 0);
+        for level in 0..50 {
+            let length = start + 5 * level + 1;
+            let elements = 128 * ((data.len() - length - 4) / 48);
+            let elements = u32::try_from(elements).unwrap().to_le_bytes();
+            data[length..length + 4].copy_from_slice(&elements);
+        }
+        let input = Bytes {
+            length: data.len() - start,
+            data: data[start..].as_mut_ptr(),
+        };
+        let mut arena = ffi::test::Arena {
+            blocks: std::ptr::null_mut(),
+            left: input.length * EXPANSION,
+        };
+        let mut options = DecodeOptions::default();
+        options.context = (&raw mut arena).cast();
+        options.calloc = Some(ffi::test::__Client_PublishArena_calloc);
+        let mut value = [0_u64; 6];
+        // SAFETY: the value holds the 48 bytes of a `Variant`, aligned to 8, and the
+        // arena lives to the free below.
+        let code = unsafe {
+            ffi::UA_decodeBinary(
+                &raw const input,
+                value.as_mut_ptr().cast(),
+                &ffi::types()[VARIANT],
+                &raw mut options,
+            )
+        };
+        let mut used = 0;
+        let mut block = arena.blocks.cast::<usize>().cast_const();
+        while !block.is_null() {
+            // SAFETY: a block starts with `next`, `size`, and `used`.
+            (used, block) = unsafe { (used + *block.add(2), *block as *const usize) };
+        }
+        // SAFETY: nothing reads the decoded value after this.
+        unsafe { ffi::test::shim_arena_free(&raw mut arena) };
+        let most = input.length * EXPANSION;
+        assert_eq!(Status(code).name(), "BadOutOfMemory");
+        assert!(used <= most, "{used} of {most}");
+        decode(&data);
     }
 
     /// A `Variant` of 127 values and no bytes after the length passes the length check
