@@ -47,7 +47,7 @@ const SUITE: Suite = Suite {
     progress: "in",
     backoff: Backoff::Restart,
     refused,
-    secrets: &["certificate", "key", "trust"],
+    secrets: Some(marked),
     echo: None,
 };
 
@@ -132,6 +132,15 @@ async fn simulate(inputs: Serve) {
         inputs.until,
     );
     served.await.expect("the listener holds");
+}
+
+/// `config` with its certificate, key, and trust each read from `secret("<source>")`.
+fn marked(config: Document, source: &str) -> Document {
+    ["certificate", "key", "trust"]
+        .into_iter()
+        .fold(config, |config, key| {
+            scenarios::with(config, key, scenarios::inputs::secret(source))
+        })
 }
 
 /// Configs with a missing scheme, two `read` blocks of one channel, and a node id that

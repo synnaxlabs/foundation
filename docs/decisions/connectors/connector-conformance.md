@@ -14,11 +14,14 @@
   kind's simulator). A `Suite` gives plain inputs: its table, a setup that defines what
   the connector needs and starts each writer that feeds it, its simulator, the name of
   its progress count, its backoff form, the configs that its check refuses with
-  their exact diagnostics, the attributes of its config that take a secret, and an
-  echo simulator when its device can answer with a text of its own. The simulator of
-  a kind that subscribes changes its data at least every 100 ms, so its progress
-  grows: the simulator of `opcua` changes each variable every 100 ms, so the suite runs
-  the default mode, which subscribes.
+  their exact diagnostics, a function that makes its config read each secret that it
+  takes, and an echo simulator when its device can answer with a text of its own. The
+  kind makes the marked config, as it owns the shape of its config: a secret can need
+  other attributes to check (`laptop.architect-2`, 2026-10-20T14:37:34Z:
+  https://github.com/synnaxlabs/foundation/issues/2642#issuecomment-6293427967). The
+  simulator of a kind that subscribes changes its data at least every 100 ms, so its
+  progress grows: the simulator of `opcua` changes each variable every 100 ms, so the
+  suite runs the default mode, which subscribes.
   `polled = true` keeps its crate and ONE NODE tests (`laptop.architect-2`,
   2026-10-20T10:03:28Z:
   https://github.com/synnaxlabs/foundation/pull/3548#issuecomment-6288442532). People
@@ -121,16 +124,16 @@
      not draw: approved by `laptop.architect-2`, 2026-10-20T08:40:04Z
      (https://github.com/synnaxlabs/foundation/pull/3548#issuecomment-6286993255).
 
-  7. **No secret in a status.** For a kind whose config takes secrets, the config of
-     its setup reads each of them from a secret whose value is a marker. No status,
-     no end of a run, and no check shows the marker. One run meets in turn: no device
-     for 10 s, the simulator for 5 s, and its stop for 10 s. A second run meets the
-     echo simulator, which answers each request with an error whose text holds each
-     header of the request, as a gateway in debug mode does: an error within 10 s,
-     and 5 s more. Then each refused config, and the read and write forms of scenario
-     5, each with the same secrets and each for 5 s. A kind with no secret passes
-     with no check. The status hides each secret value that a run read (ruling of
-     `laptop.architect-2` on #2849 item 4, 2026-10-16T17:54:49Z:
+  7. **No secret in a status.** For a kind whose config takes secrets, the config of its
+     setup reads each of them from a secret whose value is a marker, and checks. No
+     status, no end of a run, and no check shows the marker. One run meets in turn: no
+     device for 10 s, the simulator for 5 s, and its stop for 10 s. A second run meets
+     the echo simulator, which answers each request with an error whose text holds each
+     header of the request, as a gateway in debug mode does: an error within 10 s, and 5
+     s more. Then each refused config, and the read and write forms of scenario 5, each
+     with the same secrets and each for 5 s. A kind with no secret passes with no check.
+     The status hides each secret value that a run read (ruling of `laptop.architect-2`
+     on #2849 item 4, 2026-10-16T17:54:49Z:
      https://github.com/synnaxlabs/foundation/issues/2849#issuecomment-6221505945).
      Until #3603 does that, the echo form of `influx` fails, as its status shows the
      token. Scenario 7 runs 30.1 s of plant time for `opcua` (box1, at 2026-10-20).

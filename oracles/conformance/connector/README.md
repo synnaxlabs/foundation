@@ -34,8 +34,8 @@ heals_after_random_faults`. A range `<start>..<end>` in hex, the end excluded, s
   the scenario.
 - A new scenario goes into `suite!`, so it reaches each kind at once.
 - A kind gives plain inputs: its table, a setup, its simulator, the name of its
-  progress count, its backoff form, the configs that its check refuses, the attributes
-  that take a secret, and an echo simulator. A kind that needs a hook to pass a
-  scenario has a scenario that is wrong.
+  progress count, its backoff form, the configs that its check refuses, a function that
+  makes its config read each secret, and an echo simulator. A kind that needs a hook to
+  pass a scenario has a scenario that is wrong.
 - The simulator of a kind that subscribes changes its data at least every 100 ms.
 - A new kind adds `<kind>/main.rs` and its `[[test]]` entry.

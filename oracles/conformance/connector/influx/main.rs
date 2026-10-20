@@ -38,7 +38,9 @@ const SUITE: Suite = Suite {
     progress: "confirmed",
     backoff: Backoff::Run,
     refused,
-    secrets: &["token"],
+    secrets: Some(|config, source| {
+        scenarios::with(config, "token", scenarios::inputs::secret(source))
+    }),
     echo: Some(|inputs| Box::pin(echo(inputs))),
 };
 

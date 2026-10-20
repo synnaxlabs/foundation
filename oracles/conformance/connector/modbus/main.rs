@@ -38,7 +38,7 @@ const SUITE: Suite = Suite {
     progress: "in",
     backoff: Backoff::Restart,
     refused,
-    secrets: &[],
+    secrets: None,
     echo: None,
 };
 

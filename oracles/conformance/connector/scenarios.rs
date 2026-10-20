@@ -24,7 +24,7 @@ use connector::reader::SELECT;
 use connector::status::{Class, Reading, State};
 use connector::testing::{Rig, Run, create_secret};
 use document::diagnostic::{Code, Diagnostic};
-use document::value::{self, Call, Value};
+use document::value::{self, Value};
 use document::{Attribute, Document, Map};
 use env::clock::Clock;
 use env::rng::Rng;
@@ -39,7 +39,7 @@ pub(crate) use inputs::{Backoff, Plant, Serve, Simulator, Suite};
     dead_code,
     reason = "a kind names one backoff form, and reads only the inputs it needs"
 )]
-mod inputs {
+pub(crate) mod inputs {
     use std::net::SocketAddr;
     use std::pin::Pin;
 
@@ -49,6 +49,7 @@ mod inputs {
     use connector::testing::Rig;
     use document::Document;
     use document::diagnostic::Diagnostic;
+    use document::value::{self, Call, Value};
     use env::tasks::Tasks;
 
     /// What the suite of one kind gives the scenarios.
@@ -71,13 +72,27 @@ mod inputs {
         pub backoff: Backoff,
         /// Configs that the kind's check refuses, each with its exact diagnostics.
         pub refused: fn() -> Vec<(Document, Vec<Diagnostic>)>,
-        /// The attributes of the config of [`Suite::setup`] that each take a secret.
-        /// Empty for a kind that takes none.
-        pub secrets: &'static [&'static str],
+        /// Sets each attribute of `config`, the config of [`Suite::setup`], that takes
+        /// a secret to read `secret("<source>")`, and adds each attribute that those
+        /// need to check. `None` for a kind that takes no secret.
+        pub secrets: Option<fn(config: Document, source: &str) -> Document>,
         /// A simulator that answers each request with an error whose text holds each
         /// header and value of the request, as a gateway in debug mode does. `None`
         /// for a kind whose device answers with a code and no text of its own.
         pub echo: Option<Simulator>,
+    }
+
+    /// The call `secret("<source>")`, for [`Suite::secrets`].
+    pub(crate) fn secret(source: &str) -> value::Kind {
+        let source = Value {
+            kind: value::Kind::String(source.into()),
+            span: None,
+        };
+        value::Kind::Call(Call {
+            function: "secret".into(),
+            function_span: None,
+            arguments: vec![source],
+        })
     }
 
     /// A simulator, as [`Suite::serve`] says.
@@ -263,7 +278,7 @@ const FAULTS_MAX: u64 = 8;
 const TEXT_MAX: usize = 1024;
 /// A name that no spec of the scenarios defines.
 const UNDEFINED: &str = "conformance.undefined";
-/// The secret that each attribute of [`Suite::secrets`] reads in
+/// The secret that [`Suite::secrets`] reads in
 /// [`keeps_each_secret_from_the_status`].
 const SECRET: &str = "conformance.marker";
 /// The value of [`SECRET`], which no status shows.
@@ -877,24 +892,8 @@ fn undefined(config: Document) -> Document {
     with(config, SELECT.name, select)
 }
 
-/// `config` with each attribute of [`Suite::secrets`] read from [`SECRET`].
-fn marked(suite: &Suite, config: Document) -> Document {
-    suite.secrets.iter().fold(config, |config, key| {
-        let name = Value {
-            kind: value::Kind::String(SECRET.into()),
-            span: None,
-        };
-        let secret = value::Kind::Call(Call {
-            function: "secret".into(),
-            function_span: None,
-            arguments: vec![name],
-        });
-        with(config, key, secret)
-    })
-}
-
 /// `config` with the attribute `key` set to `kind`, in place of one that it had.
-fn with(config: Document, key: &str, kind: value::Kind) -> Document {
+pub(crate) fn with(config: Document, key: &str, kind: value::Kind) -> Document {
     let others = config.attributes.iter().filter(|other| &*other.key != key);
     let mut attributes: Vec<_> = others.cloned().collect();
     attributes.push(Attribute {
@@ -1085,20 +1084,22 @@ async fn faulted(scene: Rc<Scene>, seed: u64) {
     }
 }
 
-/// For a kind with [`Suite::secrets`], whose config reads each of them from
+/// For a kind with [`Suite::secrets`], whose config reads each secret from
 /// [`SECRET`], no status, no end of a run, and no check shows [`MARKER`], its value.
 /// One run meets in turn: no device for 10 s, the simulator for 5 s, and its stop
 /// for 10 s. A second run meets the echo of [`Suite::echo`]: an error within 10 s,
 /// and 5 s more. Then each config of [`Suite::refused`], and the read and write
 /// forms of scenario 5, each for 5 s. A kind with no secret passes with no check.
 pub(crate) fn keeps_each_secret_from_the_status(suite: &'static Suite) {
-    if suite.secrets.is_empty() {
+    let Some(marked) = suite.secrets else {
         return;
-    }
+    };
     run(suite, direct, move |scene| async move {
         let secret = SECRET.parse().expect("a valid name");
         create_secret(&scene.node.files(), &secret, MARKER.as_bytes()).await;
-        let config = marked(suite, scene.setup().await);
+        let setup = scene.setup().await;
+        let config = marked(setup.clone(), SECRET);
+        assert_ne!(config, setup, "the kind reads a secret");
         let kinds = (suite.kinds)();
         let checked = kinds.check(suite.kind(), None, &config);
         let checked = checked.expect("the config with secrets checks");
@@ -1122,7 +1123,7 @@ pub(crate) fn keeps_each_secret_from_the_status(suite: &'static Suite) {
             scene.stop(served).await;
         }
         for (refused, _) in (suite.refused)() {
-            let refused = marked(suite, refused);
+            let refused = marked(refused, SECRET);
             unmarked(&kinds.check(suite.kind(), None, &refused));
             ended_unmarked(&scene.supervise(refused).await.stop().await);
         }
