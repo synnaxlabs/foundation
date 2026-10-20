@@ -96,11 +96,16 @@
   the free of the frame. It runs once for each frame that a Python program reads, on the
   CPU of the program, not of the node, and adds 0 bytes per sample. It is on the path of
   a latest-mode read, so it counts against the latest-mode p99, whose limit is 2.5 µs a
-  hop. Its p99 is over the limit in each case of the table, and in at least one pass
-  of the queued frame of 1 place of 100 samples (1.41 to 3.58 µs) and of one sample of
-  `f64` (1.16 to 2.65 µs). A cut of the part per sample needs arrays that view the
-  buffers of the `sdk` frame, which this item rejects above. A cut of the part per array
-  needs no `numpy` array for each series, which the Python surface cannot give.
+  hop. Its p99 is over the limit in each case of the table, and in at least one pass of
+  the queued frame of 1 place of 100 samples (1.41 to 3.58 µs) and of one sample of
+  `f64` (1.16 to 2.65 µs). A queued frame of one sample of `uuid` is over it at p99 in
+  each pass (4.71 to 7.42 µs), and its cost grows with each sample: each costs one
+  `uuid.UUID(int=...)`, 0.50 to 1.09 µs by `timeit` in Python 3.12.3 on box1 at load 18.
+  A `UUID` made with `object.__new__` and its fields `int` and `is_safe` costs 0.16 µs,
+  but it depends on a layout of `uuid.UUID` that Python does not state. A cut of the
+  part per sample needs arrays that view the buffers of the `sdk` frame, which this item
+  rejects above. A cut of the part per array needs no `numpy` array for each series,
+  which the Python surface cannot give.
   `laptop.architect-2` accepted this judgment at 0804db16e at 2026-10-19T21:54:00Z
   (https://github.com/synnaxlabs/foundation/pull/3436#issuecomment-6278228544), with the
   line of 1024 places as its trigger at 2026-10-19T22:22:38Z
