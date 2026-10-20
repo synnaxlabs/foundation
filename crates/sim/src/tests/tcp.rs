@@ -16,6 +16,8 @@ use types::time::{Monotonic, Span};
 use super::{EIO, after, at, delay, millis, pair, panicked, shard};
 use crate::{Crash, Error, link, node};
 
+mod loss;
+
 /// What a shard gave, once it ended.
 type Slot<T> = Arc<Mutex<Option<T>>>;
 
@@ -1223,19 +1225,6 @@ fn a_delayed_stream_panics() {
 }
 
 #[test]
-fn a_stream_on_a_lossy_link_panics() {
-    let lossy = link::Config {
-        loss: 0.01,
-        ..link::Config::default()
-    };
-    let error = yet(lossy, |node, remote| async move {
-        connect(&node, remote, options()).await.err()
-    });
-    let message = "sim does not simulate TCP on a lossy link yet";
-    assert_eq!(error, panicked("client", message));
-}
-
-#[test]
 fn a_connect_to_an_address_with_no_node_panics() {
     let message = "sim does not simulate TCP to an address with no node yet";
     // A node can have 10.0.0.3, but the run has two nodes.
@@ -1264,30 +1253,6 @@ fn a_connect_to_a_full_backlog_panics() {
         let _second = connect(&node, remote, options()).await;
     });
     drop(sim.run());
-}
-
-#[test]
-#[should_panic(expected = "sim does not simulate TCP on a lossy link yet")]
-fn a_drop_between_runs_on_a_lossy_link_panics_at_the_next_run() {
-    let (mut sim, a, b) = pair(0, link::Config::default());
-    let mut listener = listen(&b, 4433);
-    let _server = start(
-        &b,
-        "server",
-        move |_| async move { accept(&mut listener).await },
-    );
-    let remote = at(&b, 4433);
-    let client = start(&a, "client", move |node| async move {
-        connect(&node, remote, options()).await.unwrap()
-    });
-    sim.run().unwrap();
-    let lossy = link::Config {
-        loss: 0.01,
-        ..link::Config::default()
-    };
-    sim.link(&a, &b, lossy);
-    drop(take(&client));
-    drop(sim.run_for(Span::ZERO));
 }
 
 #[test]
