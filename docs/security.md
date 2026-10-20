@@ -108,8 +108,8 @@ state on `main`.
   session holds at most `window_bytes / 1453` blocks, plus two for each stream. Open:
   #2434 (a session that sends small parts of large blocks, as `hub` does, holds up to
   that many large blocks).
-- Open: #620 (a stop after the peer's reset gives the peer the stream's window twice,
-  so a peer grows the connection's receive memory with no bound).
+- Fixed: #620 (a stop and a reset of one stream each gave the peer its unread bytes
+  of window, so a peer grew the connection's receive memory with no bound).
 - Fixed: #299 (a peer made the node hold certificates that are not valid for a
   session). A chain is one certificate of at most 1 KiB. #298 (datagrams that are
   not valid, from one address, stopped every stateless reset; a small datagram of an
