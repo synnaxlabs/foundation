@@ -445,8 +445,8 @@ struct Secrets(Vec<(secret::Source, secret::Value)>);
 impl Secrets {
     /// Holds the text form of `value` in place of the last value of `source`: its
     /// `String::from_utf8_lossy` form with no ASCII white space at its ends, which
-    /// HTTP drops from a header. An empty form only drops the last one, as it covers
-    /// no char.
+    /// HTTP drops from a header. An empty form only drops the last one, as `hide`
+    /// would match it at each char.
     fn hold(&mut self, source: &secret::Source, value: &secret::Value) {
         self.0.retain(|(held, _)| held != source);
         let chunks = value.expose().trim_ascii().utf8_chunks();
