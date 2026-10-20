@@ -313,7 +313,7 @@ async fn program(
             for _ in 0..FRAMES {
                 let (ends, body) = frame(case, &start.places, stamp);
                 stamp += i64::from(case.count);
-                stream.frame(head(case), &ends, &body).await;
+                stream.frame(head(case), &[case.count], &ends, &body).await;
             }
             progress.sent.fetch_add(FRAMES, Ordering::Relaxed);
             let mut outcomes = 0;
@@ -358,7 +358,6 @@ fn head(case: &Case) -> Head {
             Time::Frame(Path::Live)
         },
         form: Form::Raw,
-        count: case.count,
         series: case.series,
     }
 }
