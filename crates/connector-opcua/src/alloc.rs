@@ -175,14 +175,16 @@ unsafe extern "C" fn connector_opcua_free(ptr: *mut c_void) {
     unsafe { alloc::dealloc(block, layout) };
 }
 
-/// Makes aws-lc allocate through the global allocator of the binary, as open62541 does,
-/// so a counting allocator counts the blocks of aws-lc too. aws-lc then does not clear
-/// a block before it frees it.
+/// Makes `OPENSSL_malloc`, `OPENSSL_realloc`, and `OPENSSL_free` of aws-lc use the
+/// global allocator of the binary, so a counting allocator counts the blocks of aws-lc
+/// too. The array of the thread locals of aws-lc, one block for each thread, stays in
+/// `malloc`. aws-lc then does not clear a block before it frees it.
 ///
 /// # Safety
 ///
-/// No block of aws-lc is live: call it before the first call of aws-lc in the process.
-/// A free of an older block reads a header that the block does not have.
+/// When no earlier call routed aws-lc, no block of aws-lc is live: call it before the
+/// first call of aws-lc in the process. The free of an older block reads a header that
+/// it does not have.
 ///
 /// # Panics
 ///

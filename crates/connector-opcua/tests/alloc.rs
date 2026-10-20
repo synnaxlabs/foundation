@@ -55,7 +55,7 @@ fn sim() -> (Sim, env::clock::Clock, Rng) {
 }
 
 fn a_second_route_of_the_crypto_panics() {
-    // SAFETY: the call panics before aws-lc takes its functions.
+    // SAFETY: an earlier call routed aws-lc.
     let panic =
         std::panic::catch_unwind(|| unsafe { connector_opcua::bench::route_crypto() });
     let panic = panic.expect_err("a second route panics");

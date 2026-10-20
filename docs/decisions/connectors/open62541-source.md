@@ -378,7 +378,18 @@
   https://github.com/synnaxlabs/foundation/pull/3545#issuecomment-6286349076, item 2).
   Supersedes items 1 and 3 of
   https://github.com/synnaxlabs/foundation/pull/3037#issuecomment-6236391062. A crypto
-  library that a later PR links keeps its own allocator. So the counting allocator of a
+  library that a later PR links keeps its own allocator. Only `tests/alloc.rs` routes
+  aws-lc through these functions: `bench::route_crypto`, first in `main`, gives them to
+  aws-lc with `CRYPTO_set_mem_functions`, so the count of a secure read holds the blocks
+  of aws-lc. The array of the thread locals of aws-lc, one block for each thread, stays
+  in `malloc`. The node and each benchmark keep the allocator of aws-lc. Lost: a counter
+  of aws-lc with its own `malloc` functions and an atomic (a second mutable global, and
+  two counts that no test adds); the weak symbols of aws-lc, such as
+  `OPENSSL_memory_alloc` (link-time wiring); the count in the bench (no check fails on
+  it) (`laptop.architect-2`, 2026-10-20 10:35:03 UTC,
+  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6288961734, on the
+  plan https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6288867020).
+  So the counting allocator of a
   test or benchmark binary counts C too. The copy check compiles without `alloc.h`. A
   test reads the archive that `build.rs` makes with it, and fails on each symbol outside
   the copy, `shim.c`, and `server.c` that its closed list does not hold. The list holds
