@@ -3366,8 +3366,8 @@ fn rejected(mode: client::Mode) -> String {
 #[test]
 fn a_wrong_password_names_the_user_and_the_password() {
     let secure = Secure {
-        // The status hides each value that the run read, so no value is a word of
-        // the error.
+        // The status hides the last value of each source that the run read, so no
+        // value is a word of the error.
         user: Some(("operator", Some(b"bad-pw"))),
         ..Secure::with_user(Policy::Basic256Sha256)
     };
