@@ -374,14 +374,16 @@ fn a_write_of_a_frame_of_any_type_allocates_nothing() {
 /// Drives 21 to 100 of the changes of a subscription allocate nothing: the take, the
 /// sort, and the write of the frames, for one change or a change of each of 64 reads,
 /// into channels of one type or of each type in turn, at one device time or at a
-/// device time for each change. The drive grows its buffers in drive 1, and the test
-/// home grows its groups in the first 20, as for writes.
+/// device time for each change, 1 ns or 10 us apart. Each change is before its drive:
+/// a time after it would end the run. The drive grows its buffers in drive 1, and the
+/// test home grows its groups in the first 20, as for writes.
 fn a_drive_of_changes_allocates_nothing() {
     let one = Span::from_nanos(1);
-    let runs: [(&[Scalar], usize, Span); 5] = [
+    let runs: [(&[Scalar], usize, Span); 6] = [
         (&[Scalar::F64], 1, Span::ZERO),
         (&[Scalar::F64], 64, Span::ZERO),
         (&[Scalar::F64], 64, one),
+        (&[Scalar::F64], 64, Span::from_nanos(10_000)),
         (&[Scalar::Bool], 64, Span::ZERO),
         (connector_opcua::bench::kind::SCALARS, 64, Span::ZERO),
     ];
