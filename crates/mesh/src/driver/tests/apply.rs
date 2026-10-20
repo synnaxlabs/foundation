@@ -28,7 +28,7 @@ impl Cluster {
     }
 
     /// As [`Cluster::apply`], with `holders` and `homes`.
-    fn apply_held(
+    pub(super) fn apply_held(
         &self,
         node: u8,
         base: Pointer,
@@ -59,7 +59,7 @@ impl Cluster {
     }
 
     /// Sets a one-way delay of `delay` on each link between two voters.
-    fn delay(&mut self, delay: Span) {
+    pub(super) fn delay(&mut self, delay: Span) {
         let config = link::Config {
             delay,
             ..link::Config::default()
@@ -72,7 +72,7 @@ impl Cluster {
     }
 
     /// Node `node` proposes `voters` at its next tick.
-    fn configure(&self, node: u8, voters: BTreeSet<u8>) {
+    pub(super) fn configure(&self, node: u8, voters: BTreeSet<u8>) {
         let mut board = self.board.lock().unwrap();
         board.configurations.insert(node, voters);
     }
@@ -1086,7 +1086,7 @@ pub(super) fn create_largest(count: usize) -> BTreeMap<Name, Definition> {
 }
 
 // Voter `id`, a step of whose put passed the deadline.
-fn late(id: u8) -> Missed {
+pub(super) fn late(id: u8) -> Missed {
     Missed {
         node: key(id),
         name: Some(name(&format!("plant.node{id}"))),
@@ -1470,7 +1470,7 @@ fn specs(entries: &[Entry]) -> Vec<Change> {
 
 /// An index channel of key `7 + at` at the tree key `plant.i<at>`, for each `at` below
 /// `count`.
-fn create_indexes(count: u128) -> BTreeMap<Name, Definition> {
+pub(super) fn create_indexes(count: u128) -> BTreeMap<Name, Definition> {
     let index = |at: u128| {
         let channel = Channel {
             key: channel::Key::from_u128(at.checked_add(7).unwrap()),

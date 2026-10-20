@@ -356,6 +356,62 @@ impl Server {
         unsafe { ffi::test::shim_server_session_timeout(self.raw(), ms) };
     }
 
+    /// Lets in a later session only with the user name and password of one of
+    /// `users`, and no anonymous session.
+    ///
+    /// # Panics
+    ///
+    /// If open62541 refuses the logins.
+    #[cfg(test)]
+    pub(crate) fn admit(&self, users: &[(&str, &[u8])]) {
+        let logins: Vec<_> = (users.iter())
+            .map(|(name, password)| ffi::test::Login {
+                name: ffi::Bytes::of(name.as_bytes()),
+                password: ffi::Bytes::of(password),
+            })
+            .collect();
+        // SAFETY: the server lives, and it copies `logins`.
+        let status = Status(unsafe {
+            ffi::test::shim_server_users(self.raw(), logins.as_ptr(), logins.len())
+        });
+        assert_eq!(status, Status::GOOD, "open62541 refused the logins");
+    }
+
+    /// Gives each endpoint one user token policy, a user name with the security policy
+    /// of the URI `uri`. With the policy `None`, a client that sends the password sends
+    /// it in clear on a channel that does not encrypt.
+    ///
+    /// # Panics
+    ///
+    /// If `uri` has no `#`, or memory runs out.
+    #[cfg(test)]
+    pub(crate) fn set_token_policy(&self, uri: &CStr) {
+        // SAFETY: the server lives, and it copies `uri`.
+        let status = Status(unsafe {
+            ffi::test::shim_server_token_policy(self.raw(), uri.as_ptr())
+        });
+        assert_eq!(status, Status::GOOD, "open62541 refused the token policies");
+    }
+
+    /// Refuses each later session with `status`, until a later [`Server::admit`].
+    ///
+    /// # Panics
+    ///
+    /// If `status` is not [`Status::BAD_IDENTITY_TOKEN_INVALID`] or
+    /// [`Status::BAD_USER_ACCESS_DENIED`].
+    #[cfg(test)]
+    pub(crate) fn refuse_sessions(&self, status: Status) {
+        // SAFETY: the server lives.
+        let refused = Status(unsafe {
+            ffi::test::shim_server_refuse_sessions(self.raw(), status.0)
+        });
+        assert_eq!(
+            refused,
+            Status::GOOD,
+            "the shim refuses no session with {status:?}"
+        );
+    }
+
     /// The number of the `DataType` of the variable `node`, in namespace 0.
     ///
     /// # Panics

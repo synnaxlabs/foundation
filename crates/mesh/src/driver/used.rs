@@ -31,7 +31,7 @@ use spec::Pointer;
 pub(super) const SPEC: &str = "spec";
 /// The wait before a read or a get that follows one that failed for a cause that can
 /// pass.
-const RETRY: Span = Span::SECOND;
+pub(super) const RETRY: Span = Span::SECOND;
 
 /// The spec that this node uses, and the newest committed pointer that it does not
 /// use yet. It holds at most two trees: the tree in use, and the chunks of the tree

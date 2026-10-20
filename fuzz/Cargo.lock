@@ -886,6 +886,7 @@ dependencies = [
  "env",
  "raft",
  "spec",
+ "tracing",
  "transport",
  "types",
  "wire",

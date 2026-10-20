@@ -168,7 +168,7 @@ impl Try<'_> {
 
     // Waits until this node knows what became of the entry at `at`. Gives what the
     // apply of that entry gave, or `None` when a new leader replaced it.
-    async fn applied(
+    pub(super) async fn applied(
         &self,
         at: Position,
     ) -> Result<Option<Result<(), Refused>>, Error> {

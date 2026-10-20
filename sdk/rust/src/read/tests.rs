@@ -43,6 +43,16 @@ fn place(at: u128, scalar: Scalar, name: &str) -> Place {
     }
 }
 
+/// The place of the node of `place`, whose index is entry `index`.
+fn entry(place: Place, index: usize) -> program::Place {
+    program::Place {
+        key: place.key,
+        data_type: place.data_type,
+        name: place.name,
+        index,
+    }
+}
+
 /// `count` (`i64`), then `time`, its index.
 fn places() -> Vec<Place> {
     vec![
@@ -396,10 +406,10 @@ fn read(samples: u32, series: &[(usize, &[u8], bool)]) -> types::frame::Frame {
 }
 
 /// `time` and `count`, the entries of a frame of `read`.
-fn read_places() -> [Place; 2] {
+fn read_places() -> [program::Place; 2] {
     [
-        place(1, Scalar::Stamp, "time"),
-        place(2, Scalar::I64, "count"),
+        entry(place(1, Scalar::Stamp, "time"), 0),
+        entry(place(2, Scalar::I64, "count"), 0),
     ]
 }
 
@@ -474,7 +484,7 @@ fn a_layout_puts_each_name_at_its_place_then_the_index_unless_a_name_names_it() 
     let a = place(2, Scalar::I64, "plant.a");
     let b = place(3, Scalar::I64, "plant.b");
     let plant = place(1, Scalar::Stamp, "plant.time");
-    let entries = [a.clone(), b.clone(), plant.clone()];
+    let entries = [&a, &b, &plant].map(|place| entry(place.clone(), 2));
     let at = |place: &Place| Place {
         index: 2,
         ..place.clone()
@@ -509,10 +519,6 @@ fn a_layout_puts_each_name_at_its_place_then_the_index_unless_a_name_names_it() 
         (&["plant.a", "cell.c"], None),
     ];
     for (named, layout) in cases {
-        assert_eq!(
-            super::layout(&names(named), &entries, 2),
-            layout,
-            "{named:?}"
-        );
+        assert_eq!(super::layout(&names(named), &entries), layout, "{named:?}");
     }
 }

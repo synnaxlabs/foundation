@@ -1,6 +1,20 @@
-- **STAMP (#435)** `connector::stamp::Stamps` stamps the frames of one writer of a kind
-  that reads by request: one stamp goes into each index of the writer
-  (`laptop.architect-2`, 2026-10-16T04:32:46Z, item 3:
+- **STAMP (#435)** `connector::stamp::Writer`, crate-private, stamps the frames of one
+  writer: the `poll::Writer` of a kind and the status writer of the supervisor each
+  hold one, and no other code gives a stamp. A kind writes each frame at the last
+  stamp that `request` or `sample` of its `poll::Writer` gave (`laptop.architect-2`,
+  2026-10-20T13:33:43Z, item 1:
+  https://github.com/synnaxlabs/foundation/pull/3595#issuecomment-6292093472), and
+  writes one frame at each stamp (`laptop.architect-2`, 2026-10-20T14:10:32Z:
+  https://github.com/synnaxlabs/foundation/issues/3596#issuecomment-6292853314).
+  `write` takes the stamp as an argument, so the doc holds this rule, not the type
+  (#3596). A second frame at one stamp, after a group of the first was written again,
+  can get a refusal under the stamp of that write again, and `write` then panics.
+  `stamp::Writer` keeps the stamp rule in a private value with no hub, so the tests of
+  the rule need no node (`laptop.architect-2`, 2026-10-20T13:14:36Z:
+  https://github.com/synnaxlabs/foundation/issues/2527#issuecomment-6291709126). Lost:
+  the rule merged into `stamp::Writer` (each case of the property tests then opens a sim
+  node). It stamps the frames of a kind that reads by request: one stamp goes into each
+  index of the writer (`laptop.architect-2`, 2026-10-16T04:32:46Z, item 3:
   https://github.com/synnaxlabs/foundation/pull/2817#issuecomment-6208137622). The
   stamp of a frame is the midpoint of the mesh times before and after the requests that
   read its samples (`laptop.architect-2`,
@@ -12,8 +26,8 @@
   or after it on the same index. Each stamp given counts as the stamp before the next,
   written or not (`laptop.architect-2`, 2026-10-13T01:39:14Z, item 4:
   https://github.com/synnaxlabs/foundation/pull/2518#issuecomment-6136202010). So "the
-  last stamp of the writer" in CONNECTOR STATUS is the last stamp that `Stamps` gave,
-  also to a frame for which the pool gave no block (`laptop.architect`,
+  last stamp of the writer" in CONNECTOR STATUS is the last stamp that `stamp::Writer`
+  gave, also to a frame for which the pool gave no block (`laptop.architect`,
   2026-10-13T02:15:47Z,
   https://github.com/synnaxlabs/foundation/pull/2518#issuecomment-6136738770). After a
   refusal as backwards, the refused groups are written again once, with only their
@@ -26,7 +40,7 @@
   https://github.com/synnaxlabs/foundation/pull/3556#issuecomment-6287471425).
   `after` panics for a stamp under the last stamp, since a refusal of the frame of the
   last stamp never gives one. `stamp::Writer`, crate-private, owns the hub's writer
-  and the `Stamps` of its frames. Its `write` takes the series of a frame and a fill
+  and the stamps of its frames. Its `write` takes the series of a frame and a fill
   that gets each entry, an index too, with the stamp of the frame, and writes that
   stamp in each index. So `write` writes in no index, and per series it does the work
   of one fill (`laptop.architect-2`, 2026-10-20T11:08:01Z:
@@ -56,12 +70,14 @@
   `Draft::series_mut` after the fill, +172 ns, each the median of 3 runs on a quiet
   host (https://github.com/synnaxlabs/foundation/pull/3556#issuecomment-6289186365):
   the fill already finds each index in its one load.
-  The status writer of the supervisor stamps its frames with `Stamps::next`
+  The status writer of the supervisor stamps its frames with `stamp::Writer::next`
   of its one read of mesh time, so one module holds the stamp rule
   (`laptop.architect-2`, 2026-10-13T01:38:13Z, item 2:
   https://github.com/synnaxlabs/foundation/pull/2518#issuecomment-6136191164, approved
   2026-10-13T02:04:57Z, item 3:
-  https://github.com/synnaxlabs/foundation/pull/2518#issuecomment-6136552780). The
+  https://github.com/synnaxlabs/foundation/pull/2518#issuecomment-6136552780, and
+  2026-10-20T13:14:36Z:
+  https://github.com/synnaxlabs/foundation/issues/2527#issuecomment-6291709126). The
   person put the module in `connector` for each kind that reads by request (ONE NODE
   record, section 3, 2026-10-13T00:50:41Z,
   https://github.com/synnaxlabs/foundation/issues/1737#issuecomment-6135595217). Lost:
@@ -76,7 +92,7 @@
   2026-10-19T23:36:41Z,
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6279727836).
 - **STAMP FIT (#2622)** `connector::stamp::Fit` fits one device clock to mesh time, and
-  `Stamps::sample` stamps a sample from the mesh time that a fit gives
+  `poll::Writer::sample` stamps a sample from the mesh time that a fit gives
   (`laptop.architect-2`, 2026-10-14T01:37:20Z, PR 2:
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6158936229). `Fit`
   holds one `estimate::overlap::Overlap` of 200 ppm, over offsets of mesh time minus
@@ -103,10 +119,11 @@
   claims less, and is left out on the other side (B of the same ruling: a first `before`
   far above the clock then leaves each later low edge out, and a stopped high edge can
   hide a disagreement); `c` of 0, which drops each server time past the range of an
-  offset; `Fit` inside `Stamps` (a writer with the values of two devices then needs two
-  `Stamps` for one index, so a stamp can go back); a fit that keeps each reading and
-  solves a line (it allocates, and its bound is not hard); a restart on any edge out of
-  reach (one source time 146 years old drops the bound); leaving out a far low edge (a
-  fit from `before` alone never bounds the clock); a restart only on a high edge under
-  `i64::MIN`, which keeps the table of B (an old reading widened past the range drops an
-  edge; round 3 item 1 of the ruling of 2026-10-19T18:14:00Z).
+  offset; `Fit` inside `stamp::Writer` (a writer with the values of two devices then
+  needs two `stamp::Writer` values for one index, so a stamp can go back); a fit that
+  keeps each reading and solves a line (it allocates, and its bound is not hard); a
+  restart on any edge out of reach (one source time 146 years old drops the bound);
+  leaving out a far low edge (a fit from `before` alone never bounds the clock); a
+  restart only on a high edge under `i64::MIN`, which keeps the table of B (an old
+  reading widened past the range drops an edge; round 3 item 1 of the ruling of
+  2026-10-19T18:14:00Z).

@@ -5,9 +5,10 @@
 //! error of 1 byte.
 //! The run has a task that lives 2 s more. In a second set of twins, a rival writer
 //! keeps the pool full around the run, so the home applies its frames late. The twins
-//! add their larger steps of memory at the same runs, so the steps cancel. This binary
-//! has no test harness: the count covers each thread, and a harness allocates on its
-//! own thread at any time.
+//! add their larger steps of memory at the same runs, so the steps cancel. After a read
+//! of a secret of 64 KiB, the run holds its text form with no spare capacity: the
+//! value, or 3 bytes for each byte that is not UTF-8. This binary has no test harness:
+//! the count covers each thread, and a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -20,6 +21,7 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use connector::cancel::Token;
 use connector::kind::{Channels, Context, Error, Kind, Table};
+use connector::secret::Source;
 use connector::testing::Rig;
 use document::Document;
 use document::diagnostic::Diagnostic;
@@ -128,6 +130,72 @@ impl Kind for Large {
         };
         std::future::ready(end)
     }
+}
+
+/// The name of the secret that [`Reads`] reads.
+const TOKEN: &str = "plant.token";
+
+/// A kind that reads [`TOKEN`], drops it, and stores the bytes held then less those
+/// held before the read.
+struct Reads {
+    held: Arc<AtomicUsize>,
+}
+
+impl Kind for Reads {
+    type Config = ();
+    const SCHEMA: document::schema::Body = connector::testing::READS;
+
+    fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
+
+    fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
+        Ok(Channels::default())
+    }
+
+    fn run(&self, ctx: Context<()>) -> impl Future<Output = Result<(), Error>> {
+        let held = Arc::clone(&self.held);
+        async move {
+            let source = Source::Secret(TOKEN.parse().expect("a valid name"));
+            let before = ALLOCATOR.held();
+            drop(ctx.secret(&source).await?);
+            held.store(ALLOCATOR.held() - before, Relaxed);
+            Ok(())
+        }
+    }
+}
+
+/// The bytes that a run of [`Reads`] holds after it reads `value`.
+fn read(value: Vec<u8>) -> usize {
+    let held = Arc::new(AtomicUsize::new(usize::MAX));
+    let kind = Reads {
+        held: Arc::clone(&held),
+    };
+    let mut sim = sim::Sim::new(sim::Config::default());
+    let node = sim.node(sim::node::Config::default());
+    let result = sim.run_on(&node, move |node, tasks| async move {
+        let name: Name = TOKEN.parse().expect("a valid name");
+        connector::testing::create_secret(&node.files(), &name, &value).await;
+        let env = hub::testing::Env {
+            files: node.files(),
+            clock: node.clock(),
+            wall: node.wall(),
+            entropy: node.entropy(),
+            tasks: tasks.clone(),
+        };
+        let kinds = Table::new().with("reads", kind);
+        let rig = Rig::open(env, node.net(), kinds).await;
+        let connector: Name = "plant.reads".parse().expect("a valid name");
+        let (token, config) = (Token::new(), Document::default());
+        rig.open_connector("reads", connector, &config, &token)
+            .await
+            .run()
+            .await
+    });
+    result
+        .expect("the run ends")
+        .expect("the connector ends ok");
+    held.load(Relaxed)
 }
 
 /// Drafts frames of `writer` until the pool has no room for a frame of any size up to
@@ -249,4 +317,11 @@ fn main() {
             );
         }
     }
+    let (value, room) = (1 << 16, 1_024);
+    let got = [b'a', 0xff].map(|byte| read(vec![byte; value]));
+    assert!(
+        got[0] <= value + room && got[1] <= 3 * value + room,
+        "after a read of {value} bytes, the run holds {got:?} bytes for a UTF-8 value \
+         and one that is not"
+    );
 }

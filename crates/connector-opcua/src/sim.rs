@@ -76,6 +76,8 @@ struct State {
     /// The status of each answer of the state of the server, at first Good.
     #[cfg(test)]
     answer: Quality,
+    #[cfg(test)]
+    access: Access,
     /// The credentials and the one policy and mode of a server, set before it starts.
     security: Option<(Credentials<'static>, Policy, Mode)>,
 }
@@ -153,6 +155,36 @@ struct Queues {
     publishing: f64,
 }
 
+/// The sessions that a server lets in when it starts, `None` for its own.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+struct Access {
+    /// The only logins, of [`Variables::admit`].
+    users: Option<&'static [(&'static str, &'static [u8])]>,
+    /// The URI of the security policy of the user token policy, of
+    /// [`Variables::set_token_policy`].
+    token: Option<&'static std::ffi::CStr>,
+    /// The status of each refusal, of [`Variables::refuse_sessions`].
+    refusal: Option<crate::ffi::Status>,
+}
+
+#[cfg(test)]
+impl Access {
+    /// Sets each part that is not `None` on `server`.
+    fn apply(self, server: &Server) {
+        if let Some(users) = self.users {
+            server.admit(users);
+        }
+        if let Some(uri) = self.token {
+            server.set_token_policy(uri);
+        }
+        // After `admit`, which resets the access control.
+        if let Some(status) = self.refusal {
+            server.refuse_sessions(status);
+        }
+    }
+}
+
 impl Variables {
     /// The variables at the node ids `nodes`, each with the value 0 and the status
     /// Good.
@@ -190,6 +222,8 @@ impl Variables {
             states: 0,
             #[cfg(test)]
             answer: Quality::GOOD,
+            #[cfg(test)]
+            access: Access::default(),
             security: None,
         })))
     }
@@ -298,6 +332,27 @@ impl Variables {
         mode: Mode,
     ) {
         self.state().security = Some((credentials, policy, mode));
+    }
+
+    /// Makes a server that starts later let in only the user names and passwords of
+    /// `users`, and no anonymous session.
+    #[cfg(test)]
+    pub(crate) fn admit(&self, users: &'static [(&'static str, &'static [u8])]) {
+        self.state().access.users = Some(users);
+    }
+
+    /// Gives a server that starts later the user token policy of `uri`, as
+    /// [`Server::set_token_policy`] says.
+    #[cfg(test)]
+    pub(crate) fn set_token_policy(&self, uri: &'static std::ffi::CStr) {
+        self.state().access.token = Some(uri);
+    }
+
+    /// Makes a server that starts later refuse each session with `status`, as
+    /// [`Server::refuse_sessions`] says.
+    #[cfg(test)]
+    pub(crate) fn refuse_sessions(&self, status: crate::ffi::Status) {
+        self.state().access.refusal = Some(status);
     }
 
     /// Gives each later answer of the state of the server the status `quality`.
@@ -426,7 +481,10 @@ pub async fn serve(
         .map(|variable| variable.node.clone())
         .collect();
     #[cfg(test)]
-    let limits = variables.state().limits;
+    let (limits, access) = {
+        let state = variables.state();
+        (state.limits, state.access)
+    };
     #[cfg(test)]
     let fixed: Vec<_> = (variables.state().variables.iter())
         .map(|variable| variable.hooks.fixed)
@@ -438,6 +496,7 @@ pub async fn serve(
         #[cfg(test)]
         {
             limits.apply(server);
+            access.apply(server);
             let variables = Variables::clone(variables);
             server.set_source(&state_node(), move || {
                 let mut state = variables.state();

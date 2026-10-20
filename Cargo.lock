@@ -1020,6 +1020,7 @@ dependencies = [
  "spec",
  "transport",
  "types",
+ "waker",
  "wire",
 ]
 
@@ -1206,6 +1207,7 @@ dependencies = [
  "raft",
  "sim",
  "spec",
+ "tracing",
  "transport",
  "types",
  "wire",

@@ -1002,6 +1002,26 @@ UA_StatusCode shim_client_secure(UA_Client *client, UA_MessageSecurityMode mode,
                       config->logging, config->eventLoop);
 }
 
+/* Makes `client`, which has not connected, activate its session with a copy of the
+ * user name `name` and the password `password`, each with its length, so a NUL byte
+ * does not cut it. Gives `BadOutOfMemory` when memory runs out. */
+UA_StatusCode shim_client_user(UA_Client *client, const UA_String *name,
+                               const UA_ByteString *password) {
+    UA_UserNameIdentityToken *token = UA_UserNameIdentityToken_new();
+    if(!token)
+        return UA_STATUSCODE_BADOUTOFMEMORY;
+    if(UA_String_copy(name, &token->userName) != UA_STATUSCODE_GOOD ||
+       UA_ByteString_copy(password, &token->password) != UA_STATUSCODE_GOOD) {
+        UA_UserNameIdentityToken_delete(token);
+        return UA_STATUSCODE_BADOUTOFMEMORY;
+    }
+    UA_ClientConfig *config = UA_Client_getConfig(client);
+    UA_ExtensionObject_clear(&config->userIdentityToken);
+    UA_ExtensionObject_setValue(&config->userIdentityToken, token,
+                                &UA_TYPES[UA_TYPES_USERNAMEIDENTITYTOKEN]);
+    return UA_STATUSCODE_GOOD;
+}
+
 /* Writes the SHA-1 thumbprint of `certificate`, DER or PEM, to `thumbprint` as 40
  * upper-case hex digits, and its subject in the one-line form of OpenSSL to the empty
  * `subject`, which the caller frees with `shim_buffer_free`. Gives a status other than

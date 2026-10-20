@@ -107,6 +107,10 @@
   https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038649429,
   https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038247134, and
   https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038611630).
+  `Ok` of `propose_voters` comes only after the put of the tree in force on the new
+  set (SPEC CHANGE), so a leave or a remove that calls it first puts the tree once
+  (`laptop.architect`, 2026-10-19T23:28:13Z:
+  https://github.com/synnaxlabs/foundation/issues/3355#issuecomment-6279615451).
   `propose` returns the position of its entry only after the write that holds the entry
   ends: a lone voter leads before its term is on disk, and after a power cut the same
   position can hold another change. A second call that waits for the write lost: no

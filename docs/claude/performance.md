@@ -86,3 +86,13 @@ Before you write a hot path, make a back-of-envelope sketch of its network, disk
 memory, and CPU cost, in bandwidth and in latency. Put the sketch in the PR beside the
 six answers (r16 rule 41). A slowdown at or over the cost limit adds the P1 judgment
 beside them.
+
+A plan whose change can reach the cost limit states its trigger, and the architect OKs
+it with the plan: each bench line, the statistic that decides (the p99 for a latency
+target), and the slowdown that adds the judgment, which is the cost limit in the unit of
+the line. The run compares the base of the PR with its head (BENCH BASELINES,
+`docs/decisions/testing/bench-baselines.md`). A line that the base cannot run gives only
+its numbers. A result that the amendment of same instructions in BENCH BASELINES
+(2026-10-11) covers needs no judgment. The run then decides, with no new ruling on the
+trigger: under the trigger, the PR gives its numbers; at or over it, the PR adds the P1
+judgment, which the architect accepts or rejects (#3283, #3581).
