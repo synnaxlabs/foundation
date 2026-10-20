@@ -353,7 +353,10 @@ mod tests {
     }
 
     /// The last drop of the held waker of a drained renewal drops a task whose renewal
-    /// borrows the map, so it comes after the borrow of the insert.
+    /// borrows the map, so it comes after the borrow of the insert. No caller sees
+    /// this order: `os` and `sim` poll a renewal in its own live task, so the drop of
+    /// its held waker never drops a task. No crate call drains the set without a
+    /// `State`, so the test calls `wake` and reads `waiting`.
     #[test]
     fn a_held_waker_drops_after_the_borrow_of_the_insert() {
         let admission: &'static Admission = Box::leak(Box::new(admission()));
