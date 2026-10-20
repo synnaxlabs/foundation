@@ -30,9 +30,12 @@
      Then `PyArray1::from_vec` takes each `Vec` with no second copy. A `bool` series
      maps each byte with `!= 0`. The signal check and the warning of `"warn"` also run
      with no guard.
-  2. A `Pool` error of the stream of a reader raises `ConnectionError`: only
-     `TooLarge` gets there, a frame of the node over the read budget of the client,
-     which ends the reader and is not a bad argument.
+  2. A `Pool` error of the stream of a reader, after its open, raises
+     `ConnectionError`: only `TooLarge` gets there, a frame of the node over the read
+     budget of the client, which ends the reader and is not a bad argument. At the
+     open, it raises `ValueError`, as for a writer (SDK PYTHON WRITER item 1), as
+     `laptop.architect-2` stated at 2026-10-20T04:11:15Z
+     (https://github.com/synnaxlabs/foundation/pull/3436#issuecomment-6283184085).
   3. `DataLost.frame` is the frame after the loss when a reader raises it, and `None`
      when a writer raises it.
   4. `sdk::read::Reader::next_within(timeout)` gives `None` when no frame came within
