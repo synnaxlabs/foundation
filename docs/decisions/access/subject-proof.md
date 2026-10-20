@@ -6,9 +6,8 @@
   expiry check. The signed bytes are a contract for each SDK; each integer is
   little-endian:
   - hello: the 18 bytes `foundation/hello/1`, the subject length (1 byte), the
-    subject, the key (32), `via` as a `u128` (16, the reverse of the byte order of its
-    UUID text), the connection key (16), the nonce (16), and `expires` in nanoseconds
-    (8);
+    subject, the key (32), `via` (32, the public key of the node), the connection key
+    (16), the nonce (16), and `expires` in nanoseconds (8);
   - request: the 20 bytes `foundation/request/1`, the connection key (16), and the
     exact bytes of the body;
   - read open: the 17 bytes `foundation/read/1`, the connection key (16), and the
@@ -16,6 +15,19 @@
   - write open: the 18 bytes `foundation/write/1`, the connection key (16), and the
     exact bytes of the open (`laptop.architect`, 2026-10-18T02:34:55Z,
     https://github.com/synnaxlabs/foundation/issues/2718#issuecomment-6244779011).
+
+  Amended by #3212: `via` is the public key that the transport session of the program
+  proved, in place of the node key. With trust on the first connect, a host in the
+  middle that proves its own key could pass the challenge of the node behind it to the
+  program, and relay the hello that names that node. A hello that names the key of its
+  session gets `VIA` at that node. `Error::Via` gives both public keys, and
+  `hub::Config::public_key` is the `peer` of each client session. The tag stays
+  `foundation/hello/1`: no SDK is released, and the subject length keeps the old and
+  new bytes apart. Lost: a node key in the challenge, which proves nothing; a hello
+  with both keys, two names of one node; a TLS exporter in the hello, which needs a new
+  `transport` surface on each carrier. Decided by `laptop.architect`
+  (2026-10-19T23:45:44Z,
+  https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279846281).
 
   A signature binds its kind: `proof::signed(kind, connection, bytes)` with
   `proof::Kind` (`Request`, `Read`, `Write`) gives the signed bytes, and
@@ -35,8 +47,9 @@
   https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6055096691). A
   request is checked with the key of the hello over its connection key, so a request
   signed with another key or for another connection gives `Error::Signature`, and no
-  connection check exists. `peer` is the node that carried the hello: this node when the
-  program connected to it, else the node whose transport session forwarded it. A hello
+  connection check exists. `peer` is the public key of the node that carried the hello:
+  this node when the program connected to it, else the node whose transport session
+  forwarded it. A hello
   is live at a node while the latest mesh time is before `Admitted::ends`: the earlier
   of `expires` and `proof::CAP` (15 minutes) past the latest mesh time at its admission.
   Lost: `access` decodes the signed bytes of the hello itself (design B), because

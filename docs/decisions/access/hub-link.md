@@ -7,10 +7,11 @@
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066908418; the read
   stream by `laptop.architect`, 2026-10-10T23:31:47Z,
   https://github.com/synnaxlabs/foundation/issues/1749#issuecomment-6103341608).
-  `hub::Config` gets `node` (the `via` that `admit` checks), `time` (`clock::Reader`),
-  and `entropy` (the nonces). The link waits for `Admitted::ends` of a hello with
-  `clock::Reader::reach` (CLOCK REACH), so `hub` knows nothing of how mesh time moves
-  against the monotonic clock, and gets no second clock. A link has one open request:
+  `hub::Config` gets `node`, `public_key` (the `via` that `admit` checks, #3212),
+  `time` (`clock::Reader`), and `entropy` (the nonces). The link waits for
+  `Admitted::ends` of a hello with `clock::Reader::reach` (CLOCK REACH), so `hub`
+  knows nothing of how mesh time moves against the monotonic clock, and gets no
+  second clock. A link has one open request:
   it frees the request when `Reply::send` is called or the `Reply` drops, before the
   first byte of the response, so a client that sends its next request when a reply
   ends never gets `MALFORMED`. `Reply::send` panics on a body over `BODY_BYTES_MAX`, a
@@ -85,9 +86,10 @@
   Supersedes the rule by the send of the first request of
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066239520.
   `node` gives `hub::Config::node` from the key in `node.key` (NODE PORT), as it does
-  for the transport and the mesh, and never a zero key. The test is
+  for the transport and the mesh, and never a zero key, and `hub::Config::public_key`
+  from the key that its transport proves. The test is
   `reach_on_a_running_node_dials_its_bound_address` (#1744): a client hello that `node`
-  admits through `Hub::link`, with `via` set to the node's key. Decided by
+  admits through `Hub::link`, with `via` set to the node's public key. Decided by
   `laptop.architect` (2026-10-08T18:36:19Z,
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066571400).
   Amended by #1660, where the key moves from `node::Config` to `node.key`

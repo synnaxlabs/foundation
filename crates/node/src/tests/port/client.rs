@@ -429,7 +429,6 @@ fn operator(
         let (transport, pool) = program(&host, tasks.clone());
         let frames = super::pool();
         let config = program::Config {
-            via: local.key,
             node: local.public_key,
             addresses: vec![Address::Udp(local.address)],
             subject: "plant.operator".parse().unwrap(),

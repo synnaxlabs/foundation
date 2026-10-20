@@ -19,6 +19,12 @@ const KEY: [u8; 32] = [
     0xf7, 0x07, 0x51, 0x1a,
 ];
 
+const NODE: [u8; 32] = [
+    0xfc, 0x51, 0xcd, 0x8e, 0x62, 0x18, 0xa1, 0xa3, 0x8d, 0xa4, 0x7e, 0xd0, 0x02, 0x30,
+    0xf0, 0x58, 0x08, 0x16, 0xed, 0x13, 0xba, 0x33, 0x03, 0xac, 0x5d, 0xeb, 0x91, 0x15,
+    0x48, 0x90, 0x80, 0x25,
+];
+
 fn challenge() -> Challenge {
     Challenge {
         nonce: [0xa0; 16],
@@ -34,7 +40,7 @@ fn signed(subject: &str) -> Signed {
         hello: Hello {
             subject: subject.parse().unwrap(),
             key: PublicKey::new(KEY).unwrap(),
-            via: node::Key::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef),
+            via: PublicKey::new(NODE).unwrap(),
             connection: connection::Key([0xc0; 16]),
             nonce: [0xa1; 16],
             expires: Stamp::from_nanos(0x1122_3344_5566_7788),
@@ -98,14 +104,13 @@ mod pins {
         let mut bytes = vec![4, 7];
         bytes.extend(b"ops.ana");
         bytes.extend(KEY);
-        bytes.extend([0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01]);
-        bytes.extend([0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01]);
+        bytes.extend(NODE);
         bytes.extend([0xc0; 16]);
         bytes.extend([0xa1; 16]);
         bytes.extend([0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11]);
         bytes.extend([0x5e; 64]);
         let signed = signed("ops.ana");
-        assert_eq!(signed.encoded_len(), 161);
+        assert_eq!(signed.encoded_len(), 177);
         assert_eq!(encode_signed(&signed), bytes);
     }
 
@@ -201,14 +206,42 @@ mod signed {
     #[test]
     fn refuses_each_wrong_length() {
         let hello = encode_signed(&signed("a"));
-        for len in [1, 2, 3, 154] {
+        for len in [1, 2, 3, 155, 170] {
             let mut bytes = hello.clone();
             bytes.resize(len, 0);
             assert_eq!(Signed::decode(&bytes), Err(Error::Length { len }), "{len}");
         }
         let mut long = hello;
         long.push(0);
-        assert_eq!(Signed::decode(&long), Err(Error::Length { len: 156 }));
+        assert_eq!(Signed::decode(&long), Err(Error::Length { len: 172 }));
+    }
+
+    /// The fuzz input of a hello with a 16-byte `via` has the wrong length, and the
+    /// input with a 32-byte `via` decodes.
+    #[test]
+    fn decodes_the_fuzz_inputs() {
+        let decode = |bytes: &[u8]| {
+            bytes
+                .chunks(1 + usize::from(bytes[0]))
+                .map(|message| Signed::decode(&message[1..]))
+                .collect::<Vec<_>>()
+        };
+        let old = include_bytes!("../../../../../oracles/fuzz/wire_hub_client/hello");
+        let refused = || Err(Error::Length { len: 161 });
+        assert_eq!(decode(old), [refused(), refused()]);
+        let new = include_bytes!(
+            "../../../../../oracles/fuzz/wire_hub_client/hello_public_key"
+        );
+        let hello = Signed {
+            hello: Hello {
+                connection: connection::Key([0xc0; 16]),
+                nonce: [0xa1; 16],
+                expires: Stamp::from_nanos(3),
+                ..signed("ops.ana").hello
+            },
+            ..signed("ops.ana")
+        };
+        assert_eq!(decode(new), [Ok(hello.clone()), Ok(hello)]);
     }
 
     #[test]
@@ -244,12 +277,14 @@ mod signed {
     }
 
     #[test]
-    fn refuses_a_key_of_small_order() {
-        let mut hello = encode_signed(&signed("a"));
+    fn refuses_a_key_or_via_of_small_order() {
         let mut identity = [0; 32];
         identity[0] = 1;
-        hello[3..35].copy_from_slice(&identity);
-        assert_eq!(Signed::decode(&hello), Err(Error::SmallOrder));
+        for start in [3, 35] {
+            let mut hello = encode_signed(&signed("a"));
+            hello[start..start + 32].copy_from_slice(&identity);
+            assert_eq!(Signed::decode(&hello), Err(Error::SmallOrder), "{start}");
+        }
     }
 
     #[test]
@@ -474,9 +509,9 @@ fn panics_on_the_body_of_a_response_over_the_cap() {
 }
 
 #[test]
-#[should_panic(expected = "out has 160 bytes, and the message has 161")]
+#[should_panic(expected = "out has 176 bytes, and the message has 177")]
 fn panics_when_out_has_the_wrong_length() {
-    signed("ops.ana").encode(&mut [0; 160]);
+    signed("ops.ana").encode(&mut [0; 176]);
 }
 
 fn hello() -> impl Strategy<Value = Signed> {
@@ -484,13 +519,13 @@ fn hello() -> impl Strategy<Value = Signed> {
     (
         subject,
         any::<[u8; 32]>(),
-        any::<u128>(),
+        any::<[u8; 32]>(),
         any::<[u8; 16]>(),
         any::<[u8; 16]>(),
         any::<i64>(),
         any::<[u8; 32]>(),
     )
-        .prop_filter_map("the key is of small order", |parts| {
+        .prop_filter_map("a key is of small order", |parts| {
             let (subject, key, via, connection, nonce, expires, half) = parts;
             let mut signature = [0; 64];
             signature[..32].copy_from_slice(&half);
@@ -498,7 +533,7 @@ fn hello() -> impl Strategy<Value = Signed> {
                 hello: Hello {
                     subject: subject.parse().ok()?,
                     key: PublicKey::new(key).ok()?,
-                    via: node::Key::from_u128(via),
+                    via: PublicKey::new(via).ok()?,
                     connection: connection::Key(connection),
                     nonce,
                     expires: Stamp::from_nanos(expires),
@@ -647,7 +682,7 @@ fn names_each_error() {
         ),
         (
             Error::SmallOrder,
-            "the key of the hello is a point of small order",
+            "the key or via of the hello is a point of small order",
         ),
         (
             Error::Trailing,

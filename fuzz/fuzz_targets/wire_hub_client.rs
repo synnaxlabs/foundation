@@ -35,7 +35,6 @@ use types::ed25519::PublicKey;
 use types::frame;
 use types::hello::Hello;
 use types::name::Selector;
-use types::node;
 use types::sample::{Scalar, Type};
 use types::time::{Interval, Span, Stamp};
 use wire::hub;
@@ -532,7 +531,8 @@ fn write(input: &mut Unstructured) -> arbitrary::Result<()> {
         hello: Hello {
             subject,
             key,
-            via: node::Key::from_u128(input.arbitrary()?),
+            via: PublicKey::new(input.arbitrary()?)
+                .unwrap_or_else(|_small| PublicKey::new([9; 32]).expect("a valid key")),
             connection: connection::Key(input.arbitrary()?),
             nonce: input.arbitrary()?,
             expires: Stamp::from_nanos(input.arbitrary()?),

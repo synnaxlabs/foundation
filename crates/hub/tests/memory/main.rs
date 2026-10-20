@@ -409,6 +409,7 @@ async fn trimmed_hub(node: &sim::node::Node, tasks: env::tasks::Tasks) -> hub::H
         interner,
         tasks,
         node: types::node::Key::from_u128(1),
+        public_key: net::public_key(&net::HOME),
         time: mesh,
         entropy: node.entropy(),
         region: None,

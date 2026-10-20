@@ -46,14 +46,14 @@ const READS: block::Config = match block::Config::new(8 << 20) {
     Err(_) => panic!("invariant: the budget fits"),
 };
 
-/// The node that a program reaches: where it listens, and the keys that name it.
+/// The node that a program reaches: where it listens, and the public key that names
+/// it.
 #[derive(Clone, Debug)]
 pub struct Node {
     /// The UDP addresses where the node listens, dialed in this order with a stagger.
     pub addresses: Vec<SocketAddr>,
-    /// The key of the node, which each hello names as the node it goes through.
-    pub key: types::node::Key,
-    /// The public key that the node proves in the handshake.
+    /// The public key that the node proves in the handshake, which each hello names
+    /// as the node it goes through.
     pub public_key: PublicKey,
 }
 
@@ -92,7 +92,6 @@ impl Node {
             .map_err(Error::Local)?;
         let node = Self {
             addresses: vec![local.address],
-            key: local.key,
             public_key: local.public_key,
         };
         let subject = local.admin.map(|private_key| Subject {
@@ -619,7 +618,6 @@ async fn connect(
     })
     .map_err(Error::Bind)?;
     let config = program::Config {
-        via: node.key,
         node: node.public_key,
         addresses: node
             .addresses

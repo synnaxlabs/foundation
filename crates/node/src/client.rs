@@ -67,7 +67,6 @@ pub async fn reach(config: Config) -> Result<program::Session, Error> {
     let at = local.address;
     let frames = Rc::new(block::Pool::heap(FRAMES));
     let config = program::Config {
-        via: local.key,
         node: local.public_key,
         addresses: vec![transport::Address::Udp(at)],
         subject: spec::founding::admin(),

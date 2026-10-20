@@ -14,8 +14,9 @@ use crate::Rules;
 const TEST_1: &str = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
 /// The private key of RFC 8032, section 7.1, test 2.
 const TEST_2: &str = "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb";
-
-const PEER: node::Key = node::Key::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
+/// The private key of RFC 8032, section 7.1, test 3, the key of the node that carries
+/// each hello.
+const TEST_3: &str = "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7";
 const EXPIRES: Stamp = Stamp::from_nanos(1_791_446_400_000_000_000);
 
 fn hex<const N: usize>(hex: &str) -> [u8; N] {
@@ -37,6 +38,16 @@ fn public(pair: &Pair) -> PublicKey {
 
 fn sign(pair: &Pair, message: &[u8]) -> [u8; 64] {
     pair.sign(message)
+}
+
+/// The public key of the node that carries each hello.
+fn peer() -> PublicKey {
+    public(&pair(TEST_3))
+}
+
+/// The public key of another node.
+fn other() -> PublicKey {
+    public(&pair(TEST_2))
 }
 
 fn name(s: &str) -> Name {
@@ -63,7 +74,7 @@ fn create_hello() -> Hello {
     Hello {
         subject: name("ops.ana"),
         key: public(&pair(TEST_1)),
-        via: PEER,
+        via: peer(),
         connection: connection::Key(hex("c0c1c2c3c4c5c6c7c8c9cacbcccdcecf")),
         nonce: hex("a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"),
         expires: EXPIRES,
@@ -84,14 +95,14 @@ const NOW: Option<Interval> = Some(Interval {
     latest: Stamp::from_nanos(1_791_446_340_000_000_000),
 });
 
-/// Signs `hello` with the key of test 1 and admits it at `now` from `PEER`.
+/// Signs `hello` with the key of test 1 and admits it at `now` from [`peer`].
 fn admit(
     rules: &Rules,
     now: Option<Interval>,
     hello: Hello,
 ) -> Result<Admitted, Error> {
     let signature = sign(&pair(TEST_1), &super::hello(&hello));
-    rules.admit(now, PEER, hello, &signature)
+    rules.admit(now, peer(), hello, &signature)
 }
 
 fn listed() -> Rules {
@@ -119,20 +130,20 @@ mod golden {
 
         assert_eq!(
             bytes,
-            hex::<114>(concat!(
+            hex::<130>(concat!(
                 "666f756e646174696f6e2f68656c6c6f2f31",
                 "07",
                 "6f70732e616e61",
                 "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
-                "efcdab8967452301efcdab8967452301",
+                "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025",
                 "c0c1c2c3c4c5c6c7c8c9cacbcccdcecf",
                 "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
                 "00002762027fdc18",
             ))
         );
         let signature = hex(concat!(
-            "f7752b95cf02e41d6d79d4474e84cb53ed6a02c2a9725e44888fd853f6f61f78",
-            "bc2011c1feb9557346878c032f92f51ed0191f722d86c469839d1d701b0a7f03",
+            "0030d8177c384ef3644d93d404e719012e4fd89914ab5f5470459b4e7fb9af7a",
+            "b2e014b71787483f9b001531fa2ed2d917e5fb5e43363507d8d8b9c5c6064f03",
         ));
         assert_eq!(create_hello().key.verify(&bytes, &signature), Ok(()));
     }
@@ -210,7 +221,7 @@ mod golden {
 
         assert_eq!(bytes[18], 255);
         assert_eq!(&bytes[19..274], subject.as_bytes());
-        assert_eq!(bytes.len(), 18 + 1 + 255 + 88);
+        assert_eq!(bytes.len(), 18 + 1 + 255 + 104);
     }
 
     /// A hello whose field `field` differs from the golden one.
@@ -220,7 +231,11 @@ mod golden {
         match field {
             0 => hello.subject = name("ops.anb"),
             1 => hello.key = public(&pair(TEST_2)),
-            2 => hello.via = node::Key::from_u128(PEER.as_u128() ^ u128::from(flip)),
+            2 => {
+                let mut via = peer().to_bytes();
+                via[usize::from(bit % 32)] ^= flip;
+                hello.via = PublicKey::new(via).unwrap_or_else(|_| other());
+            }
             3 => hello.connection.0[usize::from(bit % 16)] ^= flip,
             4 => hello.nonce[usize::from(bit % 16)] ^= flip,
             _ => hello.expires = hello.expires + Span::from_nanos(i64::from(flip)),
@@ -347,7 +362,7 @@ mod admit {
         let hello = create_hello();
         let signature = sign(&pair(TEST_2), &super::hello(&hello));
 
-        let error = listed().admit(NOW, PEER, hello, &signature).unwrap_err();
+        let error = listed().admit(NOW, peer(), hello, &signature).unwrap_err();
 
         assert_eq!(error, Error::Signature);
     }
@@ -359,7 +374,7 @@ mod admit {
         let hello = create_hello();
         let signature = sign(&pair(TEST_2), &super::hello(&hello));
 
-        let error = both.admit(NOW, PEER, hello, &signature).unwrap_err();
+        let error = both.admit(NOW, peer(), hello, &signature).unwrap_err();
 
         assert_eq!(error, Error::Signature);
     }
@@ -370,22 +385,27 @@ mod admit {
         let mut hello = create_hello();
         hello.nonce[0] ^= 1;
 
-        let error = listed().admit(NOW, PEER, hello, &signature).unwrap_err();
+        let error = listed().admit(NOW, peer(), hello, &signature).unwrap_err();
 
         assert_eq!(error, Error::Signature);
     }
 
     #[test]
     fn refuses_a_hello_that_names_another_node() {
-        let via = node::Key::from_u128(7);
         let hello = Hello {
-            via,
+            via: other(),
             ..create_hello()
         };
 
         let error = admit(&listed(), NOW, hello).unwrap_err();
 
-        assert_eq!(error, Error::Via { via, peer: PEER });
+        assert_eq!(
+            error,
+            Error::Via {
+                via: other(),
+                peer: peer()
+            }
+        );
     }
 
     #[test]
@@ -460,10 +480,9 @@ mod admit {
     /// the refusal of the first check that still fails.
     #[test]
     fn refuses_a_hello_for_the_first_check_that_fails() {
-        let other = node::Key::from_u128(7);
         let late = Some(at(EXPIRES));
         let hello = Hello {
-            via: other,
+            via: other(),
             ..create_hello()
         };
         let unsigned = [0; 64];
@@ -471,7 +490,7 @@ mod admit {
         let unlisted = rules(&[("ops.ana", &[public(&pair(TEST_2))])]);
         let refuse = |rules: &Rules, now, hello: &Hello, signature| {
             rules
-                .admit(now, PEER, hello.clone(), signature)
+                .admit(now, peer(), hello.clone(), signature)
                 .unwrap_err()
         };
 
@@ -495,8 +514,8 @@ mod admit {
         assert_eq!(
             refuse(&listed(), late, &hello, &signature),
             Error::Via {
-                via: other,
-                peer: PEER
+                via: other(),
+                peer: peer()
             }
         );
         let hello = create_hello();
@@ -625,7 +644,7 @@ mod renew {
             ..renewal()
         };
         let via = Hello {
-            via: node::Key::from_u128(7),
+            via: other(),
             ..renewal()
         };
 
@@ -652,12 +671,12 @@ mod renew {
         };
         let key = Hello {
             key: public(&pair(TEST_2)),
-            via: node::Key::from_u128(7),
+            via: other(),
             connection: connection::Key([0xc5; 16]),
             ..renewal()
         };
         let via = Hello {
-            via: node::Key::from_u128(7),
+            via: other(),
             connection: connection::Key([0xc5; 16]),
             ..renewal()
         };
@@ -1009,7 +1028,6 @@ mod verify {
 fn names_each_refusal_and_its_fix() {
     let key = public(&pair(TEST_1));
     let subject = name("ops.ana");
-    let peer = node::Key::from_u128(7);
     let cases = [
         (
             Error::Unsynced,
@@ -1036,9 +1054,14 @@ fn names_each_refusal_and_its_fix() {
             "Sign the exact bytes with the key of the hello",
         ),
         (
-            Error::Via { via: PEER, peer },
-            "the hello names node 01234567-89ab-cdef-0123-456789abcdef, but node \
-             00000000-0000-0000-0000-000000000007 carried it",
+            Error::Via {
+                via: other(),
+                peer: peer(),
+            },
+            "the hello names node \
+             3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c, but \
+             node fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025 \
+             carried it",
             "Name the node that the program connects to as `via`",
         ),
         (

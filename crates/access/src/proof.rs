@@ -7,7 +7,6 @@ use types::connection;
 use types::ed25519::PublicKey;
 use types::hello::Hello;
 use types::name::Name;
-use types::node;
 use types::time::{Interval, Span, Stamp};
 
 use crate::Rules;
@@ -22,8 +21,8 @@ const WRITE_TAG: &[u8] = b"foundation/write/1";
 
 /// The bytes that the signature of `hello` covers. Each integer is little-endian:
 /// the 18 bytes `foundation/hello/1`, the length of the subject (1 byte), the
-/// subject, the key (32), `via` as a `u128` (16, the reverse of the byte order of its
-/// UUID text), the connection (16), the nonce (16), and `expires` in nanoseconds (8).
+/// subject, the key (32), `via` (32), the connection (16), the nonce (16), and
+/// `expires` in nanoseconds (8).
 /// After the tag, these are the bytes of [`Hello::encode`].
 #[must_use]
 pub fn hello(hello: &Hello) -> Vec<u8> {
@@ -90,10 +89,10 @@ impl Admitted {
 
 impl Rules {
     /// Checks `hello`, signed with `signature`, at mesh time `now` (`None` when the
-    /// node has none). `peer` is the node that carried the hello: this node when the
-    /// program connected to it, else the node whose transport session forwarded it.
-    /// `admit` does not check `nonce`: the node that `via` names checks that it is the
-    /// challenge that it sent (#1748).
+    /// node has none). `peer` is the public key of the node that carried the hello:
+    /// this node when the program connected to it, else the node whose transport
+    /// session forwarded it. `admit` does not check `nonce`: the node that `via` names
+    /// checks that it is the challenge that it sent (#1748).
     ///
     /// # Errors
     ///
@@ -103,7 +102,7 @@ impl Rules {
     pub fn admit(
         &self,
         now: Option<Interval>,
-        peer: node::Key,
+        peer: PublicKey,
         hello: Hello,
         signature: &[u8; 64],
     ) -> Result<Admitted, Error> {
@@ -236,10 +235,10 @@ pub enum Error {
     Signature,
     /// The hello names another node than the one that carried it.
     Via {
-        /// The node that the hello names.
-        via: node::Key,
-        /// The node that carried the hello.
-        peer: node::Key,
+        /// The public key of the node that the hello names.
+        via: PublicKey,
+        /// The public key of the node that carried the hello.
+        peer: PublicKey,
     },
     /// The hello ended at `expires`, at or before the latest mesh time `now`.
     Expired {

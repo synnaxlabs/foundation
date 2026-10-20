@@ -42,9 +42,8 @@ const RETRY: Span = Span::from_nanos(10 * Span::MILLISECOND.nanos());
 /// What a [`Session`] is given.
 #[derive(Debug)]
 pub struct Config {
-    /// The key of the node to connect to, which each hello names as `via`.
-    pub via: types::node::Key,
-    /// The public key that the node proves in the handshake.
+    /// The public key that the node proves in the handshake, which each hello names
+    /// as `via`.
     pub node: PublicKey,
     /// Where the node listens, tried as `transport::Client::dial` tries them.
     pub addresses: Vec<Address>,
@@ -99,7 +98,7 @@ struct Shared {
     session: transport::Session,
     pair: Pair,
     subject: Name,
-    via: types::node::Key,
+    via: PublicKey,
     connection: connection::Key,
     clock: env::clock::Clock,
     tasks: env::tasks::Tasks,
@@ -128,7 +127,6 @@ impl Session {
         config: Config,
     ) -> Result<Self, Error> {
         let Config {
-            via,
             node,
             addresses,
             subject,
@@ -148,7 +146,7 @@ impl Session {
             session,
             pair: Pair::new(&key),
             subject,
-            via,
+            via: node,
             connection: connection::Key(connection),
             clock,
             tasks: tasks.clone(),

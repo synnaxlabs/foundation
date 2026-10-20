@@ -260,7 +260,6 @@ fn a_client_of_an_address_that_no_node_reads_is_unreachable() {
     let peer = PrivateKey([7; 32]).public();
     let node = Node {
         addresses: vec![address],
-        key: types::node::Key::from_u128(1),
         public_key: peer,
     };
     let subject = Subject {

@@ -2641,6 +2641,7 @@ mod hub {
                     interner,
                     tasks: spawn,
                     node: types::node::Key::from_u128(1),
+                    public_key: types::ed25519::PrivateKey([1; 32]).public(),
                     time,
                     entropy,
                     region: None,
@@ -4580,6 +4581,7 @@ pub(crate) mod port {
             let home = opened.expect("the buffer opens");
             let interner = given.await.expect("the open gives the interner");
             let (key, entropy) = (identity.key, endpoint.entropy.clone());
+            let public_key = identity.private_key.public();
             let opened = endpoint.open(
                 identity,
                 host.files(),
@@ -4595,6 +4597,7 @@ pub(crate) mod port {
                 interner,
                 tasks: tasks.clone(),
                 node: key,
+                public_key,
                 time: time.clone(),
                 entropy: entropy.clone(),
                 region: Some(::hub::Region {

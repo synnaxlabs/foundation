@@ -26,11 +26,14 @@
   there (#2956: `laptop.monitor`, 2026-10-18T20:37Z,
   https://github.com/synnaxlabs/foundation/pull/3255#issuecomment-6254946471), and until
   #3294 builds its unit tests there.
-  `Client::connect(&Node, Subject)` takes the node (its UDP addresses, its key, and its
-  public key) apart from the subject (its name and private key): one node serves many
+  `Client::connect(&Node, Subject)` takes the node (its UDP addresses and its public
+  key) apart from the subject (its name and private key): one node serves many
   subjects, and a node can listen on more than one address. `laptop.architect-2` decided
   on 2026-10-16 at 21:39 UTC
   (https://github.com/synnaxlabs/foundation/pull/2933#issuecomment-6225208118).
+  Amended by #3212: `Node` holds no node key, since each hello names the node by its
+  public key (SUBJECT PROOF; `laptop.architect`, 2026-10-19T23:45:44Z,
+  https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6279846281).
   `Node::local(dir)` gives the node that runs on a data directory and its first admin
   as the subject: it opens `dir/data` with `os::stored`, and runs
   `sector::local::read` on a shard as `connect` does, which logs to the caller's

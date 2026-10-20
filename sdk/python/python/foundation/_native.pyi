@@ -23,7 +23,6 @@ _Value: TypeAlias = numpy.bool_ | _Float | uuid.UUID
 def connect(
     address: str | None = None,
     *,
-    node: uuid.UUID | None = None,
     public_key: bytes | None = None,
     subject: str | None = None,
     private_key: bytes | None = None,
@@ -32,15 +31,15 @@ def connect(
     """Dials the node at `address` (`ip:port`, UDP), and blocks until it admits the
     first hello of `subject`. The client then renews the hello until it closes.
 
-    `node` is the `uuid.UUID` key of the node, `public_key` the 32 bytes of the key
-    that the node proves, and `private_key` the 32 bytes of a key that the spec lists
-    for `subject`. Each of `address`, the pair (`node`, `public_key`), and the pair
-    (`subject`, `private_key`) comes from the arguments, else from the node that runs on
-    the data directory `data`: that node gives its address and keys, and its first admin
-    gives the subject. `data` is a `str` or an `os.PathLike`, the `--data` of
-    `foundation start`, by default `foundation-data`. With an `address`, the data
-    directory counts only when its node is at that address: `127.0.0.1:p` matches a node
-    bound on `0.0.0.0:p`. Other Python threads run while it waits.
+    `public_key` is the 32 bytes of the key that the node proves, and `private_key` the
+    32 bytes of a key that the spec lists for `subject`. Each of `address`,
+    `public_key`, and the pair (`subject`, `private_key`) comes from the arguments, else
+    from the node that runs on the data directory `data`: that node gives its address
+    and public key, and its first admin gives the subject. `data` is a `str` or an
+    `os.PathLike`, the `--data` of `foundation start`, by default `foundation-data`.
+    With an `address`, the data directory counts only when its node is at that
+    address: `127.0.0.1:p` matches a node bound on `0.0.0.0:p`. Other Python threads
+    run while it waits.
 
     Raises `TypeError` for an argument of a wrong type, `ValueError` for an argument
     that does not parse or a pair given in half, `RuntimeError` when a thread of the

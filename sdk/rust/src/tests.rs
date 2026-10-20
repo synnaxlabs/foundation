@@ -301,7 +301,6 @@ fn unreachable(addresses: Vec<SocketAddr>, cause: &transport::Error) {
     let peer = PrivateKey([7; 32]).public();
     let node = Node {
         addresses: addresses.clone(),
-        key: types::node::Key::from_u128(1),
         public_key: peer,
     };
     let subject = Subject {
@@ -412,7 +411,6 @@ fn local_gives_the_node_and_its_admin() {
     let (node, subject) = Node::local(&dir.0).expect("a node runs");
     let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 7400));
     assert_eq!(node.addresses, [loopback]);
-    assert_eq!(node.key, types::node::Key::from_u128(7));
     assert_eq!(node.public_key, PrivateKey([7; 32]).public());
     let subject = subject.expect("an admin");
     assert_eq!(subject.name, spec::founding::admin());
