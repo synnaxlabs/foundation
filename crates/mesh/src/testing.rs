@@ -10,6 +10,7 @@ use crate::driver::used;
 use crate::entry;
 use crate::log;
 use crate::message::Message;
+use crate::region;
 
 /// The bytes that the change record in `bytes` encodes to, or `None` when `bytes` is
 /// not a change record.
@@ -26,6 +27,13 @@ pub fn round_trip_change(bytes: &[u8]) -> Option<Vec<u8>> {
 #[must_use]
 pub fn round_trip_message(bytes: &[u8]) -> Option<Vec<u8>> {
     Message::decode(bytes).map(|message| message.encode())
+}
+
+/// The bytes that the region founding in `bytes` encodes to, or `None` when `bytes`
+/// is not a founding. A join answer and the file `founding` carry this form.
+#[must_use]
+pub fn round_trip_founding(bytes: &[u8]) -> Option<Vec<u8>> {
+    region::Founding::decode(bytes).map(|founding| founding.encode())
 }
 
 /// The bytes that the `raft` entries in `bytes` encode to, or `None` when `bytes` is
@@ -174,9 +182,12 @@ mod tests {
     use crate::card;
     use crate::change::{self, CHUNKS_MAX, Malformed, Undecoded};
     use crate::common::{at, index, key, member, name, public, ticket, unchecked};
+    use crate::member::Member;
     use crate::message::{FOUNDING_BYTES_MAX, VOTERS_MAX};
     use crate::refusal::Refusal;
     use crate::region::{self, Request, Unfit};
+    use spec::definition::Definition;
+    use types::name::Name;
 
     #[test]
     fn a_change_gives_its_bytes_and_other_bytes_give_none() {
@@ -1824,6 +1835,187 @@ mod tests {
         for (name, want) in refused {
             assert_eq!(inputs[name], want, "{name}");
             assert_eq!(round_trip_spec_name(&want), None, "{name}");
+        }
+    }
+
+    /// The founding of region `plant` with the members 1 and 2, where member 2 is
+    /// ephemeral with a status channel, the voter 1, the subject `plant.app`, and the
+    /// home of index 5 at node 1.
+    fn founding() -> region::Founding {
+        let ephemeral = Member {
+            ephemeral: Some(types::time::Span::SECOND),
+            status: crate::common::status([(name("plant.node2.disk"), index(9))]),
+            ..member(2)
+        };
+        let subject = spec::subject::Subject::new(vec![public(1)]).unwrap();
+        let app = subject_key("plant.app");
+        region::Founding {
+            prefix: name("plant").into(),
+            members: vec![member(1), ephemeral],
+            voters: [key(1)].into(),
+            definitions: [(app, Definition::Subject(subject))].into(),
+            homes: [(index(5), key(1))].into(),
+        }
+    }
+
+    fn subject_key(text: &str) -> Name {
+        spec::definition::Kind::Subject.key(text).unwrap()
+    }
+
+    /// The parts of the byte form of [`founding`]: the prefix, the count of members,
+    /// each member, the voters, the definitions, and the homes.
+    #[expect(clippy::arithmetic_side_effects, reason = "a test may panic")]
+    fn founding_parts() -> [Vec<u8>; 7] {
+        let founding = founding();
+        let mut prefix = Vec::new();
+        crate::bytes::put_prefix(&founding.prefix, &mut prefix);
+        let mut count = Vec::new();
+        put_count(2, &mut count);
+        let [one, two] = [&founding.members[0], &founding.members[1]].map(|member| {
+            let mut out = Vec::new();
+            member.encode(&mut out);
+            out
+        });
+        let mut voters = Vec::new();
+        crate::bytes::put_keys(&founding.voters, &mut voters);
+        let bytes = founding.encode();
+        let start = [&prefix, &count, &one, &two, &voters]
+            .map(Vec::len)
+            .iter()
+            .sum();
+        // One home: its count, its channel key, and its node key.
+        let homes = bytes.len() - 40;
+        let definitions = bytes[start..homes].to_vec();
+        let homes = bytes[homes..].to_vec();
+        [prefix, count, one, two, voters, definitions, homes]
+    }
+
+    /// The definitions part of a founding: a count, then each name, the length of its
+    /// definition, and the definition's bytes, in the order of `definitions`.
+    fn definitions_bytes(definitions: &[(Name, Vec<u8>)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        put_count(definitions.len(), &mut out);
+        for (name, definition) in definitions {
+            put_name(name, &mut out);
+            put_count(definition.len(), &mut out);
+            out.extend(definition);
+        }
+        out
+    }
+
+    /// The homes part of a founding, in the order of `homes`.
+    fn homes_bytes(homes: &[(u128, u8)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        put_count(homes.len(), &mut out);
+        for &(channel, home) in homes {
+            crate::bytes::put_channel(index(channel), &mut out);
+            crate::bytes::put_key(key(home), &mut out);
+        }
+        out
+    }
+
+    /// The bytes of each refused input of `mesh_founding`, by name.
+    #[expect(clippy::arithmetic_side_effects, reason = "a test may panic")]
+    fn refused_foundings() -> Vec<(&'static str, Vec<u8>)> {
+        let [prefix, count, one, two, voters, definitions, homes] = founding_parts();
+        let bytes = founding().encode();
+        let with = |members: &[&Vec<u8>], definitions: &[u8], homes: &[u8]| {
+            let mut out = [&prefix[..], &count].concat();
+            for member in members {
+                out.extend(member.iter());
+            }
+            [&out[..], &voters, definitions, homes].concat()
+        };
+        let subject =
+            Definition::Subject(spec::subject::Subject::new(vec![public(1)]).unwrap())
+                .encode();
+        let app = subject_key("plant.app");
+        let other = subject_key("plant.other");
+        let mut past_end = definitions_bytes(&[(app.clone(), subject.clone())]);
+        let at = past_end.len() - subject.len() - 8;
+        past_end[at..at + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        let mut cut = with(&[&one, &two], &definitions, &homes);
+        cut.pop();
+        vec![
+            ("none", Vec::new()),
+            ("trailing", [&bytes[..], &[0]].concat()),
+            (
+                "members_out_of_order",
+                with(&[&two, &one], &definitions, &homes),
+            ),
+            ("members_twice", with(&[&one, &one], &definitions, &homes)),
+            (
+                "member_cut",
+                [&prefix[..], &count, &one, &two[..two.len() - 1]].concat(),
+            ),
+            (
+                "voters_cut",
+                [&prefix[..], &count, &one, &two, &voters[..voters.len() - 1]].concat(),
+            ),
+            (
+                "definitions_out_of_order",
+                with(
+                    &[&one, &two],
+                    &definitions_bytes(&[
+                        (other, subject.clone()),
+                        (app.clone(), subject),
+                    ]),
+                    &homes,
+                ),
+            ),
+            (
+                "definition_past_end",
+                with(&[&one, &two], &past_end, &homes),
+            ),
+            (
+                "definition_invalid",
+                with(
+                    &[&one, &two],
+                    &definitions_bytes(&[(app, vec![0xff])]),
+                    &homes,
+                ),
+            ),
+            (
+                "homes_out_of_order",
+                with(&[&one, &two], &definitions, &homes_bytes(&[(6, 1), (5, 1)])),
+            ),
+            ("home_cut", cut),
+        ]
+    }
+
+    #[test]
+    fn each_founding_input_is_what_its_name_says() {
+        let inputs = inputs!("mesh_founding":
+            "root",
+            "plant",
+            "none",
+            "trailing",
+            "members_out_of_order",
+            "members_twice",
+            "member_cut",
+            "voters_cut",
+            "definitions_out_of_order",
+            "definition_past_end",
+            "definition_invalid",
+            "homes_out_of_order",
+            "home_cut",
+        );
+        assert_eq!(count_files("mesh_founding"), inputs.len());
+        let root = region::Founding {
+            prefix: types::name::Prefix::ROOT,
+            members: Vec::new(),
+            voters: BTreeSet::new(),
+            definitions: BTreeMap::new(),
+            homes: BTreeMap::new(),
+        };
+        for (name, want) in [("root", root), ("plant", founding())] {
+            assert_eq!(region::Founding::decode(inputs[name]), Some(want), "{name}");
+            let round_trip = round_trip_founding(inputs[name]);
+            assert_eq!(round_trip.as_deref(), Some(inputs[name]), "{name}");
+        }
+        for (name, want) in refused_foundings() {
+            assert_eq!(inputs[name], want, "{name}");
+            assert_eq!(round_trip_founding(&want), None, "{name}");
         }
     }
 }
