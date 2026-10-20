@@ -19,7 +19,7 @@ import uuid
 import numpy as np
 
 import foundation
-from test_client import PATIENCE, Node, fork
+from test_client import PATIENCE, Node, fork, home
 from test_stubs import assert_stated, called
 
 CHANNELS = """
@@ -148,6 +148,10 @@ def in_group(pids: set) -> set:
     )
     fields = (map(int, line.split()) for line in listed.stdout.splitlines())
     return {pid for pid, pgid in fields if pid in pids and pgid == os.getpgrp()}
+
+
+def setUpModule() -> None:
+    home(unittest.addModuleCleanup)
 
 
 class Selfish(np.ndarray):

@@ -1,21 +1,36 @@
 use std::env;
 use std::ffi::CStr;
-use std::path::Path;
+use std::fs;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
 use pyo3::exceptions::PyConnectionError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3::wrap_pymodule;
+use types::ed25519::PrivateKey;
 use types::frame;
 
+use crate::profile::Profile;
+
+// Each file runs as a caller whose profile names a subject with no key file, so that
+// a test that reads the profile of the caller fails.
 const SUITE: &CStr = c"
-import io, sys, unittest
+import io, os, sys, tempfile, unittest
+from unittest import mock
 sys.modules['foundation._native'] = native
 sys.path.insert(0, str(package))
 sys.path.insert(0, str(top))
 stream = io.StringIO()
 suite = unittest.TestLoader().loadTestsFromName(module)
-result = unittest.TextTestRunner(stream, verbosity=2).run(suite)
+with tempfile.TemporaryDirectory(prefix='foundation-python-') as caller:
+    profile = os.path.join(caller, 'profile.hcl')
+    with open(profile, 'w') as file:
+        file.write('subject = \"caller\"\\nprivate_key = \"caller.key\"\\n')
+    with mock.patch.dict(os.environ, {'FOUNDATION_PROFILE': profile}):
+        result = unittest.TextTestRunner(stream, verbosity=2).run(suite)
 passed = result.wasSuccessful() and result.testsRun > len(result.skipped)
 report = stream.getvalue()
 ";
@@ -173,6 +188,8 @@ fn suite(dir: &Path, file: &str) -> (bool, String) {
 /// and the count of free ones changes with the process.
 #[test]
 fn error_raises_the_class_and_text_of_each_variant() {
+    let [pinned, proved] = [1, 2].map(|byte| PrivateKey([byte; 32]).public());
+    let other = format!("the node proves public key {proved}, not the pinned {pinned}");
     let cases = [
         (
             sdk::Error::Thread {
@@ -226,6 +243,11 @@ fn error_raises_the_class_and_text_of_each_variant() {
             sdk::Error::Session(program::Error::Unplaced("plant.a".parse().unwrap())),
             "ConnectionError",
             "the node gave no place for the channel plant.a of the open",
+        ),
+        (
+            sdk::Error::OtherKey { pinned, proved },
+            "ConnectionError",
+            &other,
         ),
     ];
     raises(cases);
@@ -391,4 +413,285 @@ fn error_raises_refused_or_stopped_with_the_code_of_each_refusal() {
             }
         }
     });
+}
+
+#[test]
+fn a_pin_keeps_the_key_that_another_program_pinned_after_the_read() {
+    let dir = env::temp_dir().join(format!("foundation-pin-{}", std::process::id()));
+    let path = dir.join("profile.hcl");
+    let at: SocketAddr = "10.0.0.5:7400".parse().unwrap();
+    let [first, second] = [1, 2].map(|byte| PrivateKey([byte; 32]).public());
+    Python::initialize();
+    Python::attach(|_| {
+        let profile = Profile {
+            path: Some(path.clone()),
+        };
+        fs::create_dir_all(&dir).unwrap();
+        let text = format!(
+            "node \"{at}\" {{\n  public_key = \"{}\"\n}}\n",
+            config::openssh::line(first)
+        );
+        fs::write(&path, &text).unwrap();
+        assert_eq!(profile.pin(at, second).unwrap(), first);
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+    });
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Pins in `<path>.lock` only after a rival program lets go of it, and keeps the key
+/// that the rival pinned. A pin that takes no lock fails it only when the pin reads
+/// the file in the 200 ms before the rival writes it.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the rival opens the lock, and the pin runs on another thread"
+)]
+fn a_pin_waits_for_the_lock_of_a_rival() {
+    let dir = env::temp_dir().join(format!("foundation-lock-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("profile.hcl");
+    let at: SocketAddr = "10.0.0.5:7400".parse().unwrap();
+    let [first, second] = [1, 2].map(|byte| PrivateKey([byte; 32]).public());
+    let rival = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join("profile.hcl.lock"))
+        .unwrap();
+    rival.lock().unwrap();
+    let profile = Profile {
+        path: Some(path.clone()),
+    };
+    let pinning = thread::spawn(move || profile.pin(at, second).map_err(drop));
+    thread::sleep(Duration::from_millis(200));
+    assert!(!pinning.is_finished());
+    let text = format!(
+        "node \"{at}\" {{\n  public_key = \"{}\"\n}}\n",
+        config::openssh::line(first)
+    );
+    fs::write(&path, &text).unwrap();
+    rival.unlock().unwrap();
+    assert_eq!(pinning.join().unwrap(), Ok(first));
+    assert_eq!(fs::read_to_string(&path).unwrap(), text);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Writes a profile that a bare file name names in the working directory.
+#[test]
+fn a_pin_writes_a_profile_of_a_bare_name_in_the_working_directory() {
+    let name = format!("foundation-bare-{}.hcl", std::process::id());
+    let at: SocketAddr = "10.0.0.5:7400".parse().unwrap();
+    let key = PrivateKey([4; 32]).public();
+    let profile = Profile {
+        path: Some(PathBuf::from(&name)),
+    };
+    let pinned = profile.pin(at, key).map_err(drop);
+    let text = fs::read_to_string(&name);
+    fs::remove_file(&name).unwrap();
+    fs::remove_file(format!("{name}.lock")).unwrap();
+    assert_eq!(pinned, Ok(key));
+    assert_eq!(
+        text.unwrap(),
+        format!(
+            "node \"{at}\" {{\n  public_key = \"{}\"\n}}\n",
+            config::openssh::line(key)
+        )
+    );
+}
+
+/// Only Unix: the test takes the read right of the directory with a Unix mode.
+/// Raises the error of the sync of the directory of a pin that cannot read its
+/// directory: the pin is on the disk only once the entry of its file is.
+#[cfg(unix)]
+#[test]
+fn a_pin_raises_the_error_of_the_sync_of_its_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = env::temp_dir().join(format!("foundation-sync-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o300)).unwrap();
+    let path = dir.join("profile.hcl");
+    let at: SocketAddr = "10.0.0.5:7400".parse().unwrap();
+    let key = PrivateKey([5; 32]).public();
+    let pinned = Profile {
+        path: Some(path.clone()),
+    }
+    .pin(at, key);
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::remove_dir_all(&dir).unwrap();
+    Python::initialize();
+    let error = Python::attach(|py| {
+        let error = pinned.expect_err("the directory cannot be read");
+        assert!(error.is_instance_of::<pyo3::exceptions::PyOSError>(py));
+        error.value(py).to_string()
+    });
+    let denied = format!("{}: Permission denied (os error 13)", path.display());
+    assert_eq!(error, denied);
+}
+
+/// Only Unix: the test makes a link with `std::os::unix::fs::symlink`.
+/// Writes the file that a linked profile names, with mode 0600, and keeps the link.
+#[cfg(unix)]
+#[test]
+fn a_pin_keeps_a_linked_profile_a_link() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = env::temp_dir().join(format!("foundation-link-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("dotfiles.hcl");
+    let path = dir.join("profile.hcl");
+    fs::write(&target, "strict = false\n").unwrap();
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+    let at: SocketAddr = "10.0.0.5:7400".parse().unwrap();
+    let key = PrivateKey([3; 32]).public();
+    let profile = Profile {
+        path: Some(path.clone()),
+    };
+    assert_eq!(profile.pin(at, key).map_err(drop), Ok(key));
+    assert!(fs::symlink_metadata(&path).unwrap().is_symlink());
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        format!(
+            "strict = false\n\nnode \"{at}\" {{\n  public_key = \"{}\"\n}}\n",
+            config::openssh::line(key)
+        )
+    );
+    let mode = fs::metadata(&target).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let mut left: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["dotfiles.hcl", "dotfiles.hcl.lock", "profile.hcl"]);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Only Unix: the test makes a link with `std::os::unix::fs::symlink`.
+/// Writes the file that a profile links to when that file is not there yet, and keeps
+/// the link.
+#[cfg(unix)]
+#[test]
+fn a_pin_of_a_profile_that_links_to_no_file_keeps_the_link() {
+    let dir = env::temp_dir().join(format!("foundation-dangle-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("dotfiles.hcl");
+    let path = dir.join("profile.hcl");
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+    let at: SocketAddr = "10.0.0.5:7400".parse().unwrap();
+    let key = PrivateKey([3; 32]).public();
+    let profile = Profile {
+        path: Some(path.clone()),
+    };
+    assert_eq!(profile.pin(at, key).map_err(drop), Ok(key));
+    let linked = fs::symlink_metadata(&path).unwrap().is_symlink();
+    let written = fs::read_to_string(&target).ok();
+    fs::remove_dir_all(&dir).unwrap();
+    assert!(linked, "the profile is no longer a link");
+    assert_eq!(
+        written,
+        Some(format!(
+            "node \"{at}\" {{\n  public_key = \"{}\"\n}}\n",
+            config::openssh::line(key)
+        ))
+    );
+}
+
+/// Only Unix: the user that runs the tests cannot read `/root`, so a path that
+/// expands `~root` fails. A `private_key` of `~root/k.key` is in the directory of the
+/// profile.
+#[cfg(unix)]
+#[test]
+fn a_private_key_of_a_tilde_and_a_user_is_in_the_directory_of_the_profile() {
+    let dir = env::temp_dir().join(format!("foundation-tilde-{}", std::process::id()));
+    fs::create_dir_all(dir.join("~root")).unwrap();
+    let key = PrivateKey([5; 32]);
+    fs::write(
+        dir.join("~root/k.key"),
+        config::openssh::key_file(&key, "k"),
+    )
+    .unwrap();
+    let profile = Profile {
+        path: Some(dir.join("profile.hcl")),
+    };
+    Python::initialize();
+    let read = Python::attach(|py| {
+        let subject: types::name::Name = "alice".parse().unwrap();
+        profile
+            .private_key(py, &subject, Some(Path::new("~root/k.key")))
+            .map(|key| key.0)
+            .map_err(|e| e.value(py).to_string())
+    });
+    fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(read, Ok(key.0));
+}
+
+/// Only Unix: a test makes a link only there. A relative `private_key` of a profile
+/// that is a link to a file in another directory is next to the link.
+#[cfg(unix)]
+#[test]
+fn a_private_key_of_a_linked_profile_is_next_to_the_link() {
+    let dir = env::temp_dir().join(format!("foundation-linked-{}", std::process::id()));
+    for within in ["links", "real"] {
+        fs::create_dir_all(dir.join(within)).unwrap();
+    }
+    fs::write(dir.join("real/profile.hcl"), "").unwrap();
+    std::os::unix::fs::symlink(
+        dir.join("real/profile.hcl"),
+        dir.join("links/profile.hcl"),
+    )
+    .unwrap();
+    let (mine, theirs) = (PrivateKey([5; 32]), PrivateKey([6; 32]));
+    fs::write(
+        dir.join("links/mine.key"),
+        config::openssh::key_file(&mine, "k"),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("real/mine.key"),
+        config::openssh::key_file(&theirs, "k"),
+    )
+    .unwrap();
+    let profile = Profile {
+        path: Some(dir.join("links/profile.hcl")),
+    };
+    Python::initialize();
+    let read = Python::attach(|py| {
+        let subject: types::name::Name = "alice".parse().unwrap();
+        profile
+            .private_key(py, &subject, Some(Path::new("mine.key")))
+            .map(|key| key.0)
+            .map_err(|e| e.value(py).to_string())
+    });
+    fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(read, Ok(mine.0));
+}
+
+/// Only Unix: the test makes a link with `std::os::unix::fs::symlink`.
+/// Raises `OSError` for a profile that is a link to itself, and takes no lock.
+#[cfg(unix)]
+#[test]
+fn a_pin_of_a_profile_that_links_to_itself_raises() {
+    let dir = env::temp_dir().join(format!("foundation-loop-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("profile.hcl");
+    std::os::unix::fs::symlink(&path, &path).unwrap();
+    let looped = fs::canonicalize(&path).unwrap_err();
+    let profile = Profile {
+        path: Some(path.clone()),
+    };
+    let at: SocketAddr = "10.0.0.5:7400".parse().unwrap();
+    Python::initialize();
+    Python::attach(|py| {
+        let error = profile.pin(at, PrivateKey([3; 32]).public()).unwrap_err();
+        assert_eq!(error.get_type(py).name().unwrap().to_string(), "OSError");
+        let text = format!("{}: {looped}", path.display());
+        assert_eq!(error.value(py).to_string(), text);
+    });
+    let left: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(left, ["profile.hcl"]);
+    fs::remove_dir_all(&dir).unwrap();
 }

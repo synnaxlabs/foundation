@@ -209,28 +209,18 @@ fn a_client_dials_the_next_address_when_the_first_does_not_answer() {
 }
 
 #[test]
-fn a_client_with_a_wrong_public_key_gets_the_error_of_the_handshake() {
+fn a_client_with_a_wrong_public_key_gets_both_keys() {
     let mut rig = Rig::new();
     rig.start();
     let (node, subject) = admin(&rig);
-    let peer = PrivateKey([7; 32]).public();
+    let proved = node.public_key;
+    let pinned = PrivateKey([7; 32]).public();
     let node = Node {
-        public_key: peer,
+        public_key: pinned,
         ..node
     };
     let error = Client::connect(&node, subject).unwrap_err();
-    let unreachable = transport::Error::Unreachable {
-        peer: Some(peer),
-        attempts: vec![(
-            transport::Address::Udp(node.addresses[0]),
-            transport::Error::Authentication { expected: peer },
-        )]
-        .into_boxed_slice(),
-    };
-    assert_eq!(
-        error,
-        Error::Session(program::Error::Transport(unreachable))
-    );
+    assert_eq!(error, Error::OtherKey { pinned, proved });
     rig.stop();
 }
 

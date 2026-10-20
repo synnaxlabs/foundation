@@ -3,7 +3,7 @@
 //! program's host, and reads and writes the text of an OpenSSH Ed25519 key file, with
 //! no file I/O.
 
-mod access;
+pub mod access;
 mod channel;
 mod connector;
 mod duplicate;
@@ -216,6 +216,44 @@ fn checked<'a>(
 /// label form.
 pub(crate) fn label(kind: Kind, key: &Name) -> Name {
     kind.label(key).unwrap_or_else(|| key.clone())
+}
+
+/// The block `keyword` labeled `label`, of `attributes`, with no span.
+pub(crate) fn block(
+    keyword: &str,
+    label: &str,
+    attributes: Vec<(&str, Value)>,
+) -> Block {
+    let attributes = attributes
+        .into_iter()
+        .map(|(key, value)| document::Attribute {
+            key: key.into(),
+            key_span: None,
+            value,
+        });
+    Block {
+        keyword: keyword.into(),
+        keyword_span: None,
+        labels: vec![Label {
+            text: label.into(),
+            span: None,
+        }],
+        body: Document {
+            attributes: document::Map::new(attributes.collect()).unwrap_or_else(|_| {
+                unreachable!("invariant: each key is written once")
+            }),
+            blocks: Vec::new(),
+        },
+        span: None,
+    }
+}
+
+/// The string `text`, with no span.
+pub(crate) fn string(text: &str) -> Value {
+    Value {
+        kind: document::value::Kind::String(text.into()),
+        span: None,
+    }
 }
 
 /// Sorts `diagnostics` by span, no span first.

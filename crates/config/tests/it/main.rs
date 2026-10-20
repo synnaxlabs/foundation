@@ -4,6 +4,7 @@
 // Lets Clippy treat the helpers as test code.
 #![cfg(test)]
 
+mod access;
 mod connector;
 mod import;
 mod openssh;

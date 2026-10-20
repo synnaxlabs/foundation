@@ -179,6 +179,21 @@ async fn answered(
     Ok(public_key)
 }
 
+/// The public key of the node that answers first at `addresses` to a dial of no key
+/// on `transport`. Closes the session with code 0 and waits for its end.
+async fn proved(
+    transport: &transport::Client,
+    addresses: &[transport::Address],
+) -> Result<PublicKey, transport::Error> {
+    let session = transport.dial_any(addresses).await?;
+    let transport::Peer::Node(public_key) = session.peer() else {
+        unreachable!("invariant: the dialed side always proves a node key");
+    };
+    session.close(transport::Code(0));
+    session.closed().await;
+    Ok(public_key)
+}
+
 /// The error of [`Node::local`] whose `os::stored` failed.
 fn opened(error: os::Error) -> Error {
     match error {
@@ -300,7 +315,8 @@ impl Client {
     /// # Errors
     ///
     /// [`Error::Thread`] when the client's thread or its runtime cannot start,
-    /// [`Error::Bind`] when the local UDP socket cannot bind, [`Error::Session`]
+    /// [`Error::Bind`] when the local UDP socket cannot bind, [`Error::OtherKey`]
+    /// when the node proves another key than `node.public_key`, [`Error::Session`]
     /// when the dial, the handshake, or the hello fails, [`Error::Memory`] when the OS
     /// refuses the address space or the first page of the pool of the frames of the
     /// readers, and [`Error::Panicked`]. A `node` with no address is unreachable
@@ -453,6 +469,14 @@ pub enum Error {
     /// The session failed before the node admitted the hello, or ended before the
     /// close.
     Session(program::Error),
+    /// The node proves `proved`, not the pinned `pinned`: an address refused the
+    /// pinned key, and a dial of no key there proves `proved`.
+    OtherKey {
+        /// The public key of the [`Node`].
+        pinned: PublicKey,
+        /// The public key that the node proves.
+        proved: PublicKey,
+    },
     /// The node refused the open of a stream, or a call of a writer or a reader
     /// failed. The session goes on. After `Layout`, `Unsent`, and `Pool` of a writer,
     /// nothing was sent and the writer goes on. Each other error of a writer, and each
@@ -504,6 +528,10 @@ impl fmt::Display for Error {
                  memory or raise the commit limit of the system"
             ),
             Self::Session(error) | Self::Stream(error) => write!(f, "{error}"),
+            Self::OtherKey { pinned, proved } => write!(
+                f,
+                "the node proves public key {proved}, not the pinned {pinned}"
+            ),
             Self::Local(error) => write!(f, "{error}"),
             Self::Panicked => write!(f, "the client thread panicked"),
             Self::Value {
@@ -700,6 +728,7 @@ async fn connect(
 ) -> Result<(program::Session, usize), Error> {
     let frames = Rc::new(block::Pool::heap(FRAMES));
     let reads = reads().map_err(Error::Memory)?;
+    let pinned = node.public_key;
     let on = on_os(tasks.clone());
     let (clock, entropy, pool) =
         (on.clock.clone(), on.entropy.clone(), Rc::clone(&on.pool));
@@ -720,8 +749,35 @@ async fn connect(
         frames: Rc::clone(&frames),
         reads: Rc::new(reads),
     };
-    let session = program::Session::connect(&transport, config).await;
-    Ok((session.map_err(Error::Session)?, frames.largest()))
+    match program::Session::connect(&transport, config).await {
+        Ok(session) => Ok((session, frames.largest())),
+        Err(error) => Err(other_key(&transport, pinned, error).await),
+    }
+}
+
+/// The error of a connect to the node of `pinned` that failed with `error`:
+/// [`Error::OtherKey`] when a dial of no key on `transport`, to each address that
+/// refused `pinned`, proves another key. Else `error`. A node that is down refuses no
+/// key, so no address of it gets a second dial.
+async fn other_key(
+    transport: &transport::Client,
+    pinned: PublicKey,
+    error: program::Error,
+) -> Error {
+    let program::Error::Transport(transport::Error::Unreachable { attempts, .. }) =
+        &error
+    else {
+        return Error::Session(error);
+    };
+    let refused: Vec<_> = attempts
+        .iter()
+        .filter(|(_, cause)| matches!(cause, transport::Error::Authentication { .. }))
+        .map(|&(address, _)| address)
+        .collect();
+    match proved(transport, &refused).await {
+        Ok(proved) if proved != pinned => Error::OtherKey { pinned, proved },
+        _ => Error::Session(error),
+    }
 }
 
 /// The pool of the frames of the readers of a session. It gives back the pages of the
