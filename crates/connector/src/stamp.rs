@@ -130,6 +130,10 @@ pub(crate) enum Error {
 }
 
 /// The class of a failed write of a run, as the error of the draft or of the write.
+///
+/// # Panics
+///
+/// As the `From` of [`types::frame::Error`] and of [`hub::writer::Failure`].
 impl From<Error> for crate::kind::Error {
     fn from(error: Error) -> Self {
         match error {
