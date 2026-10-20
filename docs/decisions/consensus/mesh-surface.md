@@ -53,8 +53,11 @@
   founding node builds it from its config, and a node that joins takes it whole from its
   join answer. It derives `PartialEq` and `Eq` and has no constructor: `Mesh::open`
   stays its one check: this node, each voter, and the node of each home must be a
-  member (`Error::NotMember`). It refuses no definition. A founding spec with problems
-  is not an error of the open: when no file names a pointer, the node uses no spec until
+  member (`Error::NotMember`), other than this node when the join file of the mesh
+  directory holds its card (MEMBER RECORD, 2026-10-20T09:51:13Z,
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6288239430). It
+  refuses no definition. A founding spec with problems is not an error of the open: when
+  no file names a pointer, the node uses no spec until
   a valid change takes effect (SPEC IN USE; `laptop.architect`, 2026-10-08T15:42:09Z:
   https://github.com/synnaxlabs/foundation/pull/1897#issuecomment-6063561498). The node
   that founds the region checks the definitions (SPEC CHANGE). Changed by

@@ -113,12 +113,20 @@
   and homes, which still has no bound and needs the chunks of the founding tree at
   the voter (`laptop.architect`, 2026-10-19T00:03:42Z:
   https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6256819172).
+  Amended (2026-10-20, round 2 of PR 5e of #336): "only a first open checks it" is of
+  the founding that the open is given. Each read of the founding file refuses a body
+  over `FOUNDING_BYTES_MAX` with `Error::Unfounded`, with no read. A file that a first
+  open wrote is never over it, so a node with a stored founding still always opens. No
+  build makes `FOUNDING_BYTES_MAX` smaller (`laptop.architect`, 2026-10-20T12:03:22Z,
+  https://github.com/synnaxlabs/foundation/pull/3571#issuecomment-6290402091).
   `Config::time` gives the mesh time of the stamp, and a voter with no such time answers
-  `Unsynced` (same ruling). `stamp` gives the `Refusal` of the answer, so `Unstamped` is
-  gone, and `Unstamped::Stopped` above is `Refusal::Stopped`, which holds no cause: the
-  cause is a fault inside the voter, and the joining node is not a member yet, so it
-  must not read it. Each later call on this node gives `Error::Stopped` with the cause
-  (`laptop.architect`, 2026-10-19T11:58:22Z, item 2 of
+  `Unsynced` (`laptop.architect`, 2026-10-19T00:03:42Z, item 2 of
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6256819172). `stamp`
+  gives the `Refusal` of the answer, so `Unstamped` is gone, and `Unstamped::Stopped`
+  above is `Refusal::Stopped`, which holds no cause: the cause is a fault inside the
+  voter, and the joining node is not a member yet, so it must not read it. Each later
+  call on this node gives `Error::Stopped` with the cause (`laptop.architect`,
+  2026-10-19T11:58:22Z, item 2 of
   https://github.com/synnaxlabs/foundation/pull/3335#issuecomment-6266662803, which
   supersedes "with the first cause" of
   https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6040088128). The
@@ -177,10 +185,54 @@
   https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6257042845). A
   failed read of the file after the admission ends the reply half with no mesh code,
   because the node is a member, and it can ask again.
-  Until snapshots (#253), a region whose founders all left cannot admit a node. `secret`
-  finds no key itself: `ops` and `node` read the member and pass its seal key. A
-  rotation and `Remove` wait for a caller; a rotation that only the node signs lets a
-  stolen key lock the node out. Lost: a record that only the admitting
+  Amended (2026-10-20, PR 5e of #336): before its first ask, `join::ask` keeps the
+  request in the file `join` of the mesh directory, durable. The file holds the card
+  and the ticket's admission, never the private key of the ticket. An ask sends the
+  stored request when it is for the public key of the ticket and the public key that
+  the transport proves, and does not send its own card. Else it writes its request
+  over it. So a node that stops after a voter applied its join, and before the answer
+  came, is admitted at the next ask, where it got `Unfit::Duplicate`. A write removes
+  `join`, writes `join.new`, renames it to `join`, which makes its bytes durable, and
+  syncs the directory, as for the file `founding`. So a crash leaves the old request,
+  the new one, or none, and `Error::JoinFile` names only a file that changed on disk.
+  A crash before the rename can lose an old request, but `ask` writes over a request
+  only when its ticket or key is not that of the call, or a round ends with a refusal of
+  it and no voter has answered in the call that the join applied.
+  `config.founding.members` can lack this node when `config.dir` holds the join file of
+  this node: the node opens with no member record of its own, and only its log can make
+  it a voter. Its member record comes when it applies its join (`laptop.architect`,
+  2026-10-20T07:51:19Z, items 3 to 5 of
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6286140973; the
+  surface and its condition 1: 2026-10-20T09:51:13Z,
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6288239430).
+  Amended (2026-10-20, round 1 of PR 5e of #336): when a round ends with a voter that
+  refuses the stored request, and no voter has answered in the call that the join
+  applied, `ask` writes the request of its card and status over it, at most once in a
+  call and durable before the first send, and asks the next round with it, at once. That
+  round is one of the 8, so `bound` holds. This supersedes item 3 of
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6286140973 for that
+  case, because a node that can never join by its ticket is the worse failure. A voter
+  that applied the join admits only the stored request, so the case left is a call in
+  which each voter that applied the join does not admit it, after the card or the status
+  changed (`laptop.architect`, 2026-10-20T12:00:29Z,
+  https://github.com/synnaxlabs/foundation/pull/3571#issuecomment-6290352039; each
+  refusal counts, in place of "for its card, its ticket, or its status" of its item 3,
+  until #3588: 2026-10-20T12:37:53Z,
+  https://github.com/synnaxlabs/foundation/pull/3571#issuecomment-6291013253; the call
+  in place of the round: 2026-10-20T13:07:15Z,
+  https://github.com/synnaxlabs/foundation/pull/3571#issuecomment-6291563764, in the
+  words of 2026-10-20T13:13:16Z,
+  https://github.com/synnaxlabs/foundation/pull/3571#issuecomment-6291683276). An `ask`
+  in a mesh directory that holds a founding file gives `Error::Founded`, before it makes
+  the directory or reads `join`: the file stays for the life of the directory, and each
+  open of a founding that lacks this node reads it. Lost: `ask` gives the stored
+  founding when the ticket is for its region, which is a silent success for a caller in
+  the wrong order (`laptop.architect`, 2026-10-20T11:14:16Z,
+  https://github.com/synnaxlabs/foundation/pull/3571#issuecomment-6289593633). Until
+  snapshots (#253), a region whose founders all left cannot admit a node. `secret` finds
+  no key itself: `ops` and `node` read the member and pass its seal key. A rotation and
+  `Remove` wait for a caller; a rotation that only the node signs lets a stolen key lock
+  the node out. Lost: a record that only the admitting
   voter checks (a voter that lies admits any key, against BQ12). A `card::Signed` holds
   the `node::Key` that its signature covers
   (`Signed::key`): the key cannot come from the public key, which can rotate, so the
