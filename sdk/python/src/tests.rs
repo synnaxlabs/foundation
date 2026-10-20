@@ -8,10 +8,13 @@ use std::time::Duration;
 
 use pyo3::exceptions::PyConnectionError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyTuple};
 use pyo3::wrap_pymodule;
+use sdk::write::{End, Outcome, Refusal};
+use types::channel;
 use types::ed25519::PrivateKey;
 use types::frame;
+use types::sample::{Scalar, Type};
 
 use crate::profile::Profile;
 
@@ -374,6 +377,293 @@ fn error_raises_stopped_with_the_code_of_the_end_of_an_unstored_write() {
             assert_eq!(given, code, "{end:?}");
         }
     });
+}
+
+/// The places of a writer of the indexes `plant.time`, `cell.time`, `line.time`, and
+/// `other.time`, with one channel of each, the channels first.
+fn grouped() -> Vec<sdk::Place> {
+    let names = [
+        "plant.a",
+        "cell.a",
+        "line.a",
+        "other.a",
+        "plant.time",
+        "cell.time",
+        "line.time",
+        "other.time",
+    ];
+    let scalars = [Scalar::F64, Scalar::Stamp];
+    (0..names.len())
+        .map(|place| sdk::Place {
+            key: channel::Key::from_u128(u128::try_from(place).unwrap() + 1),
+            data_type: Type::Scalar(scalars[place / 4]),
+            name: names[place].parse().unwrap(),
+            index: place % 4 + 4,
+        })
+        .collect()
+}
+
+/// The outcome of a group whose frame got the seqs from `seq`, `count` of them.
+fn range(seq: u64, count: u32) -> frame::Range {
+    frame::Range { seq, count }
+}
+
+/// What `raised` raises for a frame of the items at `frame` of a writer of `places`,
+/// with `outcomes`: its class, its text, and its `code`, `written`, and `unwritten`
+/// when it has them.
+fn untaken(
+    places: &[sdk::Place],
+    loss: crate::Loss,
+    outcomes: &[(usize, Outcome)],
+    frame: &[usize],
+) -> (
+    String,
+    String,
+    Option<String>,
+    Option<(Vec<String>, Vec<String>)>,
+) {
+    Python::initialize();
+    Python::attach(|py| {
+        let error =
+            crate::write::raised(py, places, loss, outcomes, frame).unwrap_err();
+        let value = error.value(py);
+        let code = value
+            .getattr("code")
+            .ok()
+            .map(|code| code.extract().unwrap());
+        let names = |name: &str| {
+            let names = value.getattr(name).ok()?;
+            assert!(names.is_instance_of::<PyTuple>(), "{name}");
+            Some(names.extract::<Vec<String>>().unwrap())
+        };
+        let written = names("written").zip(names("unwritten"));
+        let class = error.get_type(py).name().unwrap().to_string();
+        (class, value.to_string(), code, written)
+    })
+}
+
+/// The names of `names`, owned.
+fn names(names: &[&str]) -> Vec<String> {
+    names.iter().map(|&name| name.to_owned()).collect()
+}
+
+/// A frame with an end, a refusal, and a loss raises `PartialWrite` for the end when
+/// the node took another group, and its text names the cause of each group that the
+/// node did not take.
+#[test]
+fn raised_names_the_cause_of_each_group_that_the_node_did_not_take() {
+    let outcomes = [
+        (4, Outcome::Ended(End::Removed)),
+        (5, Outcome::Refused(Refusal::Full)),
+        (
+            6,
+            Outcome::Lost {
+                range: range(10, 3),
+            },
+        ),
+        (7, Outcome::Taken { range: range(0, 3) }),
+    ];
+    let raised = untaken(&grouped(), crate::Loss::Raise, &outcomes, &[3, 0, 2, 1]);
+    assert_eq!(
+        raised,
+        (
+            "PartialWrite".to_owned(),
+            "the write of plant.time ended (unknown: a channel of its group was \
+             removed); the node refused the frame of cell.time (full: a backfill frame \
+             found no room in the log, or the frame found no block of the node's pool: \
+             write it again later); the frame of line.time lost 3 samples; channels \
+             plant.a, cell.a, line.a, plant.time, cell.time, line.time were not \
+             written; channels other.a, other.time were; each later frame of an ended \
+             group raises again, and the other groups go on"
+                .to_owned(),
+            Some("unknown".to_owned()),
+            Some((
+                names(&["other.a", "other.time"]),
+                names(&[
+                    "plant.a",
+                    "cell.a",
+                    "line.a",
+                    "plant.time",
+                    "cell.time",
+                    "line.time"
+                ])
+            )),
+        )
+    );
+    Python::attach(|py| {
+        let class = py.get_type::<crate::PartialWrite>();
+        assert!(class.is_subclass_of::<crate::Stopped>().unwrap());
+    });
+}
+
+/// With no end, a refusal raises `Rejected` with the code of the first refused group,
+/// and an end with no group taken raises `Stopped` with the code of the first end.
+#[test]
+fn raised_raises_for_an_end_then_a_refusal() {
+    let refused = [
+        (5, Outcome::Refused(Refusal::Waiting)),
+        (6, Outcome::Refused(Refusal::Large)),
+        (
+            7,
+            Outcome::Lost {
+                range: range(10, 3),
+            },
+        ),
+    ];
+    assert_eq!(
+        untaken(&grouped(), crate::Loss::Raise, &refused, &[1, 2, 3]),
+        (
+            "Rejected".to_owned(),
+            "the node refused the frame of cell.time (waiting: another writer holds \
+             control); the node refused the frame of line.time (large: the frame is \
+             too large for one write: split it); the frame of other.time lost 3 \
+             samples; channels cell.a, line.a, other.a, cell.time, line.time, \
+             other.time were not written; no channel was"
+                .to_owned(),
+            Some("waiting".to_owned()),
+            Some((
+                Vec::new(),
+                names(&[
+                    "cell.a",
+                    "line.a",
+                    "other.a",
+                    "cell.time",
+                    "line.time",
+                    "other.time"
+                ])
+            )),
+        )
+    );
+    let ended = [
+        (4, Outcome::Refused(Refusal::Order)),
+        (5, Outcome::Ended(End::Failed)),
+        (6, Outcome::Ended(End::Refused)),
+    ];
+    assert_eq!(
+        untaken(&grouped(), crate::Loss::Raise, &ended, &[0, 1, 2]),
+        (
+            "Stopped".to_owned(),
+            "the node refused the frame of plant.time (order: a stamp is not after the \
+             stamp before it); the write of cell.time ended (failed: the home of its \
+             group failed); the write of line.time ended (refused: the home of its \
+             group refused the proof of the program); channels plant.a, cell.a, line.a, \
+             plant.time, cell.time, line.time were not written; no channel was; each \
+             later frame of an ended group raises again, and the other groups go on"
+                .to_owned(),
+            Some("failed".to_owned()),
+            None,
+        )
+    );
+}
+
+/// The end of the group of a writer of one index raises `Stopped` with the code of a
+/// stream that the node stopped for the same cause, and says that the writer ended.
+#[test]
+fn raised_ends_a_writer_of_one_index_at_the_end_of_its_group() {
+    let places = &grouped()[..];
+    let places = [places[0].clone(), places[4].clone()];
+    let places = places.map(|place| sdk::Place { index: 1, ..place });
+    let ends = [
+        (
+            End::Removed,
+            "unknown",
+            "a channel of its group was removed",
+        ),
+        (End::Failed, "failed", "the home of its group failed"),
+        (
+            End::Refused,
+            "refused",
+            "the home of its group refused the proof of the program",
+        ),
+    ];
+    for (end, code, why) in ends {
+        let outcomes = [(1, Outcome::Ended(end))];
+        assert_eq!(
+            untaken(&places, crate::Loss::Raise, &outcomes, &[0]),
+            (
+                "Stopped".to_owned(),
+                format!(
+                    "the write of plant.time ended ({code}: {why}); channels plant.a, \
+                     plant.time were not written; no channel was; the writer has ended"
+                ),
+                Some(code.to_owned()),
+                None,
+            )
+        );
+    }
+}
+
+/// A loss with no end and no refusal does what the loss says with the channels of the
+/// lost groups only, the index of each included.
+#[test]
+fn raised_gives_the_seqs_of_the_lost_groups_only() {
+    let outcomes = [
+        (5, Outcome::Taken { range: range(0, 2) }),
+        (
+            6,
+            Outcome::Lost {
+                range: range(10, 2),
+            },
+        ),
+        (
+            7,
+            Outcome::Lost {
+                range: range(20, 3),
+            },
+        ),
+    ];
+    let places = grouped();
+    Python::initialize();
+    Python::attach(|py| {
+        let raised = crate::write::raised(
+            py,
+            &places,
+            crate::Loss::Raise,
+            &outcomes,
+            &[7, 3, 1, 2],
+        );
+        let error = raised.unwrap_err();
+        assert_eq!(error.get_type(py).name().unwrap().to_string(), "DataLost");
+        let value = error.value(py);
+        assert_eq!(
+            value.to_string(),
+            "samples were lost: line.a (2), other.a (3), line.time (2), other.time (3)"
+        );
+        let seqs = value.getattr("seqs").unwrap();
+        let expected = PyDict::new(py);
+        let range = py.get_type::<pyo3::types::PyRange>();
+        for (name, start, end) in [
+            ("line.a", 10, 12),
+            ("other.a", 20, 23),
+            ("line.time", 10, 12),
+            ("other.time", 20, 23),
+        ] {
+            expected
+                .set_item(name, range.call1((start, end)).unwrap())
+                .unwrap();
+        }
+        assert!(seqs.eq(expected).unwrap(), "{seqs}");
+        let ignored =
+            crate::write::raised(py, &places, crate::Loss::Ignore, &outcomes, &[2, 3]);
+        assert!(ignored.is_ok());
+    });
+}
+
+/// The text of a close names the index and the end of each group that ended with a
+/// frame that may not be on disk.
+#[test]
+fn unstored_names_the_index_and_the_end_of_each_group() {
+    let places = grouped();
+    assert_eq!(
+        crate::write::unstored(&places, &[(4, End::Removed)]),
+        "the write of plant.time (unknown) ended: a frame that the node took may not \
+         be on disk"
+    );
+    assert_eq!(
+        crate::write::unstored(&places, &[(4, End::Removed), (6, End::Failed)]),
+        "the writes of plant.time (unknown), line.time (failed) ended: a frame that \
+         the node took may not be on disk"
+    );
 }
 
 /// Maps a refusal of the session to `Refused`, a `ConnectionError`, and a refusal of a

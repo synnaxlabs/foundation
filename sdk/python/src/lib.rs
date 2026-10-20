@@ -46,24 +46,42 @@ pyo3::create_exception!(
     Stopped,
     PyException,
     "The node stopped a write, with a code. At the open, no writer opened, and the \
-     session goes on. A writer that raises it has ended, and each later call raises it \
-     again. `code` is its name in lower case. At the open: `unknown` for a name of no \
-     channel, `not_home` when the node is not the home of the index, `malformed` for \
-     channels of more than one index, which the client refuses for a writer and the \
-     node for a reader, `failed` when the home cannot open the write, `refused` when \
-     the access check of the node refuses the write, and `busy` when the node has no \
-     room for the open. Later: `unknown` when a channel was removed, `failed` when the \
-     home failed, `refused` when the home refuses the program's proof, such as a \
-     renewal of its hello, `busy` when the home has no room for the outcome of a \
-     frame, and `malformed` for a frame that breaks a rule of the wire."
+     session goes on. Later, it has one of two scopes, which its text names. When the \
+     node stopped the stream, the writer has ended, and each later call raises it \
+     again. When the write of the group of an index ended, only that group ended: \
+     each later frame that holds the group raises it again, and the frames of the \
+     other groups go on, so a writer of one index has ended. `code` is its name in \
+     lower case. At the open: `unknown` for a name of no channel, `not_home` when the \
+     node is not the home of an index, `malformed` for a reader of channels of more \
+     than one index, `failed` when the home cannot open the write, `refused` when the \
+     access check of the node refuses the write, and `busy` when the node has no room \
+     for the open. Later: `unknown` when a channel was removed, `failed` when the home \
+     failed, `refused` when the home refuses the program's proof, such as a renewal of \
+     its hello, `busy` when the home has no room for the outcome of a frame, and \
+     `malformed` for a frame that breaks a rule of the wire."
 );
 pyo3::create_exception!(
     foundation,
     Rejected,
     PyException,
-    "The node refused one frame of a writer, and took none of it. `code` is why: \
-     `waiting`, `reserved`, `expired`, `order`, `codec`, `full`, or `large`. The \
-     writer goes on."
+    "The node refused the frame of the group of one or more indexes, and took none of \
+     their samples. `code` is why, for the first refused group in place order: \
+     `waiting`, `reserved`, `expired`, `order`, `codec`, `full`, or `large`. `written` \
+     and `unwritten` are the names of the channels of the frame in the groups that \
+     the node took and did not take, in place order. Its text names the cause of each \
+     group that the node did not take. The writer goes on."
+);
+pyo3::create_exception!(
+    foundation,
+    PartialWrite,
+    Stopped,
+    "The write of the group of one or more indexes ended, and the node took the \
+     samples of at least one other group of the frame. `written` and `unwritten` are \
+     the names of the channels of the frame in the groups that the node took and did \
+     not take, in place order. `code` is the end of the first group that ended, as \
+     `Stopped` gives it. Its text names the cause of each group that the node did not \
+     take. The writer goes on: each later frame that holds an ended group raises it \
+     again."
 );
 pyo3::create_exception!(
     foundation,
@@ -91,6 +109,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("Refused", py.get_type::<Refused>())?;
     module.add("Stopped", py.get_type::<Stopped>())?;
     module.add("Rejected", py.get_type::<Rejected>())?;
+    module.add("PartialWrite", py.get_type::<PartialWrite>())?;
     module.add("DataLost", py.get_type::<DataLost>())?;
     #[cfg(feature = "sim")]
     sim::add(module)?;
@@ -541,26 +560,24 @@ impl Client {
         .map_err(|e| error(py, &e))
     }
 
-    /// Opens a writer of `channels` at the home of their index, and blocks until the
-    /// node opened it. `channels` is one channel name or an iterable of names, all of
-    /// one index. Place `n` is `channels[n]`, and the index is place `len(channels)`
-    /// when `channels` does not name it. `authority` (0 to 255) is the writer's
-    /// authority over its channels: a writer of a higher authority takes control from
-    /// it. `lease` is the seconds that the writer may go with no write and keep
-    /// control, or `None` for no limit. `on_loss` is what a write does when the node
-    /// took no room for a live frame: `"warn"` logs a warning on the `foundation`
-    /// logger, `"raise"` raises `DataLost`, and `"ignore"` does nothing. Other Python
-    /// threads run while it waits.
+    /// Opens a writer of `channels` at the homes of their indexes, and blocks until the
+    /// node opened it. `channels` is one channel name or an iterable of names, of any
+    /// index. Place `n` is `channels[n]`; then comes the index of each group that
+    /// `channels` does not name, in the order of the first channel of each group.
+    /// `authority` (0 to 255) is the writer's authority over its channels: a writer of
+    /// a higher authority takes control from it. `lease` is the seconds that the writer
+    /// may go with no write and keep control, or `None` for no limit. `on_loss` is what
+    /// a write does when the node took no room for a live frame: `"warn"` logs a
+    /// warning on the `foundation` logger, `"raise"` raises `DataLost`, and `"ignore"`
+    /// does nothing. Other Python threads run while it waits.
     ///
     /// Raises `TypeError` for an argument of a wrong type; `ValueError` for no channel,
     /// a name that does not parse, an `authority` outside 0 to 255, a `lease` that,
     /// taken as a `float`, does not round to 1 to 2^63 - 1 nanoseconds, or another
     /// `on_loss`, with no writer opened; `Stopped` when the node refused the open, with
-    /// a text that names each channel of the open for `unknown`, or with code
-    /// `malformed` for channels of more than one index, which the client refuses;
-    /// `ConnectionError` when the session failed; `RuntimeError` when the client closed
-    /// or in a process that the program forked; and `PanicException` when the client's
-    /// thread panicked.
+    /// a text that names each channel of the open for `unknown`; `ConnectionError` when
+    /// the session failed; `RuntimeError` when the client closed or in a process that
+    /// the program forked; and `PanicException` when the client's thread panicked.
     #[pyo3(
         signature = (
             channels, *, authority=Level(Authority(0)), lease=None, on_loss="warn"
@@ -581,7 +598,7 @@ impl Client {
         config.authority = authority.0;
         config.lease = lease.map(|lease| lease.0);
         let writer = self.open(py, &names, |client| client.open_writer(config))?;
-        write::Writer::new(py, writer, self.process, loss)
+        Ok(write::Writer::new(writer, self.process, loss))
     }
 
     /// Opens a reader of `channels` at the home of their index, and blocks until the
@@ -769,15 +786,19 @@ fn uuids(class: &Bound<'_, PyAny>, samples: Vec<[u8; 16]>) -> PyResult<Vec<Py<Py
         .collect()
 }
 
-/// The name and the type of each of `places`, in order, the type as the spec writes it
-/// (`f64`, `timestamp`).
+/// The name, the type, and the place of the index of each of `places`, in order, the
+/// type as the spec writes it (`f64`, `timestamp`).
 fn places<'py>(
     py: Python<'py>,
     places: &[sdk::Place],
 ) -> PyResult<Bound<'py, PyTuple>> {
-    let places = places
-        .iter()
-        .map(|place| (place.name.as_str(), place.data_type.to_string()));
+    let places = places.iter().map(|place| {
+        (
+            place.name.as_str(),
+            place.data_type.to_string(),
+            place.index,
+        )
+    });
     PyTuple::new(py, places)
 }
 
@@ -956,8 +977,8 @@ fn exception(py: Python<'_>, error: &sdk::Error, text: String) -> PyErr {
             | program::Error::Unplaced(_),
         ) => PyConnectionError::new_err(text),
         sdk::Error::Partial { outcomes, .. } => unreachable!(
-            "invariant: a writer of one index maps each Partial to Ended, got \
-             {outcomes:?}"
+            "invariant: the writer maps each Partial to the outcomes of its groups, \
+             got {outcomes:?}"
         ),
         sdk::Error::Panicked => PanicException::new_err(text),
         sdk::Error::Value { .. } => PyTypeError::new_err(text),

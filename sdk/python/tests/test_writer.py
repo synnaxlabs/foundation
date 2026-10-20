@@ -70,13 +70,46 @@ UNKNOWN = (
     "the selector matches no channel, or a channel of the read or write is unknown or "
     "was removed"
 )
-ORDER = "the node refused the frame: a stamp is not after the stamp before it"
+
+
+def order(channels: str) -> str:
+    """The text of `Rejected` for a frame of `channels` of `plant.time` that the node
+    refused for the order of its stamps."""
+    return (
+        "the node refused the frame of plant.time (order: a stamp is not after the "
+        f"stamp before it); channels {channels} were not written; no channel was"
+    )
+
+
+def absent(entry: int, index: int) -> str:
+    """The text of the `ValueError` of a call that gives place `entry` and no stamp of
+    its index, place `index`."""
+    return (
+        f"the series of the draft are not valid: entry {entry} is present but its "
+        f"index, entry {index}, is absent"
+    )
 
 
 def planted(node: Node, channels: str = CHANNELS) -> foundation.Client:
     """Plans and applies `channels`, which hold `CHANNELS`, on `node`, and gives a
     client of it once the hub of the node knows the channels, which it learns after the
     apply."""
+    applied(node, channels)
+    client = node.connect()
+    deadline = time.monotonic() + PATIENCE
+    while True:
+        try:
+            client.open_writer("plant.a").close()
+            client.open_writer("other.a").close()
+            return client
+        except foundation.Stopped as error:
+            if error.code != "unknown" or time.monotonic() > deadline:
+                raise
+            time.sleep(0.01)
+
+
+def applied(node: Node, channels: str) -> None:
+    """Plans and applies `channels` on `node`."""
     with open(os.path.join(node.dir.name, "plant.hcl"), "w") as file:
         file.write(channels)
     for args in (["plan", "plant.hcl", "--out", "plant.plan"], ["apply", "plant.plan"]):
@@ -92,17 +125,6 @@ def planted(node: Node, channels: str = CHANNELS) -> foundation.Client:
                 f"foundation {' '.join(args)} exited with {done.returncode}:\n"
                 + done.stderr.decode()
             )
-    client = node.connect()
-    deadline = time.monotonic() + PATIENCE
-    while True:
-        try:
-            client.open_writer("plant.a").close()
-            client.open_writer("other.a").close()
-            return client
-        except foundation.Stopped as error:
-            if error.code != "unknown" or time.monotonic() > deadline:
-                raise
-            time.sleep(0.01)
 
 
 def backstop(test: unittest.TestCase, node: Node) -> subprocess.Popen:
@@ -176,15 +198,26 @@ class WriterTest(unittest.TestCase):
             self.assertEqual(
                 writer.places,
                 (
-                    ("plant.b", "i64"),
-                    ("plant.a", "f64"),
-                    ("plant.time", "timestamp"),
+                    ("plant.b", "i64", 2),
+                    ("plant.a", "f64", 2),
+                    ("plant.time", "timestamp", 2),
                 ),
             )
-            self.assertEqual(writer.index, 2)
         writer = called(self, self.client.open_writer, ["plant.time", "plant.a"])
-        self.assertEqual(writer.index, 0)
+        self.assertEqual(
+            writer.places, (("plant.time", "timestamp", 0), ("plant.a", "f64", 0))
+        )
         called(self, writer.close)
+        with self.client.open_writer(["other.a", "plant.a", "other.time"]) as writer:
+            self.assertEqual(
+                writer.places,
+                (
+                    ("other.a", "f64", 2),
+                    ("plant.a", "f64", 3),
+                    ("other.time", "timestamp", 2),
+                    ("plant.time", "timestamp", 3),
+                ),
+            )
 
     def test_write_takes_frames_of_node_time_and_of_the_callers_stamps(self) -> None:
         with self.client.open_writer(["plant.a", "plant.b"]) as writer:
@@ -195,8 +228,65 @@ class WriterTest(unittest.TestCase):
                 writer.write({"plant.a": 3.5, "plant.time": stamp})
             assert_stated(self, raised.exception)
             self.assertEqual(raised.exception.code, "order")
-            self.assertEqual(str(raised.exception), ORDER)
+            self.assertEqual(str(raised.exception), order("plant.a, plant.time"))
+            self.assertEqual(raised.exception.written, ())
+            self.assertEqual(raised.exception.unwritten, ("plant.a", "plant.time"))
             self.assertIsNone(writer.write({"plant.a": 3.5, "plant.time": stamp + 1}))
+
+    def test_a_write_of_the_stamps_of_only_some_groups_raises_value_error(
+        self,
+    ) -> None:
+        start = time.time_ns() + 10**9
+        with self.client.open_writer(["plant.a", "other.a"]) as writer:
+            with self.assertRaises(ValueError) as raised:
+                writer.write({"plant.a": 1.5, "other.a": 2.5, "other.time": start})
+            self.assertEqual(str(raised.exception), absent(0, 2))
+            series = {
+                "plant.a": np.zeros(2),
+                "plant.time": np.arange(start, start + 2, dtype=np.int64),
+                "other.a": np.zeros(3),
+            }
+            with self.assertRaises(ValueError) as raised:
+                writer.write_series(series)
+            self.assertEqual(str(raised.exception), absent(1, 3))
+            self.assertIsNone(writer.write({"plant.a": 1.5, "other.a": 2.5}))
+
+    def test_a_removed_channel_ends_its_group_and_the_other_group_goes_on(
+        self,
+    ) -> None:
+        writer = self.client.open_writer(["plant.a", "other.a"])
+        self.addCleanup(writer.close)
+        removed = (
+            'channel "other.a" {\n  data_type = "f64"\n  index = "other.time"\n}\n'
+        )
+        self.assertIn(removed, CHANNELS)
+        applied(self.node, CHANNELS.replace(removed, ""))
+        deadline = time.monotonic() + PATIENCE
+        while True:
+            try:
+                self.client.open_writer("other.a").close()
+            except foundation.Stopped as error:
+                self.assertEqual(error.code, "unknown")
+                break
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+        for _ in range(2):
+            with self.assertRaises(foundation.PartialWrite) as raised:
+                writer.write({"plant.a": 1.5, "other.a": 2.5})
+            assert_stated(self, raised.exception)
+            self.assertIsInstance(raised.exception, foundation.Stopped)
+            self.assertEqual(raised.exception.code, "unknown")
+            self.assertEqual(raised.exception.written, ("plant.a", "plant.time"))
+            self.assertEqual(raised.exception.unwritten, ("other.a", "other.time"))
+            self.assertEqual(
+                str(raised.exception),
+                "the write of other.time ended (unknown: a channel of its group was "
+                "removed); channels other.a, other.time were not written; channels "
+                "plant.a, plant.time were; each later frame of an ended group raises "
+                "again, and the other groups go on",
+            )
+        self.assertIsNone(writer.write({"plant.a": 3.5}))
+        self.assertIsNone(writer.close())
 
     def test_write_takes_a_value_with_no_key_for_one_place(self) -> None:
         with self.client.open_writer("plant.a") as writer:
@@ -207,9 +297,11 @@ class WriterTest(unittest.TestCase):
                 writer.write(2.5)
             self.assertEqual(
                 str(raised.exception),
-                "the writer has 2 places other than the index: pass a dict from each "
+                "the writer has 2 places that are not an index: pass a dict from each "
                 "channel name to its value",
             )
+        with self.client.open_writer(["plant.a", "other.time"]) as writer:
+            self.assertIsNone(writer.write(4.5))
 
     def test_write_takes_a_value_of_each_scalar(self) -> None:
         channels = ["plant.b", "plant.c", "plant.d", "plant.e", "plant.f", "plant.g"]
@@ -334,7 +426,9 @@ class WriterTest(unittest.TestCase):
             with self.assertRaises(foundation.Rejected) as raised:
                 writer.write_series(strided)
             self.assertEqual(raised.exception.code, "order")
-            self.assertEqual(str(raised.exception), ORDER)
+            self.assertEqual(
+                str(raised.exception), order("plant.a, plant.c, plant.d, plant.time")
+            )
         with self.client.open_writer("plant.g") as writer:
             spans = np.arange(count, dtype=np.int64).astype("timedelta64[ns]")
             stamps = stamps + 3 * count
@@ -391,13 +485,12 @@ class WriterTest(unittest.TestCase):
             (
                 {"plant.a": floats, "plant.time": stamps[:99]},
                 ValueError,
-                "the series of plant.time holds 99 samples, not the 100 of plant.a",
+                "places 0 and 2 are of one index but hold 100 and 99 samples",
             ),
             (
                 {"plant.a": floats},
                 ValueError,
-                "the series of the draft are not valid: entry 0 is present but its "
-                "index, entry 2, is absent",
+                absent(0, 2),
             ),
             (
                 {},
@@ -624,20 +717,6 @@ class WriterTest(unittest.TestCase):
         self.assertEqual(
             str(raised.exception), f"{UNKNOWN}: the open names plant.a, plant.z"
         )
-        with self.assertRaises(foundation.Stopped) as raised:
-            self.client.open_writer(["plant.a", "other.a"])
-        self.assertEqual(raised.exception.code, "malformed")
-        self.assertIsNone(self.client.open_writer("plant.a").close())
-
-    def test_open_writer_of_two_indexes_raises_stopped_naming_each_index(self) -> None:
-        with self.assertRaises(foundation.Stopped) as raised:
-            self.client.open_writer(["other.a", "plant.a", "plant.b"])
-        self.assertEqual(raised.exception.code, "malformed")
-        self.assertEqual(
-            str(raised.exception),
-            "channels of more than one index (other.time, plant.time): open one "
-            "writer for each index",
-        )
         self.assertIsNone(self.client.open_writer("plant.a").close())
 
     def test_a_writer_of_a_closed_client_raises(self) -> None:
@@ -768,7 +847,9 @@ class WriterTest(unittest.TestCase):
                 self.assertEqual(raised.exception.code, "waiting")
                 self.assertEqual(
                     str(raised.exception),
-                    "the node refused the frame: another writer holds control",
+                    "the node refused the frame of plant.time (waiting: another writer "
+                    "holds control); channels plant.a, plant.time were not written; no "
+                    "channel was",
                 )
 
     def test_a_writer_of_authority_1_takes_control_from_one_of_no_authority(
@@ -789,8 +870,9 @@ class WriterTest(unittest.TestCase):
             self.assertEqual(raised.exception.code, "expired")
             self.assertEqual(
                 str(raised.exception),
-                "the node refused the frame: the writer's control lease ran out: "
-                "open the writer again",
+                "the node refused the frame of plant.time (expired: the writer's "
+                "control lease ran out: open the writer again); channels plant.a, "
+                "plant.time were not written; no channel was",
             )
 
     def test_a_forked_child_does_not_own_the_writer(self) -> None:

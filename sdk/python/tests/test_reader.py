@@ -107,8 +107,8 @@ class ReaderTest(unittest.TestCase):
         self.addCleanup(reader.close)
         self.assertEqual(
             reader.places,
-            (("plant.b", "i64"), ("plant.a", "f64"), ("plant.b", "i64"),
-             ("plant.time", "timestamp")),
+            (("plant.b", "i64", 3), ("plant.a", "f64", 3), ("plant.b", "i64", 3),
+             ("plant.time", "timestamp", 3)),
         )
         with self.writes.open_writer(["plant.a", "plant.b"]) as writer:
             writer.write({"plant.a": 1.5, "plant.b": 7})
@@ -417,7 +417,7 @@ class ReaderTest(unittest.TestCase):
             self.assertEqual(str(raised.exception), text)
         self.assertEqual(
             self.client.open_reader("plant.a").places,
-            (("plant.a", "f64"), ("plant.time", "timestamp")),
+            (("plant.a", "f64", 1), ("plant.time", "timestamp", 1)),
         )
 
     def test_open_reader_raises_stopped_with_the_code_of_the_node(self) -> None:
