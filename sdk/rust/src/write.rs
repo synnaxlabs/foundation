@@ -173,7 +173,9 @@ impl Writer {
     /// channel (`Unordered`, `entry` the higher of their places and `last` the lower),
     /// or for values that give the stamps of only some groups (`IndexAbsent`, `entry`
     /// the lowest place of a group with no stamp and `index` the place of its index),
-    /// each with nothing sent, and `Unsent` for no values.
+    /// each with nothing sent, and `Unsent` for no values. A call of more values than
+    /// the places gives `Unordered` or an error of one of its first `places + 1`
+    /// values: it reads no value after those.
     pub fn write(
         &mut self,
         values: &[(usize, Value)],
@@ -220,7 +222,9 @@ impl Writer {
     /// whose count is not that count; each with nothing sent. `Unsent` for a frame
     /// with no series or a series of no samples; and `Pool(TooLarge)` for a frame over
     /// the largest block, or, before any copy, for series whose bytes go over
-    /// [`Writer::bytes_max`], `requested` their bytes.
+    /// [`Writer::bytes_max`], `requested` their bytes. A call of more series than the
+    /// places gives `Pool(TooLarge)`, `Unordered`, or an error of one of its first
+    /// `places + 1` series: it reads no series after those.
     pub fn write_series(
         &mut self,
         series: &[Series<'_>],

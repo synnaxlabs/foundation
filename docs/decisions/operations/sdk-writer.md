@@ -122,13 +122,21 @@
   `index` the place of its index. Each `write::Series` holds its own count, and the
   series of one group with two counts give `Stream(program::Error::Count)`, `place` the
   lowest place of the group and `other` its lowest place of another count. Each error
-  names the places of the caller, with nothing sent, and the writer goes on. When a
-  group of the frame got `Outcome::Ended`, the call gives `Error::Partial`: `written`
-  holds the channels of each group that got `Taken`, `unwritten` the rest, and
-  `outcomes` each outcome of the frame. The writer goes on. The end of a group alone
+  names the places of the caller, with nothing sent, and the writer goes on. A call
+  reads at most one item more than the places, so a call of more items gives
+  `Unordered` or an error of one of those items, and the kept frame stays bounded by
+  the places. Lost: an error of its own for a call of too many items, which a caller
+  would get for the cause of `Unordered`. When a group of the frame got
+  `Outcome::Ended`, the call gives `Error::Partial`: `written` holds the channels of
+  each group that got `Taken`, `unwritten` the rest, and `outcomes` each outcome of
+  the frame. The writer goes on. The end of a group alone
   gives no error at `close`. `close` gives `Stream(Unstored)` for each group that
   ended with a frame that the node took and that may not be on disk, with the place of
-  the index of each such group. Decided by `laptop.architect-2` on 2026-10-19T12:57:33Z
+  the index of each such group (`laptop.architect-2`, 2026-10-19T13:14:55Z,
+  https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268099496, item 2,
+  which supersedes item 7 of the ruling below, in the text of
+  https://github.com/synnaxlabs/foundation/pull/3581#issuecomment-6290157639, item 2).
+  Decided by `laptop.architect-2` on 2026-10-19T12:57:33Z
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267752091) and
   on 2026-10-20T10:51:53Z
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6289228997): no
