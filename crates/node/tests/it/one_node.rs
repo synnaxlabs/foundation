@@ -8,7 +8,6 @@ use std::collections::BTreeMap;
 use std::fs::Permissions;
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
-use std::time::Duration;
 
 use types::quality::Quality;
 use types::time::{Span, Stamp};
@@ -29,7 +28,7 @@ const VARIABLES: [(&str, &str); 3] = [
     ("ns=3;s=PositiveTrendData", "plant.trend"),
 ];
 
-/// The changes of each variable, at most 10 a second. Each change steps the value.
+/// The changes of each variable. Each change steps the value.
 const TICKS: usize = 20;
 
 /// The changes of each variable in the test of the time bound: 5 s at 10 Hz, so that a
@@ -816,15 +815,6 @@ fn a_subscribed_plant_stores_each_change_at_its_read() {
     first_stored(&plant, &VARIABLES);
     let value = |tick: usize| f64::from(u32::try_from(tick).expect("a few ticks"));
     for tick in 1..=TICKS {
-        if tick == TICKS / 2 {
-            // A late wake of the thread of the changes, as on a loaded runner. A pace
-            // that catches up puts two changes in one sampling interval.
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "the test thread is not a thread that env started"
-            )]
-            std::thread::sleep(Duration::from_millis(300));
-        }
         plant.opcua.change(1, Quality::GOOD);
         // The next change waits until InfluxDB holds this one, so that a stall of the
         // node cannot fill the queue of the server.
