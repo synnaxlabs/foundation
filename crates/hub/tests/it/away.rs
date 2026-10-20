@@ -804,7 +804,7 @@ fn stops_the_write_as_failed_when_the_home_takes_smaller_messages() {
         limit.to_string(),
         format!(
             "the home {OTHER} takes messages of at most {} bytes, under the {MESSAGE} \
-             of this node: give each node of the mesh the same message limit",
+             bytes of this node: give each node of the mesh the same message limit",
             MESSAGE / 2
         )
     );

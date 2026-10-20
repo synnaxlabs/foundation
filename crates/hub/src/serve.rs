@@ -300,7 +300,8 @@ impl fmt::Display for Error {
             } => write!(
                 f,
                 "the home {home} takes messages of at most {home_max} bytes, under the \
-                 {max} of this node: give each node of the mesh the same message limit"
+                 {max} bytes of this node: give each node of the mesh the same message \
+                 limit"
             ),
         }
     }
