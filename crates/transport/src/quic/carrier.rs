@@ -144,7 +144,7 @@ impl Handle {
         Ok(())
     }
 
-    /// The next session that a peer dialed and that no accept took, without a wait.
+    /// The next session that a peer dialed and that nothing took, without a wait.
     pub(crate) fn accepted(&self) -> Option<Session> {
         let key = self.0.borrow_mut().accepted.as_mut()?.pop_front()?;
         Some(Session {

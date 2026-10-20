@@ -38,7 +38,8 @@ pub(crate) struct Table {
     ready: VecDeque<Session>,
     /// The wakers of the `accept` calls that wait.
     accepting: Vec<Waker>,
-    /// Why the carrier stopped, which `accept` gives once `ready` is empty.
+    /// Why the carrier stopped, which `accept` gives once `ready` is empty. The take
+    /// task sets it only after it took each session that waits in the carrier.
     failed: Option<Error>,
 }
 
@@ -216,8 +217,7 @@ impl Table {
         attempt.end(result);
     }
 
-    /// Takes each session that a peer opened and that no `accept` took from the
-    /// carrier.
+    /// Takes each session that a peer opened and that waits in the carrier.
     fn take(&mut self) {
         while let Some(session) = self.carrier.accepted() {
             if let Some(session) = self.arrive(Session::new(session)) {
@@ -822,8 +822,8 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
-    // Only the take task reads the carrier's sessions, so it wakes the `accept` that
-    // waits, both for a session and for the error of the socket.
+    // No `accept` reads the carrier, so the take task wakes the one that waits, both
+    // for a session and for the error of the socket.
     #[test]
     fn an_accept_that_waits_gets_a_peers_session_then_the_error_of_a_broken_socket() {
         for value in 0..32 {
@@ -850,6 +850,35 @@ mod tests {
             });
             assert_eq!(sim.run(), Ok(()), "run {value}");
         }
+    }
+
+    // The session waits in the ready queue when the socket breaks.
+    #[test]
+    fn accept_gives_a_waiting_session_before_the_error_of_a_broken_socket() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let at = [Address::Udp(testing::address(&server))];
+        testing::transport(&server, SERVER, |transport, node| async move {
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 10))
+                .await;
+            node.fail_udp(testing::address(&node));
+            linger(&node).await;
+            let session = transport.accept().await.expect("the waiting session");
+            assert_eq!(session.peer(), Peer::Node(CLIENT.public()));
+            let network = Error::Network {
+                error: env::net::Error::Io { code: 5 },
+            };
+            assert_eq!(transport.accept().await.err(), Some(network));
+        });
+        testing::transport(&client, CLIENT, move |transport, _| async move {
+            drop(
+                transport
+                    .dial(SERVER.public(), &at)
+                    .await
+                    .expect("a session"),
+            );
+        });
+        assert_eq!(sim.run(), Ok(()));
     }
 
     #[test]
@@ -1002,6 +1031,34 @@ mod tests {
         entry.dialed
     }
 
+    /// After a random delay under 750 us, dials `peer` at `at` on `transport`.
+    async fn dial_late(
+        transport: &Transport,
+        node: &Node,
+        peer: PublicKey,
+        at: &[Address],
+    ) -> Session {
+        let offset = node.entropy().rng().below(750_000);
+        let offset = Span::from_nanos(i64::try_from(offset).expect("small"));
+        node.clock().sleep(offset).await;
+        transport.dial(peer, at).await.expect("a session")
+    }
+
+    /// Checks that each of `sessions` ends with `Code(0)`, from either side.
+    async fn ended_with_0(sessions: impl Iterator<Item = &Session>) {
+        for session in sessions {
+            let error = session.closed().await;
+            assert!(
+                matches!(
+                    error,
+                    Error::Closed { code: Code(0) }
+                        | Error::PeerClosed { code: Code(0) }
+                ),
+                "{error:?}"
+            );
+        }
+    }
+
     /// A node of [`two_nodes_that_dial_each_other_keep_the_session_of_the_lower_key`]
     /// with `key`. After a random delay under 750 us, it dials `peer` at `at`. A
     /// session reaches the peer three one-way delays of 250 us after its dial, so
@@ -1012,10 +1069,7 @@ mod tests {
         let lower = key.public() < peer;
         testing::shard(node, key, move |config, node| async move {
             let (transport, sessions) = accepting(config, &node);
-            let offset = node.entropy().rng().below(750_000);
-            let offset = Span::from_nanos(i64::try_from(offset).expect("small"));
-            node.clock().sleep(offset).await;
-            let dialed = transport.dial(peer, &at).await.expect("a session");
+            let dialed = dial_late(&transport, &node, peer, &at).await;
             sessions.borrow_mut().push(dialed);
             node.clock()
                 .sleep(testing::spans(Span::MILLISECOND, 100))
@@ -1023,17 +1077,7 @@ mod tests {
             let open = transport.dial(peer, &[]).await.expect("the open session");
             assert_eq!(own(&transport, &open), lower);
             let held: Vec<_> = sessions.borrow_mut().drain(..).collect();
-            for session in held.iter().filter(|s| !s.downgrade().is(&open)) {
-                let error = session.closed().await;
-                assert!(
-                    matches!(
-                        error,
-                        Error::Closed { code: Code(0) }
-                            | Error::PeerClosed { code: Code(0) }
-                    ),
-                    "{error:?}"
-                );
-            }
+            ended_with_0(held.iter().filter(|s| !s.downgrade().is(&open))).await;
             // The higher node must find the open session first.
             if lower {
                 node.clock()
@@ -1061,24 +1105,11 @@ mod tests {
         testing::start(node, move |shard, node| async move {
             let config = shard.config(key, testing::spans(Span::SECOND, 30));
             let (transport, sessions) = accepting(config, &node);
-            let offset = node.entropy().rng().below(750_000);
-            let offset = Span::from_nanos(i64::try_from(offset).expect("small"));
-            node.clock().sleep(offset).await;
-            let dialed = transport.dial(peer, &at).await.expect("a session");
+            let dialed = dial_late(&transport, &node, peer, &at).await;
             sessions.borrow_mut().push(dialed);
             node.clock().sleep(testing::spans(Span::SECOND, 3)).await;
             let kept: Vec<_> = sessions.borrow_mut().drain(..).collect();
-            for session in kept.iter().filter(|session| !session.quic().live()) {
-                let error = session.closed().await;
-                assert!(
-                    matches!(
-                        error,
-                        Error::Closed { code: Code(0) }
-                            | Error::PeerClosed { code: Code(0) }
-                    ),
-                    "{error:?}"
-                );
-            }
+            ended_with_0(kept.iter().filter(|session| !session.quic().live())).await;
         });
     }
 
