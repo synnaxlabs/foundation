@@ -468,13 +468,18 @@ impl Scene {
         }
     }
 
-    /// Watches the status of `run` for `within`, and panics at a status that shows
-    /// [`MARKER`].
-    async fn watch(&self, run: &mut Run, within: Span) {
+    /// Watches the status of `run` for [`GLANCE`], then stops it, and panics at a
+    /// status or an end that shows [`MARKER`].
+    async fn close(&self, mut run: Run) {
         let clock: Clock = self.node.clock();
-        let mut late = pin!(clock.sleep(within));
+        let mut late = pin!(clock.sleep(GLANCE));
         while let Some(reading) = before(late.as_mut(), run.next()).await {
             unmarked(&reading);
+        }
+        let end = run.stop().await;
+        unmarked(&end);
+        if let Err(error) = end {
+            unmarked(&error.to_string());
         }
     }
 
@@ -1077,12 +1082,13 @@ async fn faulted(scene: Rc<Scene>, seed: u64) {
 }
 
 /// For a kind with [`Suite::secrets`], whose config reads secrets that each hold
-/// [`MARKER`], no status, no end of a run, and no check shows it.
-/// One run meets the simulator, and is Running with progress within [`START`], then
-/// its stop, and gives an error within [`LOST`] and 5 s more. A second run meets no
-/// device: an error within [`START`], and 5 s more. A third meets the echo of
-/// [`Suite::echo`]: an error within [`START`], and 5 s more. Then the write form of
-/// scenario 5 for 5 s. A kind with no secret passes with no check.
+/// [`MARKER`], no status and no end of a run shows it. Two runs meet the simulator,
+/// and are Running with progress within [`START`]. Then the simulator stops for the
+/// first, and the device node crashes for the second, and each gives an error within
+/// [`LOST`] and 5 s more. A third run meets no device: an error within [`START`], and
+/// 5 s more. A fourth meets the echo of [`Suite::echo`]: an error within [`START`],
+/// and 5 s more. Then the write form of scenario 5 for 5 s. A kind with no secret
+/// passes with no check.
 pub(crate) fn keeps_each_secret_from_the_status(suite: &'static Suite) {
     let Some(marked) = suite.secrets else {
         return;
@@ -1109,36 +1115,38 @@ pub(crate) fn keeps_each_secret_from_the_status(suite: &'static Suite) {
             unmarked(reading);
             reading.error.is_some()
         };
-        let served = scene.serve();
-        let mut run = scene.supervise(config.clone()).await;
         let started = |reading: &Reading| {
             unmarked(reading);
             reading.state == State::Running
                 && reading.error.is_none()
                 && scene.progress(reading) > 0
         };
-        run.until(START, started).await;
-        scene.stop(served).await;
-        run.until(LOST, failed).await;
-        scene.watch(&mut run, GLANCE).await;
-        ended_unmarked(&run.stop().await);
+        for crashed in [false, true] {
+            let served = scene.serve();
+            let mut run = scene.supervise(config.clone()).await;
+            run.until(START, started).await;
+            if crashed {
+                drop(served);
+                scene.crash().await;
+            } else {
+                scene.stop(served).await;
+            }
+            run.until(LOST, failed).await;
+            scene.close(run).await;
+        }
         let mut run = scene.supervise(config.clone()).await;
         run.until(START, failed).await;
-        scene.watch(&mut run, GLANCE).await;
-        ended_unmarked(&run.stop().await);
+        scene.close(run).await;
         if let Some(echo) = suite.echo {
             let served = scene.start(echo);
             let mut run = scene.supervise(config.clone()).await;
             run.until(START, failed).await;
-            scene.watch(&mut run, GLANCE).await;
-            ended_unmarked(&run.stop().await);
+            scene.close(run).await;
             scene.stop(served).await;
         }
         if let Some(missing) = writes.first() {
             scene.rig.remove(std::slice::from_ref(missing));
-            let mut run = scene.supervise(config).await;
-            scene.watch(&mut run, GLANCE).await;
-            ended_unmarked(&run.stop().await);
+            scene.close(scene.supervise(config).await).await;
         }
     });
 }
@@ -1148,14 +1156,6 @@ pub(crate) fn keeps_each_secret_from_the_status(suite: &'static Suite) {
 fn unmarked(shown: &impl Debug) {
     let text = format!("{shown:?}");
     assert!(!text.contains(MARKER), "the secret shows: {text}");
-}
-
-/// Panics when `end`, or the text of its error, holds [`MARKER`].
-fn ended_unmarked(end: &Result<(), Error>) {
-    unmarked(end);
-    if let Err(error) = end {
-        unmarked(&error.to_string());
-    }
 }
 
 /// A scenario that runs 1 s past [`RING`] fails.
