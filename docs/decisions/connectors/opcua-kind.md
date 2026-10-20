@@ -21,9 +21,9 @@
   types do not match the channel types that the user wants (`laptop.architect-2`,
   2026-10-14T00:36:21Z:
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6158211076). Time:
-  each frame has the midpoint of the request on mesh time (STAMP). The SourceTimestamp
-  comes with the device clock and its fit to mesh time, when a user needs the time of
-  the measurement (question:
+  with `polled = true` (OPCUA READ), each frame has the midpoint of the request on mesh
+  time (STAMP). The default mode subscribes, and each value has the mesh time of its
+  device time, as OPCUA SUBSCRIBE states (question:
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6150343218). The
   device clock is the server clock. The client reads `CurrentTime` as a `Stamp`, and a
   `DateTime` that a `Stamp` cannot hold, the null one too, gives `BadOutOfRange`, and
@@ -49,8 +49,9 @@
   loses each time after mid 2185. Status: a Good with a subcode counts as Good. A frame
   leaves out each value that is not Good and keeps the others: an Uncertain value adds 1
   to the count `uncertain`, and each other one, also no value (`BadNoData`) and a
-  `BadTypeMismatch` of the server, adds 1 to `bad`. A tick that leaves out each value
-  writes no frame. A quality channel comes with the quality model of the MVP (question:
+  `BadTypeMismatch` of the server, adds 1 to `bad`. A tick of `polled = true` that
+  leaves out each value writes no frame. A quality channel comes with the quality
+  model of the MVP (question:
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6150343529). Approved
   by the person (2026-10-15T16:34:12Z:
   https://github.com/synnaxlabs/foundation/issues/1737#issuecomment-6197131223). A Good
@@ -78,11 +79,12 @@
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6206438915, and its
   amendment at 2026-10-16T02:44:43Z:
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6206868666).
-  Keep-alive: between ticks, the run waits through `Client::idle`, which drives the
-  client. When 10 s pass with no read, `idle` reads `Server_ServerStatus_State`
-  (ns=0;i=2259) to check the connection, so a run that reads more often than each 10 s
-  sends no check. A check fails when its answer has a bad service result, when it gets
-  no answer in the request timeout (5 s), or when the close of the channel cuts it. The
+  Keep-alive: between the ticks of `polled = true`, and in a run with no read, the
+  run waits through `Client::idle`, which drives the client. When 10 s pass with no
+  read, `idle` reads `Server_ServerStatus_State` (ns=0;i=2259) to check the
+  connection, so a run that reads more often than each 10 s sends no check. A check
+  fails when its answer has a bad service result, when it gets no answer in the
+  request timeout (5 s), or when the close of the channel cuts it. The
   status and the value of the server state are not judged: each answer came over the
   channel and the session (`laptop.architect-2`, 2026-10-16T05:10:17Z,
   https://github.com/synnaxlabs/foundation/pull/2809#issuecomment-6208565249). The first
