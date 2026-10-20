@@ -8841,7 +8841,8 @@ mod tests {
             });
         }
 
-        /// The bytes that `Complete` is owed on the client's connection.
+        /// The bytes that `Complete` is owed on the client's connection. No read count
+        /// shows the credit, so it reads the share.
         fn owed(pair: &mut Pair) -> isize {
             let key = key(&pair.client);
             let connection =
