@@ -765,7 +765,7 @@ mod tests {
             ticket: public(1),
             card: unchecked(&card),
             admission: ticket(1).admission(&card),
-            status: BTreeSet::from(["disk".parse().unwrap()]),
+            status: crate::common::names(["disk".parse().unwrap()]),
         });
         [
             ("raft_pre_vote", raft(Body::PreVote { last: at(3, 6) })),
@@ -935,23 +935,22 @@ mod tests {
         .into_iter()
     }
 
-    /// The join of node 2 by ticket 1, with the status names `names`.
-    fn join_with(names: impl IntoIterator<Item = String>) -> Message {
+    /// The byte form of the join of node 2 by ticket 1, with the status names `names`.
+    fn join_with(names: &[&str]) -> Vec<u8> {
         let card = member(2).card;
-        Message::Join {
-            request: Box::new(Request {
-                ticket: public(1),
-                card: unchecked(&card),
-                admission: ticket(1).admission(&card),
-                status: names.into_iter().map(|text| name(&text)).collect(),
-            }),
-        }
+        let request = Request {
+            ticket: public(1),
+            card: unchecked(&card),
+            admission: ticket(1).admission(&card),
+            status: crate::status::Names::default(),
+        };
+        crate::common::join_bytes(request, names)
     }
 
     /// A join of two status names, with the last name first.
     fn join_out_of_order() -> Vec<u8> {
         let names = ["plant.node2.a", "plant.node2.b"];
-        let mut bytes = join_with(names.map(String::from)).encode();
+        let mut bytes = join_with(&names);
         let mut swapped = Vec::new();
         for text in names.iter().rev() {
             put_name(&name(text), &mut swapped);
@@ -1037,8 +1036,9 @@ mod tests {
             ("kind_10", vec![10]),
             ("join_status_out_of_order", join_out_of_order()),
         ];
-        let names = (0..65).map(|at| format!("plant.node2.s{at}"));
-        refused.push(("join_status_65", join_with(names).encode()));
+        let names: Vec<_> = (0..65).map(|at| format!("plant.node2.s{at}")).collect();
+        let names: Vec<_> = names.iter().map(String::as_str).collect();
+        refused.push(("join_status_65", join_with(&names)));
         let heartbeat = inputs["raft_heartbeat"];
         refused.push(("raft_heartbeat_trailing", [heartbeat, &[0]].concat()));
         // A heartbeat body is its kind and then the commit index.

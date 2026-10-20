@@ -1,7 +1,7 @@
 //! Test helpers that the modules of `mesh` reuse: keys, signed messages, and a pool.
 //! Node `id` has the private key `[id; 32]`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use block::Pool;
@@ -24,6 +24,7 @@ use crate::card::{self, Card};
 use crate::change::{CHUNKS_MAX, Change, HOLDERS_MAX, HOMES_MAX, Join};
 use crate::claim::Signer;
 use crate::member::Member;
+use crate::region::Request;
 use crate::status::{self, Status};
 use crate::ticket::{Options, Ticket, Voter};
 
@@ -117,6 +118,28 @@ pub(crate) fn status_bytes(count: u128) -> Vec<u8> {
 /// A status of the `entries`, at most 64.
 pub(crate) fn status<const N: usize>(entries: [(Name, channel::Key); N]) -> Status {
     Status::new(entries.into()).unwrap()
+}
+
+/// The byte form of a `Join` of `request` with the status names `names` in place of
+/// its own, also more than 64.
+pub(crate) fn join_bytes(request: Request, names: &[&str]) -> Vec<u8> {
+    let request = Box::new(Request {
+        status: status::Names::default(),
+        ..request
+    });
+    let mut bytes = crate::message::Message::Join { request }.encode();
+    bytes.truncate(bytes.len().saturating_sub(8));
+    let names: BTreeSet<_> = names.iter().map(|text| name(text)).collect();
+    put_count(names.len(), &mut bytes);
+    for name in &names {
+        put_name(name, &mut bytes);
+    }
+    bytes
+}
+
+/// The status names `names`, at most 64.
+pub(crate) fn names(names: impl IntoIterator<Item = Name>) -> status::Names {
+    status::Names::new(names.into_iter().collect()).unwrap()
 }
 
 pub(crate) fn create_members(ids: &[u8]) -> Vec<Member> {

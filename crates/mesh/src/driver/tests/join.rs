@@ -96,7 +96,7 @@ fn a_join_of_a_bound_key_under_another_public_key_is_contested() {
             ticket: public(8),
             card: card.clone().into(),
             admission: common::ticket(8).admission(&card),
-            status: BTreeSet::new(),
+            status: crate::status::Names::default(),
         };
         let contested = mesh.admit(public(5), request).await;
         assert_eq!(contested, Ok(Err(Refusal::Contested)));
@@ -244,8 +244,8 @@ fn serve_stops_a_join_of_more_than_64_status_names() {
         |peer| async move {
             let names: Vec<_> = (0..65).map(|at| format!("status{at}")).collect();
             let names: Vec<_> = names.iter().map(String::as_str).collect();
-            let request = Box::new(request(4, 8, &names));
-            stopped(peer, &[Message::Join { request }.encode()]).await
+            let join = common::join_bytes(request(4, 8, &[]), &names);
+            stopped(peer, &[join]).await
         },
     );
     assert_eq!((served, member), (Err(Error::Malformed), None));

@@ -36,7 +36,6 @@ use crate::member::Member;
 use crate::message::{self, Message};
 use crate::refusal::Refusal;
 use crate::region::{self, Refused, Request};
-use crate::status::Status;
 use bound::Bound;
 pub use founding::founding;
 use send::Senders;
@@ -590,14 +589,6 @@ impl Mesh {
     ///   key has no time.
     /// - [`Refusal::Refused`] when the applied state of this node refuses the
     ///   join. A node whose state lags can refuse a join that the region admits.
-    ///
-    /// # Panics
-    ///
-    /// When `request` names more than 64 status channels, which its decode refuses.
-    #[expect(
-        clippy::unwrap_in_result,
-        reason = "the decode bounds the status names"
-    )]
     pub(crate) fn stamp(&self, request: Request) -> Result<Change, Refusal> {
         if self.group.borrow().stopped.get().is_some() {
             return Err(Refusal::Stopped);
@@ -611,19 +602,17 @@ impl Mesh {
         if !measurement.known() || at < Stamp::EPOCH {
             return Err(Refusal::Unsynced);
         }
-        let key = |name| {
+        let status = request.status.keyed(|_| {
             let mut random = [0; 16];
             self.entropy.fill(&mut random);
-            (name, channel::Key::v7(at, u128::from_le_bytes(random)))
-        };
-        let keys = request.status.into_iter().map(key).collect();
+            channel::Key::v7(at, u128::from_le_bytes(random))
+        });
         let join = Join {
             ticket: request.ticket,
             at,
             card: request.card,
             admission: request.admission,
-            status: Status::new(keys)
-                .expect("invariant: a request decodes with at most 64 status names"),
+            status,
         };
         let group = self.group.borrow();
         group.state.check(&join).map_err(Refusal::Refused)?;
@@ -2573,7 +2562,7 @@ mod tests {
                 let channel = common::index(u128::from(id) << 8 | u128::from(at));
                 (common::name(&format!("{end:a>width$}")), channel)
             });
-            let status = Status::new(statuses.collect()).unwrap();
+            let status = crate::status::Status::new(statuses.collect()).unwrap();
             let join = common::join_with(&card, 7, common::BEFORE_EXPIRY, status);
             Change::Join(Box::new(join))
         });
@@ -5544,7 +5533,7 @@ mod tests {
             ticket: public(ticket),
             card: unchecked(&card),
             admission: common::ticket(ticket).admission(&card),
-            status: status.iter().map(|name| name.parse().unwrap()).collect(),
+            status: common::names(status.iter().map(|name| name.parse().unwrap())),
         }
     }
 
@@ -5920,19 +5909,6 @@ mod tests {
                 panic!("{stamped:?} is not a join")
             };
             assert_eq!(join.at, time.now().mesh.unwrap().latest);
-        });
-    }
-
-    #[test]
-    #[should_panic(expected = "invariant: a request decodes with at most 64 status")]
-    fn a_join_request_with_65_status_names_is_a_defect() {
-        solo(|node, tasks| async move {
-            let mesh =
-                recorded(&node, &tasks, &[ticket_of(8, "plant", true, LAST)]).await;
-            let names: Vec<_> = (0..65).map(|i| format!("s{i:02}")).collect();
-            let names: Vec<_> = names.iter().map(String::as_str).collect();
-            mesh.stamp(request(4, 8, &names[..64])).unwrap();
-            mesh.stamp(request(4, 8, &names)).unwrap_err();
         });
     }
 

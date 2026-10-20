@@ -1,6 +1,6 @@
 //! The status channels of a node.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use types::channel;
@@ -65,6 +65,60 @@ impl Status {
     }
 }
 
+/// The names of a node's status channels, under the node's name: at most 64.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Names(BTreeSet<Name>);
+
+impl Names {
+    /// `names`.
+    ///
+    /// # Errors
+    ///
+    /// [`Many`] when `names` holds more than 64 names.
+    pub fn new(names: BTreeSet<Name>) -> Result<Self, Many> {
+        let count = names.len();
+        if count > usize::from(MAX) {
+            return Err(Many { count });
+        }
+        Ok(Self(names))
+    }
+
+    /// The names, in order.
+    #[must_use]
+    pub fn as_set(&self) -> &BTreeSet<Name> {
+        &self.0
+    }
+
+    /// The status with the key that `key` gives each name, in name order.
+    pub(crate) fn keyed(self, mut key: impl FnMut(&Name) -> channel::Key) -> Status {
+        let keyed = self.0.into_iter().map(|name| (key(&name), name));
+        Status(keyed.map(|(channel, name)| (name, channel)).collect())
+    }
+
+    /// Adds the count, then each name in rising order.
+    pub(crate) fn encode(&self, out: &mut Vec<u8>) {
+        put_count(self.0.len(), out);
+        for name in &self.0 {
+            put_name(name, out);
+        }
+    }
+
+    /// Takes what [`Names::encode`] gives. `None` when the count is over 64, before
+    /// any name is read, or when the names are not in rising order.
+    pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Self> {
+        let mut count = *bytes;
+        if take_count(&mut count)? > u64::from(MAX) {
+            return None;
+        }
+        let mut names = BTreeSet::new();
+        take_rising(bytes, take_name, |name, _| {
+            names.insert(name);
+            Some(())
+        })?;
+        Some(Self(names))
+    }
+}
+
 /// More than 64 status entries. Text: "{count} status entries, more than 64".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Many {
@@ -106,5 +160,25 @@ mod tests {
         assert_eq!(many, Err(Many { count: 65 }));
         let text = "65 status entries, more than 64";
         assert_eq!(many.unwrap_err().to_string(), text);
+    }
+
+    #[test]
+    fn names_hold_at_most_64_names_and_read_back() {
+        let most: BTreeSet<_> = entries(64).into_keys().collect();
+        let names = Names::new(most.clone()).unwrap();
+        assert_eq!(names.as_set(), &most);
+        let mut bytes = Vec::new();
+        names.encode(&mut bytes);
+        assert_eq!(Names::decode(&mut bytes.as_slice()), Some(names));
+        let many = Names::new(entries(65).into_keys().collect());
+        assert_eq!(many, Err(Many { count: 65 }));
+    }
+
+    #[test]
+    fn keyed_names_give_the_key_of_each_name() {
+        let names = Names::new(entries(3).into_keys().collect()).unwrap();
+        let mut keys = entries(3).into_values();
+        let status = names.keyed(|_| keys.next().unwrap());
+        assert_eq!(status.as_map(), &entries(3));
     }
 }
