@@ -1,0 +1,6 @@
+subject = ""
+private_key = ""
+strict = "no"
+user = "a"
+thing {
+}

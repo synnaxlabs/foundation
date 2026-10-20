@@ -251,13 +251,36 @@ impl DataType {
     }
 }
 
-/// `UA_DecodeBinaryOptions`, all null but the length that the decoder sets.
+/// `UA_DecodeBinaryOptions`, all null but the calloc and the length that the decoder
+/// sets.
 #[repr(C)]
-#[derive(Default)]
 pub(crate) struct DecodeOptions {
-    pointers: [usize; 4],
+    pointers: [usize; 2],
+    /// The first argument of each call of `calloc`.
+    pub(crate) context: *mut c_void,
+    /// Takes the memory of the decoded value in place of `UA_calloc`, which then frees
+    /// none of it.
+    pub(crate) calloc: Option<Calloc>,
     pub(crate) decoded: usize,
 }
+
+impl Default for DecodeOptions {
+    fn default() -> Self {
+        Self {
+            pointers: [0; 2],
+            context: ptr::null_mut(),
+            calloc: None,
+            decoded: 0,
+        }
+    }
+}
+
+/// The `calloc` of [`DecodeOptions`]: gives `count` zeroed elements of `size` bytes.
+pub(crate) type Calloc = unsafe extern "C" fn(
+    context: *mut c_void,
+    count: usize,
+    size: usize,
+) -> *mut c_void;
 
 /// `UA_TYPES_COUNT`.
 pub(crate) const TYPES: usize = 388;
@@ -296,6 +319,11 @@ const _: () = {
         size_of::<DecodeOptions>() == 40,
         "UA_DecodeBinaryOptions changed"
     );
+    assert!(
+        offset_of!(DecodeOptions, context) == 16,
+        "callocContext moved"
+    );
+    assert!(offset_of!(DecodeOptions, calloc) == 24, "calloc moved");
     assert!(
         offset_of!(DecodeOptions, decoded) == 32,
         "decodedLength moved"
@@ -543,7 +571,8 @@ pub(crate) struct Security<'a> {
 }
 
 /// `shim_refusal` of `shim.c`: the kind of a refusal of the credentials and the number
-/// of the certificate of the trust or the line that it names.
+/// of the certificate of the trust or the line that it names, or of the certificates
+/// before a damaged block.
 #[repr(C)]
 pub(crate) struct Refusal {
     pub(crate) kind: c_int,
@@ -563,6 +592,7 @@ impl Refusal {
     pub(crate) const TRUST_LINE: c_int = 9;
     pub(crate) const CERTIFICATE_LINE: c_int = 10;
     pub(crate) const KEY_LINE: c_int = 11;
+    pub(crate) const DAMAGED: c_int = 12;
 }
 
 /// `UA_MessageSecurityMode`, the modes of a channel that signs.
@@ -783,7 +813,10 @@ unsafe extern "C" {
         refusal: *mut Refusal,
     ) -> u32;
     pub(crate) fn shim_client_timeout(client: *mut Client) -> u32;
-    pub(crate) fn shim_client_publishes(client: *mut Client, count: u16);
+    pub(crate) fn shim_client_publish_count(client: *mut Client, count: u16);
+    pub(crate) fn shim_client_publish_stop(client: *mut Client);
+    pub(crate) fn shim_client_publish_resume(client: *mut Client);
+    pub(crate) fn shim_client_reserve(client: *mut Client, changes: usize) -> u32;
     pub(crate) fn shim_client_limits(
         client: *mut Client,
         limits: *mut [usize; 5],

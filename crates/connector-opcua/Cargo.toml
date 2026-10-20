@@ -7,9 +7,9 @@ publish.workspace = true
 
 [features]
 open62541 = ["dep:aws-lc-sys", "dep:cc", "dep:tracing"]
-# Exposes `bench` to the `run`, `manager`, `client`, `kind`, and `value` benches,
-# `fuzz` to the fuzz target, both to the `alloc` and `memory` tests, and `sim` to the
-# tests of other crates.
+# Exposes `bench` to the `run`, `manager`, `client`, `changes`, `kind`, and `value`
+# benches, `fuzz` to the fuzz target, both to the `alloc` and `memory` tests, and
+# `sim` to the tests of other crates.
 sim = ["open62541"]
 
 [dependencies]
@@ -75,6 +75,11 @@ test = true
 
 [[bench]]
 name = "client"
+harness = false
+test = true
+
+[[bench]]
+name = "changes"
 harness = false
 test = true
 
