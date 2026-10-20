@@ -332,47 +332,35 @@ impl Writes {
         draft: Draft,
         time: Time,
     ) -> Result<(), Error> {
-        match &mut self.spread {
+        let Self {
+            heads,
+            groups,
+            spread,
+            waiting,
+            ..
+        } = self;
+        match spread {
             Spread::One(block) => {
                 let block = block.take().expect(TAKEN);
                 let frame = Frame::Whole(draft);
-                self.put(state, sender, 0, block, frame, time).await?;
+                let group = &mut groups[0];
+                if put(state, sender, group, *heads, block, frame, time).await? {
+                    waiting.push(0);
+                }
             }
             Spread::Many { pending, parts } => {
-                let (mut pending, mut parts) = (mem::take(pending), mem::take(parts));
                 parts.split(&draft, pending.iter().map(|&(group, _)| group));
-                for (group, block) in pending.drain(..) {
-                    let frame = parts.part(&draft, group);
-                    self.put(state, sender, group, block, frame, time).await?;
+                for (number, block) in pending.drain(..) {
+                    let frame = parts.part(&draft, number);
+                    let group = &mut groups[to_usize(number)];
+                    if put(state, sender, group, *heads, block, frame, time).await? {
+                        waiting.push(number);
+                    }
                 }
-                self.spread = Spread::Many { pending, parts };
             }
         }
         self.call(state);
         Ok(())
-    }
-
-    /// Writes `frame` to `group`, and sends the `Ended` of the group when it ends at
-    /// the frame, then the outcome of the frame in `block`.
-    async fn put(
-        &mut self,
-        state: &RefCell<State>,
-        sender: &mut Sender,
-        group: u32,
-        block: Unique,
-        frame: Frame<'_>,
-        time: Time,
-    ) -> Result<(), Error> {
-        let write = &mut self.groups[to_usize(group)];
-        let waiting = write.waiting();
-        let (ended, outcome) = write.write(state, frame, time, self.heads);
-        if !waiting && let Outcome::Taken { .. } = outcome {
-            self.waiting.push(group);
-        }
-        if let Some((block, reply)) = ended {
-            send(sender, block, reply).await?;
-        }
-        send(sender, block, reply(self.heads, group, outcome)).await
     }
 
     /// Calls a commit for the taken frames of each waiting group when none is due.
@@ -453,6 +441,29 @@ impl Writes {
         sender.finish()?;
         Ok(())
     }
+}
+
+/// Writes `frame`, the frame `heads` of the stream, to `group`, and sends the `Ended` of
+/// the group when it ends at the frame, then the outcome of the frame in `block`.
+/// Returns whether the group took the frame while it waited for no commit, so it now
+/// waits for one.
+async fn put(
+    state: &RefCell<State>,
+    sender: &mut Sender,
+    group: &mut Group,
+    heads: u64,
+    block: Unique,
+    frame: Frame<'_>,
+    time: Time,
+) -> Result<bool, Error> {
+    let waiting = group.waiting();
+    let (ended, outcome) = group.write(state, frame, time, heads);
+    let starts = !waiting && matches!(outcome, Outcome::Taken { .. });
+    if let Some((block, reply)) = ended {
+        send(sender, block, reply).await?;
+    }
+    send(sender, block, reply(heads, group.number(), outcome)).await?;
+    Ok(starts)
 }
 
 /// Sends `reply` in the last bytes of `block`.
