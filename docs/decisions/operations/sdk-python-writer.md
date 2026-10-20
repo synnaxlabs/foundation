@@ -29,9 +29,9 @@
      because a caller of `connect` that catches `ConnectionError` then misses a
      refused session; and a `session` attribute on `Refused`, because
      `except ConnectionError` then still catches a typo. `Stream` with `Layout`,
-     `Unsent`, `Body`, `Open`, or `Unnamed`, and `Stream` of a writer with `Pool`,
-     raises `ValueError`: nothing was sent, and the writer goes on, or, at the open,
-     no writer or reader opened.
+     `Unsent`, `Body`, `Open`, or `Unnamed`, and `Stream` of a writer, or of the open
+     of a reader, with `Pool`, raises `ValueError`: nothing was sent, and the writer
+     goes on, or, at the open, no writer or reader opened.
      `Stream` with `Unstored` raises `Stopped` with the code of the end of the first
      group (`Removed` gives `unknown`, `Failed` gives `failed`): an `sdk` writer has
      one index, so one group, and only `close` gives it. Approved in PR 3372 by
