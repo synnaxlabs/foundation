@@ -89,8 +89,17 @@ fn asks_on(
 }
 
 /// As [`asks_on`], on `node`.
-#[expect(clippy::arithmetic_side_effects, reason = "a test may panic")]
 fn asks_at(node: &sim::node::Node, asks: Vec<(Ticket, card::Signed)>) -> Asked {
+    asks_in(node, "", asks)
+}
+
+/// As [`asks_at`], with the mesh directory `dir`.
+#[expect(clippy::arithmetic_side_effects, reason = "a test may panic")]
+fn asks_in(
+    node: &sim::node::Node,
+    dir: &'static str,
+    asks: Vec<(Ticket, card::Signed)>,
+) -> Asked {
     let asked = Asked::default();
     let (own, slot) = (node.clone(), Arc::clone(&asked));
     let main = move |tasks: Tasks| async move {
@@ -100,6 +109,7 @@ fn asks_at(node: &sim::node::Node, asks: Vec<(Ticket, card::Signed)>) -> Asked {
         for (ticket, card) in asks {
             let config = join::Config {
                 card,
+                dir: PathBuf::from(dir),
                 ..config_of(&node, Rc::clone(&transport), ticket)
             };
             let start = clock.now();
@@ -634,8 +644,16 @@ fn request_of(config: &join::Config) -> region::Request {
 
 /// Reads the join file of the mesh directory of `node`.
 async fn stored(node: &sim::node::Node) -> Result<Option<region::Request>, Error> {
+    stored_in(node, Path::new("")).await
+}
+
+/// Reads the join file of `dir` on `node`.
+async fn stored_in(
+    node: &sim::node::Node,
+    dir: &Path,
+) -> Result<Option<region::Request>, Error> {
     let blocks = crate::file::Blocks::new(create_pool()).unwrap();
-    join::file::read(&node.files(), Path::new(""), &blocks, Mode::Read).await
+    join::file::read(&node.files(), dir, &blocks, Mode::Read).await
 }
 
 /// The miss of each voter of [`IDS`] that refuses the unknown ticket `id`.
@@ -1080,6 +1098,7 @@ fn a_crash_in_the_write_of_the_join_file_leaves_a_whole_request_and_the_node_joi
 // A process crash after the rename of the first write and before the sync of
 // the directory, then an ask that sends the stored request and joins, then a power
 // cut. Gives what the file holds after the cut, and the third ask with a new card.
+// The mesh directory is `mesh`, so the sync of its parent covers none of its names.
 #[test]
 fn an_ask_that_sends_the_stored_request_makes_it_durable() {
     let mut lost = Vec::new();
@@ -1090,31 +1109,28 @@ fn an_ask_that_sends_the_stored_request_makes_it_durable() {
             let joiner = cluster.sim.node(sim::node::Config::default());
             let card = common::member(JOINER).card;
             let ask = || (ticket_to(TICKET, &IDS), card.clone());
-            drop(asks_at(&joiner, vec![ask()]));
+            drop(asks_in(&joiner, "mesh", vec![ask()]));
             cluster.sim.run_for(span).unwrap();
             cluster.sim.crash(&joiner, Crash::Process);
-            let left = on(
-                &mut cluster,
-                &joiner,
-                |node| async move { stored(&node).await },
-            );
+            let left = on(&mut cluster, &joiner, |node| async move {
+                stored_in(&node, Path::new("mesh")).await
+            });
             if !matches!(left, Ok(Some(_))) {
                 continue;
             }
-            let asked = asks_at(&joiner, vec![ask()]);
+            let asked = asks_in(&joiner, "mesh", vec![ask()]);
             cluster.run(seconds(20));
             let asked: Vec<_> =
                 asked.lock().unwrap().drain(..).map(|(a, _)| a).collect();
             assert_eq!(asked, [Ok(founding_of(&IDS, &IDS))], "{seed} {span:?}");
             cluster.sim.crash(&joiner, Crash::Power);
-            let after = on(
-                &mut cluster,
-                &joiner,
-                |node| async move { stored(&node).await },
-            );
+            let after = on(&mut cluster, &joiner, |node| async move {
+                stored_in(&node, Path::new("mesh")).await
+            });
             if matches!(after, Ok(None)) {
                 let new = member_signed(JOINER, JOINER, 2).card;
-                let asked = asks_at(&joiner, vec![(ticket_to(TICKET, &IDS), new)]);
+                let asked =
+                    asks_in(&joiner, "mesh", vec![(ticket_to(TICKET, &IDS), new)]);
                 cluster.run(seconds(30));
                 let asked: Vec<_> =
                     asked.lock().unwrap().drain(..).map(|(a, _)| a).collect();
@@ -1211,7 +1227,7 @@ fn an_open_of_a_founding_without_this_node_reads_its_join_file() {
         write_join(&node, member_signed(JOINER, 6, 1).card).await;
     });
     assert_eq!(rotated, Err(Error::WrongKey));
-    // It opens as a member that is not a voter, with no record until its join applies.
+    // It opens with no member record of its own until its join applies.
     let joined = open_joiner(|node| async move {
         write_join(&node, common::member(JOINER).card).await;
     });
@@ -1236,6 +1252,47 @@ fn an_open_of_a_founding_without_this_node_gives_the_error_of_its_join_file() {
     });
     let path = PathBuf::from("join");
     assert_eq!(torn, Err(Error::JoinFile { path }));
+}
+
+#[test]
+fn ask_gives_the_error_of_a_failed_open_of_the_founding_file() {
+    solo(|node, tasks| async move {
+        let transport = transport_of(&node, &tasks, JOINER);
+        let config = config_of(&node, transport, ticket_to(TICKET, &[1]));
+        node.fail_file(Path::new("founding"), Operation::Open);
+        let asked = join::ask(config).await;
+        let cause = files::Error::Io {
+            path: PathBuf::from("founding"),
+            operation: Operation::Open,
+            code: 5,
+        };
+        assert_eq!(asked, Err(Error::Files(cause)));
+        assert_eq!(stored(&node).await, Ok(None));
+    });
+}
+
+// Each voter refuses the stored request, whose card takes the name of node 1. The ask
+// gives the same card, so it has no new request and makes no file.
+#[test]
+fn an_ask_with_the_card_of_a_refused_stored_request_writes_no_file() {
+    let mut cluster = recorded_cluster(0, &IDS, &[]);
+    let joiner = cluster.sim.node(sim::node::Config::default());
+    let taken = common::signed(JOINER, "plant.node1");
+    let card = taken.clone();
+    on(&mut cluster, &joiner, |node| async move {
+        write_join(&node, card).await;
+        node.fail_file(Path::new("join.new"), Operation::Open);
+    });
+    let asked = asks_at(&joiner, vec![(ticket_to(TICKET, &IDS), taken)]);
+    cluster.run(seconds(60));
+    let asked: Vec<_> = asked.lock().unwrap().drain(..).map(|(a, _)| a).collect();
+    let taken = region::Unfit::Taken {
+        name: "plant.node1".parse().unwrap(),
+        key: key(1),
+    };
+    let miss = Miss::from(Refusal::Refused(region::Refused::Unfit(taken)));
+    let missed = IDS.iter().map(|&id| (key(id), miss.clone())).collect();
+    assert_eq!(asked, [Err(Error::Unjoined { missed })]);
 }
 
 // A joined node opened from its directory, which then holds a founding file. An ask
