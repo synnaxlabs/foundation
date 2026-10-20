@@ -3,7 +3,7 @@
 use std::cell::{Cell, RefCell};
 use std::future::poll_fn;
 use std::pin::pin;
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll};
 
 use access::proof::{self, Admitted};
 use types::ed25519::PublicKey;
@@ -245,6 +245,8 @@ impl Drop for Renewal<'_> {
 
 #[cfg(test)]
 mod tests {
+
+    use std::task::Waker;
 
     use types::ed25519::PrivateKey;
 
