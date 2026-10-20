@@ -8,8 +8,8 @@ use std::process;
 use std::sync::{Mutex, PoisonError};
 
 use pyo3::exceptions::{
-    PyConnectionError, PyException, PyMemoryError, PyOSError, PyRuntimeError,
-    PyTypeError, PyValueError,
+    PyConnectionError, PyException, PyMemoryError, PyOSError, PyOverflowError,
+    PyRuntimeError, PyTypeError, PyValueError,
 };
 use pyo3::panic::PanicException;
 use pyo3::prelude::*;
@@ -365,13 +365,13 @@ impl Client {
     /// logger, `"raise"` raises `DataLost`, and `"ignore"` does nothing. Other Python
     /// threads run while it waits.
     ///
-    /// Raises `TypeError` for an argument of a wrong type; `ValueError` for no
-    /// channel, a name that does not parse, an `authority` outside 0 to 255, a `lease`
-    /// that is not a finite number over 0, or another `on_loss`, with no writer
-    /// opened; `Stopped` when the node refused the open, with a text that names each
-    /// channel of the open for `unknown`; `ConnectionError` when the session failed;
-    /// `RuntimeError` when the client closed or in a process that the program forked;
-    /// and `PanicException` when the client's thread panicked.
+    /// Raises `TypeError` for an argument of a wrong type; `ValueError` for no channel,
+    /// a name that does not parse, an `authority` outside 0 to 255, a `lease` that,
+    /// taken as a `float`, does not round to 1 to 2^63 - 1 nanoseconds, or another
+    /// `on_loss`, with no writer opened; `Stopped` when the node refused the open, with
+    /// a text that names each channel of the open for `unknown`; `ConnectionError` when
+    /// the session failed; `RuntimeError` when the client closed or in a process that
+    /// the program forked; and `PanicException` when the client's thread panicked.
     #[pyo3(
         signature = (
             channels, *, authority=Level(Authority(0)), lease=None, on_loss="warn"
@@ -383,14 +383,14 @@ impl Client {
         py: Python<'_>,
         channels: &Bound<'_, PyAny>,
         authority: Level,
-        lease: Option<f64>,
+        lease: Option<Lease>,
         on_loss: &str,
     ) -> PyResult<write::Writer> {
         let loss = write::Loss::parse(on_loss)?;
         let names = names(channels)?;
         let mut config = sdk::write::Config::new(names.clone());
         config.authority = authority.0;
-        config.lease = lease.map(span).transpose()?;
+        config.lease = lease.map(|lease| lease.0);
         owned(self.process)?;
         // The lock is taken without the GIL, which a closing thread needs to return.
         let writer = py
@@ -503,21 +503,42 @@ impl<'a, 'py> FromPyObject<'a, 'py> for Level {
     }
 }
 
-/// The span of the lease `lease`, in seconds.
-fn span(lease: f64) -> PyResult<Span> {
-    let nanos = (lease * 1e9).round();
-    // The bound is the first f64 past `i64::MAX`, and a NaN fails both tests.
-    #[expect(clippy::cast_precision_loss, reason = "2^63 is exact in an f64")]
-    if !(nanos >= 1.0 && nanos < i64::MAX as f64) {
-        return Err(PyValueError::new_err(format!(
-            "lease is {lease:?} s, not a finite number of seconds over 0"
-        )));
+/// The argument `lease` of `open_writer`: seconds that, taken as an `f64`, round to 1
+/// to 2^63 - 1 nanoseconds.
+struct Lease(Span);
+
+impl<'a, 'py> FromPyObject<'a, 'py> for Lease {
+    type Error = PyErr;
+
+    fn extract(object: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        let refused = |lease: &str| {
+            PyValueError::new_err(format!(
+                "lease is {lease}, which does not round to 1 to 2^63 - 1 ns"
+            ))
+        };
+        let lease = match object.extract::<f64>() {
+            Ok(lease) => lease,
+            Err(e) if e.is_instance_of::<PyOverflowError>(object.py()) => {
+                let lease = object.repr().map_or_else(
+                    |_| "past the range of a float".to_owned(),
+                    |repr| format!("{repr} s"),
+                );
+                return Err(refused(&lease));
+            }
+            Err(e) => return Err(e),
+        };
+        let nanos = (lease * 1e9).round();
+        // The bound is the first f64 past `i64::MAX`, and a NaN fails both tests.
+        #[expect(clippy::cast_precision_loss, reason = "2^63 is exact in an f64")]
+        if !(nanos >= 1.0 && nanos < i64::MAX as f64) {
+            return Err(refused(&format!("{lease:?} s")));
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the test above keeps a whole number of nanoseconds in i64"
+        )]
+        Ok(Self(Span::from_nanos(nanos as i64)))
     }
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "the test above keeps a whole number of nanoseconds in i64"
-    )]
-    Ok(Span::from_nanos(nanos as i64))
 }
 
 impl Drop for Client {

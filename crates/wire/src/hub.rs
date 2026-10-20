@@ -9,8 +9,9 @@
 //! ends run exactly [`Head::series`] ends, so the receiver counts them to find where a
 //! run ends. The body starts a new message.
 //!
-//! The streams of a program's session are in [`client`], and the frames of its write
-//! stream and their replies in [`write`](mod@write).
+//! The streams of a program's session are in [`client`], the frames of its write
+//! stream and their replies in [`write`](mod@write), and the stream on which its node
+//! carries its write to the home in [`forward`].
 //!
 //! [`Home`] decodes the messages from the reader's node, and [`Reader`] those from the
 //! home. Each checks the order and the runs of its side of the session.
@@ -30,6 +31,7 @@
 //! - [`ends`]: place and end (each `u32`) for each series.
 
 pub mod client;
+pub mod forward;
 mod frames;
 mod gaps;
 mod home;
@@ -525,6 +527,8 @@ pub enum Error {
     },
     /// An open names no channel.
     Channels,
+    /// A forward names no place.
+    Unplaced,
     /// A head names no series.
     Series,
     /// The range of a head or of a write's reply ends past the highest seq.
@@ -558,6 +562,12 @@ pub enum Error {
         /// The places of the session.
         places: u32,
     },
+    /// A place of a forward is not after the place before it, or not below the
+    /// channels of the open.
+    Place {
+        /// The place.
+        place: u32,
+    },
     /// A head of a reader session is on the backfill path. A session gets only live
     /// frames.
     Backfill,
@@ -569,11 +579,12 @@ pub enum Error {
         /// The seq plus the count of the head before it, or the open position.
         end: u64,
     },
-    /// A message of a run has more keys, ends, or counts than remain in the run.
+    /// A message of a run has more keys, ends, counts, or places than remain in the
+    /// run.
     Run {
-        /// The keys, ends, or counts of the message.
+        /// The keys, ends, counts, or places of the message.
         items: usize,
-        /// The keys, ends, or counts that remain in the run.
+        /// The keys, ends, counts, or places that remain in the run.
         remain: u32,
     },
     /// A message of a body has more bytes than remain in the body.
@@ -687,6 +698,7 @@ impl fmt::Display for Error {
                 "the hub message has {len} bytes, which no message of its kind has"
             ),
             Self::Channels => f.write_str("the hub open names no channel"),
+            Self::Unplaced => f.write_str("the hub forward names no place"),
             Self::Series => f.write_str("the frame head names no series"),
             Self::Range { seq, count } => write!(
                 f,
@@ -711,6 +723,11 @@ impl fmt::Display for Error {
                 f,
                 "the frame head names {series} series, and the session has {places} \
                  places"
+            ),
+            Self::Place { place } => write!(
+                f,
+                "the forward names place {place}, which is not after the place before \
+                 it or not below the channels of the open"
             ),
             Self::Backfill => {
                 f.write_str("the frame head of a reader session is on backfill")
@@ -947,7 +964,7 @@ mod tests {
 
     /// `decode` gives [`Error::Length`] for a message of `kind` with each length in
     /// `lens`.
-    fn check<T: fmt::Debug + PartialEq>(
+    pub(super) fn check<T: fmt::Debug + PartialEq>(
         decode: fn(&[u8]) -> Result<T, Error>,
         kind: u8,
         lens: &[usize],
@@ -960,7 +977,7 @@ mod tests {
 
     /// `decode` gives [`Error::Kind`] for each kind byte outside `known`, at each
     /// length in `lens`.
-    fn check_kinds<T: fmt::Debug + PartialEq>(
+    pub(super) fn check_kinds<T: fmt::Debug + PartialEq>(
         decode: fn(&[u8]) -> Result<T, Error>,
         known: &[u8],
         lens: &[usize],
@@ -1439,6 +1456,7 @@ mod tests {
                 "the hub message has 4 bytes, which no message of its kind has",
             ),
             (Error::Channels, "the hub open names no channel"),
+            (Error::Unplaced, "the hub forward names no place"),
             (Error::Series, "the frame head names no series"),
             (
                 Error::Range { seq: 7, count: 2 },
@@ -1463,6 +1481,11 @@ mod tests {
                     places: 3,
                 },
                 "the frame head names 4 series, and the session has 3 places",
+            ),
+            (
+                Error::Place { place: 3 },
+                "the forward names place 3, which is not after the place before it or \
+                 not below the channels of the open",
             ),
             (
                 Error::Backfill,

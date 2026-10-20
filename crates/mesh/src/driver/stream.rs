@@ -16,7 +16,7 @@ impl Mesh {
     /// has read the header of the stream, which is its whole first message. `serve`
     /// returns when the stream ends, or at the first message it refuses. A refused
     /// message changes nothing, and the stream stops with code 16, with code 17 for a
-    /// request from a node that a committed configuration removed, with code 18 for a
+    /// `PreVote` or a `Vote` that [`Error::Removed`] refuses, with code 18 for a
     /// `Card` change over the bound of [`Mesh::set_addresses`], or with code 19 for a
     /// contested `Join` change.
     ///

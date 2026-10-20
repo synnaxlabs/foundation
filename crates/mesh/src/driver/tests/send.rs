@@ -614,9 +614,10 @@ fn assert_ends_in_a_send<E: Future<Output = ()> + 'static>(
             .await;
         }
         clock.sleep(seconds(25)).await;
-        for _ in 0..2 {
-            assert!(!quiet(&mesh, 2).await, "the task of node 2 does not wait");
-        }
+        // A task that does not wait takes a message at the instant it comes, so a
+        // message that a later instant finds shows that the task waits in a send.
+        clock.sleep(Span::from_nanos(1)).await;
+        assert!(!quiet(&mesh, 2).await, "the task of node 2 does not wait");
         end(node, mesh).await;
         pending::<()>().await;
     };
@@ -703,16 +704,20 @@ impl Peer {
     }
 }
 
-// Node 1 leads, and its task for node 2 waits in a send. Its proposal waits for a
-// block of the pool when voter 2 answers `removed`. The group stops while the write
-// of the entry waits, so the proposal gives that stop.
+// Node 1 leads voters 1 and 2, and its task for node 2 waits in a send. Its
+// proposal waits for a block of the pool when voter 2, the only other voter, answers
+// `removed`. The group stops while the write of the entry waits, so the proposal
+// gives that stop.
 #[test]
 fn a_proposal_whose_write_waits_gives_a_removed_stop() {
     let outcome = Arc::new(Mutex::new(None));
     let written = Arc::clone(&outcome);
     let mesh = move |node: sim::node::Node, tasks: Tasks| async move {
         let pool = open_pool();
-        let config = create_config(&node, &tasks, Rc::clone(&pool)).await;
+        let config = Config {
+            pool: Rc::clone(&pool),
+            ..dialed_at(&node, &tasks, 1, PORT, &IDS, &[1, 2]).await
+        };
         let transport = Rc::clone(&config.transport);
         let mesh = Mesh::open(config).await.unwrap();
         let clock = node.clock();
@@ -752,7 +757,9 @@ fn a_proposal_whose_write_waits_gives_a_removed_stop() {
         pending::<()>().await;
     }));
     sim.run_for(seconds(90)).unwrap();
-    let removed = Stopped::Removed { by: key(2) };
+    let removed = Stopped::Removed {
+        by: [key(2)].into(),
+    };
     let expected = (Some(Err(Error::Stopped(removed.clone()))), Err(removed));
     assert_eq!(outcome.lock().unwrap().take(), Some(expected));
 }

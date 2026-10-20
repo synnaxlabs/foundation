@@ -104,23 +104,26 @@ jobs:
               - '.claude/skills/build/wait_test.sh'
               - '.github/workflows/**'
 
-  # The required checks `check`, `macos`, and `windows`, one for each OS of LINUX CI.
-  # A matrix job that skips reports one check named by the unexpanded expression, so
-  # this job always runs, and each step skips when the filter found no change.
+  # The lint and the two parts of the tests (`cargo xtask test`) of each OS of LINUX CI,
+  # at the same time. A matrix job that skips reports one check named by the
+  # unexpanded expression, so this job always runs, and each step skips when the
+  # filter found no change.
   check:
     needs: changes
     if: "!cancelled()"
-    name: ${{ matrix.name }}
+    name: ${{ matrix.part }} ${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
+        name: [check, macos, windows]
+        part: [lint, test, serial]
         # Each OS lists the flags that leave out what fails on it, each with the open
         # issue that removes it: `crates` do not build with all their targets, the tests
-        # of `untested` fail, and so do `tests`, each a full test path that `--exact`
-        # matches in its binary. Each item of `gates` names a file and the path in it of
-        # an item whose `cfg` leaves a test out of the OS, which `cargo xtask skips`
-        # reads. The lists only shrink, other than a new crate or gate with the open
-        # issues of the `os` items that it needs (LINUX CI).
+        # of `untested` fail, and so do `tests`, each a full test path that nextest
+        # matches with `test(=<path>)`. Each item of `gates` names a file and the path
+        # in it of an item whose `cfg` leaves a test out of the OS, which `cargo xtask
+        # skips` reads. The lists only shrink, other than a new crate or gate with the
+        # open issues of the `os` items that it needs (LINUX CI).
         include:
           - name: check
             runner: ubuntu-24.04
@@ -133,60 +136,60 @@ jobs:
             crates: []
             untested: []
             tests:
-              - --skip wall::gives_a_bound_under_sixteen_seconds_when_a_daemon_runs # #2965
-              - --skip daqmx::tests::names_a_library_that_does_not_load # #3033
-              - --skip daqmx::tests::names_a_function_the_library_lacks # #3033
-              - --skip rig::a_test_that_panics_kills_its_command # #3034
-              - --skip rig::a_failed_kill_panics # #3034
-              - --skip rig::a_failed_kill_while_the_test_panics_with_a_closed_stderr_does_not_abort # #3034
-              - --skip rig::a_failed_kill_while_the_test_panics_reports_its_error # #3034
-              - --skip rig::a_failed_kill_panics_in_a_run_that_does_not_capture # #3034
-              - --skip one_node::sim::a_stopped_influx_refuses_and_serves_again_on_its_port_with_what_it_stored # #3035
-              - --skip one_node::sim::a_dropped_opcua_stops_each_server_that_it_served # #3035
-              - --skip one_node::sim::a_dropped_influx_stops_its_server_when_the_test_panics # #3035
-              - --skip one_node::a_wrong_endpoint_shows_in_status_and_heals # #3035
-              - --skip no_child_holds_a_socket_that_another_thread_opens # #3036
-              - --skip no_child_holds_a_socket_of_a_lookup # #3036
-              - --skip a_dropped_listener_refuses_while_a_copy_of_it_is_open # #3036
-              - --skip a_listener_with_a_failed_registration_refuses_while_a_copy_is_open # #3036
-              - --skip start::a_kept_pool_budget_too_large_for_the_host_fails_with_no_panic # #3043
-              - --skip start::a_kept_pool_budget_that_the_system_cannot_reserve_fails # #3043
-              - --skip open62541::tests::check_refuses_a_line_directive_in_the_copy # #3041
-              - --skip open62541::tests::run_copies_each_compiled_source_and_its_headers # #3041
-              - --skip open62541::tests::run_refuses_a_release_with_no_file_of_extra # #3041
-              - --skip open62541::tests::run_refuses_a_file_of_extra_that_the_library_holds # #3041
-              - --skip open62541::tests::run_refuses_each_problem_of_the_staged_copy # #3041
-              - --skip open62541::tests::run_names_a_static_helper_that_calls_a_clock # #3041
-              - --skip open62541::tests::run_refuses_a_source_with_other_flags # #3041
-              - --skip open62541::tests::run_refuses_a_flag_in_no_list # #3041
-              - --skip open62541::tests::run_copies_a_source_whose_name_starts_with_a_dash # #3041
-              - --skip open62541::tests::run_names_a_clock_call_in_a_source_whose_name_starts_with_an_at_sign # #3041
-              - --skip open62541::tests::run_keeps_the_copy_when_a_file_is_missing # #3041
-              - --skip open62541::tests::check_finds_a_clock_call_added_to_the_copy # #3041
-              - --skip open62541::tests::check_finds_a_builtin_and_an_asm_statement_that_read_a_clock # #3041
-              - --skip open62541::tests::check_finds_an_os_call_through_a_header_that_includes_its_own # #3041
-              - --skip open62541::tests::check_finds_an_os_call_whose_name_another_file_defines_as_static # #3041
-              - --skip open62541::tests::check_finds_a_read_of_errno_that_no_call_of_the_copy_set # #3041
-              - --skip open62541::tests::check_finds_a_listed_symbol_at_a_place_that_the_list_does_not_name # #3041
-              - --skip open62541::tests::check_finds_a_listed_symbol_in_a_nested_function_of_a_new_function # #3041
-              - --skip open62541::tests::check_finds_the_address_of_a_listed_symbol_in_its_function # #3041
-              - --skip open62541::tests::check_reads_each_name_to_its_end # #3041
-              - --skip open62541::tests::check_refuses_an_odd_name_that_looks_like_a_mapping_symbol # #3041
-              - --skip open62541::tests::check_fails_on_a_c_identifier_that_holds_a_dollar # #3041
-              - --skip open62541::tests::check_reads_the_symbols_that_a_build_with_the_flags_of_the_copy_gives # #3041
-              - --skip open62541::tests::check_passes_an_undefined_symbol_that_no_relocation_names # #3041
-              - --skip open62541::tests::check_finds_a_read_of_the_table_of_the_linker_that_the_c_makes # #3041
-              - --skip open62541::tests::check_finds_a_clock_call_that_a_listed_function_inlines # #3041
-              - --skip open62541::tests::check_passes_on_the_committed_copy # #3041
-              - --skip open62541::tests::each_thread_of_the_committed_copy_draws_from_its_own_random_state_or_aborts # #3041
-              - --skip open62541::tests::run_refuses_a_file_of_omitted_that_the_library_does_not_compile # #3041
-              - --skip open62541::tests::check_builds_against_the_headers_of_the_crypto # #3041
-              - --skip open62541::tests::check_finds_a_read_of_the_committed_copy_that_gives_aws_lc_no_callback # #3041
-              - --skip open62541::tests::check_fails_a_read_of_the_copy_with_no_declaration # #3041
-              - --skip open62541::tests::check_fails_a_read_of_aws_lc_with_no_declaration # #3041
-              - --skip open62541::tests::check_finds_a_read_of_the_copy_with_its_own_declaration # #3041
-              - --skip open62541::tests::check_finds_a_read_under_a_macro_of_pem_h # #3041
-              - --skip open62541::tests::check_finds_a_read_past_a_pem_h_of_the_copy # #3041
+              - wall::gives_a_bound_under_sixteen_seconds_when_a_daemon_runs # #2965
+              - daqmx::tests::names_a_library_that_does_not_load # #3033
+              - daqmx::tests::names_a_function_the_library_lacks # #3033
+              - rig::a_test_that_panics_kills_its_command # #3034
+              - rig::a_failed_kill_panics # #3034
+              - rig::a_failed_kill_while_the_test_panics_with_a_closed_stderr_does_not_abort # #3034
+              - rig::a_failed_kill_while_the_test_panics_reports_its_error # #3034
+              - rig::a_failed_kill_panics_in_a_run_that_does_not_capture # #3034
+              - one_node::sim::a_stopped_influx_refuses_and_serves_again_on_its_port_with_what_it_stored # #3035
+              - one_node::sim::a_dropped_opcua_stops_each_server_that_it_served # #3035
+              - one_node::sim::a_dropped_influx_stops_its_server_when_the_test_panics # #3035
+              - one_node::a_wrong_endpoint_shows_in_status_and_heals # #3035
+              - no_child_holds_a_socket_that_another_thread_opens # #3036
+              - no_child_holds_a_socket_of_a_lookup # #3036
+              - a_dropped_listener_refuses_while_a_copy_of_it_is_open # #3036
+              - a_listener_with_a_failed_registration_refuses_while_a_copy_is_open # #3036
+              - start::a_kept_pool_budget_too_large_for_the_host_fails_with_no_panic # #3043
+              - start::a_kept_pool_budget_that_the_system_cannot_reserve_fails # #3043
+              - open62541::tests::check_refuses_a_line_directive_in_the_copy # #3041
+              - open62541::tests::run_copies_each_compiled_source_and_its_headers # #3041
+              - open62541::tests::run_refuses_a_release_with_no_file_of_extra # #3041
+              - open62541::tests::run_refuses_a_file_of_extra_that_the_library_holds # #3041
+              - open62541::tests::run_refuses_each_problem_of_the_staged_copy # #3041
+              - open62541::tests::run_names_a_static_helper_that_calls_a_clock # #3041
+              - open62541::tests::run_refuses_a_source_with_other_flags # #3041
+              - open62541::tests::run_refuses_a_flag_in_no_list # #3041
+              - open62541::tests::run_copies_a_source_whose_name_starts_with_a_dash # #3041
+              - open62541::tests::run_names_a_clock_call_in_a_source_whose_name_starts_with_an_at_sign # #3041
+              - open62541::tests::run_keeps_the_copy_when_a_file_is_missing # #3041
+              - open62541::tests::check_finds_a_clock_call_added_to_the_copy # #3041
+              - open62541::tests::check_finds_a_builtin_and_an_asm_statement_that_read_a_clock # #3041
+              - open62541::tests::check_finds_an_os_call_through_a_header_that_includes_its_own # #3041
+              - open62541::tests::check_finds_an_os_call_whose_name_another_file_defines_as_static # #3041
+              - open62541::tests::check_finds_a_read_of_errno_that_no_call_of_the_copy_set # #3041
+              - open62541::tests::check_finds_a_listed_symbol_at_a_place_that_the_list_does_not_name # #3041
+              - open62541::tests::check_finds_a_listed_symbol_in_a_nested_function_of_a_new_function # #3041
+              - open62541::tests::check_finds_the_address_of_a_listed_symbol_in_its_function # #3041
+              - open62541::tests::check_reads_each_name_to_its_end # #3041
+              - open62541::tests::check_refuses_an_odd_name_that_looks_like_a_mapping_symbol # #3041
+              - open62541::tests::check_fails_on_a_c_identifier_that_holds_a_dollar # #3041
+              - open62541::tests::check_reads_the_symbols_that_a_build_with_the_flags_of_the_copy_gives # #3041
+              - open62541::tests::check_passes_an_undefined_symbol_that_no_relocation_names # #3041
+              - open62541::tests::check_finds_a_read_of_the_table_of_the_linker_that_the_c_makes # #3041
+              - open62541::tests::check_finds_a_clock_call_that_a_listed_function_inlines # #3041
+              - open62541::tests::check_passes_on_the_committed_copy # #3041
+              - open62541::tests::each_thread_of_the_committed_copy_draws_from_its_own_random_state_or_aborts # #3041
+              - open62541::tests::run_refuses_a_file_of_omitted_that_the_library_does_not_compile # #3041
+              - open62541::tests::check_builds_against_the_headers_of_the_crypto # #3041
+              - open62541::tests::check_finds_a_read_of_the_committed_copy_that_gives_aws_lc_no_callback # #3041
+              - open62541::tests::check_fails_a_read_of_the_copy_with_no_declaration # #3041
+              - open62541::tests::check_fails_a_read_of_aws_lc_with_no_declaration # #3041
+              - open62541::tests::check_finds_a_read_of_the_copy_with_its_own_declaration # #3041
+              - open62541::tests::check_finds_a_read_under_a_macro_of_pem_h # #3041
+              - open62541::tests::check_finds_a_read_past_a_pem_h_of_the_copy # #3041
             gates:
               - crates/block/tests/alloc/main.rs resident # #3196
               - crates/block/tests/alloc/main.rs untouched # #3196
@@ -225,48 +228,48 @@ jobs:
               - --exclude secret # #2973
               - --exclude connector-influx # #2973
             tests:
-              - --skip kind::tests::reads_a_secret_at_each_call_and_retries_one_the_store_has_not # #2973
-              - --skip supervisor::tests::heals_a_run_when_a_secret_file_too_large_is_cut # #2973
-              - --skip supervisor::tests::heals_a_run_when_the_missing_secret_is_written # #2973
-              - --skip browse::gives_a_secret_that_is_not_there_as_a_retry # #2973
-              - --skip driver::tests::home::set_home_gives_the_cause_when_the_write_of_its_entry_stops_the_group # #2973
-              - --skip driver::tests::in_use::an_open_refuses_a_file_that_does_not_name_a_pointer # #2973
-              - --skip driver::tests::serve::serve_gives_no_code_of_the_mesh_when_the_group_stops # #2973
-              - --skip log::tests::a_second_open_gives_busy_on_the_lock_while_the_first_log_lives # #2973
-              - --skip log::tests::refuses_a_bad_record_with_a_good_one_after_it # #2973
-              - --skip log::tests::refuses_a_file_that_is_not_the_next_log_file # #2973
-              - --skip log::tests::refuses_a_lock_that_has_bytes # #2973
-              - --skip log::tests::refuses_a_record_of_another_format_version # #2973
-              - --skip log::tests::refuses_a_write_after_a_failed_or_dropped_one # #2973
-              - --skip daqmx::tests::names_a_library_that_does_not_load # #3033
-              - --skip daqmx::tests::names_a_function_the_library_lacks # #3033
-              - --skip open62541::tests::check_fails_on_a_c_identifier_that_holds_a_dollar # #3166
-              - --skip open62541::tests::check_finds_a_builtin_and_an_asm_statement_that_read_a_clock # #3166
-              - --skip open62541::tests::check_finds_a_clock_call_added_to_the_copy # #3166
-              - --skip open62541::tests::check_finds_a_clock_call_that_a_listed_function_inlines # #3166
-              - --skip open62541::tests::check_finds_a_listed_symbol_at_a_place_that_the_list_does_not_name # #3166
-              - --skip open62541::tests::check_finds_a_listed_symbol_in_a_nested_function_of_a_new_function # #3166
-              - --skip open62541::tests::check_finds_a_read_of_errno_that_no_call_of_the_copy_set # #3166
-              - --skip open62541::tests::check_finds_a_read_of_the_table_of_the_linker_that_the_c_makes # #3166
-              - --skip open62541::tests::check_finds_an_os_call_through_a_header_that_includes_its_own # #3166
-              - --skip open62541::tests::check_finds_an_os_call_whose_name_another_file_defines_as_static # #3166
-              - --skip open62541::tests::check_finds_the_address_of_a_listed_symbol_in_its_function # #3166
-              - --skip open62541::tests::check_passes_an_undefined_symbol_that_no_relocation_names # #3166
-              - --skip open62541::tests::check_reads_each_name_to_its_end # #3166
-              - --skip open62541::tests::check_reads_the_symbols_that_a_build_with_the_flags_of_the_copy_gives # #3166
-              - --skip open62541::tests::check_refuses_a_line_directive_in_the_copy # #3166
-              - --skip open62541::tests::flags_keeps_each_define_include_and_standard # #3166
-              - --skip open62541::tests::run_copies_a_source_whose_name_starts_with_a_dash # #3166
-              - --skip open62541::tests::run_copies_each_compiled_source_and_its_headers # #3166
-              - --skip open62541::tests::run_keeps_the_copy_when_a_file_is_missing # #3166
-              - --skip open62541::tests::run_names_a_clock_call_in_a_source_whose_name_starts_with_an_at_sign # #3166
-              - --skip open62541::tests::run_names_a_static_helper_that_calls_a_clock # #3166
-              - --skip open62541::tests::run_refuses_a_file_of_extra_that_the_library_holds # #3166
-              - --skip open62541::tests::run_refuses_a_file_of_omitted_that_the_library_does_not_compile # #3166
-              - --skip open62541::tests::run_refuses_a_flag_in_no_list # #3166
-              - --skip open62541::tests::run_refuses_a_release_with_no_file_of_extra # #3166
-              - --skip open62541::tests::run_refuses_a_source_with_other_flags # #3166
-              - --skip open62541::tests::run_refuses_each_problem_of_the_staged_copy # #3166
+              - kind::tests::reads_a_secret_at_each_call_and_retries_one_the_store_has_not # #2973
+              - supervisor::tests::heals_a_run_when_a_secret_file_too_large_is_cut # #2973
+              - supervisor::tests::heals_a_run_when_the_missing_secret_is_written # #2973
+              - browse::gives_a_secret_that_is_not_there_as_a_retry # #2973
+              - driver::tests::home::set_home_gives_the_cause_when_the_write_of_its_entry_stops_the_group # #2973
+              - driver::tests::in_use::an_open_refuses_a_file_that_does_not_name_a_pointer # #2973
+              - driver::tests::serve::serve_gives_no_code_of_the_mesh_when_the_group_stops # #2973
+              - log::tests::a_second_open_gives_busy_on_the_lock_while_the_first_log_lives # #2973
+              - log::tests::refuses_a_bad_record_with_a_good_one_after_it # #2973
+              - log::tests::refuses_a_file_that_is_not_the_next_log_file # #2973
+              - log::tests::refuses_a_lock_that_has_bytes # #2973
+              - log::tests::refuses_a_record_of_another_format_version # #2973
+              - log::tests::refuses_a_write_after_a_failed_or_dropped_one # #2973
+              - daqmx::tests::names_a_library_that_does_not_load # #3033
+              - daqmx::tests::names_a_function_the_library_lacks # #3033
+              - open62541::tests::check_fails_on_a_c_identifier_that_holds_a_dollar # #3166
+              - open62541::tests::check_finds_a_builtin_and_an_asm_statement_that_read_a_clock # #3166
+              - open62541::tests::check_finds_a_clock_call_added_to_the_copy # #3166
+              - open62541::tests::check_finds_a_clock_call_that_a_listed_function_inlines # #3166
+              - open62541::tests::check_finds_a_listed_symbol_at_a_place_that_the_list_does_not_name # #3166
+              - open62541::tests::check_finds_a_listed_symbol_in_a_nested_function_of_a_new_function # #3166
+              - open62541::tests::check_finds_a_read_of_errno_that_no_call_of_the_copy_set # #3166
+              - open62541::tests::check_finds_a_read_of_the_table_of_the_linker_that_the_c_makes # #3166
+              - open62541::tests::check_finds_an_os_call_through_a_header_that_includes_its_own # #3166
+              - open62541::tests::check_finds_an_os_call_whose_name_another_file_defines_as_static # #3166
+              - open62541::tests::check_finds_the_address_of_a_listed_symbol_in_its_function # #3166
+              - open62541::tests::check_passes_an_undefined_symbol_that_no_relocation_names # #3166
+              - open62541::tests::check_reads_each_name_to_its_end # #3166
+              - open62541::tests::check_reads_the_symbols_that_a_build_with_the_flags_of_the_copy_gives # #3166
+              - open62541::tests::check_refuses_a_line_directive_in_the_copy # #3166
+              - open62541::tests::flags_keeps_each_define_include_and_standard # #3166
+              - open62541::tests::run_copies_a_source_whose_name_starts_with_a_dash # #3166
+              - open62541::tests::run_copies_each_compiled_source_and_its_headers # #3166
+              - open62541::tests::run_keeps_the_copy_when_a_file_is_missing # #3166
+              - open62541::tests::run_names_a_clock_call_in_a_source_whose_name_starts_with_an_at_sign # #3166
+              - open62541::tests::run_names_a_static_helper_that_calls_a_clock # #3166
+              - open62541::tests::run_refuses_a_file_of_extra_that_the_library_holds # #3166
+              - open62541::tests::run_refuses_a_file_of_omitted_that_the_library_does_not_compile # #3166
+              - open62541::tests::run_refuses_a_flag_in_no_list # #3166
+              - open62541::tests::run_refuses_a_release_with_no_file_of_extra # #3166
+              - open62541::tests::run_refuses_a_source_with_other_flags # #3166
+              - open62541::tests::run_refuses_each_problem_of_the_staged_copy # #3166
             gates:
               - crates/block/tests/alloc/main.rs resident # #3196
               - crates/block/tests/alloc/main.rs untouched # #3196
@@ -358,6 +361,12 @@ jobs:
         uses: actions/checkout@v4
       - if: env.RUST != 'false'
         uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.part }}
+      - if: env.RUST != 'false' && matrix.part == 'test'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.146
       # The tests of `sdk-python` embed CPython 3.11 or later, which needs its shared
       # library and NumPy, and start the node at `FOUNDATION_NODE`, which `Test` builds
       # for the tests of `node`. Windows builds no node (#2968, #682, #2955, #2956,
@@ -372,40 +381,75 @@ jobs:
           echo "PYO3_PYTHON=$(command -v python)" >> "$GITHUB_ENV"
           echo "FOUNDATION_NODE=$PWD/target/debug/foundation" >> "$GITHUB_ENV"
       - name: Format
-        if: env.RUST != 'false' && runner.os == 'Linux'
+        if: env.RUST != 'false' && matrix.part == 'lint' && runner.os == 'Linux'
         run: |
           cargo fmt --check
           cargo fmt --check --manifest-path fuzz/Cargo.toml
       - name: Clippy
-        if: "!cancelled() && env.RUST != 'false'"
+        if: "!cancelled() && env.RUST != 'false' && matrix.part == 'lint'"
         run: >-
           cargo clippy --workspace ${{ join(matrix.crates, ' ') }} --all-targets
           --all-features --keep-going -- -D warnings
       - name: Layers
-        if: "!cancelled() && env.RUST != 'false' && runner.os == 'Linux'"
+        if: >-
+          !cancelled() && env.RUST != 'false' && matrix.part == 'lint'
+          && runner.os == 'Linux'
         run: cargo xtask layers
       - name: Globals
-        if: "!cancelled() && env.RUST != 'false' && runner.os == 'Linux'"
+        if: >-
+          !cancelled() && env.RUST != 'false' && matrix.part == 'lint'
+          && runner.os == 'Linux'
         run: cargo xtask globals
       - name: Skips
-        if: "!cancelled() && env.RUST != 'false' && runner.os == 'Linux'"
+        if: >-
+          !cancelled() && env.RUST != 'false' && matrix.part == 'lint'
+          && runner.os == 'Linux'
         run: cargo xtask skips
       - name: Oracles
-        if: "!cancelled() && env.RUST != 'false' && runner.os == 'Linux'"
+        if: >-
+          !cancelled() && env.RUST != 'false' && matrix.part == 'lint'
+          && runner.os == 'Linux'
         run: cargo xtask oracles
       - name: Test
-        if: "!cancelled() && env.RUST != 'false'"
+        if: "!cancelled() && env.RUST != 'false' && matrix.part == 'test'"
         run: >-
-          cargo test --workspace ${{ join(matrix.crates, ' ') }}
-          ${{ join(matrix.untested, ' ') }} --all-features --no-fail-fast
-          -- --exact ${{ join(matrix.tests, ' ') }}
+          cargo xtask test nextest ${{ join(matrix.crates, ' ') }}
+          ${{ join(matrix.untested, ' ') }} --all-features
+          -- ${{ join(matrix.tests, ' ') }}
+      - name: Serial tests
+        if: "!cancelled() && env.RUST != 'false' && matrix.part == 'serial'"
+        run: >-
+          cargo xtask test serial ${{ join(matrix.crates, ' ') }}
+          ${{ join(matrix.untested, ' ') }} --all-features
       # Root tests mount a filesystem. Only this runner, which is discarded after the
       # job, runs them.
       - name: Root tests
-        if: "!cancelled() && env.RUST != 'false' && runner.os == 'Linux'"
+        if: >-
+          !cancelled() && env.RUST != 'false' && matrix.part == 'test'
+          && runner.os == 'Linux'
         run: |
           cargo clippy -p os --all-features --test root -- -D warnings
           cargo test -p os --all-features --test root
+
+  # The required checks `check`, `macos`, and `windows`. Each passes when each part of
+  # `check` on each OS passed: the result of a matrix job covers all its entries, so
+  # each of the three gives the result of all three OSes. `check` always runs, so with
+  # no change of code each part passes, and so does `os`.
+  os:
+    needs: check
+    if: "!cancelled()"
+    name: ${{ matrix.name }}
+    strategy:
+      matrix:
+        name: [check, macos, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: The result of the parts
+        env:
+          RESULT: ${{ needs.check.result }}
+        run: |
+          [ "$RESULT" = success ] ||
+            { echo "::error::A part of check ended in $RESULT."; exit 1; }
 
   # The required checks `features`, `features-macos`, and `features-windows`. It runs
   # as `check` does, and each OS leaves out the `crates` of its entry of `check`.
