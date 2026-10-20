@@ -2106,8 +2106,10 @@ fn a_trust_without_the_certificate_of_the_server_names_the_trust() {
     let cause = "the trust holds neither the certificate of the server nor the CA that \
                  issued it, or the server does not trust the certificate of the node \
                  secret(\"plant.opcua_certificate\"). Check the trust \
-                 secret(\"plant.opcua_trust\"), and install the certificate of the node \
-                 in the trust list of the server";
+                 secret(\"plant.opcua_trust\"), and install the certificate \
+                 secret(\"plant.opcua_certificate\") (SHA-1 thumbprint \
+                 6D839E838DCC3C47E59D1B56282B18B9CB3DE453, subject /CN=client) in the \
+                 trust list of the server";
     connect_fails(secure, "BadCertificateUntrusted", cause);
 }
 
@@ -2223,8 +2225,10 @@ fn a_refused_certificate_names_the_trust_and_the_certificate_of_the_node() {
             format!(
                 "the trust holds neither the certificate of the server nor the CA that \
                  issued it, or the server does not trust the certificate of the node \
-                 {certificate}. Check the trust {trust}, and install the certificate of \
-                 the node in the trust list of the server"
+                 {certificate}. Check the trust {trust}, and install the certificate \
+                 {certificate} (SHA-1 thumbprint \
+                 6D839E838DCC3C47E59D1B56282B18B9CB3DE453, subject /CN=client) in the \
+                 trust list of the server"
             ),
         ),
         (

@@ -325,7 +325,20 @@ impl<'a> Secured<'a> {
     /// The cause of a server that refused the secure channel, with the names of the
     /// certificate to install.
     fn distrusted(&self) -> String {
-        let names = match client::names(self.certificate.expose()) {
+        format!(
+            "the server refused the secure channel; most likely it does not trust the \
+             certificate of the node. Install the certificate {}{} in the trust list of \
+             the server",
+            self.security.certificate,
+            self.names()
+        )
+    }
+
+    /// The thumbprint and the subject of the certificate, as ` (SHA-1 thumbprint ...,
+    /// subject ...)`, with no subject when it is empty, or empty when the certificate
+    /// gives no names.
+    fn names(&self) -> String {
+        match client::names(self.certificate.expose()) {
             None => String::new(),
             Some(names) if names.subject.is_empty() => {
                 format!(" (SHA-1 thumbprint {})", names.thumbprint)
@@ -334,13 +347,7 @@ impl<'a> Secured<'a> {
                 " (SHA-1 thumbprint {}, subject {})",
                 names.thumbprint, names.subject
             ),
-        };
-        format!(
-            "the server refused the secure channel; most likely it does not trust the \
-             certificate of the node. Install the certificate {}{names} in the trust \
-             list of the server",
-            self.security.certificate
-        )
+        }
     }
 }
 
@@ -405,8 +412,9 @@ fn cause(status: Status, secured: Option<&Secured<'_>>) -> Option<String> {
         Status::BAD_CERTIFICATE_UNTRUSTED => format!(
             "the trust holds neither the certificate of the server nor the CA that \
              issued it, or the server does not trust the certificate of the node \
-             {certificate}. Check the trust {trust}, and install the certificate of \
-             the node in the trust list of the server"
+             {certificate}. Check the trust {trust}, and install the certificate \
+             {certificate}{} in the trust list of the server",
+            secured.names()
         ),
         Status::BAD_CERTIFICATE_TIME_INVALID => format!(
             "the mesh time is outside the validity window of the certificate of the \
