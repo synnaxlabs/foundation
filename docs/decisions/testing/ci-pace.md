@@ -85,7 +85,7 @@
   `arm.yaml` runs both parts, one after the other." of
   https://github.com/synnaxlabs/foundation/issues/3418#issuecomment-6276305229, and the
   name `test` of the ARM job in ARM RUNNER. In run 39335833233 the one job took 21 min.
-  In run 39349284591, with a cold cache, `nextest` took 13.1 min (11755 passed, 12
-  skipped) and `serial` 11.1 min (79 test targets with no harness, 235 doc tests), and
-  the workflow 13.4 min. Each part builds on its own runner, and ARM keeps a cache
-  entry for each part in place of one.
+  In run 39351739537, `nextest` took 12.7 min (11762 passed, 12 skipped), `serial` 8.2
+  min (79 test targets with no harness, 235 doc tests), and the workflow 13.1 min; with
+  a cold cache (run 39349284591), 13.1, 11.1, and 13.4 min. Each part builds on its own
+  runner, and ARM keeps a cache entry for each part in place of one.
