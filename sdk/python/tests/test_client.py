@@ -32,7 +32,8 @@ BASE = bytes([0x58]) + bytes([0x66] * 31)
 WRONG = bytes(31) + b"\x01"
 # The watcher of a node, `sh -c WATCH <pid> <directory> <loops>`. Its stdin ends when
 # the test process and its forked children end. It sends SIGKILL after <loops> waits of
-# 0.1 s.
+# 0.1 s: twice `PATIENCE`, so that a test that waits `PATIENCE` for the SIGTERM sees a
+# node that missed it.
 WATCH = """
 cat >/dev/null
 kill -CONT "$0"; kill -TERM "$0"
@@ -44,7 +45,7 @@ while kill -0 "$0" 2>/dev/null; do
 done
 rm -rf "$1"
 """
-LOOPS = str(int(PATIENCE * 10))
+LOOPS = str(int(2 * PATIENCE * 10))
 FORKED = (
     "a connect in a forked child traps on macOS (#3370): connect in the test process"
 )
@@ -163,13 +164,9 @@ class Node:
         )
         line = self.process.stdout.readline()
         if not line:
-            self.process.wait(PATIENCE)
-            self.watcher.kill()
-            self.watcher.communicate()
-            self.dir.cleanup()
+            error = self.stop()
             raise AssertionError(
-                f"the node exited with {self.process.returncode}:\n"
-                + self.process.stderr.read().decode()
+                f"the node exited with {self.process.returncode}:\n" + error.decode()
             )
 
     def first(self) -> foundation.Client:
@@ -204,16 +201,25 @@ class Node:
         """Continues the node after `pause`."""
         self.process.send_signal(signal.SIGCONT)
 
-    def stop(self) -> None:
+    def stop(self, patience: float = PATIENCE) -> bytes:
         """Stops the node with SIGTERM, waits until it exits, removes the directory,
-        and then stops the watcher."""
+        then stops the watcher, and gives the rest of the standard error of the node.
+        Raises `subprocess.TimeoutExpired` after it kills a node that runs on for
+        `patience` s."""
         if self.process.poll() is None:
             self.process.send_signal(signal.SIGCONT)
             self.process.send_signal(signal.SIGTERM)
-        self.process.communicate(timeout=PATIENCE)
-        self.dir.cleanup()
-        self.watcher.kill()
-        self.watcher.communicate()
+        try:
+            _, error = self.process.communicate(timeout=patience)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.communicate()
+            raise
+        finally:
+            self.dir.cleanup()
+            self.watcher.kill()
+            self.watcher.communicate()
+        return error
 
 
 class ClientTest(unittest.TestCase):
@@ -489,7 +495,28 @@ def alive(pid: int) -> bool:
     return True
 
 
+def ended(node: Node) -> tuple[bool, int | None, bool]:
+    """Whether the node of `node` exited, the exit code of its watcher, and whether its
+    directory is there."""
+    return (
+        node.process.poll() is not None,
+        node.watcher.returncode,
+        os.path.exists(node.dir.name),
+    )
+
+
 class NodeTest(unittest.TestCase):
+    def binary(self, script: str) -> str:
+        """A node binary that runs the shell `script`, removed at the end of the
+        test."""
+        scripts = tempfile.TemporaryDirectory(prefix="foundation-python-")
+        self.addCleanup(scripts.cleanup)
+        path = os.path.join(scripts.name, "node")
+        with open(path, "w") as file:
+            file.write("#!/bin/sh\n" + script + "\n")
+        os.chmod(path, 0o755)
+        return path
+
     def test_a_node_stops_and_its_directory_goes_when_its_test_process_is_killed(
         self,
     ) -> None:
@@ -526,28 +553,88 @@ class NodeTest(unittest.TestCase):
         broken = mock.patch.object(
             foundation, "connect", side_effect=ConnectionError("broken")
         )
-        with broken, self.assertRaises(ConnectionError) as raised:
-            node.__init__()
+        try:
+            with broken, self.assertRaises(ConnectionError) as raised:
+                node.__init__()
+            state = ended(node)
+        finally:
+            node.stop()
         self.assertEqual(str(raised.exception), "broken")
-        self.assertIsNotNone(node.process.returncode)
-        self.assertFalse(os.path.exists(node.dir.name))
-        self.assertEqual(node.watcher.returncode, -signal.SIGKILL)
+        self.assertEqual(state, (True, -signal.SIGKILL, False))
 
     def test_a_node_that_exits_at_its_start_leaves_no_watcher_and_no_directory(
         self,
     ) -> None:
         node = Node.__new__(Node)
-        with mock.patch.dict(os.environ, {"FOUNDATION_NODE": shutil.which("false")}):
-            with self.assertRaises(AssertionError) as raised:
-                node.start()
+        try:
+            with mock.patch.dict(
+                os.environ, {"FOUNDATION_NODE": shutil.which("false")}
+            ):
+                with self.assertRaises(AssertionError) as raised:
+                    node.start()
+            state = ended(node)
+        finally:
+            node.stop()
         self.assertEqual(str(raised.exception), "the node exited with 1:\n")
-        self.assertEqual(node.watcher.returncode, -signal.SIGKILL)
-        self.assertFalse(os.path.exists(node.dir.name))
+        self.assertEqual(state, (True, -signal.SIGKILL, False))
 
-    def test_a_watcher_kills_a_node_that_ignores_sigterm(self) -> None:
+    def test_a_node_that_closes_its_output_and_runs_on_stops_at_its_start(
+        self,
+    ) -> None:
+        mute = self.binary("exec >&- 2>&-; exec sleep 1000")
+        node = Node.__new__(Node)
+        try:
+            with mock.patch.dict(os.environ, {"FOUNDATION_NODE": mute}):
+                with self.assertRaises(AssertionError) as raised:
+                    node.start()
+            state = ended(node)
+        finally:
+            node.stop()
+        self.assertEqual(
+            str(raised.exception), f"the node exited with {-signal.SIGTERM}:\n"
+        )
+        self.assertEqual(state, (True, -signal.SIGKILL, False))
+
+    def test_a_stop_kills_a_node_that_ignores_sigterm(self) -> None:
+        deaf = self.binary('trap "" TERM; echo; while :; do sleep 0.1; done')
+        node = Node.__new__(Node)
+        with mock.patch.dict(os.environ, {"FOUNDATION_NODE": deaf}):
+            node.start()
+        try:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                node.stop(patience=1)
+            state = (node.process.returncode, *ended(node)[1:])
+        finally:
+            node.stop()
+        self.assertEqual(state, (-signal.SIGKILL, -signal.SIGKILL, False))
+
+    def test_a_stop_stops_the_watcher_after_the_node_exits_and_its_directory_goes(
+        self,
+    ) -> None:
+        node = Node.__new__(Node)
+        node.start()
+        seen = []
+        kill = node.watcher.kill
+
+        def killed() -> None:
+            seen.append(
+                (node.process.poll() is not None, os.path.exists(node.dir.name))
+            )
+            kill()
+
+        try:
+            with mock.patch.object(node.watcher, "kill", side_effect=killed):
+                node.stop()
+        finally:
+            node.stop()
+        self.assertEqual(seen, [(True, False)])
+
+    def test_a_watcher_sends_sigterm_then_sigkill_to_a_node_that_ignores_it(
+        self,
+    ) -> None:
         directory = tempfile.mkdtemp(prefix="foundation-python-")
         deaf = subprocess.Popen(
-            ["sh", "-c", 'trap "" TERM; echo; while :; do sleep 0.1; done'],
+            ["sh", "-c", "trap 'echo term' TERM; echo; while :; do sleep 0.1; done"],
             stdout=subprocess.PIPE,
         )
         watcher = subprocess.Popen(
@@ -557,14 +644,19 @@ class NodeTest(unittest.TestCase):
         try:
             deaf.stdout.readline()
             watcher.stdin.close()
-            self.assertEqual(deaf.wait(PATIENCE), -signal.SIGKILL)
-            self.assertEqual(watcher.wait(PATIENCE), 0)
+            state = (
+                deaf.stdout.readline(),
+                deaf.wait(PATIENCE),
+                watcher.wait(PATIENCE),
+            )
         finally:
             deaf.kill()
             deaf.wait()
             deaf.stdout.close()
             watcher.kill()
             watcher.wait()
+            shutil.rmtree(directory, ignore_errors=True)
+        self.assertEqual(state, (b"term\n", -signal.SIGKILL, 0))
         self.assertFalse(os.path.exists(directory))
 
 
