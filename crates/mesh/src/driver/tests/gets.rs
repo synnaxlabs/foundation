@@ -267,6 +267,44 @@ fn a_change_each_8_s_with_a_silent_first_voter_keeps_no_voter_behind() {
     assert_eq!(behind, Vec::new());
 }
 
+// As the 8 s test, with 400 ms each way on the link of voters 2 and 3, so that a newer
+// pointer often drops a get while voter 2 gives. The next get starts at voter 2 again,
+// not at silent voter 1.
+#[test]
+fn a_drop_while_the_last_giver_gives_keeps_the_start_at_it() {
+    let mut late = Vec::new();
+    for seed in 0..32 {
+        let (mut cluster, first) = lacking(seed);
+        cluster.board.lock().unwrap().silent = [1].into();
+        let config = link::Config {
+            delay: Span::from_nanos(400 * Span::MILLISECOND.nanos()),
+            ..link::Config::default()
+        };
+        let (a, b) = (cluster.node(2).clone(), cluster.node(3).clone());
+        cluster.sim.link(&a, &b, config);
+        cluster.sim.link(&b, &a, config);
+        cluster.start_voter(3);
+        cluster.run(seconds(1));
+        let mut definitions = first.clone();
+        let mut base = pointer(1, &first);
+        let mut used = Vec::new();
+        for version in 2..22 {
+            let label = format!("plant.z{version}");
+            definitions.extend(create_subjects(&[label.as_str()], 1));
+            cluster.change(2, base, &definitions);
+            base = pointer(version, &definitions);
+            cluster.run(seconds(8));
+            let board = cluster.board.lock().unwrap();
+            let seen = board.specs.get(&3).and_then(|seen| seen.pointer);
+            used.push(seen.map(|pointer| pointer.version));
+        }
+        if used.last() != Some(&Some(21)) {
+            late.push((seed, used));
+        }
+    }
+    assert_eq!(late, Vec::new());
+}
+
 // Voter 3 is down at the change of 40 subjects, and at its start its store holds the
 // tree of 20 of them. The read of one of those fails once, so the first read ends
 // with `Cause::Blob`. The retry still gets each listed chunk that the store lacks in

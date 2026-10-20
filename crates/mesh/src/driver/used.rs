@@ -492,7 +492,10 @@ pub(super) async fn keep(
         });
         let Some(gave) = gave.await else {
             if let (Some(group), Some(key)) = (group.upgrade(), asking.get()) {
-                group.borrow_mut().used.dropped = Some(key);
+                let used = &mut group.borrow_mut().used;
+                if used.gave != Some(key) {
+                    used.dropped = Some(key);
+                }
             }
             continue;
         };
