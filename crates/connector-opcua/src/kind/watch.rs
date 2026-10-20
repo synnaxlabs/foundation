@@ -27,7 +27,9 @@ const OFFSET: i64 = 1 << 62;
 
 /// Subscribes to each node of the reads of `ctx` at the rate of `ctx`, and writes
 /// each change until the cancel. It reads the current time of the server first, then
-/// each [`READ`], and at once when a server timestamp disagrees with the fit.
+/// each [`READ`], and at once when a server timestamp disagrees with the fit. When
+/// the server answers the subscribe with `BadServiceUnsupported` or
+/// `BadNotImplemented`, it polls as `polled = true` does, with a note.
 ///
 /// # Errors
 ///
@@ -48,11 +50,19 @@ pub(super) async fn run(
     let round_trip = clock.read(client).await?;
     let nodes: Vec<Node> = reads.iter().map(|read| read.node.clone()).collect();
     let sampling = ctx.config().rate.span(1);
-    let revised = client.subscribe(&nodes, sampling, round_trip).await;
-    let revised =
-        revised.map_err(|status| failed(client.url(), Call::Subscribe, status))?;
+    let revised = match client.subscribe(&nodes, sampling, round_trip).await {
+        Err(status) if unsupported(status) => {
+            return super::fall_back(ctx, client, frames, status).await;
+        }
+        revised => {
+            revised.map_err(|status| failed(client.url(), Call::Subscribe, status))?
+        }
+    };
     for (read, item) in reads.iter().zip(&revised.items) {
         if let &Err(status) = item {
+            if unsupported(status) {
+                return super::fall_back(ctx, client, frames, status).await;
+            }
             return Err(failure(Failure::Unwatched {
                 node: read.node.to_string(),
                 channel: read.channel.to_string(),
@@ -169,6 +179,11 @@ impl Clock {
         _ = self.fit.between(time, sent, answered);
         Ok(answered - sent)
     }
+}
+
+/// Whether `status` says that the server has no subscription service.
+fn unsupported(status: Status) -> bool {
+    status == Status::BAD_SERVICE_UNSUPPORTED || status == Status::BAD_NOT_IMPLEMENTED
 }
 
 /// Gives the device time of the server timestamp `time`, as a [`Fit`] takes it:

@@ -32,7 +32,8 @@ use types::quality::Quality;
 
 use super::*;
 use crate::client::GRACE;
-use crate::client::tests::common::{env, rig};
+use crate::client::tests::common::{env, is, rig};
+use crate::client::tests::{RELAY, relayed_up};
 use crate::gate::Gate;
 use crate::sim::{Served, Variables, serve};
 
@@ -486,13 +487,19 @@ where
     S: FnOnce(Rc<Scene>) -> F + Send + 'static,
     F: Future<Output = Result<(), Error>> + 'static,
 {
-    scene(rate, true, setup, script)
+    scene(4840, rate, true, setup, script)
 }
 
-/// Runs `script` on a scene of `setup` that reads at `rate`, and polls when `polled`,
-/// with its server started, and records the frames of each channel until 1 s after
-/// the script returns.
-fn scene<S, F>(rate: &'static str, polled: bool, setup: Setup, script: S) -> Record
+/// Runs `script` on a scene of `setup` that reads at `rate` from port `port`, and polls
+/// when `polled`, with its server started, and records the frames of each channel
+/// until 1 s after the script returns.
+fn scene<S, F>(
+    port: u16,
+    rate: &'static str,
+    polled: bool,
+    setup: Setup,
+    script: S,
+) -> Record
 where
     S: FnOnce(Rc<Scene>) -> F + Send + 'static,
     F: Future<Output = Result<(), Error>> + 'static,
@@ -500,7 +507,7 @@ where
     let run = logged(move |node, tasks| async move {
         let rig = rig(&node, tasks.clone()).await;
         let hub = rig.hub();
-        let address = format!("opc.tcp://{}:4840", node.addresses()[0]);
+        let address = format!("opc.tcp://{}:{port}", node.addresses()[0]);
         let config = config(&address, rate, polled, &setup.reads);
         let status = rig.define_status("opcua", &name(PLC), &config);
         let channels = setup.channels.iter();
@@ -1903,7 +1910,7 @@ where
     S: FnOnce(Rc<Scene>) -> F + Send + 'static,
     F: Future<Output = Result<(), Error>> + 'static,
 {
-    scene("20Hz", false, setup, script)
+    scene(4840, "20Hz", false, setup, script)
 }
 
 /// The offset of mesh time from the clock of the node of `scene`, in ns.
@@ -2116,6 +2123,81 @@ fn subscribes_again_after_the_server_stops_and_starts() {
     assert_eq!(last(&outcome.statuses, RESTARTS), 2);
     let frames = &outcome.frames;
     assert_eq!(values(frames, 2), [0.0, 0.0, 1.0]);
+}
+
+/// The binary encoding of a `CreateSubscription` request, a `NodeId` of 4 bytes.
+const CREATE_SUBSCRIPTION: [u8; 4] = [0x01, 0x00, 0x13, 0x03];
+
+/// The binary encoding of a `CreateMonitoredItems` request, a `NodeId` of 4 bytes.
+const CREATE_MONITORED_ITEMS: [u8; 4] = [0x01, 0x00, 0xEF, 0x02];
+
+/// Runs `script` on a scene of `setup` whose server does not have the service of the
+/// requests of type `kind`: a relay gives each a type that the server does not know,
+/// which it answers with `BadServiceUnsupported`.
+fn unsubscribed<S, F>(kind: [u8; 4], setup: Setup, script: S) -> Record
+where
+    S: FnOnce(Rc<Scene>) -> F + Send + 'static,
+    F: Future<Output = Result<(), Error>> + 'static,
+{
+    scene(RELAY, "10Hz", false, setup, move |scene| async move {
+        let node = scene.node.clone();
+        let unknown = move |message: &mut Vec<u8>| {
+            if is(message, kind) {
+                message[26..28].copy_from_slice(&[0xFF, 0x7F]);
+            }
+        };
+        relayed_up(&node, unknown, script(scene)).await
+    })
+}
+
+/// The note of a run that polls a server with no subscription service.
+const POLLS: &str = "polls: the server has no subscriptions (BadServiceUnsupported)";
+
+/// A server with no `CreateSubscription` or no `CreateMonitoredItems` service is read
+/// on each tick as `polled = true` reads it, with a note and no error.
+#[test]
+fn polls_a_server_with_no_subscription_service() {
+    for kind in [CREATE_SUBSCRIPTION, CREATE_MONITORED_ITEMS] {
+        let outcome = unsubscribed(kind, Setup::three(), |scene| async move {
+            scene.after(ms(430), |scene| async move {
+                scene.variables.change(Quality::GOOD);
+            });
+            scene.supervise(ms(1_050)).await
+        });
+        assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+        assert_eq!(errors(&outcome.statuses), [], "{kind:?}");
+        assert_eq!(notes(&outcome.statuses), [POLLS], "{kind:?}");
+        let frames = &outcome.frames;
+        assert_eq!(keys(frames), vec![vec![1, 2, 3, 4]; 11], "{kind:?}");
+        for (key, node) in [(2, A), (3, B), (4, C)] {
+            assert_eq!(values(frames, key), served(&outcome, node), "{node}");
+        }
+        let stamps: Vec<_> = frames.iter().map(|frame| stamp(frame, 1)).collect();
+        for pair in stamps.windows(2) {
+            assert_eq!(pair[1] - pair[0], ms(100).nanos(), "{stamps:?}");
+        }
+    }
+}
+
+/// The note of a mistyped node follows the note of the fallback, and neither clears
+/// the other.
+#[test]
+fn notes_a_mistyped_node_after_the_fallback() {
+    use crate::sim::Fixed;
+    let outcome =
+        unsubscribed(CREATE_SUBSCRIPTION, Setup::three(), |scene| async move {
+            scene.stop().await;
+            scene.variables.fix(B, Fixed::String);
+            scene.serve();
+            scene.supervise(ms(1_050)).await
+        });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    assert_eq!(keys(&outcome.frames), vec![vec![1, 2, 4]; 11]);
+    let note = format!(
+        "{POLLS}; leaves out the values of the node `ns=3;i=7` of the channel \
+         `plant.b`: they are of type String, and the channel has samples of type f64"
+    );
+    assert_eq!(notes(&outcome.statuses).last(), Some(&note));
 }
 
 /// A node that the server does not have ends each run with a device error that names

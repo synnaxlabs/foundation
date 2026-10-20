@@ -104,7 +104,9 @@ impl kind::Kind for Kind {
     /// device time, one value per channel. The queue of each node in the server holds
     /// the samples of two publishing intervals, or of two round trips of the first
     /// read when they are longer. A change after values that the server dropped from
-    /// a full queue adds 1 to `missed`.
+    /// a full queue adds 1 to `missed`. When the server answers the subscribe with
+    /// `BadServiceUnsupported` or `BadNotImplemented`, the run polls as `polled` does
+    /// until the connect ends, and the note says so.
     ///
     /// Each tick of `polled` writes one frame stamped at the midpoint of the read.
     /// When 10 s pass with no read, the run reads the state of the server to check
@@ -307,6 +309,20 @@ async fn session<T>(
     Ok(Some(done))
 }
 
+/// Notes that the server answered the subscribe with `status`, and polls as [`read`]
+/// does.
+#[cold]
+async fn fall_back(
+    ctx: &Context<Config>,
+    client: &mut Client,
+    frames: &mut Frames<'_>,
+    status: Status,
+) -> Result<(), Error> {
+    frames.left.polls = Some(status);
+    frames.left.show(ctx, None);
+    read(ctx, client, frames).await
+}
+
 /// Reads each node once per tick until the cancel, and writes the frame of each tick.
 async fn read(
     ctx: &Context<Config>,
@@ -413,6 +429,9 @@ struct Left {
     mistyped: status::Count,
     /// The read and the type that the note names, or `None` when it shows none.
     noted: Option<(usize, value::Type)>,
+    /// The answer to the subscribe for which the run polls, which the note names
+    /// before the read.
+    polls: Option<Status>,
 }
 
 impl<'a> Frames<'a> {
@@ -449,6 +468,7 @@ impl<'a> Frames<'a> {
                 uncertain: ctx.count("uncertain"),
                 mistyped: ctx.count("mistyped"),
                 noted: None,
+                polls: None,
             },
         }))
     }
@@ -518,7 +538,7 @@ impl Left {
 
     /// Sets the note of `ctx` for `mistyped`, when it is not the note of the frame
     /// before: the read at a value of another type, its type, and the sample type of
-    /// its channel. `None` clears the note.
+    /// its channel. `None` shows only the note of [`fall_back`], or none.
     #[inline]
     fn note(
         &mut self,
@@ -537,14 +557,19 @@ impl Left {
         mistyped: Option<(usize, value::Type, Scalar)>,
     ) {
         self.noted = mistyped.map(|(at, value, _)| (at, value));
+        let polls = (self.polls).map(|status| {
+            format!("polls: the server has no subscriptions ({status:?})")
+        });
+        let polls = polls.as_deref().unwrap_or_default();
         let Some((at, value, sample)) = mistyped else {
-            ctx.note(&"");
+            ctx.note(&polls);
             return;
         };
         let read = &ctx.config().reads[at];
+        let gap = if polls.is_empty() { "" } else { "; " };
         ctx.note(&format_args!(
-            "leaves out the values of the node `{}` of the channel `{}`: they are of \
-             type {value}, and the channel has samples of type {}",
+            "{polls}{gap}leaves out the values of the node `{}` of the channel `{}`: \
+             they are of type {value}, and the channel has samples of type {}",
             read.node,
             read.channel,
             Type::Scalar(sample),

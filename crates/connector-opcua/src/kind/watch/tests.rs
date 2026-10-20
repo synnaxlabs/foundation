@@ -182,3 +182,11 @@ fn the_order_is_device_time_then_read_then_arrival_with_each_hold() {
     // timestamp when that is earlier.
     assert_eq!(held, [mesh(4), mesh(3), mesh(4), mesh(8), mesh(9)]);
 }
+
+#[test]
+fn only_an_unsupported_or_unimplemented_service_is_no_subscription_service() {
+    assert!(unsupported(Status::BAD_SERVICE_UNSUPPORTED));
+    assert!(unsupported(Status::BAD_NOT_IMPLEMENTED));
+    assert!(!unsupported(Status::BAD_NOT_SUPPORTED));
+    assert!(!unsupported(Status::GOOD));
+}

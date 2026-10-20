@@ -59,7 +59,7 @@ pub(super) fn rebuilt(chunk: &[u8], kind: u8, body: &[u8]) -> Vec<u8> {
 }
 
 /// Whether `message` is a MSG chunk of the service type `kind`.
-pub(super) fn is(message: &[u8], kind: [u8; 4]) -> bool {
+pub(crate) fn is(message: &[u8], kind: [u8; 4]) -> bool {
     message.starts_with(b"MSG") && message[HEADER..HEADER + 4] == kind
 }
 
