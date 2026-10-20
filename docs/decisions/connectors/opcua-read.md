@@ -231,7 +231,10 @@
   it. `subscribe` sets the count once, and open62541 alone writes it after, so a
   refusal while a change waits lowers it as at any other time, and the resume keeps it
   (`laptop.architect-2`, 2026-10-20T00:39:50Z,
-  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6280562003). The
+  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6280562003). Lost: a
+  count of 0 as the stop, which the resume sets again over the count that a refusal
+  lowered while a change waited (`laptop.architect-2`, 2026-10-20T01:03:31Z,
+  https://github.com/synnaxlabs/foundation/pull/3462#issuecomment-6280867776). The
   `subscribe` rule caps the publishing interval of item 1 of
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6157348272 at 1 min,
   and adds the keep-alive count. Lost: no check, as a server that revises the keep-alive
