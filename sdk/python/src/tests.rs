@@ -2,7 +2,7 @@ use std::env;
 use std::ffi::CStr;
 use std::fs;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
@@ -415,6 +415,55 @@ fn a_pin_waits_for_the_lock_of_a_rival() {
     assert_eq!(pinning.join().unwrap(), Ok(first));
     assert_eq!(fs::read_to_string(&path).unwrap(), text);
     fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Writes a profile that a bare file name names in the working directory.
+#[test]
+fn a_pin_writes_a_profile_of_a_bare_name_in_the_working_directory() {
+    let name = format!("foundation-bare-{}.hcl", std::process::id());
+    let at: SocketAddr = "10.0.0.5:7400".parse().unwrap();
+    let key = PrivateKey([4; 32]).public();
+    let profile = Profile {
+        path: PathBuf::from(&name),
+    };
+    let pinned = profile.pin(at, key).map_err(drop);
+    let text = fs::read_to_string(&name);
+    fs::remove_file(&name).unwrap();
+    fs::remove_file(format!("{name}.lock")).unwrap();
+    assert_eq!(pinned, Ok(key));
+    assert_eq!(
+        text.unwrap(),
+        format!(
+            "node \"{at}\" {{\n  public_key = \"{}\"\n}}\n",
+            config::openssh::line(key)
+        )
+    );
+}
+
+/// Raises the error of the sync of the directory of a pin that cannot read its
+/// directory: the pin is on the disk only once the entry of its file is.
+#[cfg(unix)]
+#[test]
+fn a_pin_raises_the_error_of_the_sync_of_its_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = env::temp_dir().join(format!("foundation-sync-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o300)).unwrap();
+    let path = dir.join("profile.hcl");
+    let at: SocketAddr = "10.0.0.5:7400".parse().unwrap();
+    let key = PrivateKey([5; 32]).public();
+    let pinned = Profile { path: path.clone() }.pin(at, key);
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::remove_dir_all(&dir).unwrap();
+    Python::initialize();
+    let error = Python::attach(|py| {
+        let error = pinned.expect_err("the directory cannot be read");
+        assert!(error.is_instance_of::<pyo3::exceptions::PyOSError>(py));
+        error.value(py).to_string()
+    });
+    let denied = format!("{}: Permission denied (os error 13)", path.display());
+    assert_eq!(error, denied);
 }
 
 /// Writes the file that a linked profile names, with mode 0600, and keeps the link.
