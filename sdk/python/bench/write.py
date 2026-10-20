@@ -11,6 +11,8 @@ It prints, in microseconds:
 
 - the round trip of `write` (one value, node stamps) and of `write_series` (a series
   of `f64` and its stamps), p50 and p99;
+- the round trip and the part of `write` and of `write_series` of one place in each
+  of two indexes, p50 and p99;
 - `write` with channel names as keys against places as keys, p50 of the part;
 - the part of a call before `sdk::write::Writer::write`: the key lookup, the
   conversion, the copy, and the list of parts, p50 and p99. The writer times it
@@ -104,8 +106,8 @@ def channel(n: int) -> str:
 
 def connect(node: Node, channels: int = CHANNELS) -> foundation.Client:
     """Plans and applies `channels` channels of `f64`, one of `bool`, and one of `uuid`
-    on one index on `node`, and gives a client of it once the hub of the node knows
-    them."""
+    on index `w.time`, and `v.a` of `f64` on index `v.time`, on `node`, and gives a
+    client of it once the hub of the node knows them."""
     hcl = 'channel "w.time" { kind = "index" }\n'
     hcl += 'channel "w.flag" {\n  data_type = "bool"\n  index = "w.time"\n}\n'
     hcl += 'channel "w.key" {\n  data_type = "uuid"\n  index = "w.time"\n}\n'
@@ -113,6 +115,9 @@ def connect(node: Node, channels: int = CHANNELS) -> foundation.Client:
         hcl += f'channel "{channel(n)}" {{\n  data_type = "f64"\n'
         hcl += '  index = "w.time"\n}\n'
     hcl += 'placement "w.home" {\n  select = "w.*"\n  home = "edge"\n}\n'
+    hcl += 'channel "v.time" { kind = "index" }\n'
+    hcl += 'channel "v.a" {\n  data_type = "f64"\n  index = "v.time"\n}\n'
+    hcl += 'placement "v.home" {\n  select = "v.*"\n  home = "edge"\n}\n'
     with open(os.path.join(node.dir.name, "w.hcl"), "w") as file:
         file.write(hcl)
     for args in (["plan", "w.hcl", "--out", "w.plan"], ["apply", "w.plan"]):
@@ -153,6 +158,42 @@ def round_trips(client: foundation.Client) -> None:
             print(
                 f"write_series, {samples} samples: round trip p50 {p50(times):.1f}, "
                 f"p99 {p99(times):.1f}"
+            )
+
+
+def indexes(client: foundation.Client) -> None:
+    """Prints the round trip and the part of `write` and of `write_series` of one place
+    in each of two indexes."""
+    random = np.random.default_rng(3320)
+    with client.open_writer([channel(0), "v.a"], on_loss="ignore") as writer:
+        values = {channel(0): 1.5, "v.a": 2.5}
+        times = timed(lambda: writer.write(values), SENDS)
+        part = ranged(writer, lambda: writer.write(values))
+        print(
+            f"write, 2 indexes: round trip p50 {p50(times):.1f}, p99 "
+            f"{p99(times):.1f}; before the send {part}"
+        )
+        w, v = Stamps(), Stamps()
+        for samples in SAMPLES:
+            if 4 * samples * 8 > LARGEST:
+                continue
+            floats = random.random(samples)
+
+            def send() -> None:
+                writer.write_series(
+                    {
+                        channel(0): floats,
+                        "w.time": w.take(samples),
+                        "v.a": floats,
+                        "v.time": v.take(samples),
+                    }
+                )
+
+            times = timed(send, SENDS)
+            part = ranged(writer, send)
+            print(
+                f"write_series, 2 indexes, {samples} samples: round trip p50 "
+                f"{p50(times):.1f}, p99 {p99(times):.1f}; before the send {part}"
             )
 
 
@@ -230,6 +271,7 @@ def main() -> None:
     try:
         client = connect(node)
         round_trips(client)
+        indexes(client)
         keys(client)
         parts(client)
         client.close()
