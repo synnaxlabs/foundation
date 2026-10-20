@@ -1,8 +1,12 @@
 - **STAMP (#435)** `connector::stamp::Writer`, crate-private, stamps the frames of one
-  writer of a kind: `poll::Writer` and the status writer each hold one, and no other
-  code gives a stamp (#2527). It stamps the frames of a kind that reads by request:
-  one stamp goes into each index of the writer (`laptop.architect-2`,
-  2026-10-16T04:32:46Z, item 3:
+  writer: the `poll::Writer` of a kind and the status writer of the supervisor each
+  hold one, and no other code gives a stamp. It keeps the rule in a private value with
+  no hub, so the tests of the rule need no node (`laptop.architect-2`,
+  2026-10-20T13:14:36Z:
+  https://github.com/synnaxlabs/foundation/issues/2527#issuecomment-6291709126). Lost:
+  the rule merged into `stamp::Writer` (each case of the property tests then opens a sim
+  node). It stamps the frames of a kind that reads by request: one stamp goes into each
+  index of the writer (`laptop.architect-2`, 2026-10-16T04:32:46Z, item 3:
   https://github.com/synnaxlabs/foundation/pull/2817#issuecomment-6208137622). The
   stamp of a frame is the midpoint of the mesh times before and after the requests that
   read its samples (`laptop.architect-2`,
@@ -14,8 +18,8 @@
   or after it on the same index. Each stamp given counts as the stamp before the next,
   written or not (`laptop.architect-2`, 2026-10-13T01:39:14Z, item 4:
   https://github.com/synnaxlabs/foundation/pull/2518#issuecomment-6136202010). So "the
-  last stamp of the writer" in CONNECTOR STATUS is the last stamp that `stamp::Writer` gave,
-  also to a frame for which the pool gave no block (`laptop.architect`,
+  last stamp of the writer" in CONNECTOR STATUS is the last stamp that `stamp::Writer`
+  gave, also to a frame for which the pool gave no block (`laptop.architect`,
   2026-10-13T02:15:47Z,
   https://github.com/synnaxlabs/foundation/pull/2518#issuecomment-6136738770). After a
   refusal as backwards, the refused groups are written again once, with only their
@@ -105,10 +109,11 @@
   claims less, and is left out on the other side (B of the same ruling: a first `before`
   far above the clock then leaves each later low edge out, and a stopped high edge can
   hide a disagreement); `c` of 0, which drops each server time past the range of an
-  offset; `Fit` inside `Stamps` (a writer with the values of two devices then needs two
-  `Stamps` for one index, so a stamp can go back); a fit that keeps each reading and
-  solves a line (it allocates, and its bound is not hard); a restart on any edge out of
-  reach (one source time 146 years old drops the bound); leaving out a far low edge (a
-  fit from `before` alone never bounds the clock); a restart only on a high edge under
-  `i64::MIN`, which keeps the table of B (an old reading widened past the range drops an
-  edge; round 3 item 1 of the ruling of 2026-10-19T18:14:00Z).
+  offset; `Fit` inside `stamp::Writer` (a writer with the values of two devices then
+  needs two `stamp::Writer` values for one index, so a stamp can go back); a fit that
+  keeps each reading and solves a line (it allocates, and its bound is not hard); a
+  restart on any edge out of reach (one source time 146 years old drops the bound);
+  leaving out a far low edge (a fit from `before` alone never bounds the clock); a
+  restart only on a high edge under `i64::MIN`, which keeps the table of B (an old
+  reading widened past the range drops an edge; round 3 item 1 of the ruling of
+  2026-10-19T18:14:00Z).
