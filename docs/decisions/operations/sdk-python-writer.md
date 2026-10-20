@@ -150,25 +150,25 @@
      reaches it only with `isinstance`; and `lost` only with `"raise"`, because what an
      attribute holds then hangs on a setting.
   7. `write_series` copies each array into the kept buffer with the GIL held, because
-     another Python thread can change an array while the GIL is free. Before the copy
-     of each array, it raises `ValueError` when the bytes copied so far and the bytes
-     of the array go over `sdk::write::Writer::bytes_max`, which the writer reads at
-     the open, so no copy goes past one frame. Decided by `laptop.architect-2` at
+     another Python thread can change an array while the GIL is free. Before the copy of
+     each array, it raises `ValueError` when the bytes copied so far and the bytes of
+     the array go over `sdk::write::Writer::bytes_max`, which the writer reads at the
+     open, so no copy goes past one frame. Decided by `laptop.architect-2` at
      2026-10-19T12:51:02Z
      (https://github.com/synnaxlabs/foundation/pull/3325#issuecomment-6267629281), for
      the round 3 defect of PR 3325: before, a broadcast array of 2^31 samples ended the
-     process in its copy. The copy reads an array that is not aligned or not
-     contiguous in place, at its byte stride, with one `unsafe` read of each sample.
-     Changed by `laptop.architect-2` at 2026-10-19T13:03:37Z
+     process in its copy. The copy reads an array that is not aligned or not contiguous
+     in place, at its byte stride, with one `unsafe` read of each sample. Changed by
+     `laptop.architect-2` at 2026-10-19T13:03:37Z
      (https://github.com/synnaxlabs/foundation/pull/3325#issuecomment-6267870899):
      before, `numpy.array` copied such an array first, and `numpy` lets other threads
      run in that copy. Its cost is measured below, with the P1 judgment. The checks of
-     one count for each group and of the stamps of each group or of none are those of
-     `sdk` (`program::Error::Count` and `Layout(IndexAbsent)`), which raise
+     one count for each group, and of the stamps of each group (in `write`, or of none),
+     are those of `sdk` (`program::Error::Count` and `Layout(IndexAbsent)`), which raise
      `ValueError` with the places of the caller (`laptop.architect-2`,
      2026-10-20T13:37:38Z,
-     https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6292172439),
-     and its text names the channels at those places (item 1).
+     https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6292172439), and
+     its text names the channels at those places (item 1).
   The key choices of the plan went ahead with `laptop.monitor` at 2026-10-19T01:13:34Z
   (https://github.com/synnaxlabs/foundation/issues/3320#issuecomment-6257555546), with
   one condition: the `TypeError` of an array of another dtype names the place, the
